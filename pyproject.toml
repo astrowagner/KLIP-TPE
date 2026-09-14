@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "klip-tpe"
+version = "0.1.0"
+description = "Bayesian (TPE) optimization of high-contrast-imaging reduction parameters, with a reference KLIP/ADI reducer, injection-recovery metrics and post-search verification."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{name = "Kevin Wagner"}]
+dependencies = [
+  "numpy>=1.22",
+  "scipy>=1.8",
+  "astropy>=5.0",
+  "threadpoolctl>=3.0",
+]
+
+[project.optional-dependencies]
+plots = ["matplotlib>=3.5", "pillow>=9", "imageio>=2.20"]
+test = ["pytest>=7"]
+pyklip = ["pyklip>=2.7"]
+vip = ["vip_hci>=1.6"]
+jupyter = ["matplotlib>=3.5", "pillow>=9", "imageio>=2.20", "jupyter", "ipython"]
+all = ["matplotlib>=3.5", "pillow>=9", "imageio>=2.20", "jupyter", "ipython", "pytest>=7", "pyklip>=2.7", "vip_hci>=1.6", "nbformat", "nbconvert"]
+
+[project.urls]
+Homepage = "https://github.com/astrowagner/klip-tpe"
+Documentation = "https://github.com/astrowagner/klip-tpe/tree/main/docs"
+Tutorials = "https://github.com/astrowagner/klip-tpe/tree/main/tutorials"
+
+[project.scripts]
+klip-tpe = "klip_tpe.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["klip_tpe*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

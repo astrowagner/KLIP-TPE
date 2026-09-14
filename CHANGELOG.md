@@ -1,0 +1,126 @@
+# Changelog
+
+## Unreleased — 2026-09-13
+- **Public release preparation**: README rewritten for a general audience, `docs/TUTORIALS.md`,
+  `docs/PYNOMIC.md` (pyNOMIC start-to-finish guide incl. image groups), `docs/DISPLAY.md` (panel anatomy
+  and product glossary), generated `docs/CLI.md` (`scripts/gen_cli_doc.py`), `CONTRIBUTING.md`,
+  `CITATION.cff`, CI workflow; private paths removed from the shipped files.
+- **Generic cube adapter** (`klip_tpe.instruments.generic`, `klip-tpe generic`): any registered ADI cube
+  (+ angles, optional PSF template and reference cube; FITS or arrays, 4-d IFS with `wv_index`) becomes a
+  `Dataset` → reducer → space → guard → objective.  Data-derived frame-quality tags (`quality_tags`),
+  `star_flux_from_halo` for saturated cores, per-partition wavelength / FWHM dicts (IRDIS K1/K2).
+- **Example data** (`klip_tpe.datasets`): `naco_betapic`, `sphere_sao206462`, `nircam_pds70_*` (VIP_extras)
+  and `sphere_hd95086` (SPHERE IRDIS K1+K2 crops, klip-tpe release), downloaded on first use into
+  `~/.klip_tpe/data` (`$KLIP_TPE_DATA`).
+- **Tutorials** (`tutorials/`, authored as `.py` with `# %%` markers, built and executed by
+  `tutorials/_build_notebooks.py`): 01 NACO β Pic end to end (+ VIP / pyKLIP engines), 02 SPHERE HD 95086
+  partitions, 03 JWST NIRCam HIP 65426 via spaceKLIP/pyKLIP (+ `tutorials/fetch_jwst_hip65426.py`).
+- **JWST / pyKLIP fixes found while building tutorial 3**: `load_spaceklip(partition_by="roll")` is the new
+  default (one partition per position angle; `filenums` gave one partition per exposure, often a single
+  frame) and the pixel scale is read from the science header when pyKLIP's reader does not carry it;
+  the pyKLIP and VIP backends default to `pool="threads"` because they fork their own workers and a
+  daemonic worker may not have children.  Backend options are searchable as ordinary parameters — the
+  tutorial searches pyKLIP's `mode` and the optimizer picks `RDI` over `ADI+RDI` for a 10-degree roll.
+- **Known sources**: `known=[(rho, pa), ...]` (already honoured by the position sampler and the metric) is
+  now also excluded from the noise rings of `products.noise_profile` / `contrast_curve`, and `Runner`
+  forwards the objective's list automatically — a detected companion no longer inflates the 5-sigma limit
+  at its own separation (58% at HD 95086 b).  New tutorial 4 covers the whole topic, incl. `forbidden_pa`
+  and `pixel_mask` for disks.
+- **Search ranges scaled to the data** (`instruments.generic.make_space`): temporal binning up to
+  `nframes / min_bins` (default 8 bins) instead of the NEAR production 5-30 frames per bin, which
+  collapsed short sequences to two bins and made the search degenerate; `bin_range=(lo, hi)` overrides,
+  `near.make_space(bin_range=...)` too.
+- **Inline Jupyter display**: `LiveDisplay(show="inline")` updates one output cell in place;
+  `show="auto"` picks inline inside a notebook and a window otherwise; `--show [window|inline|auto]`.
+
+## Unreleased — 2026-09-12
+- pyNOMIC image groups as partitions (`--groups auto | <JD splits> | @labels`, `nomic.load_pynomic(groups=...)`):
+  the port of pyNOMIC's `hf.image_groups` star-position split (`nomic.image_groups`) or explicit labels make
+  every (night x chop state x group) a partition `<name><A|B>g<k>`, so nights and groups go through the
+  same selection / per-partition-block / display machinery; `--group-min-frames`, `--group-smooth`;
+  `make_space(max_drop=...)` / `--max-drop` sets the number of drop slots for many partitions.
+- Progress movie while the run goes: `annulusNN/progress.gif` + `.mp4` rebuilt every `--movie-every`
+  evaluations (default = `--pdf-every`, IDL's `annNN_progress.gif` cadence) and at annulus end, on the
+  render thread; movies are thinned to 400 evenly spaced frames (last kept) so long annuli stay bounded.
+- Display: validation trials now update the live/step display (IDL's `valid` frames):
+  `RunCallback.on_validation_trial` fires after every trial with the trial's images, fresh sources and
+  score; the panel shows them in the Test cells (title `Valid c/n trial t/n (eval e)`, green header
+  `VALIDATION ... median so far`) and the frames join the progress movie.
+- Display: the elapsed/ETA block carries IDL's full estimate — `ETA(ann)`, `ETA(full)` and `total`
+  (elapsed + remaining) computed as in `optimize_near_2_tpe`: remaining evals of this and future annuli
+  at the current per-eval loop time, plus the measured calibration + validation time per annulus for
+  each future annulus, this annulus' pending validation (`cal_avg · n_top · (1 + n_valid) / 3` until one
+  is measured; per-trial time × trials left during validation) and a reserve for still-available
+  re-calibration restarts.  (`ETA(ann)` used to be the remaining-evals-only figure for the whole run.)
+- Display, single-night runs: the night-inclusion, night-effect and S/N-vs-#nights panels are dropped and
+  IDL's `mwcm_pimppanel` parameter-importance bars (|corr| with S/N, strongest first) take the inclusion
+  panel's place; the ETA block reads `Est. total` and adds a `done <clock time>` line.
+- Display: evaluation axes of the night-inclusion panel (and the trace / partition-S/N books) grow with
+  the evaluations done in the current annulus, `xrange=[0.5, nev+0.5]` with IDL's `near2m_evtick` tick
+  rule, so they start over at every annulus instead of spanning the annulus budget.
+- Display: live window at IDL's size (1850 × 990, 1:1, `--window-scale`), `last` eval time under `avg`,
+  corner bottom-row marginal rotated to share the row's y axis, contrast panel keeps the validated
+  winners of earlier annuli, KLIP-FM model square symlog, injected-PSF square derotated by true north.
+- Resume with the live window: `on_setup` is emitted on a resume too (window opens at once with the run's
+  newest frame, no toolbar), and a restart in the middle of an annulus restores the earlier evaluations of
+  that annulus from `results.jsonl`, so the panel shows the whole annulus rather than the post-restart evals.
+  The launcher accepts lowercase settings (`show=1`, `smoke=1`, ...).  The incumbent's images are not
+  checkpointed, so a resume re-reduces the best-so-far evaluation once (same config, positions and
+  contrast; the logged score stands) to refill the Best cells, the KLIP-FM preview and the fallback products
+  instead of showing `collecting...` until the next new best.
+- Resume without the run id: `scripts/run_near2_production.sh resume` (or `resume last`) and `klip-tpe
+  resume` / `extend --run-dir last` (the CLI default) pick the newest `run_*` under `<root>/comb/opt`;
+  an explicit run directory or name still works.
+- Launcher: `SMOKE=1` end-to-end test preset (25 warm-up + 50 TPE per annulus, 5 candidates × 10 trials).
+- IDL calibration display phase (opt-in `--fun` / `LiveDisplay(fun=True)` / `ALIENS=1`): the five-act launch movie (`klip_tpe/intro.py`, port of
+  `near2m_intro_frame`) plays in the live window during the first annulus' calibration (animated from the
+  main thread while it waits on the workers) and is written as `intro_frames/` + `intro.gif`; every
+  calibration trial draws the `near2m_calshow` panel (clean | injected, per-source S/N, trial / contrast /
+  target line) to `steps/calib_annNN_trialNNNN.png` and the window (`RunCallback.on_calibration_trial`);
+  the calibration frames lead the progress movie like IDL's.
+- Reduction: `rotate_ccw` now treats NaN neighbours as 0 in the bilinear stencil (`klip.ROT_NAN_MODE =
+  "zero"`), which is what IDL `rot(/interp)` does on the production images: the 1–2 px rim of the padded
+  KLIP zone is damped like IDL's instead of a noisy few-frame ring (rim std 0.027 → 0.007 vs IDL 0.006 at
+  r 21–22 px on eval 1826).  Images inside the zone are unchanged; scores move by a few % because the
+  matched-filter noise apertures near the outer sources reached into the rim.  `"propagate"` restores the
+  strict semantics.
+- Display: no annulus-edge circles on the image cells (IDL has none), injected-PSF square uses the image
+  colour map, panel 17 × 8.6 in (946 px at 110 dpi, fits 1080p with menu bar and dock), rows shifted up,
+  no toolbar under the live window.
+- Production launcher: `scripts/run_near2_production.sh` and `notebooks/near2_production_run.ipynb` run the
+  IDL `run_20260906_173000` protocol from a terminal / Jupyter (docs/RUNNING.md); `--run-dir` defaults to
+  `<root>/comb/opt/run_YYYYMMDD_HHMMSS` (IDL layout).
+- Parallelism: `--workers auto` (default) uses every core — forked worker processes sharing the loaded data
+  (`klip_tpe.parallel.ProcessPool`, the IDL bridges; `--pool threads` for the single-process version),
+  injected and clean reductions concurrent, partitions mapped onto the workers, the remainder as per-target
+  threads inside `klip_annular` (`KLIPParams.threads`), BLAS pinned to one thread per worker (threadpoolctl).
+- Validation checkpoints after every trial (`val_candNN_trials.pkl`) and resumes mid-candidate.
+- Live/step display redrawn to the IDL `near2m_show` layout (`render_step(style="idl")`, default): black
+  live window, 5+5 image/S-N cells with `raw/corr` per-source labels and the stitched cells, convergence
+  trace with SMA20/50 + rotated S/N histogram, KLIP-FM and injected-PSF squares, night inclusion, SNR=5
+  contrast with the FM curve dashed, BEST/TEST parameter vectors, elapsed/ETA, night-effect panels and the
+  scatter corner on the right; a white snapshot (`annulusNN/step_display_white.png`) at annulus end.
+  The previous layout is `style="classic"`.  Runs now save per-eval image crops
+  (`annulusNN/evals/evalNNNN_{inj,clean}.fits.gz`, `RunConfig.save_eval_images`, like IDL's
+  `evalNNNN_score_inj.fits.gz`) so `render_steps` rebuilds complete frames post hoc; `fm_preview`
+  (live KLIP-FM at each new best) is now on by default (`--no-fm-preview`); the annulus-end hook
+  writes all books (importance / paracoord / rank / slice / verify / products) and survives a resume.
+- Display parity with the IDL figure set: `plot_annulus_books` now also writes `importance.pdf`
+  (η² parameter importance), `paracoord.pdf`, `rank.pdf`, `slice.pdf`, `products.pdf` (final images /
+  S/N maps / stitches / per-partition winners) and the verify books `verify_limits.pdf`,
+  `verify_subsets_inj.pdf` (recomputed from the saved partition stacks).  IDL↔Python product mapping
+  and side-by-side sheets: `KLIP-TPE/idl_vs_python/displays/`.
+- `klip-tpe compare` / `klip_tpe.idl_compare`: live incremental comparison against a running IDL run.
+
+## 0.1.0 — 2026-09-11 (first shared version)
+- Port of the IDL `optimize_near_2_tpe` / `reduce_near_2` optimizer: TPE (univariate default,
+  `pbest`=0, `blocks` option), calibration → search → validation protocol, feasibility projections,
+  KLIP/ADI/RDI reference reducer with KLIP-FM, injection models, Mawet small-sample metric, products
+  (contrast curve, FM cross-check, stitching, S/N maps), verification stack (verify / param_verify /
+  candidates), live display + movies, checkpoint / resume at any phase, `extend`, `opt_width`, scan k-modes.
+- Instrument adapters: VLT/VISIR NEAR (`instruments/near.py`), LBTI/NOMIC via pyNOMIC
+  (`instruments/nomic.py`).
+- PSF-subtraction backends: pyKLIP, VIP; spaceKLIP/JWST ingestion; custom-pipeline wrappers
+  (`FunctionReducer`, `ExternalReducer`).
+- Cross-validation against IDL documented in the (internal) IDL findings notes (incl. the `parstr` frame-selection
+  bug found in the IDL production code, now fixed there).

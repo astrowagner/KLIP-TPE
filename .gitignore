@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+build/
+dist/
+runs/
+tutorials/runs/
+_sync/
+*.log
+.DS_Store
+
+# Run outputs, not source.  paper_runs/ is 3.1 GB of FITS, panels and checkpoints on the
+# machine that produced it; only the four drivers belong in the repo.  Anything added there
+# later is ignored by default, which is the safe direction for a directory that fills up
+# with hundreds of megabytes every time a stage runs.
+paper_runs/*
+!paper_runs/*.py
+!paper_runs/*.sh
+!paper_runs/*.md
+
+# archives of run outputs
+*.tgz
+*.tar.gz
+*.zip
+
+# search products that can land anywhere
+heartbeat.json
+checkpoint.json
+results.jsonl
+final_results.json

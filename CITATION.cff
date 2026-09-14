@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use klip-tpe, please cite it as below and the KLIP-TPE method paper once published."
+title: "klip-tpe: Bayesian optimization of high-contrast imaging reductions"
+type: software
+authors:
+  - family-names: Wagner
+    given-names: Kevin
+    affiliation: "Steward Observatory, University of Arizona"
+repository-code: "https://github.com/astrowagner/klip-tpe"
+license: MIT
+version: 0.1.0
+date-released: 2026-09-13

@@ -1,0 +1,204 @@
+"""pyKLIP backend (https://pyklip.readthedocs.io).
+
+* :class:`PyKLIPReducer` -- the optimizer's pre-processed cube goes through
+  ``pyklip.parallelized.klip_parallelized`` (ADI, RDI or ADI+RDI; ``algo`` klip / nmf /
+  empca); derotation and combination are done here with the package's own routines so
+  the conventions match the other backends.  Parameter mapping (searched -> pyKLIP):
+
+  ==============  ==========================================================
+  ``k_klip``       ``numbasis`` (k-scan: ``numbasis = 1..k`` in one call)
+  ``n_ang``        ``subsections``
+  ``inrad/outrad`` ``IWA / OWA`` with ``annuli = n_annuli`` (default 1)
+  ``angsep``       ``movement = angsep * lambda/D [px]``
+  ``anglemax``     ``maxrot``
+  ``bin, filter, corr_thresh, noise_max, coronoise_max``  handled upstream
+  ==============  ==========================================================
+
+* :func:`dataset_from_pyklip` -- turn any ``pyklip.instruments.Instrument.Data`` object
+  (GPI, CHARIS, JWST from spaceKLIP, GenericData ...) into :class:`Dataset`\\ s: frames
+  are re-centred on a common pixel, cropped, and split into partitions (default: one per
+  ``filenums`` group, i.e. per exposure / roll; ``partition_by=None`` for one dataset).
+"""
+from __future__ import annotations
+
+from typing import Any, Callable, Dict, Optional, Sequence
+
+import numpy as np
+
+from ..klip import derotate, nw_ang_comb
+from ..reducer import Dataset, KLIPParams, KLIPReducer
+
+__all__ = ["PyKLIPReducer", "dataset_from_pyklip"]
+
+
+def _require_pyklip():
+    try:
+        import pyklip.parallelized as par  # noqa: F401
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("PyKLIPReducer needs pyklip: pip install pyklip") from exc
+
+
+class PyKLIPReducer(KLIPReducer):
+    """KLIP/NMF/empca subtraction by pyKLIP on the optimizer's pre-processed cube.
+
+    Extra defaults (fixed unless you add them to the search space): ``algo``
+    (``'klip'`` | ``'nmf'`` | ``'empca'``), ``mode`` (``'ADI'`` | ``'RDI'`` | ``'ADI+RDI'``;
+    RDI needs ``Dataset.ref_cube``), ``n_annuli`` (radial subdivisions of the zone),
+    ``annuli_spacing``, ``corr_smooth``, ``numthreads``.  ``comb_type`` ``'nwadi'`` (default,
+    the noise-weighted combine of the built-in reducer) | ``'mean'`` | ``'median'``.
+    """
+
+    name = "pyklip"
+    supports_kscan = True
+    supports_fm = False
+
+    def __init__(self, data: Dataset, pxscale: float, lam_m: float, diam_m: float, **kw):
+        _require_pyklip()
+        super().__init__(data, pxscale=pxscale, lam_m=lam_m, diam_m=diam_m, **kw)
+        self.defaults.setdefault("algo", "klip")
+        self.defaults.setdefault("mode", "ADI")
+        self.defaults.setdefault("n_annuli", 1)
+        self.defaults.setdefault("annuli_spacing", "constant")
+        self.defaults.setdefault("corr_smooth", 1)
+        self.defaults.setdefault("numthreads", 1)
+        self.defaults.setdefault("minrot", 0.0)
+
+    def _subtract(self, bcube, bang, kp: KLIPParams, p, filt, req, mcube, ref_basis, fm_ref, meta):
+        import pyklip.parallelized as par
+        n, ny, nx = bcube.shape
+        cx, cy = (nx - 1) / 2.0, (ny - 1) / 2.0
+        centers = np.tile([cx, cy], (n, 1)).astype(float)
+        numbasis = np.arange(1, kp.k_klip + 1) if kp.k_scan else np.array([kp.k_klip])
+        mode = str(p["mode"]).upper()
+        psflib = None
+        if "RDI" in mode:
+            ref = self._reference_cube(filt, meta)            # Dataset.ref_cube, high-passed like the science
+            if ref is None:
+                mode = "ADI"
+                meta["rdi_note"] = "no reference cube: mode fell back to ADI"
+            else:
+                from pyklip.instruments.Instrument import GenericData
+                from pyklip.rdi import PSFLibrary
+                ref = np.asarray(ref, np.float32)
+                sci_names = np.array([f"sci{i}" for i in range(n)])
+                lib_imgs = np.concatenate([ref, bcube], axis=0)
+                names = np.concatenate([np.array([f"ref{i}" for i in range(ref.shape[0])]), sci_names])
+                gdata = GenericData(np.asarray(bcube, np.float32), centers, parangs=np.asarray(bang, float),
+                                    filenames=sci_names)
+                lib = PSFLibrary(lib_imgs, (cx, cy), names, compute_correlation=True)
+                lib.prepare_library(gdata)          # science frames excluded from their own library
+                psflib = dict(psf_library=lib.master_library, psf_library_corr=lib.correlation,
+                              psf_library_good=lib.isgoodpsf)
+        movement = float(kp.angsep) * self.lam_over_d_px
+        out = par.klip_parallelized(np.asarray(bcube, np.float32), centers, np.asarray(bang, float),
+                                       np.ones(n), np.zeros(n, int), kp.inrad, OWA=kp.outrad, mode=mode,
+                                       annuli=int(p["n_annuli"]), subsections=int(kp.n_ang), movement=movement,
+                                       numbasis=numbasis, aligned_center=[cx, cy],
+                                       numthreads=int(p["numthreads"]) or None, minrot=float(p["minrot"]),
+                                       maxrot=float(kp.anglemax), annuli_spacing=str(p["annuli_spacing"]),
+                                       corr_smooth=float(p["corr_smooth"]), algo=str(p["algo"]), verbose=False,
+                                       **(psflib or {}))
+        sub = np.asarray(out[0], np.float32)                  # (b, n, ny, nx), aligned, not derotated
+        ct = p["comb_type"]
+
+        def _combine(dr):
+            if ct == "median":
+                return np.nanmedian(dr, axis=0)
+            if ct == "mean":
+                return np.nanmean(dr, axis=0)
+            return nw_ang_comb(dr, bang)
+
+        imgs = [_combine(derotate(sub[b], bang, self.truenorth)) for b in range(sub.shape[0])]
+        img = np.stack(imgs) if kp.k_scan else imgs[0]
+        return img, None, {"backend": "pyklip", "algo": p["algo"], "mode": mode, "movement_px": movement}
+
+    def describe(self) -> Dict[str, Any]:
+        d = super().describe()
+        d.update(backend="pyklip")
+        return d
+
+
+def dataset_from_pyklip(data, crop_half: Optional[int] = None, partition_by: Optional[str] = "filenums",
+                        name: str = "pyklip", texp_per_frame: Optional[float] = None,
+                        tags_fn: Optional[Callable[[Any, np.ndarray], Optional[Dict[str, np.ndarray]]]] = None,
+                        include_psflib: bool = True, wv_index: Optional[int] = None) -> Dict[str, Dataset]:
+    """Convert a pyKLIP ``Data`` object into :class:`Dataset`\\ s.
+
+    Frames (``data.input``) are shifted (bilinear) so every star centre (``data.centers``)
+    lands on the common pixel ``((nx-1)/2, (ny-1)/2)`` of a ``2*crop_half`` cut-out
+    (default: the largest square that fits); ``data.PAs`` are the parallactic angles
+    (pyKLIP derotates CCW by PA, like this package).  Multi-wavelength data: pass
+    ``wv_index`` to pick one channel (spectral collapse is not done here).
+    ``partition_by``: ``'roll'`` (one partition per distinct position angle -- the natural
+    unit for JWST, where each exposure of a roll is its own ``filenum``), ``'filenums'``
+    (one partition per exposure), ``'filenames'``, any other attribute of ``data``, or
+    ``None`` (one dataset).
+    ``tags_fn(data, index) -> {'corrs','noises','coronoise'}`` optionally supplies frame
+    quality tags.  ``include_psflib`` attaches ``data.psflib`` master frames as
+    ``Dataset.ref_cube`` for RDI when present.
+    """
+    from scipy import ndimage
+    imgs = np.asarray(data.input, np.float32)
+    centers = np.asarray(data.centers, float)
+    pas = np.asarray(data.PAs, float)
+    wvs = np.asarray(getattr(data, "wvs", np.ones(len(imgs))), float)
+    sel = np.arange(len(imgs))
+    if wv_index is not None:
+        uw = np.unique(wvs)
+        sel = np.flatnonzero(wvs == uw[int(wv_index)])
+    ny, nx = imgs.shape[-2:]
+    if crop_half is None:
+        cxs, cys = centers[sel, 0], centers[sel, 1]
+        crop_half = int(np.floor(min(cxs.min(), cys.min(), nx - 1 - cxs.max(), ny - 1 - cys.max())))
+    h = int(crop_half)
+    c = h - 0.5
+
+    def _recentre(frame, cx, cy):
+        out = np.empty((2 * h, 2 * h), np.float32)
+        ix, iy = int(np.floor(cx - c)), int(np.floor(cy - c))          # integer origin of the cut-out
+        fx, fy = (cx - c) - ix, (cy - c) - iy                           # residual sub-pixel shift
+        pad = 1
+        y0, x0 = iy - pad, ix - pad
+        sub = np.full((2 * h + 2 * pad, 2 * h + 2 * pad), np.nan, np.float32)
+        ys, xs = slice(max(y0, 0), min(y0 + sub.shape[0], ny)), slice(max(x0, 0), min(x0 + sub.shape[1], nx))
+        sub[ys.start - y0:ys.stop - y0, xs.start - x0:xs.stop - x0] = frame[ys, xs]
+        fin = np.isfinite(sub)
+        sub0 = np.where(fin, sub, 0.0)
+        shifted = ndimage.shift(sub0, (-fy, -fx), order=1, mode="constant", cval=0.0)
+        w = ndimage.shift(fin.astype(np.float32), (-fy, -fx), order=1, mode="constant", cval=0.0)
+        shifted = np.where(w > 0.999, shifted / np.maximum(w, 1e-6), np.nan)
+        out[:] = shifted[pad:pad + 2 * h, pad:pad + 2 * h]
+        return out
+
+    key = None
+    if partition_by == "roll":                       # group by position angle (rounded to 0.1 deg)
+        key = np.round(pas[sel], 1)
+    elif partition_by:
+        key = np.asarray(getattr(data, partition_by))[sel]
+    if key is None:
+        groups = [("", sel)]
+    else:
+        uniq = np.unique(key)
+        # short, stable names: roll1, roll2, ... for the roll grouping, the key itself otherwise
+        labels = [f"roll{i + 1}" for i in range(len(uniq))] if partition_by == "roll" else [str(k) for k in uniq]
+        groups = [(lab, sel[key == k]) for lab, k in zip(labels, uniq)]
+    out: Dict[str, Dataset] = {}
+    ref_cube = None
+    if include_psflib and getattr(data, "psflib", None) is not None:
+        try:
+            lib = data.psflib
+            ref_imgs = np.asarray(lib.master_library, np.float32)
+            rc = np.asarray(lib.aligned_center, float)
+            ref_cube = np.stack([_recentre(f, rc[0], rc[1]) for f in ref_imgs])
+        except Exception:
+            ref_cube = None
+    for gname, idx in groups:
+        cube = np.stack([_recentre(imgs[i], centers[i, 0], centers[i, 1]) for i in idx])
+        cube = np.where(np.isfinite(cube), cube, 0.0).astype(np.float32)
+        tags = tags_fn(data, idx) if tags_fn else None
+        pid = f"{name}{gname}" if gname else name
+        meta = {"source": "pyklip", "partition_by": partition_by, "crop_half": h,
+                "filenames": [str(f) for f in np.asarray(getattr(data, "filenames", np.array([""] * len(imgs))))[idx][:5]]}
+        texp = float(len(idx) * texp_per_frame) if texp_per_frame else float(len(idx))
+        out[pid] = Dataset(cube, pas[idx], tags, texp=texp, name=pid, meta=meta, ref_cube=ref_cube)
+    return out
