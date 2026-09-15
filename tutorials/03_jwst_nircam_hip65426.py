@@ -260,7 +260,84 @@ if HAVE_DATA:
     plt.grid(alpha=.3); plt.legend(); plt.title("HIP 65426, NIRCam F444W");
 
 # %% [markdown]
-# ## 5. Notes for real JWST work
+# ## 5. The real PSF, and a forward-modelled matched filter
+#
+# Two approximations are worth removing on JWST.  First the **injected PSF**: inside a few
+# λ/D of a coronagraph the off-axis PSF is neither a Gaussian nor separation-independent,
+# and the mask throughput is a steep function of separation.
+# [STPSF](https://stpsf.readthedocs.io) (the renamed WebbPSF) computes both from the mode in
+# the headers — `psf="stpsf"` in `make_reducer`, or by hand below.  The grid is cached, so
+# the cost is paid once.
+#
+# Second the **matched filter**.  KLIP is not flux-conserving: it eats part of the planet
+# and leaves negative lobes around what is left, by an amount that depends on the very
+# parameters being searched.  `klip_tpe.fmmf.FMMFSNR` propagates the PSF model through each
+# configuration's own subtraction and filters with *that* (Pueyo 2016; Ruffio et al. 2017).
+# Everything else — the Mawet small-sample ring statistics, the clean-subtraction rule, the
+# validation protocol — is untouched, so the two runs differ only in the filter.
+
+# %%
+if HAVE_DATA:
+    from klip_tpe import stpsf_psf
+    try:
+        grid = stpsf_psf.offaxis_grid("NIRCam", "F444W", image_mask="MASK335R",
+                                      seps_as=np.arange(0.2, 2.01, 0.2), stamp_px=21, nlambda=1)
+        psf_model = stpsf_psf.library(grid, star_flux=STAR_FLUX or 1.0)
+        plt.figure(figsize=(9, 3.2))
+        plt.subplot(1, 2, 1)
+        plt.plot(grid["seps"], grid["transmission"], "-o", ms=3)
+        plt.axvline(PLANET[0], color="c", ls=":", label="HIP 65426 b")
+        plt.axhline(0.5, color="k", lw=.5)
+        plt.xlabel("separation (arcsec)"); plt.ylabel("MASK335R throughput")
+        plt.legend(); plt.grid(alpha=.3)
+        plt.subplot(1, 2, 2)
+        st, _, _ = psf_model.stamp(PLANET[0])
+        plt.imshow(st ** 0.4, origin="lower", cmap="inferno")
+        plt.title(f'off-axis PSF at {PLANET[0]}"'); plt.xticks([]); plt.yticks([])
+        plt.tight_layout()
+        print(f"throughput at the planet: {psf_model.throughput(PLANET[0]):.3f}")
+    except Exception as exc:            # STPSF and its data files are an optional dependency
+        psf_model = None
+        print(f"STPSF unavailable ({exc}); keeping the Gaussian template")
+
+# %% [markdown]
+# The same 50-evaluation search, scored with the forward-modelled filter.  pyKLIP has no
+# analytic KLIP-FM, so the template is the *numerical* forward model `injected − clean` —
+# the same response to first order, and free, because the clean reduction is computed
+# anyway.  `fm_fraction` says what fraction of the filters really were forward-modelled.
+
+# %%
+if HAVE_DATA:
+    from klip_tpe.fmmf import FMMFSNR
+    red_fm = sk.make_reducer(dsets, injection_model=psf_model, star_flux=STAR_FLUX,
+                             mode="RDI", max_workers="auto")
+    objective_fm, _ = generic.default_config(red_fm, metric="fmmf", known=[PLANET])
+    metric_fm = objective_fm.metric
+    cfg_fm = RunConfig(ann_edges=[6, 45], n_iter=50, n_init=15, seed=5, n_sources=4,
+                       validation=ValidationConfig(n_top=2, n_valid=3),
+                       calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=2),
+                       defaults={"k_klip": 10}, fm_curve=False)
+    run_fm = os.path.join(os.path.dirname(RUN_DIR), "hip65426_fmmf")
+    runner_fm = Runner(red_fm, space, objective_fm, sampler, cfg_fm, run_fm,
+                       callbacks=[LiveDisplay(run_fm, show="inline", window_scale=0.55, every=5)])
+    t0 = time.time(); results_fm = runner_fm.run(); print(f"{(time.time() - t0) / 60:.1f} min")
+    print(f"forward-modelled filters: {metric_fm.describe()['fm_fraction']:.0%} of "
+          f"{metric_fm.describe()['n_filtered']}")
+
+# %%
+if HAVE_DATA:
+    fm_clean = fits.getdata(os.path.join(run_fm, "annulus01", "best_clean.fits"))
+    snr2 = float(metric.per_source(fm_clean, None, [PLANET[0]], [PLANET[1]])[0])
+    print(f"HIP 65426 b, scored the same way for all three images:")
+    print(f"   default k=10        S/N {snr0:5.1f}")
+    print(f"   PSF matched filter  S/N {snr1:5.1f}")
+    print(f"   forward-modelled MF S/N {snr2:5.1f}")
+    print(f"   winner (fmmf): " + "  ".join(
+        f"{k}={v}" for k, v in results_fm[0].winner_config["params"].items()
+        if k in ("mode", "filter", "n_ang", "k_klip")))
+
+# %% [markdown]
+# ## 6. Notes for real JWST work
 #
 # * **Preprocessing sets the floor.**  Section 1 is the bare minimum; spaceKLIP's
 #   `ImageTools` (bad-pixel repair, background subtraction, sub-pixel alignment on the
@@ -276,7 +353,7 @@ if HAVE_DATA:
 #   (`annuli_spacing`, `algo`, `corr_smooth`, …) becomes searchable the same way: add a
 #   `Param` with that name.
 #
-# ## 6. From a spaceKLIP database
+# ## 7. From a spaceKLIP database
 #
 # Once you have run spaceKLIP, skip sections 1–2 entirely:
 # ```python

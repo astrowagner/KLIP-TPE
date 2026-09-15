@@ -120,7 +120,10 @@ def _capture(demos, monkeypatch):
         return "REDUCER"
 
     monkeypatch.setattr(demos.generic, "default_config",
-                        lambda red, known: seen.update(known=known, cfg_red=red) or ("OBJ", "SAMP"))
+                        lambda red, known, **kw: seen.update(known=known, cfg_red=red, cfg_kw=kw)
+                        or ("OBJ", "SAMP"))
+    # bp_disk wants a real reducer to size the mask; the stub reducer is a string
+    monkeypatch.setattr(demos, "bp_disk", lambda *a, **k: ((), None))
     monkeypatch.setattr(demos.generic, "make_space",
                         lambda red, **kw: seen.update(space_kw=kw) or _FakeSpace())
     monkeypatch.setattr(demos.generic, "make_guard", lambda red, **kw: seen.update(guard_kw=kw))
@@ -180,7 +183,7 @@ def test_h2_carries_the_searched_klip_mode_and_unsearched_angles(demos, monkeypa
     space = _FakeSpace()
     monkeypatch.setattr(demos, "OUT", str(tmp_path))
     monkeypatch.setattr(demos, "hip65426_objects", lambda: "JWST_REDUCER")
-    monkeypatch.setattr(demos.generic, "default_config", lambda red, known: ("OBJ", "SAMP"))
+    monkeypatch.setattr(demos.generic, "default_config", lambda red, known, **kw: ("OBJ", "SAMP"))
     monkeypatch.setattr(demos.generic, "make_space", lambda red, **kw: seen.update(kw) or space)
     monkeypatch.setattr(demos.generic, "make_guard", lambda red, **kw: None)
     monkeypatch.setattr(demos, "Runner", lambda *a, **kw: "RUNNER")
@@ -268,6 +271,51 @@ def test_the_stage_command_is_dry_runnable():
     sh = _text("rerun_paper.sh")
     assert 'if [[ -n "${DRY:-}" ]]' in sh
     assert "would run" in sh
+
+
+def test_force_on_a_benchmark_stage_retires_the_batch():
+    """``FORCE=1`` on a benchmark used to get past the stage skip and then resume anyway.
+
+    A benchmark resumes by reading ``bench_tag.txt`` and rejoining that tag's slots, so a
+    stage re-run with a changed setting applied it to the new slots only -- F2 ended up with
+    slot 0 uncut, slots 1-4 cut and slot 5 half of each, in one directory. Retiring the
+    directory takes bench_tag.txt with it, which is what forces a fresh tag.
+    """
+    sh = _text("rerun_paper.sh")
+    assert 'if [[ -n "${FORCE:-}" && -n "$d" && -f "$d/bench_tag.txt" ]]' in sh
+    assert "_superseded_" in sh
+    assert 'mv "$d" "$keep"' in sh
+    # and it must not touch a science stage, which has no bench_tag.txt
+    i_skip = sh.index('already finished ($d) -- skipping')
+    i_force = sh.index('retiring the existing batch')
+    assert i_skip < i_force, "the retire step has to come after the finished-stage skip"
+
+
+def test_dry_reports_without_touching_the_tree():
+    """A dry run that retires a batch is not a dry run.
+
+    The retire step went in ahead of the DRY check and moved a real benchmark directory
+    during what was meant to be a look-only invocation.
+    """
+    sh = _text("rerun_paper.sh")
+    i_dry = sh.index('if [[ -n "${DRY:-}" ]]')
+    i_retire = sh.index('mv "$d" "$keep"')
+    assert i_dry < i_retire, "DRY must be checked before anything that changes the tree"
+    assert "FORCE would retire batch" in sh, "a dry run should still say what FORCE would do"
+
+
+def test_a_failed_preflight_stops_the_run():
+    """``set -uo pipefail`` has no ``-e``: the guard printed its traceback and the stages ran
+    anyway, so the assertion protecting the objective protected nothing."""
+    sh = _text("rerun_paper.sh")
+    assert "if ! python3 - <<'PY'" in sh
+    assert "pre-flight failed" in sh and "exit 1" in sh
+
+
+def test_force_is_documented_as_retiring_a_benchmark_batch():
+    sh = _text("rerun_paper.sh")
+    head = sh[:sh.index("set -uo pipefail")]
+    assert "superseded" in head and "uniform" in head
 
 
 # ------------------------------------------------------- the objective the rerun asserts

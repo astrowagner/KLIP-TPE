@@ -6,7 +6,7 @@ authors:
   - family-names: Wagner
     given-names: Kevin
     affiliation: "Steward Observatory, University of Arizona"
-repository-code: "https://github.com/astrowagner/klip-tpe"
+repository-code: "https://github.com/astrowagner/KLIP-TPE"
 license: MIT
 version: 0.1.0
 date-released: 2026-09-13

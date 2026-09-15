@@ -26,9 +26,9 @@ jupyter = ["matplotlib>=3.5", "pillow>=9", "imageio>=2.20", "jupyter", "ipython"
 all = ["matplotlib>=3.5", "pillow>=9", "imageio>=2.20", "jupyter", "ipython", "pytest>=7", "pyklip>=2.7", "vip_hci>=1.6", "nbformat", "nbconvert"]
 
 [project.urls]
-Homepage = "https://github.com/astrowagner/klip-tpe"
-Documentation = "https://github.com/astrowagner/klip-tpe/tree/main/docs"
-Tutorials = "https://github.com/astrowagner/klip-tpe/tree/main/tutorials"
+Homepage = "https://github.com/astrowagner/KLIP-TPE"
+Documentation = "https://github.com/astrowagner/KLIP-TPE/tree/main/docs"
+Tutorials = "https://github.com/astrowagner/KLIP-TPE/tree/main/tutorials"
 
 [project.scripts]
 klip-tpe = "klip_tpe.cli:main"

@@ -29,7 +29,7 @@ __all__ = ["DATASETS", "data_dir", "fetch"]
 
 _BASE = "https://raw.githubusercontent.com/vortex-exoplanet/VIP_extras/master/datasets/"
 _KT_BASE = os.environ.get("KLIP_TPE_DATA_URL",
-                          "https://github.com/astrowagner/klip-tpe/releases/download/tutorial-data/")
+                          "https://github.com/astrowagner/KLIP-TPE/releases/download/tutorial-data/")
 
 DATASETS: Dict[str, Dict[str, str]] = {
     "naco_betapic": {

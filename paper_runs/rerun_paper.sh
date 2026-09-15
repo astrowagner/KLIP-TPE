@@ -31,7 +31,11 @@
 #   ./rerun_paper.sh A2 C         just those
 #   WORKERS=4 ./rerun_paper.sh    leave cores for another run on the same machine
 #   SHOW=0 ./rerun_paper.sh       headless (panels still written to each run's steps/)
-#   FORCE=1 ./rerun_paper.sh A2   redo a stage that already finished
+#   FORCE=1 ./rerun_paper.sh A2   redo a stage that already finished.  On a benchmark stage
+#                                 this retires the whole batch to <dir>_superseded_<stamp>
+#                                 and starts a new tag, so the re-run is uniform: a
+#                                 benchmark that merely resumed would mix the old slots'
+#                                 settings with the new ones in a single directory.
 #
 # The live window is ON by default and is shared: one window that follows whichever stage --
 # or, inside a benchmark, whichever slot -- is running.
@@ -97,7 +101,10 @@ stage_cmd() {
 say() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" | tee -a rerun_paper.log; }
 
 say "rerunning: ${STAGES[*]}   (reference objective, fixed_sources=False)"
-python3 - <<'PY' | tee -a rerun_paper.log
+# `set -u -o pipefail` without -e: a failing pre-flight (no klip_tpe on the path, a
+# syntax error, the wrong interpreter) printed its traceback and the run carried on
+# regardless -- so the assertion guarding the objective was not a guard at all.
+if ! python3 - <<'PY' | tee -a rerun_paper.log
 from klip_tpe import RunConfig, datasets
 assert not RunConfig().fixed_sources, (
     "fixed_sources is ON -- that freezes the injection azimuths, which optimize_near_2_tpe "
@@ -116,6 +123,10 @@ for ds in ("naco_betapic", "sphere_hd95086"):
         print(f"  could not pre-fetch {ds}: {exc!r} (a stage that needs it will retry)")
 print("  data cache warm")
 PY
+then
+  say "pre-flight failed (see above) -- not starting any stage"
+  exit 1
+fi
 
 for s in "${STAGES[@]}"; do
   d="$(outdir "$s")"
@@ -123,11 +134,26 @@ for s in "${STAGES[@]}"; do
     say "$s: already finished ($d) -- skipping.  FORCE=1 to redo"
     continue
   fi
-  t0=$SECONDS
   if [[ -n "${DRY:-}" ]]; then
-    say "$s: would run  $(stage_cmd "$s")   [WORKERS=${WORKERS:-auto} SHOW=${SHOW:-window}]"
+    extra=""
+    [[ -n "${FORCE:-}" && -n "$d" && -f "$d/bench_tag.txt" ]] && \
+      extra="   [FORCE would retire batch $(cat "$d/bench_tag.txt")]"
+    say "$s: would run  $(stage_cmd "$s")   [WORKERS=${WORKERS:-auto} SHOW=${SHOW:-window}]$extra"
     continue
   fi
+  # FORCE on a BENCHMARK stage has to retire the batch, not just get past the skip above.
+  # A benchmark resumes by reading bench_tag.txt and rejoining the slots of that tag, so a
+  # stage re-run with FORCE=1 used to march straight back into the batch it was meant to
+  # replace -- and any setting changed for the re-run (DISK_CUT, the objective, the space)
+  # then applied to the NEW slots only, leaving one directory holding two protocols.  That
+  # is how F2 ended up with slot 0 uncut, slots 1-4 cut, and slot 5 half of each.
+  # Retiring the directory takes bench_tag.txt with it, so the stage mints a fresh tag.
+  if [[ -n "${FORCE:-}" && -n "$d" && -f "$d/bench_tag.txt" ]]; then
+    keep="${d}_superseded_$(date +%Y%m%d_%H%M%S)"
+    say "$s: FORCE -- retiring the existing batch $(cat "$d/bench_tag.txt") to $(basename "$keep")"
+    mv "$d" "$keep"
+  fi
+  t0=$SECONDS
   say "$s: starting"
   if WORKERS="${WORKERS:-auto}" SHOW="${SHOW:-window}" \
        bash -c "$(stage_cmd "$s")" >> "$s.log" 2>&1; then

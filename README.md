@@ -19,7 +19,7 @@ optimizer it was ported from (the KLIP-TPE code used for the NEAR and LBTI campa
 pip install "klip-tpe[plots]"                 # numpy, scipy, astropy, matplotlib, pillow, imageio, threadpoolctl
 pip install "klip-tpe[all]"                   # + jupyter, pytest, pyklip, vip_hci
 # from a clone:
-git clone https://github.com/astrowagner/klip-tpe && cd klip-tpe && pip install -e ".[all]"
+git clone https://github.com/astrowagner/KLIP-TPE && cd KLIP-TPE && pip install -e ".[all]"
 python -m pytest -q                           # ~3 min, synthetic data only
 ```
 

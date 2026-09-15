@@ -1,6 +1,6 @@
 # Contributing
 
-Issues and pull requests are welcome at https://github.com/astrowagner/klip-tpe.
+Issues and pull requests are welcome at https://github.com/astrowagner/KLIP-TPE.
 
 * **Setup**: `pip install -e ".[all]"`, then `python -m pytest -q` (≈3 min, synthetic data
   only; no downloads).  New behaviour comes with a test in `tests/`.

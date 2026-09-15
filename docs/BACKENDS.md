@@ -94,6 +94,56 @@ PSF at the data's pixel scale (`psf_template`, e.g. from spaceKLIP's
 a Gaussian of `1.028 λ/D` and flux unit 1 is used, which is fine for parameter *ranking*
 but not for calibrated contrasts.
 
+#### STPSF off-axis PSFs
+
+`psf="stpsf"` replaces that template with the off-axis PSF of the coronagraph itself,
+computed with [STPSF](https://stpsf.readthedocs.io) (the renamed WebbPSF) from the mode in
+the data's own headers:
+
+```python
+red = sk.make_reducer(datasets, psf="stpsf", star_flux=F_star, max_workers=4)
+# or build it yourself and reuse the grid:
+from klip_tpe import stpsf_psf
+grid  = stpsf_psf.offaxis_grid("NIRCam", "F444W", image_mask="MASK335R",
+                               seps_as=np.arange(0.2, 2.61, 0.2))
+model = stpsf_psf.library(grid, star_flux=F_star)
+red   = sk.make_reducer(datasets, injection_model=model)
+```
+
+Inside a few λ/D of a mask the PSF is neither a Gaussian nor separation-independent, so
+this matters twice: injected sources get the right shape *and* the right amplitude, since
+the grid also measures the mask throughput `T(ρ)` (for MASK335R it reaches half
+transmission at 0.65″, against the published 0.63″ IWA) and `LibraryPSF` applies it. Each
+PSF costs seconds, so a grid is computed once and cached as a FITS under
+`$KLIP_TPE_DATA/stpsf_cache` (default `~/.klip_tpe/stpsf_cache`); the stamps are stored
+source-centred with the star towards −x, which is the `refpa_deg=0` convention the
+injector rotates from. STPSF is an optional dependency (`pip install stpsf`, Python ≥
+3.10, plus its ~90 MB data files via `STPSF_PATH`); nothing else imports the module.
+
+#### Forward-modelled matched filter (`--metric fmmf`)
+
+KLIP is not flux-conserving: it eats part of the planet and leaves negative
+self-subtraction lobes around what remains, and *how much* depends on the very parameters
+being searched. Filtering with the instrument PSF therefore mismatches the signal, and the
+mismatch is worst exactly where the optimizer is working hardest. `klip_tpe.fmmf.FMMFSNR`
+propagates the PSF model through each configuration's own subtraction and filters with the
+result (Pueyo 2016; Ruffio et al. 2017):
+
+```bash
+klip-tpe generic --cube ... --metric fmmf          # or metric="fmmf" in default_config()
+```
+
+Everything else is unchanged — the same Mawet small-sample ring statistics, the same
+clean-subtraction rule, the same validation protocol — so an FMMF run and a PSF-matched
+filter run differ only in the filter. The template comes from the analytic KLIP-FM image
+when the reducer has one (the built-in annular KLIP); pyKLIP, VIP and spaceKLIP do not, and
+there the runner passes the *numerical* forward model `injected − clean`, which is the same
+quantity to first order and costs nothing extra because `clean_subtract=True` already
+computes both. `FMMFSNR.describe()["fm_fraction"]` reports what fraction of the filters
+were really forward-modelled rather than fallbacks (the per-evaluation k-scan has no
+forward model and always falls back). `klip_tpe.fmmf.fmmf_map` turns a ring of test
+sources into a full-frame FMMF amplitude/S-N map for the final image.
+
 ### VIP cubes
 
 VIP keeps cubes as plain arrays: `Dataset(cube, angle_list, texp=...)` is all that is
