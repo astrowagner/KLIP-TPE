@@ -14,6 +14,7 @@ after derotation (CCW by ``parang + truenorth``) the source lands at
 """
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
 
@@ -353,6 +354,54 @@ class LibraryPSF(InjectionModel):
         return kernel_from_profile(st, fwhm)
 
 
+def _check_float32_headroom(cube: np.ndarray, sources: Sequence[Source], model: InjectionModel,
+                            fallback: Optional[InjectionModel] = None) -> None:
+    """Warn when an injection is too faint to survive being added to a float32 cube.
+
+    The cube is held in float32, so adding a stamp whose pixels sit below the float32
+    quantum of the science pixels they land on does nothing at all -- the source is not
+    faint, it is GONE, and silently: on this data an injection whose stamp peaks at 1e-4
+    counts loses a quarter of its flux and the loss grows as the contrast falls, so the
+    recovered S/N stops being proportional to the contrast and every curve derived from it
+    bends.  It is a real failure mode rather than a theoretical one: it is what happens the
+    moment ``flux_unit`` is a normalised template's own sum (order 1) instead of the star's
+    flux (order 1e6), which is the state a missing ``star_flux`` leaves you in.
+    """
+    if not cube.size:
+        return
+    # A subsample: this runs on every injection, and a full pass over a production cube
+    # would cost real time for a number that only has to be right to an order of magnitude.
+    # The brightest pixels are the star's and are in every frame, so striding is safe.
+    s = max(1, int(cube.size // 2_000_000))
+    peak = float(np.nanmax(np.abs(cube.reshape(-1)[::s])))
+    if not np.isfinite(peak) or peak <= 0:
+        return
+    quantum = peak * float(np.finfo(np.float32).eps)      # ULP of the brightest pixels
+    for s in sources:
+        m = model
+        try:
+            st, _, ok = model.stamp(s.rho)
+            if not ok and fallback is not None:
+                st, _, ok = fallback.stamp(s.rho)
+                m = fallback
+            if not ok:
+                continue
+        except Exception:                                  # the real error comes later
+            continue
+        amp = abs(s.contrast) * m.flux_unit * model.throughput(s.rho) * float(np.nanmax(st))
+        if amp < 32 * quantum:
+            warnings.warn(
+                f"injection at rho={s.rho:.3f}\" contrast={s.contrast:.3e} peaks at "
+                f"{amp:.3e} counts, within float32 rounding of a cube whose pixels reach "
+                f"{peak:.3e}: most of its flux will be lost and the recovered S/N will not "
+                f"scale with the contrast.  flux_unit is {m.flux_unit:.4g} -- if that is a "
+                f"normalised template's own sum rather than the star's flux in the science "
+                f"frames' units, set star_flux (see "
+                f"generic.star_flux_from_aperture_photometry).",
+                RuntimeWarning, stacklevel=3)
+            return                                         # one warning per call is enough
+
+
 def inject_sources(cube: np.ndarray, angles: np.ndarray, sources: Sequence[Source], model: InjectionModel,
                    pxscale: float, truenorth: float = 0.0, center: Optional[Tuple[float, float]] = None,
                    fallback: Optional[InjectionModel] = None, angle_convention: str = "pa",
@@ -368,6 +417,7 @@ def inject_sources(cube: np.ndarray, angles: np.ndarray, sources: Sequence[Sourc
     """
     out = np.array(cube, dtype=np.float32, copy=copy)
     n, ny, nx = out.shape
+    _check_float32_headroom(out, sources, model, fallback)
     if center is None:
         center = ((nx - 1) / 2.0, (ny - 1) / 2.0)
     angles = np.asarray(angles, float)

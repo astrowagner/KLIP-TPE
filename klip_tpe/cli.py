@@ -74,7 +74,14 @@ def _generic_objects(a, log=print):
                                tags=None if a.no_tags else "auto", wv_index=a.wv_index)
         datasets[nm] = ds
         if sf is not None:
-            star_flux[nm] = generic.star_flux_from_halo(ds) if str(sf).lower() == "halo" else float(sf)
+            if str(sf).lower() == "halo":
+                raise SystemExit(
+                    "--star-flux halo has been removed.  Fitting an off-axis template to the "
+                    "science halo was never valid on coronagraphic or occulted data, and on the "
+                    "beta Pic AGPM sequence it returned fluxes 5-8x apart on two runs of the same "
+                    "method.  Give a measured number, or leave --star-flux off and read the "
+                    "contrast axis as template units.")
+            star_flux[nm] = float(sf)
         log(f"  {nm}: {ds.cube.shape} frames, angles {ds.angles.min():.1f}..{ds.angles.max():.1f} deg"
             + (f", star flux {star_flux[nm]:.4g}" if nm in star_flux else ""))
     red = generic.make_reducer(datasets, pxscale=a.pxscale, lam_m=a.lam, diam_m=a.diam, fwhm_px=a.fwhm_px,
@@ -150,7 +157,9 @@ def _add_near_args(p):
     gg.add_argument("--ref-cube", nargs="+", default=None, help="PSF-reference cube(s) for RDI/ARDI (one per cube)")
     gg.add_argument("--names", nargs="+", default=None, help="partition names (default: cube file stems)")
     gg.add_argument("--star-flux", nargs="+", default=None,
-                    help="star flux in science-frame units per cube, or 'halo' (scale the PSF template to the halo)")
+                    help="star flux per cube, in the science frames' own units and in the "
+                         "template's normalisation aperture; omit it and the contrast axis is "
+                         "in template units")
     gg.add_argument("--pxscale", type=float, default=None, help="arcsec / px")
     gg.add_argument("--lam", type=float, default=None, help="wavelength (m)")
     gg.add_argument("--diam", type=float, default=8.4, help="aperture diameter (m) for lambda/D")

@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased — 2026-09-15
+- **Flux calibration audited end to end** (`docs/FLUX_CALIBRATION.md`): what PSF is injected, what the
+  star flux is and over what aperture, for every observation the package ships or the paper uses.  Three
+  axes were wrong and are fixed, each checked against the companion's published brightness:
+  - **β Pic** — the distributed `naco_betapic_psf.fits` is a *normalised* template (unit flux inside
+    r = 2.000 px), so its own counts are not the star; unset, `star_flux` put the axis 9.4e5 from a
+    contrast.  Now `3.3268e6`, converted from VIP's published `starphot` by the new
+    `generic.star_flux_from_aperture_photometry` + `datasets.PHOTOMETRY`.  **Verified**: β Pic b measures
+    ΔL′ = 7.81 ± 0.08 against Absil et al. (2013)'s 8.01 ± 0.16 from the same data — 1.1 σ
+    (`scripts/check_betapic_contrast.py`).
+  - **HD 95086** — the SPHERE flux frames are already on the science frames' scale; applying
+    `dit_science/dit_flux/nd_transmission` a second time over-counted the star by 1347×.
+  - **HIP 65426** — still has no stellar photometry; that is now stated rather than implied.
+- **`star_flux_from_halo` removed**, with no opt-in (also the `--star-flux halo` CLI value).  Fitting an
+  off-axis template to a *coronagraphic* halo compares two different functions: the same method on the
+  same data gave star fluxes 5.28× and 8.04× apart on paper runs A2 and B2.  A PSF template is now
+  **required** — the old `GaussianPSF(flux_unit=1)` fallback silently called raw detector units a contrast.
+- **New**: `generic.aperture_sum` (exact partial-pixel circular photometry, no photutils dependency) and
+  `generic.star_flux_from_aperture_photometry`.
+- **Fixed**: `inject_sources` builds the cube in float32, so an injected stamp below the float32 quantum
+  of the science pixels it lands on was silently rounded away — a quarter of the flux at 1e-4 counts, and
+  worse as the contrast falls, which bends every curve derived from it.  Now a `RuntimeWarning` naming
+  `flux_unit` as the likely cause.  No paper run was affected.
+
 ## Unreleased — 2026-09-13
 - **Public release preparation**: README rewritten for a general audience, `docs/TUTORIALS.md`,
   `docs/PYNOMIC.md` (pyNOMIC start-to-finish guide incl. image groups), `docs/DISPLAY.md` (panel anatomy
@@ -8,7 +32,8 @@
 - **Generic cube adapter** (`klip_tpe.instruments.generic`, `klip-tpe generic`): any registered ADI cube
   (+ angles, optional PSF template and reference cube; FITS or arrays, 4-d IFS with `wv_index`) becomes a
   `Dataset` → reducer → space → guard → objective.  Data-derived frame-quality tags (`quality_tags`),
-  `star_flux_from_halo` for saturated cores, per-partition wavelength / FWHM dicts (IRDIS K1/K2).
+  per-partition wavelength / FWHM dicts (IRDIS K1/K2).  (This entry originally listed a
+  `star_flux_from_halo` helper for saturated cores; it was removed on 2026-09-15, see above.)
 - **Example data** (`klip_tpe.datasets`): `naco_betapic`, `sphere_sao206462`, `nircam_pds70_*` (VIP_extras)
   and `sphere_hd95086` (SPHERE IRDIS K1+K2 crops, klip-tpe release), downloaded on first use into
   `~/.klip_tpe/data` (`$KLIP_TPE_DATA`).

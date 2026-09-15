@@ -35,8 +35,10 @@ from klip_tpe.display import LiveDisplay
 
 f = datasets.fetch("naco_betapic")                                   # public VIP tutorial data (beta Pic b)
 ds = generic.load_cube(f["cube"], f["angles"], psf=f["psf"], name="betapic")
-red = generic.make_reducer({"betapic": ds}, star_flux=generic.star_flux_from_halo(ds),
-                           **datasets.INSTRUMENT["naco_betapic"])    # pxscale, lambda, D
+p = datasets.PHOTOMETRY["naco_betapic"]                              # the template is normalised, so the
+sf = generic.star_flux_from_aperture_photometry(                     # star's flux has to come from published
+    ds.meta["psf"], p["starphot"], p["aperture_px"])                 # photometry or the axis is not a contrast
+red = generic.make_reducer({"betapic": ds}, star_flux=sf, **datasets.INSTRUMENT["naco_betapic"])
 space = generic.make_space(red, k_klip_max=30); space.project = generic.make_guard(red, k_max=30)
 objective, sampler = generic.default_config(red, known=[(0.452, 211.9)])   # keep injections off the planet
 
@@ -48,7 +50,7 @@ or, the same from a terminal:
 
 ```
 klip-tpe generic --cube naco_betapic_cube_cen.fits --angles naco_betapic_derot_angles.fits \
-    --psf naco_betapic_psf.fits --star-flux halo --pxscale 0.02719 --lam 3.8e-6 --diam 8.2 \
+    --psf naco_betapic_psf.fits --star-flux 3.3268e6 --pxscale 0.02719 --lam 3.8e-6 --diam 8.2 \
     --known 0.452 211.9 --ann-edges 8 22 --n-iter 60 --n-init 15 --run-dir runs/betapic --show
 klip-tpe resume --run-dir runs/betapic ...        # after an interruption (or: --run-dir last)
 klip-tpe plots  --run-dir runs/betapic            # regenerate the figures

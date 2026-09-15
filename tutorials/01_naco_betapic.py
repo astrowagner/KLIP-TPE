@@ -59,11 +59,31 @@ plt.tight_layout()
 #
 # * **angles** – klip-tpe derotates each frame counter-clockwise by `angle` (same sign as
 #   VIP's `angle_list` / pyKLIP's `PAs`); use `angle_sign=-1` for the opposite convention.
-# * **star flux** – injected companions are expressed as a *contrast* to the star, so the
-#   adapter needs the star's flux in the science frames' units.  This L′ sequence is
-#   saturated in the core, so we scale the PSF template to the halo at 6–14 px
-#   (`star_flux_from_halo`); with an unsaturated core, or a flux frame taken with a known
-#   neutral density, compute it directly.
+# * **star flux** – injected companions are expressed as a *contrast*, so an absolute
+#   contrast axis needs the star's flux **in the science frames' own units and in the
+#   template's normalisation aperture**.  Neither of these two files carries it.  The science
+#   frames are AGPM coronagraphic (the radial profile is suppressed inside ~3 px — the star
+#   is occulted, not saturated), so you cannot read the star off them; and the distributed
+#   `naco_betapic_psf.fits` is a *normalised* template — its flux inside r = 2.000 px is
+#   1.000000000 — so its counts are not β Pictoris either.  Leave `star_flux` unset and
+#   `TemplatePSF` falls back to the stamp's own sum, 4.349, which puts the "contrast" axis a
+#   factor of 9.4 × 10⁵ away from a contrast.  A normalised template is the easiest way to
+#   get a plausible-looking axis that means nothing.
+#
+#   What is needed is photometry the *observer* made.  `datasets.PHOTOMETRY` carries VIP's
+#   published `starphot = 764939.6` for this very cube — measured on the non-coronagraphic
+#   PSF and rescaled to the coronagraphic integration time, in the same 2 px aperture the
+#   template is normalised in — and `star_flux_from_aperture_photometry` converts it into the
+#   normalisation `TemplatePSF` uses.  **And then it gets checked**: with that star flux,
+#   β Pic b measures ΔL′ = 7.81 ± 0.08 against the 8.01 ± 0.16 that Absil et al. (2013)
+#   published from these same data — 1.1 σ.  `scripts/check_betapic_contrast.py` is that
+#   measurement; run it if you change anything upstream of the axis.
+#
+#   A `star_flux_from_halo` helper used to stand here instead, scaling the template to the
+#   science halo at 6–14 px.  It has been removed: fitting an off-axis template to a
+#   *coronagraphic* halo compares two different functions, and it showed — the same method on
+#   the same data returned fluxes 5.28× and 8.04× apart on paper runs A2 and B2, and both were
+#   wrong.  Use photometry, or say "template units" and mean it.
 # * **frame-quality tags** – the searched frame-selection thresholds (`corr_thresh`,
 #   `noise_max`, `coronoise_max`) act on per-frame tags.  When the data bring none, the
 #   adapter derives them from the cube itself (`quality_tags`).
@@ -79,8 +99,12 @@ plt.tight_layout()
 # %%
 inst = datasets.INSTRUMENT["naco_betapic"]
 ds = generic.load_cube(files["cube"], files["angles"], psf=files["psf"], name="betapic")
-star_flux = generic.star_flux_from_halo(ds, r_range_px=(6, 14))
-print(f"star flux (template units): {star_flux:.3g};  tags: {list(ds.tags)}")
+print(f"tags: {list(ds.tags)}")
+
+phot = datasets.PHOTOMETRY["naco_betapic"]
+star_flux = generic.star_flux_from_aperture_photometry(psf, phot["starphot"], phot["aperture_px"])
+print(f"template sum {psf.sum():.4f}, flux in r={phot['aperture_px']} px "
+      f"{generic.aperture_sum(psf, 19, 19, phot['aperture_px']):.9f} -> star_flux {star_flux:.4g}")
 
 red = generic.make_reducer({"betapic": ds}, star_flux=star_flux, max_workers="auto", **inst)
 space = generic.make_space(red, k_klip_max=30)      # 61 frames -> <=30 KL modes, <=7 frames per temporal bin
@@ -239,7 +263,7 @@ for backend in ("klip", "vip", "pyklip"):
 #
 # ```
 # klip-tpe generic --cube naco_betapic_cube_cen.fits --angles naco_betapic_derot_angles.fits \
-#     --psf naco_betapic_psf.fits --star-flux halo --pxscale 0.02719 --lam 3.8e-6 --diam 8.2 \
+#     --psf naco_betapic_psf.fits --star-flux 3.3268e6 --pxscale 0.02719 --lam 3.8e-6 --diam 8.2 \
 #     --known 0.452 211.9 --ann-edges 8 30 --n-iter 60 --n-init 15 --n-top 2 --n-valid 3 \
 #     --run-dir runs/betapic_cli --show           # --show inline inside Jupyter, --backend vip|pyklip
 # klip-tpe resume --run-dir runs/betapic_cli      # after an interruption

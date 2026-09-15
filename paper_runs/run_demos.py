@@ -99,7 +99,16 @@ def betapic_dataset(groups=1):
     f = datasets.fetch("naco_betapic", quiet=True)
     inst = datasets.INSTRUMENT["naco_betapic"]
     ds = generic.load_cube(f["cube"], f["angles"], psf=f["psf"], name="betapic")
-    sf = generic.star_flux_from_halo(ds)
+    # The distributed template is NORMALISED (flux 1.000000000 inside r = 2.000 px), so its
+    # own sum -- 4.349, what star_flux=None would use -- is not beta Pic's brightness and
+    # leaves the axis 9.4e5 from a contrast.  datasets.PHOTOMETRY carries VIP's published
+    # starphot for this very cube, in that same aperture; converting it to the template's
+    # normalisation gives 3.327e6, and beta Pic b then measures dL' = 7.79 against Absil et
+    # al. (2013)'s 8.01 +/- 0.16 from these same data (scripts/check_betapic_contrast.py).
+    # The halo fit that used to stand here was invalid on coronagraphic data and returned
+    # fluxes 5.28x and 8.04x apart on runs A2 and B2.
+    p = datasets.PHOTOMETRY["naco_betapic"]
+    sf = generic.star_flux_from_aperture_photometry(ds.meta["psf"], p["starphot"], p["aperture_px"])
     if groups <= 1:
         return {"betapic": ds}, sf, inst
     n = ds.cube.shape[0]
@@ -172,13 +181,17 @@ def hd95086_objects():
     files = datasets.fetch("sphere_hd95086", quiet=True)
     inst = datasets.INSTRUMENT["sphere_hd95086"]
     ang = fits.getdata(files["angles"])
-    scale = inst["dit_science"] / inst["dit_flux"] / inst["nd_transmission"]
     dsets, sf, lam = {}, {}, {}
+    # The flux frames are ALREADY on the science frames' scale in this distribution: the DIT
+    # ratio and the ND transmission went in when the products were made.  Applying
+    # dit_science/dit_flux/nd_transmission here as well over-counted the star by 1347x and
+    # moved the whole contrast axis of runs C and G2 with it.  See tutorial 02 for the
+    # arithmetic against HD 95086 b's published contrast.
     for b in ("K1", "K2"):
         ds = generic.load_cube(files[f"cube_{b}"], ang, psf=files[f"psf_{b}"], name=b)
         dsets[b] = ds
         p = ds.meta["psf"]
-        sf[b] = float(p[p > 0].sum()) * scale
+        sf[b] = float(p[p > 0].sum())
         lam[b] = inst["lam_m"] if b == "K1" else inst["lam_m_K2"]
     red = generic.make_reducer(dsets, pxscale=inst["pxscale"], lam_m=lam, diam_m=inst["diam_m"],
                                star_flux=sf, max_workers=workers(), log=log, partition_label="channel")

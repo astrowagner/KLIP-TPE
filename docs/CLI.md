@@ -181,8 +181,9 @@ generic cubes (--instrument generic / klip-tpe generic):
   --names NAMES [NAMES ...]
                         partition names (default: cube file stems)
   --star-flux STAR_FLUX [STAR_FLUX ...]
-                        star flux in science-frame units per cube, or 'halo'
-                        (scale the PSF template to the halo)
+                        star flux per cube, in the science frames' own units
+                        and in the template's normalisation aperture; omit it
+                        and the contrast axis is in template units
   --pxscale PXSCALE     arcsec / px
   --lam LAM             wavelength (m)
   --diam DIAM           aperture diameter (m) for lambda/D
@@ -392,8 +393,9 @@ generic cubes (--instrument generic / klip-tpe generic):
   --names NAMES [NAMES ...]
                         partition names (default: cube file stems)
   --star-flux STAR_FLUX [STAR_FLUX ...]
-                        star flux in science-frame units per cube, or 'halo'
-                        (scale the PSF template to the halo)
+                        star flux per cube, in the science frames' own units
+                        and in the template's normalisation aperture; omit it
+                        and the contrast axis is in template units
   --pxscale PXSCALE     arcsec / px
   --lam LAM             wavelength (m)
   --diam DIAM           aperture diameter (m) for lambda/D
@@ -523,8 +525,9 @@ generic cubes (--instrument generic / klip-tpe generic):
   --names NAMES [NAMES ...]
                         partition names (default: cube file stems)
   --star-flux STAR_FLUX [STAR_FLUX ...]
-                        star flux in science-frame units per cube, or 'halo'
-                        (scale the PSF template to the halo)
+                        star flux per cube, in the science frames' own units
+                        and in the template's normalisation aperture; omit it
+                        and the contrast axis is in template units
   --pxscale PXSCALE     arcsec / px
   --lam LAM             wavelength (m)
   --diam DIAM           aperture diameter (m) for lambda/D
@@ -644,8 +647,9 @@ generic cubes (--instrument generic / klip-tpe generic):
   --names NAMES [NAMES ...]
                         partition names (default: cube file stems)
   --star-flux STAR_FLUX [STAR_FLUX ...]
-                        star flux in science-frame units per cube, or 'halo'
-                        (scale the PSF template to the halo)
+                        star flux per cube, in the science frames' own units
+                        and in the template's normalisation aperture; omit it
+                        and the contrast axis is in template units
   --pxscale PXSCALE     arcsec / px
   --lam LAM             wavelength (m)
   --diam DIAM           aperture diameter (m) for lambda/D
@@ -784,8 +788,9 @@ generic cubes (--instrument generic / klip-tpe generic):
   --names NAMES [NAMES ...]
                         partition names (default: cube file stems)
   --star-flux STAR_FLUX [STAR_FLUX ...]
-                        star flux in science-frame units per cube, or 'halo'
-                        (scale the PSF template to the halo)
+                        star flux per cube, in the science frames' own units
+                        and in the template's normalisation aperture; omit it
+                        and the contrast axis is in template units
   --pxscale PXSCALE     arcsec / px
   --lam LAM             wavelength (m)
   --diam DIAM           aperture diameter (m) for lambda/D
@@ -931,8 +936,9 @@ generic cubes (--instrument generic / klip-tpe generic):
   --names NAMES [NAMES ...]
                         partition names (default: cube file stems)
   --star-flux STAR_FLUX [STAR_FLUX ...]
-                        star flux in science-frame units per cube, or 'halo'
-                        (scale the PSF template to the halo)
+                        star flux per cube, in the science frames' own units
+                        and in the template's normalisation aperture; omit it
+                        and the contrast axis is in template units
   --pxscale PXSCALE     arcsec / px
   --lam LAM             wavelength (m)
   --diam DIAM           aperture diameter (m) for lambda/D

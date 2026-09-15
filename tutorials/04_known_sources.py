@@ -33,7 +33,14 @@ from klip_tpe.products import noise_profile, contrast_curve
 files = datasets.fetch("naco_betapic")
 inst = datasets.INSTRUMENT["naco_betapic"]
 ds = generic.load_cube(files["cube"], files["angles"], psf=files["psf"], name="betapic")
-red = generic.make_reducer({"betapic": ds}, star_flux=generic.star_flux_from_halo(ds), **inst)
+# The distributed template is normalised (unit flux inside r = 2 px), so its own counts are
+# not beta Pictoris; PHOTOMETRY carries VIP's published starphot for this cube, in that same
+# aperture, and star_flux_from_aperture_photometry converts it to the template's whole-stamp
+# normalisation.  Without it the contrast axis is template units, 9.4e5 off.  Tutorial 01 -
+# section 2 has the reasoning and scripts/check_betapic_contrast.py has the verification.
+_p = datasets.PHOTOMETRY["naco_betapic"]
+red = generic.make_reducer({"betapic": ds}, **inst, star_flux=generic.star_flux_from_aperture_photometry(
+    ds.meta["psf"], _p["starphot"], _p["aperture_px"]))
 space = generic.make_space(red, k_klip_max=30)
 space.project = generic.make_guard(red, k_max=30)
 cfg0 = space.decode(space.default_vector())

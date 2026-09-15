@@ -36,13 +36,18 @@ TARGETS = {"A": ("A_betapic", "betapic", R.BP), "A2": ("A2_betapic", "betapic", 
            "C": ("C_hd95086", "hd95086", R.HD), "D": ("D_hip65426", "hip65426", R.HIP)}
 N_DEFAULT_TRIALS = 5
 
-#: Published contrast of the companion in each data set's own band.  The injection
-#: templates carry no absolute photometry (the beta Pic template comes from a halo ratio,
-#: the SPHERE one from a flux frame with its own DIT and neutral density, and the JWST one
-#: has none at all), so every contrast axis is anchored on the companion itself: we measure
-#: the companion's S/N and the injected S/N at a known contrast in the same annulus, which
-#: gives the companion's contrast in template units, and rescale so that it equals the
-#: published value.  Ratios -- gains, curve shapes -- are untouched by this.
+#: Published contrast of the companion in each data set's own band.  Every contrast axis is
+#: anchored on the companion itself: we measure the companion's S/N and the injected S/N at a
+#: known contrast in the same annulus, which gives the companion's contrast in the injection
+#: template's units, and rescale so that it equals the published value.  Ratios -- gains,
+#: curve shapes -- are untouched by this.
+#:
+#: The anchor is also the DIAGNOSTIC on the star fluxes, and the recorded ``flux_scale``
+#: should be read that way: it is 1 when the star flux is right.  beta Pic now carries VIP's
+#: published starphot (3.3268e6; see docs/FLUX_CALIBRATION.md) and comes out at 1.21 -- the
+#: 0.2 mag residual against Absil -- where the halo fit it replaced gave 5.28 and 8.04 on the
+#: same data.  SPHERE's flux frames are already on the science scale (a second DIT/ND factor
+#: cost run C a 1071x axis).  HIP 65426 still has no stellar photometry at all.
 ANCHOR = {
     "betapic":  (6.25e-4, "Absil et al. 2013, dL' = 8.01 +/- 0.16 (this very data set)"),
     "hd95086":  (1.32e-5, "Chauvin et al. 2018, dK1 = 12.2 +/- 0.1 (2015-02-03)"),

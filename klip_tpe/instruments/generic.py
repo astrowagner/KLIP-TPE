@@ -48,8 +48,9 @@ from ..reducer import Dataset, PartitionedReducer, reducer_class
 from ..space import SearchSpace
 from . import near as _near
 
-__all__ = ["load_cube", "quality_tags", "star_flux_from_halo", "make_reducer", "make_space", "make_guard",
-           "default_config", "injection_model_for"]
+__all__ = ["load_cube", "quality_tags", "make_reducer", "make_space", "make_guard",
+           "default_config", "injection_model_for", "aperture_sum",
+           "star_flux_from_aperture_photometry"]
 
 ArrayLike = Union[str, np.ndarray, Sequence[float]]
 
@@ -158,46 +159,93 @@ def load_cube(cube: ArrayLike, angles: ArrayLike, psf: Optional[ArrayLike] = Non
                    ref_cube=None if rc is None else np.asarray(rc, np.float32))
 
 
-def star_flux_from_halo(ds: Dataset, psf: Optional[np.ndarray] = None, r_range_px: Tuple[float, float] = (6.0, 14.0),
-                        psf_center: Optional[Tuple[float, float]] = None) -> float:
-    """Star flux in the science frames' units when the core is saturated / behind a mask:
-    the ratio of the median-frame azimuthal profile to the PSF template's profile over
-    ``r_range_px`` (median of the per-radius ratios).  The template is treated as
-    unit-normalised *in whatever normalisation it comes* (the returned number is the
-    ``star_flux`` to pass to :func:`make_reducer` / :func:`injection_model_for` with the
-    same template)."""
-    t = ds.meta.get("psf") if psf is None else np.asarray(psf, float)
-    if t is None:
-        raise ValueError("no PSF template")
-    t = np.nanmedian(t, axis=0) if t.ndim == 3 else t
-    med = np.nanmedian(ds.cube, axis=0)
-    cx, cy = ds.meta.get("center", ((med.shape[1] - 1) / 2.0, (med.shape[0] - 1) / 2.0))
-    if psf_center is None:
-        iy, ix = np.unravel_index(np.nanargmax(t), t.shape)
-        psf_center = (float(ix), float(iy))
-    yy, xx = np.mgrid[0:med.shape[0], 0:med.shape[1]]
-    r = np.hypot(xx - cx, yy - cy)
-    pyy, pxx = np.mgrid[0:t.shape[0], 0:t.shape[1]]
-    pr = np.hypot(pxx - psf_center[0], pyy - psf_center[1])
-    ratios = []
-    for rr in np.arange(r_range_px[0], r_range_px[1] + 0.5, 1.0):
-        a = np.nanmedian(med[(r > rr - 0.5) & (r <= rr + 0.5)])
-        b = np.nanmedian(t[(pr > rr - 0.5) & (pr <= rr + 0.5)])
-        if np.isfinite(a) and np.isfinite(b) and b > 0 and a > 0:
-            ratios.append(a / b)
-    if not ratios:
-        raise ValueError("no usable radii for the halo ratio (template too small?)")
-    return float(np.median(ratios) * float(np.nansum(t)))     # x template flux: TemplatePSF normalises to unit total
+def _quadrant_area(x: np.ndarray, y: np.ndarray, r: float) -> np.ndarray:
+    """Area of ``{0<=u<=x, 0<=v<=y, u^2+v^2<=r^2}`` for ``x, y >= 0`` (exact)."""
+    x = np.clip(np.asarray(x, float), 0.0, r)                 # beyond r the circle bounds it
+    y = np.clip(np.asarray(y, float), 0.0, r)
+    g = lambda t: 0.5 * (t * np.sqrt(np.clip(r * r - t * t, 0.0, None))
+                         + r * r * np.arcsin(np.clip(t / r, -1.0, 1.0)))   # int_0^t sqrt(r^2-u^2)
+    a = np.minimum(x, np.sqrt(np.clip(r * r - y * y, 0.0, None)))          # where the circle is above y
+    return a * y + (g(x) - g(a))
+
+
+def aperture_sum(img: np.ndarray, cx: float, cy: float, radius_px: float) -> float:
+    """Flux in a circular aperture with *exact* partial-pixel areas.
+
+    Matches photutils' ``method='exact'`` to floating point, without the dependency.  A
+    whole-pixel mask (``hypot(x - cx, y - cy) <= r``) is NOT good enough here: at the radii
+    published photometry is quoted in -- 2 px, one FWHM -- it differs from the exact
+    aperture by several percent, and sub-pixel sampling converges only as 1/nsub, which is
+    still 1e-3 at 40 samples per pixel.  Either error lands straight on the contrast axis.
+    """
+    img = np.asarray(img, float)
+    ny, nx = img.shape
+    r = float(radius_px)
+    if r <= 0:
+        return 0.0
+    x0, x1 = max(int(np.floor(cx - r)), 0), min(int(np.ceil(cx + r)) + 1, nx)
+    y0, y1 = max(int(np.floor(cy - r)), 0), min(int(np.ceil(cy + r)) + 1, ny)
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    # pixel (i, j) covers [j-0.5, j+0.5] x [i-0.5, i+0.5], shifted to the circle's frame
+    xa = (np.arange(x0, x1) - 0.5 - cx)[None, :]
+    xb = (np.arange(x0, x1) + 0.5 - cx)[None, :]
+    ya = (np.arange(y0, y1) - 0.5 - cy)[:, None]
+    yb = (np.arange(y0, y1) + 0.5 - cy)[:, None]
+    s = lambda x, y: np.sign(x) * np.sign(y) * _quadrant_area(np.abs(x), np.abs(y), r)
+    frac = s(xb, yb) - s(xa, yb) - s(xb, ya) + s(xa, ya)       # covered area per pixel
+    return float((np.nan_to_num(img[y0:y1, x0:x1]) * frac).sum())
+
+
+def star_flux_from_aperture_photometry(template: np.ndarray, starphot: float,
+                                       aperture_px: float, center: Optional[Tuple[float, float]] = None,
+                                       ee_radius_px: Optional[float] = None) -> float:
+    """``star_flux`` for :class:`TemplatePSF` from a *published* stellar aperture flux.
+
+    ``starphot`` is the star's flux inside ``aperture_px`` **in the science frames' own
+    units** (an unsaturated/off-axis measurement rescaled to the science exposure time and
+    neutral density).  The template is usually distributed normalised -- its own counts mean
+    nothing -- so the star flux this returns is ``starphot`` rescaled from ``aperture_px``
+    into whatever normalisation ``TemplatePSF`` will use (``ee_radius_px``, or the whole
+    stamp when None), which is the only number that makes an injected ``contrast`` a real
+    contrast.
+
+    This is the *replacement* for the halo fit that used to live here: it uses photometry
+    the observer actually made instead of fitting an off-axis template to a coronagraphic
+    halo, which compares two different functions and was 4-8x wrong on exactly this data.
+    """
+    t = np.asarray(template, float)
+    t = np.where(np.isfinite(t), t, 0.0)
+    if center is None:
+        center = ((t.shape[1] - 1) / 2.0, (t.shape[0] - 1) / 2.0)
+    a = aperture_sum(t, center[0], center[1], aperture_px)
+    if not np.isfinite(a) or a <= 0:
+        raise ValueError(f"the template has no flux inside {aperture_px} px of "
+                         f"{center} -- wrong centre, or the core is masked out")
+    f = float(t.sum()) if ee_radius_px is None else aperture_sum(t, center[0], center[1], ee_radius_px)
+    return float(starphot) * f / a
 
 
 def injection_model_for(ds: Dataset, fwhm_px: float, psf: Optional[np.ndarray] = None,
                         ee_radius_px: Optional[float] = None, star_flux: Optional[float] = None,
                         psf_center: Optional[Tuple[float, float]] = None) -> InjectionModel:
-    """:class:`TemplatePSF` from ``psf`` (or ``ds.meta['psf']``), else a Gaussian of
-    ``fwhm_px`` with flux unit 1."""
+    """:class:`TemplatePSF` from ``psf`` (or ``ds.meta['psf']``).
+
+    A template is **required**.  The previous fallback -- a Gaussian with flux unit 1 --
+    produced a reducer that injected happily and reported a "contrast" that was really raw
+    detector units, with nothing downstream able to tell the difference; paper run D shipped
+    a contrast axis 2.3e5 off that way.  If you have no off-axis PSF, say so explicitly by
+    constructing :class:`GaussianPSF` yourself, so the choice is in your code and not in a
+    silent default.
+    """
     t = ds.meta.get("psf") if psf is None else psf
     if t is None:
-        return GaussianPSF(fwhm_px, star_flux=1.0)
+        raise ValueError(
+            f"dataset {ds.name!r} has no PSF template: pass psf= to load_cube (or to "
+            f"injection_model_for).  A template is required -- injecting a Gaussian of "
+            f"unit flux gives an injection 'contrast' in raw detector units, which no "
+            f"downstream product can distinguish from a real contrast.  To do that on "
+            f"purpose, build GaussianPSF(fwhm_px, star_flux=...) yourself and pass it.")
     t = np.asarray(t, float)
     if t.ndim == 3:
         t = np.nanmedian(t, axis=0)

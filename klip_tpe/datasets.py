@@ -25,7 +25,7 @@ import sys
 import urllib.request
 from typing import Dict
 
-__all__ = ["DATASETS", "data_dir", "fetch"]
+__all__ = ["DATASETS", "INSTRUMENT", "PHOTOMETRY", "data_dir", "fetch"]
 
 _BASE = "https://raw.githubusercontent.com/vortex-exoplanet/VIP_extras/master/datasets/"
 _KT_BASE = os.environ.get("KLIP_TPE_DATA_URL",
@@ -67,9 +67,42 @@ INSTRUMENT = {
     "sphere_sao206462": {"pxscale": 0.01225, "lam_m": 1.593e-6, "diam_m": 8.2, "truenorth": 0.0},
     "nircam_pds70_f480m": {"pxscale": 0.063, "lam_m": 4.83e-6, "diam_m": 6.5, "truenorth": 0.0},
     "nircam_pds70_f187n": {"pxscale": 0.031, "lam_m": 1.874e-6, "diam_m": 6.5, "truenorth": 0.0},
-    # SPHERE IRDIS DB_K12: K1 2.110 um, K2 2.251 um; science DIT 96 s without ND, flux DIT 0.837464 s with ND_1.0
+    # SPHERE IRDIS DB_K12: K1 2.110 um, K2 2.251 um.  The DIT and ND entries are PROVENANCE,
+    # not a correction to apply: the distributed flux frames are already on the science
+    # frames' scale.  Multiplying the flux frame by dit_science/dit_flux/nd_transmission a
+    # second time over-counts the star by 1347x and moves the whole contrast axis with it --
+    # it cost tutorial 02 and paper run C a contrast axis until HD 95086 b's published
+    # brightness was used to check it.  star_flux = the flux frame's own sum.
     "sphere_hd95086": {"pxscale": 0.01225, "lam_m": 2.110e-6, "lam_m_K2": 2.251e-6, "diam_m": 8.2, "truenorth": 0.0,
                        "dit_science": 96.0, "dit_flux": 0.837464, "nd_transmission": 0.0851},
+}
+
+#: Absolute stellar photometry for the sets that HAVE some, in the science frames' own
+#: units: ``starphot`` = the star's flux inside ``aperture_px`` of the distributed template's
+#: centre.  Feed it to :func:`klip_tpe.instruments.generic.star_flux_from_aperture_photometry`
+#: with the template to get the ``star_flux`` :class:`TemplatePSF` wants; without it the
+#: contrast axis is in template units, not contrast.
+#:
+#: ``naco_betapic``: the distributed ``naco_betapic_psf.fits`` is NORMALISED -- its flux
+#: inside r = 2.000 px is 1.000000000 to 2e-9 -- so its own counts say nothing about beta
+#: Pic's brightness, and ``star_flux`` left unset (= the stamp's sum, 4.349) puts the axis
+#: 9.4e5 away from a real contrast.  VIP's metrics tutorial publishes ``starphot = 764939.6``
+#: for this very cube, "obtained from the non-coronagraphic PSF before normalization and
+#: after rescaling to the integration time used in the coronagraphic observations", i.e. in
+#: the aperture the template is normalised in.  CHECKED, not assumed: with it, beta Pic b
+#: measures dL' = 7.79 against the 8.01 +/- 0.16 Absil et al. (2013) published from these
+#: same data -- 1.2 sigma.  See ``scripts/check_betapic_contrast.py`` and docs/FLUX_CALIBRATION.md.
+#:
+#: The other sets are calibrated differently and are NOT listed here: ``sphere_hd95086``
+#: distributes flux frames already on the science scale (``star_flux`` = the frame's own
+#: sum), and the JWST set has no stellar photometry at all.
+PHOTOMETRY = {
+    "naco_betapic": {
+        "starphot": 764939.6, "aperture_px": 2.0,
+        "ref": "VIP tutorial 04_metrics (vip.readthedocs.io), NACO L' beta Pic; "
+               "off-axis PSF rescaled to the coronagraphic DIT",
+        "check": "beta Pic b -> dL' 7.79 vs 8.01 +/- 0.16 (Absil et al. 2013, A&A 559, L12)",
+    },
 }
 
 

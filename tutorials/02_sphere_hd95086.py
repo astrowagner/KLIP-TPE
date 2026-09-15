@@ -37,22 +37,39 @@ files, inst
 # %% [markdown]
 # ## 1. Two partitions, one star flux per channel
 #
-# The flux frames were taken with DIT 0.837 s through the ND_1.0 filter, the science
-# frames with DIT 96 s and no ND, so the star flux in science units is
-# `flux(template) × (96 / 0.837) / T_ND`.  `T_ND ≈ 0.085` at K1/K2 is the SPHERE ND_1.0
-# transmission (check the SPHERE user manual curves for your band; it only scales the
-# contrast axis).  Each channel has its own wavelength (2.110 / 2.251 µm), hence its own
-# λ/D and FWHM — `make_reducer` takes per-partition dicts.
+# Injected companions are expressed as a *contrast*, so the reducer needs the star's flux
+# **in the science frames' own units**.  The flux frames here were taken with DIT 0.837 s
+# through the ND_1.0 filter and the science frames with DIT 96 s and no ND — but **these
+# products already carry that correction**, so the star flux is the flux frame's own sum
+# and nothing further.
+#
+# Getting this wrong is invisible to the optimizer and fatal to the contrast axis, because
+# the search only ever compares S/N.  Applying `(96/0.837)/T_ND ≈ 1347` a second time put
+# the injections at 3.21e-09 for S/N 4.8 while HD 95086 b sat at S/N 12.2 in the same
+# image — an implied planet contrast of 8.1e-09 against a published ΔK1 = 12.2 mag, i.e.
+# 1.3e-05.  The ratio is 1625: the factor, within the accuracy of reading one off the
+# other.  Removing it gives 1.1e-05.  **Check any star flux against a known companion
+# before you believe a contrast curve.**
+#
+# Each channel has its own wavelength (2.110 / 2.251 µm), hence its own λ/D and FWHM —
+# `make_reducer` takes per-partition dicts.
 
 # %%
 angles = fits.getdata(files["angles"])
-scale = inst["dit_science"] / inst["dit_flux"] / inst["nd_transmission"]
 dsets, star_flux, lam = {}, {}, {}
+# The flux frames in this distribution are ALREADY on the science frames' scale -- the
+# DIT ratio and the ND transmission were applied when the products were made -- so the
+# star flux is the flux frame's own sum and nothing more.  Applying
+# `dit_science/dit_flux/nd_transmission` here as well over-counted the star by 1347x and
+# pushed the whole contrast axis down by that factor: the injections calibrated to 3.21e-09
+# for S/N 4.8 while HD 95086 b sat at S/N 12.2 in the same image, implying a planet contrast
+# of 8.1e-09 against a published dK1 = 12.2 mag, i.e. 1.3e-05.  The ratio, 1625, is that
+# factor.  Without it the implied contrast is 1.1e-05 -- the published value.
 for band in ("K1", "K2"):
     ds = generic.load_cube(files[f"cube_{band}"], angles, psf=files[f"psf_{band}"], name=band)
     dsets[band] = ds
     psf = ds.meta["psf"]
-    star_flux[band] = float(psf[psf > 0].sum()) * scale
+    star_flux[band] = float(psf[psf > 0].sum())
     lam[band] = inst["lam_m"] if band == "K1" else inst["lam_m_K2"]
     print(f"{band}: {ds.cube.shape}, PA {ds.angles.min():.1f}..{ds.angles.max():.1f} deg, star flux {star_flux[band]:.3g}")
 

@@ -245,3 +245,100 @@ def test_an_annulus_where_everything_failed_says_so():
     i_guard = src.index("no winner and no best image")
     i_done = src.index('search done: best')
     assert i_guard < i_done, "the warning belongs before the search-done line, not after it"
+
+
+# ----------------------------------------- the star flux the contrast axis is built on
+
+def test_the_sphere_star_flux_is_not_scaled_twice():
+    """The SPHERE distribution's flux frames already carry the DIT ratio and the ND
+    transmission.  Applying ``dit_science/dit_flux/nd_transmission`` on top over-counted the
+    star by 1347x, and because the search only ever compares S/N nothing noticed: the
+    optimizer, the winner and every reported S/N were unaffected while the contrast axis sat
+    three orders of magnitude too deep.  The planet is what caught it -- injections at
+    3.21e-09 scored S/N 4.8 in an image where HD 95086 b scored 12.2, implying a planet
+    contrast of 8.1e-09 against a published 1.3e-05.
+
+    ``dit_science`` and friends stay in ``INSTRUMENT`` as provenance; this pins the fact that
+    nothing multiplies by them."""
+    import os
+
+    from klip_tpe import datasets
+
+    inst = datasets.INSTRUMENT["sphere_hd95086"]
+    assert {"dit_science", "dit_flux", "nd_transmission"} <= set(inst), \
+        "the observing metadata should stay -- it is provenance"
+
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for path in (os.path.join(here, "tutorials", "02_sphere_hd95086.py"),
+                 next((p for p in (os.path.join(here, "paper_runs", "run_demos.py"),
+                                   os.path.join(os.path.dirname(here), "paper_runs", "run_demos.py"))
+                       if os.path.exists(p)), None)):
+        if path is None:
+            continue
+        src = open(path).read()
+        assert 'dit_science"] / inst["dit_flux"]' not in src, \
+            f"{os.path.basename(path)} is scaling the star flux by the DIT/ND factor again"
+        assert "already" in src and "ND" in src, \
+            f"{os.path.basename(path)} should say why the factor is absent"
+
+
+# --------------------------------------------- the halo fit is gone, a template is required
+
+def test_the_halo_fit_is_gone_everywhere():
+    """``star_flux_from_halo`` scaled the PSF template to the science frames' halo.  It was
+    never valid on the data it was used for: the beta Pic NACO set is AGPM *coronagraphic*
+    (the radial profile is suppressed inside ~3 px, so the star is occulted, not saturated),
+    and fitting an off-axis template to an occulted halo compares two different functions.
+    It showed -- the same method on the same data gave star fluxes 5.28x and 8.04x apart on
+    paper runs A2 and B2, both wrong against beta Pic b's published dL'.  Removed, with no
+    opt-in: a wrong absolute contrast that looks right is worse than an honest relative one.
+    """
+    import os
+
+    import klip_tpe.instruments.generic as G
+
+    assert not hasattr(G, "star_flux_from_halo")
+    assert "star_flux_from_halo" not in G.__all__
+
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    paths = [os.path.join(here, "klip_tpe", "cli.py"),
+             os.path.join(here, "README.md"),
+             os.path.join(here, "tutorials", "01_naco_betapic.py"),
+             os.path.join(here, "tutorials", "04_known_sources.py")]
+    pr = next((p for p in (os.path.join(here, "paper_runs", "run_demos.py"),
+                           os.path.join(os.path.dirname(here), "paper_runs", "run_demos.py"))
+               if os.path.exists(p)), None)
+    if pr:
+        paths.append(pr)
+    for p in paths:
+        src = open(p).read()
+        calls = [l for l in src.splitlines()
+                 if "star_flux_from_halo" in l and not l.lstrip().startswith(("#", "*"))
+                 and '"' not in l.split("star_flux_from_halo")[0][-2:]]
+        assert not calls, f"{os.path.basename(p)} still calls it: {calls}"
+
+    # the CLI's 'halo' value is refused with a reason, not silently accepted
+    cli = open(os.path.join(here, "klip_tpe", "cli.py")).read()
+    assert "--star-flux halo has been removed" in cli
+
+
+def test_a_dataset_with_no_template_is_refused():
+    """The old fallback -- GaussianPSF with flux unit 1 -- produced a reducer that injected
+    happily and called raw detector units a contrast.  Paper run D shipped an axis 2.3e5 off
+    that way, and nothing downstream could tell.  Now you have to say it on purpose."""
+    import numpy as np
+
+    from klip_tpe.reducer import Dataset
+    import klip_tpe.instruments.generic as G
+
+    ds = Dataset(np.zeros((3, 21, 21), np.float32), np.zeros(3), name="nopsf")
+    with pytest.raises(ValueError) as e:
+        G.injection_model_for(ds, 3.0)
+    msg = str(e.value)
+    assert "no PSF template" in msg and "GaussianPSF" in msg, msg
+
+    # with a template it is fine, and star_flux=None means the template's own flux
+    t = np.zeros((11, 11), float); t[5, 5] = 1.0; t[4:7, 4:7] += 0.1
+    ds2 = Dataset(np.zeros((3, 21, 21), np.float32), np.zeros(3), name="withpsf", meta={"psf": t})
+    m = G.injection_model_for(ds2, 3.0)
+    assert m.name == "library" or m.flux_unit == pytest.approx(float(t.sum()))
