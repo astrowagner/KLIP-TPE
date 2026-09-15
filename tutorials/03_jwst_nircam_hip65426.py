@@ -131,6 +131,16 @@ if HAVE_DATA:
 # measured `STARCENX/Y`), so the crop is taken about it — klip-tpe expects the star at the
 # centre of the array.  Each roll becomes a `Dataset` with its own parameter block, and both
 # carry the same reference cube.
+#
+# **`CRPIX` is where the mask is, not where the star is**, and the difference is the
+# astrometric floor of this notebook.  Measured on these frames, HIP 65426 b lands **1.3 px
+# (81 mas, 5.6° of position angle at its separation)** from the catalogued 0.826″ / 150.2°,
+# which is why the circle below does not sit dead centre on it and why the S/N quoted at the
+# catalogued position (5.6) is below the peak (6.4).  Nothing downstream is wrong — the
+# injections are placed about the same assumed centre, so they recover exactly where they
+# were put — but a *real* source is measured against the sky, and it exposes the offset.
+# Section 6's spaceKLIP path carries the measured `STARCENX/Y` and removes it; use that for
+# anything astrometric.
 
 # %%
 if HAVE_DATA:
@@ -138,12 +148,17 @@ if HAVE_DATA:
     pxscale = float(np.sqrt(hdr["PIXAR_A2"]))                      # 0.0626"/px (NIRCam LW)
     wavelength = 4.44e-6                                           # F444W pivot
     cx, cy = hdr["CRPIX1"] - 1.0, hdr["CRPIX2"] - 1.0              # 0-based star pixel
-    H = 55                                                          # 110x110 px = 6.9" square
+    H = 55                                                          # 111x111 px = 6.9" square
 
     def crop(cube):
+        # ODD size, deliberately.  The shift puts the star on the integer pixel round(cx),
+        # and the crop starts H pixels before it, so the star lands on index H -- which is
+        # the array centre (n-1)/2 only when n = 2H+1.  With an even 2H crop the star sits
+        # half a pixel off the centre klip-tpe assumes in EVERY axis (0.71 px in all), and
+        # every separation and position angle downstream is measured from the wrong origin.
         fx, fy = cx - round(cx), cy - round(cy)
         x0, y0 = int(round(cx)) - H, int(round(cy)) - H
-        return np.array([ndimage.shift(im, (-fy, -fx), order=3)[y0:y0 + 2 * H, x0:x0 + 2 * H]
+        return np.array([ndimage.shift(im, (-fy, -fx), order=3)[y0:y0 + 2 * H + 1, x0:x0 + 2 * H + 1]
                          for im in cube], np.float32)
 
     sci_x, ref_x = crop(sci_a), crop(ref_a)

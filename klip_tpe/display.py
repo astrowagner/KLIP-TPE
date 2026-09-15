@@ -1972,6 +1972,18 @@ class StepImages:
     best_inj: Optional[np.ndarray] = None
     best_clean: Optional[np.ndarray] = None
     best_index: int = -1
+    #: sources that were injected into ``best_inj``, when they are NOT the ones the history
+    #: holds at ``best_index``.  The best cells used to circle ``ad.sources[best_index]``
+    #: while the image came from a different bookkeeping path, and the two part company
+    #: whenever the picture is the winner's *committed* trial: validation re-scores the
+    #: elected config on FRESH injections, so ``annulus01/best_inj.fits`` carries the
+    #: validation positions while the history at that index carries the search ones.  On the
+    #: annulus-done frame -- the one that stays on screen and is what a notebook shows at the
+    #: end -- that drew every circle rotated by the azimuth step between the two draws
+    #: (19.5 deg, ~5 px at 0.4"), which reads as a placement bug and is not one.  Pass the
+    #: image's own sources here and the cells circle what is actually in the picture.
+    best_sources: Optional[List[Tuple[float, float, float]]] = None
+    best_labels: Optional[List[Any]] = None        # per-source values that go with best_sources
     note: Optional[str] = None
     fm_image: Optional[np.ndarray] = None          # KLIP-FM response (preview at the best, or the winner's cross-check)
     fm_sources: Optional[List[Tuple[float, float, float]]] = None
@@ -2066,6 +2078,9 @@ def render_step_classic(ad: AnnulusData, i: int, images: StepImages, out_png: Op
         cur_cps = ad.clean_per_source[i] if 0 <= i < ad.n else None
         best_src = ad.sources[bi] if 0 <= bi < ad.n else []
         best_ps = ad.per_source[bi] if 0 <= bi < ad.n else []
+        if images.best_sources is not None:        # the image's own injections; see StepImages
+            best_src = list(images.best_sources)
+            best_ps = list(images.best_labels or [])
         y_i = ad.y[i] if 0 <= i < ad.n else np.nan
         y_b = ad.y[bi] if 0 <= bi < ad.n else np.nan
         note = images.note
@@ -2318,13 +2333,20 @@ def _vec_lines(ad: AnnulusData, i: int) -> List[str]:
     return out
 
 
-def _inj_lines(ad: AnnulusData, i: int) -> List[str]:
-    if not (0 <= i < ad.n) or not ad.sources[i]:
+def _inj_lines(ad: AnnulusData, i: int, src=None) -> List[str]:
+    """``src`` overrides the history row -- the BEST block has to quote the injections that
+    are in the picture it labels, which after validation is the committed trial's fresh
+    draw, not the search evaluation at index ``i``."""
+    if src is None:
+        if not (0 <= i < ad.n) or not ad.sources[i]:
+            return []
+        src = ad.sources[i]
+    if not src:
         return []
-    src = ad.sources[i]
+    con = ad.contrast[i] if 0 <= i < ad.n else float("nan")
     return [f"sep = {', '.join(f'{s[0]:.2f}' for s in src)}\"",
             f"PA = {', '.join(f'{s[1]:.0f}' for s in src)} deg",
-            f"inj contrast = {ad.contrast[i]:.2E}"]
+            f"inj contrast = {con:.2E}"]
 
 
 def _text_block(fig, x_lab, x_c1, x_c2, y_top, label, lab_lines, vec_lines, pitch, fs) -> float:
@@ -2379,6 +2401,10 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
         b_ok = 0 <= bi < ad.n
         best_src = ad.sources[bi] if b_ok else []
         best_ps, best_rps = (ad.per_source[bi], ad.raw_per_source[bi]) if b_ok else ([], [])
+        if images.best_sources is not None:        # the image's own injections; see StepImages
+            best_src = list(images.best_sources)
+            best_ps = list(images.best_labels or [])
+            best_rps = [None] * len(best_src)
         y_i, y_b = (ad.y[i] if n_ok else np.nan), (ad.y[bi] if b_ok else np.nan)
         raw_i, raw_b = (ad.raw[i] if n_ok else np.nan), (ad.raw[bi] if b_ok else np.nan)
         if images.cur_override:                    # validation trial in the current cells
@@ -2488,7 +2514,8 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
         xlab, xc1, xc2 = hx0 + 0.008, hx0 + 0.118, hx0 + 0.238
         yb = 0.955
         if b_ok:
-            yb = _text_block(fig, xlab, xc1, xc2, yb, "BEST", _inj_lines(ad, bi), _vec_lines(ad, bi), pitch, fs)
+            yb = _text_block(fig, xlab, xc1, xc2, yb, "BEST",
+                             _inj_lines(ad, bi, images.best_sources), _vec_lines(ad, bi), pitch, fs)
         if n_ok:
             _text_block(fig, xlab, xc1, xc2, yb, "TEST", _inj_lines(ad, i), _vec_lines(ad, i), pitch, fs)
         # ---- corner (lower-left triangle of the right region) -----------------------------
@@ -3950,8 +3977,18 @@ class LiveDisplay(RunCallback):
         done = [v for v in trials if v is not None and np.isfinite(v)]
         med = float(np.median(done)) if done else np.nan
         bimg = self._best_images(runner)
+        # ``e`` is the candidate being validated; the best cells hold whatever image the
+        # runner is keeping, which is a different evaluation for every candidate after the
+        # first.  Circle that image's own injections rather than the candidate's.
+        b_src = [s.as_tuple() if hasattr(s, "as_tuple") else tuple(s)
+                 for s in (bimg.get("sources") or [])] or None
         imgs = StepImages(cur_clean=img_c, cur_inj=img_i, best_inj=bimg.get("inj"), best_clean=bimg.get("clean"),
-                          best_index=int(e), fm_image=(bimg.get("fm") or {}).get("fm_image"), inj_model=self._inj_model,
+                          best_index=int(e), best_sources=b_src,
+                          best_labels=(None if b_src is None else
+                                       (list(ad.per_source[bimg["record"].index])
+                                        if bimg.get("record") is not None
+                                        and 0 <= bimg["record"].index < ad.n else [None] * len(b_src))),
+                          fm_image=(bimg.get("fm") or {}).get("fm_image"), inj_model=self._inj_model,
                           cur_label=f"Ann {ia + 1}/{ad.nann}  Valid {ci + 1}/{n_cand} trial {t + 1}/{n_valid} (eval {e + 1})",
                           cur_override={"sources": src, "per_source": ps, "raw_per_source": rps, "clean_per_source": cps,
                                         "score": float(getattr(r, "score", np.nan)), "raw": np.nan},
@@ -4019,13 +4056,31 @@ class LiveDisplay(RunCallback):
             if not li:
                 c_inj, c_clean = load_eval_images(self.run_dir, result.annulus, i)
                 li = {"inj": c_inj, "clean": c_clean}
-            if bimg.get("inj") is None:
+            # Whatever picture ends up in the best cells, the circles have to be ITS
+            # injections.  Three different images can land here and only the middle one is
+            # the evaluation the history holds at winner_index:
+            #   * bimg["inj"]        -- kept by the runner, paired with bimg["sources"];
+            #   * the eval images    -- winner_index's own injected pass;
+            #   * best_inj.fits      -- the winner's COMMITTED trial, whose injections are the
+            #                           fresh validation draw, not the search one.
+            b_src = None
+            if bimg.get("inj") is not None:
+                b_src = [s.as_tuple() if hasattr(s, "as_tuple") else tuple(s)
+                         for s in (bimg.get("sources") or [])] or None
+            else:
                 b_inj, b_clean = load_eval_images(self.run_dir, result.annulus, int(result.winner_index))
+                if b_inj is None:                  # the committed trial, with the fresh sources
+                    b_src = [tuple(s) for s in (getattr(result, "winner_sources", None) or [])] or None
                 bimg = dict(bimg, inj=b_inj if b_inj is not None else _fits(os.path.join(d, "best_inj.fits")),
                             clean=b_clean if b_clean is not None else _fits(os.path.join(d, "best_clean.fits")))
+            b_lab = None
+            if b_src is not None:
+                ps = list(bimg.get("per_source") or getattr(result, "per_source", None) or [])
+                b_lab = ps if len(ps) == len(b_src) else [None] * len(b_src)
             fm_src = [s.as_tuple() if hasattr(s, "as_tuple") else tuple(s) for s in (fm.get("sources") or [])] or None
             imgs = StepImages(cur_clean=li.get("clean"), cur_inj=li.get("inj"), best_inj=bimg.get("inj"),
                               best_clean=bimg.get("clean"), best_index=int(result.winner_index),
+                              best_sources=b_src, best_labels=b_lab,
                               note="annulus complete", fm_image=fm.get("fm_image"), fm_sources=fm_src,
                               fm_label="KLIP-FM cross-check (winner, test spiral)",
                               cur_label=f"Ann {result.annulus + 1}/{ad.nann}  last eval {i + 1}",

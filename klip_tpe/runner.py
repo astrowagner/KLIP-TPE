@@ -1691,6 +1691,16 @@ class Runner:
             if inj_img is not None:
                 _write_fits(os.path.join(d, "best_inj.fits"), inj_img, hdr_inj)
                 self._best_images["inj"] = inj_img
+                # ``_best_images`` is a bundle: the image and the sources that were injected
+                # into it belong together, and every consumer treats them that way.  This
+                # picture is the winner's COMMITTED trial, whose injections are validation's
+                # fresh draw -- not the search evaluation the bundle was built from -- so the
+                # sources have to move with it.  Leaving them behind made the annulus-done
+                # panel circle the search azimuths on the committed image: every circle
+                # rotated off its blob by one azimuth step (19.5 deg, ~5 px at 0.4"), on the
+                # frame that stays on screen and is the one a notebook shows at the end.
+                self._best_images["sources"] = list(sources)
+                self._best_images["per_source"] = list(winner.get("per_source") or [])
             for key, hh in (("clean", hdr), ("inj", hdr_inj)):
                 ev = winner.get(key)
                 if ev is not None and getattr(ev, "stack", None) is not None:
