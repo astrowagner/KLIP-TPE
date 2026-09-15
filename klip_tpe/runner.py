@@ -1488,6 +1488,21 @@ class Runner:
         """Validation, products, edge commit (opt_width), checkpoint and the
         verification hooks of annulus ``ia`` (search already complete)."""
         bi, bs = self.history.best()
+        # A search in which EVERY evaluation failed still reached this point quietly: the
+        # winner index came back -1, no best_*.fits were written, and the first thing to
+        # read one of those files was what finally raised -- a notebook cell, several
+        # minutes and one confusing traceback later.  Tutorial 3's STPSF section spent all
+        # 50 evaluations this way, injecting at 2.40" into a library built only out to
+        # 2.00", and nothing said so.  Say it here, where it happened.
+        ntot = len(self.history)
+        nok = int(self.history.valid.sum()) if ntot else 0
+        if ntot and nok == 0:
+            self.log(f"  ** every one of the {ntot} evaluations of annulus {ia+1} FAILED -- there "
+                     f"is no winner and no best image.  The usual cause is an injection model "
+                     f"that does not span the annulus; the reason is on the 'evaluation failed:' "
+                     f"lines above.")
+        elif ntot and nok < ntot:
+            self.log(f"  note: {ntot - nok}/{ntot} evaluations failed")
         self.log(f"  search done: best {bs:.3f} at eval {bi+1}")
         table, vwin, winner = ([], -1, {})
         if self.cfg.validation.n_valid >= 1 and self.cfg.validation.n_top >= 1:

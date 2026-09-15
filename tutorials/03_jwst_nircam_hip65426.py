@@ -35,6 +35,7 @@ from klip_tpe.metrics import MawetPeakSNR
 
 DATA = os.path.expanduser(os.environ.get("KLIP_TPE_JWST", "~/.klip_tpe/data/jwst_hip65426"))
 RUN_DIR = os.path.abspath("runs/hip65426_f444w")
+# Re-running RESUMES this directory -- delete it to search again (see tutorial 01).
 PLANET = (0.826, 150.2)                    # HIP 65426 b, Carter et al. 2023
 
 files = sorted(glob.glob(os.path.join(DATA, "**", "jw*calints.fits"), recursive=True))
@@ -295,8 +296,14 @@ if HAVE_DATA:
 if HAVE_DATA:
     from klip_tpe import stpsf_psf
     try:
+        # The grid has to span the SEARCH ANNULUS, not just the planet: the injections are
+        # spread from the inner to the outer edge, and `LibraryPSF` has no template outside
+        # its own range, so a source past the last separation aborts that evaluation.  Built
+        # only out to 2.0" while the annulus reaches 45 px = 2.82", every one of 50
+        # evaluations failed -- the run finished with no winner and no best image.
         grid = stpsf_psf.offaxis_grid("NIRCam", "F444W", image_mask="MASK335R",
-                                      seps_as=np.arange(0.2, 2.01, 0.2), stamp_px=21, nlambda=1)
+                                      seps_as=np.arange(0.2, 45 * pxscale + 0.21, 0.2),
+                                      stamp_px=21, nlambda=1)
         psf_model = stpsf_psf.library(grid, star_flux=STAR_FLUX or 1.0)
         plt.figure(figsize=(9, 3.2))
         plt.subplot(1, 2, 1)

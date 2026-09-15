@@ -376,7 +376,13 @@ def inject_sources(cube: np.ndarray, angles: np.ndarray, sources: Sequence[Sourc
         m = model
         if not ok:
             if fallback is None:
-                raise ValueError(f"no PSF template at rho={s.rho} and no fallback model")
+                rng = getattr(model, "seps", None)
+                span = "" if rng is None or not len(rng) else \
+                    f" (the model spans {float(rng[0]):.3f}-{float(rng[-1]):.3f} arcsec)"
+                raise ValueError(
+                    f"no PSF template at rho={s.rho:.3f} arcsec and no fallback model{span}. "
+                    "Build the library over the separations the search injects into -- the "
+                    "annulus, not just the known companion -- or pass fallback=.")
             st, sc, ok = fallback.stamp(s.rho)
             m = fallback
         amp = s.contrast * m.flux_unit * model.throughput(s.rho)

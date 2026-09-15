@@ -194,3 +194,54 @@ def test_the_best_header_block_quotes_the_picture(tmp_path):
     assert "PA = 28, 208 deg" in committed, committed
     assert 'sep = 0.45, 0.45"' in committed
     assert "1.31E-03" in committed[2], "the contrast line must survive the override"
+
+
+# ------------------------------------------- an injection model that misses the annulus
+
+def test_a_library_that_misses_the_annulus_says_which_range_it_has():
+    """``LibraryPSF`` has no template outside its own separations, and a search injects
+    across the WHOLE annulus, not just at the known companion.  Tutorial 3 built its STPSF
+    grid out to 2.0" for an annulus reaching 2.82": every one of 50 evaluations aborted on
+    the outermost source, the run finished with no winner and no best image, and the first
+    thing to notice was a notebook cell failing to open a file that was never written.  The
+    error now names the separation asked for and the range the model covers."""
+    import numpy as np
+
+    from klip_tpe import Source
+    from klip_tpe.injection import LibraryPSF, inject_sources
+
+    m = LibraryPSF(np.ones((3, 11, 11)), [0.2, 1.0, 2.0], center=(5, 5), ee_radius_px=3.0)
+    with pytest.raises(ValueError) as e:
+        inject_sources(np.zeros((1, 41, 41)), np.zeros(1), [Source(2.4, 10.0, 1e-4)], m, 0.0626)
+    msg = str(e.value)
+    assert "2.400" in msg, msg
+    assert "0.200-2.000" in msg, "the message must name the range the model actually covers"
+    assert "fallback" in msg
+    # inside the range it is fine
+    inject_sources(np.zeros((1, 41, 41)), np.zeros(1), [Source(1.5, 10.0, 1e-4)], m, 0.0626)
+
+
+def test_an_annulus_where_everything_failed_says_so():
+    """A search in which every evaluation fails used to end quietly: winner index -1, no
+    best image, and nothing in the log between the last failure and 'search done'.  The
+    first thing to notice was a notebook cell failing to open a file never written."""
+    import os
+
+    import numpy as np
+
+    from klip_tpe.optimizers import History
+
+    h = History(2)
+    for _ in range(4):
+        h.append(np.zeros(2), None)          # a failed evaluation scores None -> nan
+    assert len(h) == 4 and int(h.valid.sum()) == 0, "this is the state the guard has to catch"
+    h.append(np.zeros(2), 1.0)
+    assert int(h.valid.sum()) == 1, "and it must not fire once anything succeeded"
+
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "klip_tpe", "runner.py")).read()
+    assert "nok = int(self.history.valid.sum())" in src
+    assert "no winner and no best image" in src
+    i_guard = src.index("no winner and no best image")
+    i_done = src.index('search done: best')
+    assert i_guard < i_done, "the warning belongs before the search-done line, not after it"

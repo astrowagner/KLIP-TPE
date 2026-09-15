@@ -29,6 +29,7 @@ from klip_tpe.display import LiveDisplay
 from klip_tpe.reducer import ReductionRequest
 
 RUN_DIR = os.path.abspath("runs/hd95086_irdis")
+# Re-running RESUMES this directory -- delete it to search again (see tutorial 01).
 files = datasets.fetch("sphere_hd95086")
 inst = datasets.INSTRUMENT["sphere_hd95086"]
 files, inst

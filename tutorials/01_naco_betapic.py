@@ -30,6 +30,8 @@ from klip_tpe.instruments import generic
 from klip_tpe.display import LiveDisplay
 
 RUN_DIR = os.path.abspath("runs/betapic_naco")      # everything the run produces goes here
+# Re-running this notebook RESUMES that directory: a finished annulus is reported complete
+# in 0.0 min and no new panels are drawn.  Delete runs/betapic_naco to search again.
 
 # %% [markdown]
 # ## 1. The data
