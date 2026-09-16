@@ -49,6 +49,10 @@ def main(argv=None):
                     help="output FITS (default: <data>/jwst_hip65426/hip65426_F444W_cubes.fits)")
     ap.add_argument("--params", nargs="*", default=[], metavar="K=V",
                     help="override the default reduction parameters, e.g. filter=5 k_klip=18")
+    ap.add_argument("--frames", action="store_true",
+                    help="also write the INDIVIDUAL frames and their provenance, as "
+                         "<base>_frames_sci.fits and <base>_frames_ref.fits")
+    ap.add_argument("--png", default=None, help="montage of the individual science frames")
     a = ap.parse_args(argv)
 
     from astropy.io import fits
@@ -60,7 +64,7 @@ def main(argv=None):
     out = a.out or os.path.join(d, "hip65426_F444W_cubes.fits")
 
     phot = datasets.PHOTOMETRY["hip65426_f444w"]
-    dsets, info = sk.load_calints(files, science_target="HIP65426",
+    dsets, info = sk.load_calints(files, science_target="HIP65426", keep_frames=a.frames,
                                   star_center=tuple(phot["star_center"]), log=print)
     grid = stpsf_psf.offaxis_grid("NIRCam", info["filter"] or "F444W", image_mask="MASK335R",
                                   seps_as=np.arange(0.2, 3.01, 0.2), stamp_px=41, nlambda=3,
@@ -150,7 +154,93 @@ def main(argv=None):
     for h in fits.open(out):
         if h.data is not None:
             print(f"   {h.name:<14} {np.shape(h.data)}")
+
+    if a.frames:
+        _write_frames(out, info, hdr, fits)
+    if a.png:
+        _montage(info, a.png)
     return 0
+
+
+def _frame_table(rows, fits):
+    """The per-frame provenance, as a FITS binary table."""
+    def col(name, key, fmt, unit=None, default=0.0):
+        vals = [r.get(key, default) for r in rows]
+        if fmt.endswith("A"):
+            vals = [str(v) for v in vals]
+        return fits.Column(name=name, format=fmt, unit=unit, array=np.array(vals))
+    w = max(len(str(r["file"])) for r in rows)
+    return fits.BinTableHDU.from_columns([
+        col("FILE", "file", f"{w}A"),
+        col("INTEG", "integration", "J"),
+        col("ROLE", "role", "4A"),
+        col("TARGET", "target", "16A"),
+        col("PA", "pa", "D", "deg"),
+        col("N_DQ", "n_dq", "J"),
+        col("N_REPAIR", "n_repaired", "J"),
+        col("DX", "dx", "D", "pix"),
+        col("DY", "dy", "D", "pix"),
+        col("XOFFSET", "xoffset", "D", "arcsec"),
+        col("YOFFSET", "yoffset", "D", "arcsec"),
+    ], name="FRAMES")
+
+
+def _write_frames(out, info, hdr, fits):
+    """One file per role, with every individual frame at each processing stage.
+
+    RAW is the archive frame with the DQ DO_NOT_USE pixels set to NaN and nothing else;
+    ALIGNED is after the outlier repair and the cross-correlation shift, still full frame;
+    CROP is the individual frame the reducer actually receives.  The FRAMES table says
+    which archive file and integration each slice came from, the shift that was applied to
+    it, and how many pixels the DQ and the repair touched.
+    """
+    base = out[:-5] if out.endswith(".fits") else out
+    rows = info["frames"]
+    for role, raw, aligned, crop in (("sci", info["raw_sci"], info["aligned_sci"], info["crop_sci"]),
+                                     ("ref", info["raw_ref"], info["aligned_ref"], info["crop_ref"])):
+        sel = [r for r in rows if r["role"].lower() == role]
+        if not len(raw):
+            continue
+        path = f"{base}_frames_{role}.fits"
+        h = fits.Header(hdr, copy=True)
+        h["ROLE"] = (role.upper(), "SCI = science rolls, REF = RDI library")
+        hl = fits.HDUList([fits.PrimaryHDU(header=h), _frame_table(sel, fits),
+                           fits.ImageHDU(np.asarray(raw, np.float32), name="RAW"),
+                           fits.ImageHDU(np.asarray(aligned, np.float32), name="ALIGNED"),
+                           fits.ImageHDU(np.asarray(crop, np.float32), name="CROP")])
+        hl.writeto(path, overwrite=True)
+        print(f"\nwrote {path}")
+        for x in fits.open(path):
+            if x.data is not None:
+                print(f"   {x.name:<10} {np.shape(x.data)}")
+        print(f"   {'idx':>3} {'file':<34} {'int':>3} {'PA':>8} {'n_dq':>6} {'n_rep':>6} "
+              f"{'dx':>6} {'dy':>6}")
+        for i, r in enumerate(sel):
+            print(f"   {i:>3} {r['file']:<34} {r['integration']:>3} {r['pa']:>8.3f} "
+                  f"{r.get('n_dq', 0):>6} {r.get('n_repaired', 0):>6} "
+                  f"{r.get('dx', 0):>6.2f} {r.get('dy', 0):>6.2f}")
+
+
+def _montage(info, path):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    rows = [r for r in info["frames"] if r["role"] == "SCI"]
+    raw, crop = info["raw_sci"], info["crop_sci"]
+    n = len(rows)
+    fig, ax = plt.subplots(2, n, figsize=(2.5 * n, 5.4))
+    ax = np.atleast_2d(ax)
+    for j, r in enumerate(rows):
+        for i, (im, t) in enumerate(((raw[j], "raw (DQ masked)"), (crop[j], "cropped, aligned"))):
+            v = np.nanpercentile(im[np.isfinite(im)], [5, 99.5])
+            ax[i, j].imshow(im, origin="lower", cmap="inferno", vmin=v[0], vmax=v[1])
+            ax[i, j].set_xticks([]); ax[i, j].set_yticks([])
+            ax[i, j].set_title(f"{t}\n{r['file'][:18]} int {r['integration']}\n"
+                               f"PA {r['pa']:.2f}, dx {r.get('dx', 0):+.2f} dy {r.get('dy', 0):+.2f}",
+                               fontsize=6)
+    plt.tight_layout()
+    plt.savefig(path, dpi=130)
+    print(f"\nwrote {path}")
 
 
 if __name__ == "__main__":

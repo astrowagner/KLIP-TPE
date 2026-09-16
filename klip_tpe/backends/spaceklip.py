@@ -184,7 +184,7 @@ def load_spaceklip(database=None, key: Optional[str] = None, sci_files: Optional
 
 def load_calints(files: Sequence[str], science_target: Optional[str] = None, half_px: int = 55,
                  align: bool = True, repair: bool = True,
-                 star_center: Optional[Tuple[float, float]] = None,
+                 star_center: Optional[Tuple[float, float]] = None, keep_frames: bool = False,
                  log: Callable[[str], None] = print) -> Tuple[Dict[str, Dataset], Dict[str, Any]]:
     """Stage-2 ``*_calints.fits`` straight into ``{roll: Dataset}``, without spaceKLIP.
 
@@ -210,7 +210,13 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
 
     ``info`` carries ``pxscale`` (arcsec/px from ``PIXAR_A2``), ``pixar_sr``, ``bunit``,
     ``filter``, ``star_center`` and the first science ``SCI`` header, which is what the flux
-    calibration in :mod:`klip_tpe.stpsf_psf` needs.
+    calibration in :mod:`klip_tpe.stpsf_psf` needs.  It also carries ``frames``: one dict per
+    individual integration with the archive file it came from, its integration index, role,
+    position angle, commanded dither offset, how many pixels the DQ and the outlier repair
+    touched, and the shift the registration measured and removed.  ``keep_frames=True``
+    additionally attaches the image stacks themselves (``raw_sci``/``raw_ref``,
+    ``aligned_sci``/``aligned_ref``, ``crop_sci``/``crop_ref``) -- about 18 MB for this
+    programme, which is why it is off by default.
     """
     from astropy.io import fits
     from scipy import ndimage
@@ -228,28 +234,40 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
     if not sci:
         raise ValueError(f"no science files matching TARGPROP {want!r} among {len(files)} files")
 
-    def read(fs):
-        ims, pas = [], []
+    def read(fs, role):
+        ims, pas, prov = [], [], []
         for f in fs:
             with fits.open(f) as h:
                 d = np.asarray(h["SCI"].data, float)
                 dq = np.asarray(h["DQ"].data, int)
                 s = h["SCI"].header
+                ph = h[0].header
                 pa = float(s["ROLL_REF"]) - float(s.get("V3I_YANG", 0)) * float(s.get("VPARITY", 1))
-                d = np.where((dq & 1).astype(bool), np.nan, d)
+                bad = (dq & 1).astype(bool)
+                d = np.where(bad, np.nan, d)
                 for i in range(d.shape[0]):
                     ims.append(d[i])
                     pas.append(pa)
-        return np.array(ims), np.array(pas)
+                    prov.append({"file": os.path.basename(f), "integration": i, "role": role,
+                                 "target": str(ph.get("TARGPROP", "")), "pa": pa,
+                                 "n_dq": int(bad[i].sum()),
+                                 # the small-grid dither offsets live in the PRIMARY
+                                 # header, not SCI -- read_jwst_files gets this right too
+                                 "xoffset": float(ph.get("XOFFSET", 0.0)),
+                                 "yoffset": float(ph.get("YOFFSET", 0.0))})
+        return np.array(ims), np.array(pas), prov
 
-    def _repair(cube, size=5, nsig=7.0):
+    def _repair(cube, prov=None, size=5, nsig=7.0):
         out = np.array(cube, float)
         for i, im in enumerate(out):
             bad = ~np.isfinite(im)
             med = ndimage.median_filter(np.where(bad, np.nanmedian(im), im), size=size)
             r = np.abs(im - med)
             s = 1.4826 * np.nanmedian(np.abs(r - np.nanmedian(r)))
-            out[i] = np.where(bad | (r > nsig * s), med, im)
+            hit = bad | (r > nsig * s)
+            out[i] = np.where(hit, med, im)
+            if prov is not None:
+                prov[i]["n_repaired"] = int(hit.sum())
         return out
 
     def _xs(im, ref_, search=6):
@@ -265,18 +283,31 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
             dx += p(sub[k[0], k[1] - 1], sub[k[0], k[1]], sub[k[0], k[1] + 1])
         return dx, dy
 
-    S, pas = read(sci)
-    R, _ = read(ref) if ref else (np.zeros((0,) + S.shape[1:]), np.zeros(0))
+    S, pas, prov_s = read(sci, "SCI")
+    if ref:
+        R, _, prov_r = read(ref, "REF")
+    else:
+        R, prov_r = np.zeros((0,) + S.shape[1:]), []
+    raw_s = np.array(S, np.float32) if keep_frames else None
+    raw_r = np.array(R, np.float32) if keep_frames else None
     if repair:
-        S = _repair(S)
-        R = _repair(R) if R.size else R
+        S = _repair(S, prov_s)
+        R = _repair(R, prov_r) if R.size else R
     if align:
         a0 = np.median(S, axis=0)
-        S = np.array([ndimage.shift(im, (-d[1], -d[0]), order=3)
-                      for im, d in ((im, _xs(im, a0)) for im in S)])
+
+        def _shift_all(cube, prov):
+            out = []
+            for i, im in enumerate(cube):
+                dx, dy = _xs(im, a0)
+                if prov is not None:
+                    prov[i]["dx"], prov[i]["dy"] = float(dx), float(dy)
+                out.append(ndimage.shift(im, (-dy, -dx), order=3))
+            return np.array(out)
+
+        S = _shift_all(S, prov_s)
         if R.size:
-            R = np.array([ndimage.shift(im, (-d[1], -d[0]), order=3)
-                          for im, d in ((im, _xs(im, a0)) for im in R)])
+            R = _shift_all(R, prov_r)
 
     hdr = fits.getheader(sci[0], "SCI")
     px = float(np.sqrt(hdr["PIXAR_A2"]))
@@ -307,10 +338,15 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
         dsets[f"roll{k + 1}"] = Dataset(Sx[m], pas[m], name=f"roll{k + 1}",
                                         ref_cube=Rx if Rx.size else None, meta=dict(meta))
     info = dict(meta, n_sci=int(S.shape[0]), n_ref=int(R.shape[0]), crop_px=n,
+                frames=prov_s + prov_r,
                 filter=str(fits.getheader(sci[0]).get("FILTER", "")),
                 star_center=(float(cx), float(cy)),
                 crpix=(float(hdr["CRPIX1"] - 1), float(hdr["CRPIX2"] - 1)),
                 rolls=[float(v) for v in np.unique(np.round(pas, 1))])
+    if keep_frames:
+        info.update(raw_sci=raw_s, raw_ref=raw_r,
+                    aligned_sci=np.asarray(S, np.float32), aligned_ref=np.asarray(R, np.float32),
+                    crop_sci=Sx, crop_ref=Rx)
     log(f"  calints: {len(sci)} science / {len(ref)} reference files -> {S.shape[0]} + "
         f"{R.shape[0]} frames, {n}x{n} px at {px*1e3:.2f} mas, rolls {info['rolls']}, "
         f"{info['bunit']!r}")
