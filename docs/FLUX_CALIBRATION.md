@@ -241,6 +241,29 @@ reference star's 18, which is the point of the 9-point dither.
 reference integrations differ by 7.6× and any per-frame weighting that assumed a single
 exposure time would be wrong for 18 of the 22 frames.
 
+**Carter et al. (2023) agree.** Their Table 1 gives, for MASK335R/F444W: HIP 65426 —
+`DEEP8`, N_groups 15, **N_ints 2**, t_exp 617.946 s, N_dithers 1, **N_rolls 2**, t_total
+1235.892 s; HIP 68245 — `MEDIUM8`, N_groups 4, **N_ints 2**, t_exp 83.426 s, **N_dithers
+9**, N_rolls 1, t_total 750.835 s. That is 2 × 2 = 4 science integrations and 2 × 9 = 18
+reference integrations, matching the headers to the millisecond, and Section 2.2 confirms
+they are not stacked: *"the subtraction is performed on each integration from both science
+rolls individually, before being rotated to a common orientation … and summed together."*
+That is what `load_calints` does. F444W is observed once, with one mask — Section 2.1 lists
+MASK335R only, in F250M, F300M, F356W, F410M and F444W — so there is no second F444W
+dataset to add.
+
+Two bookkeeping notes for the paper's observation table:
+
+* Their t_exp is `DURATION` (617.946 s), not `EFFEXPTM` (615.767 s); the 2.179 s difference
+  is the two reset frames. Quote 1235.892 s to match Carter, 1231.5 s for time actually
+  integrating. Either is defensible, but say which.
+* Their prose quotes PA = 110.2° (ref), 110.0° (roll 1), 120.4° (roll 2), implying a 10.4°
+  roll separation. The headers give **10.080°**, and `PA_V3` (10.085°) and `ROLL_REF`
+  (10.080°) agree independently; roll 2's computed sky PA is 120.382°, which is their
+  120.4°, while their other two look interchanged or rounded from the commanded attitude.
+  The derotation here uses the headers. At 0.826″ the 0.3° is 0.15 px, so it does not move
+  the companion, but it does matter if you try to reproduce their astrometry.
+
 ### α Cen — VLT/NEAR (`instruments/near.py`; `scripts/run_near2_production.sh`)
 
 * **Template**: the measured off-axis AGPM-N4 library `n4_psf_cube_EEnorm.fits`, a

@@ -219,6 +219,7 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
     that build it.  There is nothing below an integration to recover: the ``nframes`` frames
     of each group are averaged on the detector, and the ``ngroups`` groups are cumulative
     samples of one charge ramp, already collapsed to a slope in a calints file.
+
     ``keep_frames=True``
     additionally attaches the image stacks themselves (``raw_sci``/``raw_ref``,
     ``aligned_sci``/``aligned_ref``, ``crop_sci``/``crop_ref``) -- about 18 MB for this

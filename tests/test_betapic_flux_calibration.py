@@ -271,6 +271,25 @@ def test_the_readout_ladder_closes_for_both_hip65426_patterns():
     assert 2 * 2 * 307.884 == pytest.approx(1231.5, abs=0.1)
 
 
+def test_the_frame_count_matches_carter_2023_table_1():
+    """Carter et al. 2023 (ApJL 951, L20) Table 1, MASK335R/F444W: HIP 65426 has N_ints=2
+    over N_rolls=2, HIP 68245 N_ints=2 over N_dithers=9.  Four science integrations is the
+    published design, not a truncated download -- and their t_exp is DURATION, not EFFEXPTM,
+    which is the 2.2 s per exposure that makes 1235.892 s rather than 1231.5 s."""
+    duration_sci, duration_ref = 617.946, 83.426      # Carter Table 1 t_exp
+    effexptm_sci, effexptm_ref = 615.767, 81.247      # header, excludes the reset frames
+    tframe, nints = 1.06904, 2
+
+    assert 2 * duration_sci == pytest.approx(1235.892, abs=1e-3), "Carter t_total, 2 rolls"
+    assert 9 * duration_ref == pytest.approx(750.835, abs=1e-2), "Carter t_total, 9 dithers"
+    for dur, eff in ((duration_sci, effexptm_sci), (duration_ref, effexptm_ref)):
+        # the gap is one reset frame per integration, give or take clock granularity
+        assert (dur - eff) / (nints * tframe) == pytest.approx(1.0, abs=0.03)
+
+    # 4 science, 18 reference -- what load_calints must produce for this programme
+    assert 2 * 2 == 4 and 2 * 9 == 18
+
+
 def test_the_jwst_call_sites_use_the_model_and_the_measured_centre():
     """Neither the runs nor the tutorial may fall back to a Gaussian of flux unit 1 or to
     CRPIX: those are the two things that made run D's axis 2.3e5 off and put the companion
