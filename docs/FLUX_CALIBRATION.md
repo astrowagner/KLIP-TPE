@@ -124,6 +124,14 @@ interchangeable and nothing checks them against each other.
 * Minor: `psf[psf > 0].sum()` excludes negative pixels while `TemplatePSF` divides by
   `t.sum()`, which includes them. A sub-percent inconsistency, but they should be the same
   sum.
+* **The fix reached `hd95086_objects` on 2026-09-15 but not the constants downstream of
+  it.** `run_G2` still forced `5.899e-9`, which is run C's annulus-1 calibration as written
+  on 2026-09-13 — before the fix — so the harness and the reducer disagreed by the whole
+  1347.0246. That contrast puts the injection peak at 2.4e-4 counts in a cube whose pixels
+  reach 5.8e+02, below the float32 quantum, and the injections were rounded away before KLIP
+  saw them; `reducer.py` raises the warning that says so. Now `7.946e-6`. **Run C's own
+  `calibration.json` predates the fix too, so run C has to be redone** — annulus 1 moves from
+  5.8989e-9 to 7.9459e-6 and annulus 2 from 4.6035e-9 to 6.2011e-6.
 
 ### HIP 65426 — JWST/NIRCam F444W (tutorial 03; paper runs D, H2)
 
@@ -348,8 +356,19 @@ all. What remains:
    `webbpsf_ext`'s COM throughput) at 4.44 µm would turn the HIP 65426 b comparison from a
    calibration into a real check, and would let the same number serve other NIRCam
    coronagraphic programmes without re-anchoring. It is the last assumed number in the table.
-2. **Runs D and H2 have to be redone.** They now build the model above, but the archived
-   results predate both the flux scale and the 1.48 px star-centre correction.
+2. **Runs C, D, G2 and H2 have to be redone.** D and H2 now build the model above, but the
+   archived results predate both the flux scale and the 1.48 px star-centre correction. C and
+   G2 predate the HD 95086 star-flux fix (see that section). G2 additionally has to be redone
+   because of the rank collapse below.
+2b. **Every archived run needs the rank-collapse audit.** A shared KL basis built from the
+   frames it subtracts spans them exactly, so `k_klip >= n_binned_frames` returned float64
+   round-off (image rms ~1e-15) and an S/N that is an O(1) random draw. `klip_annular` now
+   caps `k` and records `k_requested`/`k_effective`/`k_capped`, but the archived runs were
+   searched without the cap: on `bench_20260915185229_tpe_s2` **548 of 800 evaluations were
+   degenerate**, the best of them scored +2.410 and the best honest one +0.006. Exposure is
+   `k_max >= n_frames/bin`: β Pic (61 frames, `k_max` 30) from `bin >= 3`, HD 95086 (63) from
+   `bin >= 3`, F2 (`k_max` 12) from `bin >= 6`. A run is safe only if its winner — and the
+   scores it was chosen over — sit below that line.
 3. **`star_center` for HIP 65426 is solved from published astrometry**, so it is the geometry
    the photometry needs rather than an astrometric measurement. spaceKLIP's own star-centring
    step (`STARCENX/Y`) would make it independent; `load_calints(star_center=)` takes it.

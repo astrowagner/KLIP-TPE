@@ -508,8 +508,23 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
         fast, auto_fast = True, True
     arc = arcdist_deg(p.inrad, p.outrad, lam_over_d_px)
     angsep_deg = p.angsep * abs(arc)
+    # A shared basis built from the frames it is about to subtract (fast/auto_fast without
+    # RDI: R = D) spans those frames exactly, so mode n annihilates every one of them and
+    # the residual is float64 round-off -- an image of ~1e-15 whose S/N is the ratio of two
+    # round-off numbers, i.e. an O(1) RANDOM draw that an optimizer will happily chase.
+    # klip_basis silently clamps k to the row count, so nothing errors and nothing warns.
+    # The per-target path is safe (reference_mask drops the target) and so is RDI (the basis
+    # frames are not the target frames); only this combination has to be capped.
+    k_req, k_capped = k, False
+    if fast and not rdi and n >= 2 and k >= n:
+        k, k_capped = n - 1, True
+        if log is not None:
+            log(f"  k_klip={k_req} >= {n} basis frames and the basis is built from the science "
+                f"frames themselves: capped to {k} (k={k_req} would subtract every frame from "
+                f"itself and leave only round-off)")
     info = {"fast": fast, "auto_fast": auto_fast, "arcdist": arc, "n_frames": n, "n_dropped": 0,
             "rdi": rdi, "n_basis_frames": int(ref_cube.shape[0]) if rdi else n, "fm": do_fm,
+            "k_requested": int(k_req), "k_effective": int(k), "k_capped": bool(k_capped),
             "fm_selfsub": bool(fm_selfsub) if do_fm else None}
 
     shape_out = (k, n, ny, nx) if p.k_scan else (n, ny, nx)

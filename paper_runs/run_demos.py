@@ -425,7 +425,17 @@ def run_G2():
     Configured as run C's first annulus -- same space, same k cap, and C's own calibrated
     contrast -- so the benchmark searches the problem the science run actually solved.
     """
-    _bench_hi("G2", 1, ("tpe", "random"), 30, None, {"k_klip": 10}, 5.899e-9, [20, 45], "G2_bench_sphere",
+    # 7.946e-6 is run C's annulus-1 calibration ON THE ABSOLUTE AXIS.  It replaces a forced
+    # 5.899e-9, which was that same calibration read out of C_hd95086/annulus01 (written
+    # 2026-09-13) two days BEFORE the star-flux fix of ff20c4b (2026-09-15) -- the one whose
+    # own message says it "moved the contrast axis of tutorial 02 and paper runs C and G2".
+    # hd95086_objects was fixed there and this constant was not, so the two disagreed by the
+    # full 1347.0246 = dit_science/dit_flux/nd_transmission over-count.  A contrast of
+    # 5.899e-9 puts the injection peak at 2.4e-4 counts in a cube whose pixels reach 5.8e+02:
+    # below the float32 quantum, so the fakes were being rounded away before KLIP saw them
+    # (reducer.py raises the RuntimeWarning that says so).  Run C itself still has to be
+    # redone for the same reason -- its calibration.json predates the fix as well.
+    _bench_hi("G2", 1, ("tpe", "random"), 30, None, {"k_klip": 10}, 7.946e-6, [20, 45], "G2_bench_sphere",
               make_red=hd95086_objects, known=[HD], n_sources=3, n_min_ref=10)
 
 
