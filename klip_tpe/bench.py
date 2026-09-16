@@ -69,7 +69,15 @@ def _fmt(v: Optional[float]) -> str:
 
 def read_records(run_dir: str, annulus: Optional[int] = None, last_segment: bool = True) -> List[Dict[str, Any]]:
     """Records of ``run_dir/results.jsonl`` (optionally one annulus).  A re-calibration
-    restart resets ``index`` to 0; ``last_segment`` keeps only the final restart."""
+    restart resets ``index`` to 0; ``last_segment`` keeps only the final restart.
+
+    Repeated evaluations are dropped, keeping the first of each.  ``results.jsonl`` is
+    append-only and an index can land in it twice -- two processes on one run directory both
+    append, and a resume can re-log what it replayed.  Counting those twice inflates the
+    evaluation count and puts a flat step in every running-best curve, which is exactly the
+    quantity the benchmark reports.  De-duplication is per SEGMENT: the calibration loop
+    legitimately replays indices 0..n at each trial contrast, and those are not repeats.
+    """
     path = os.path.join(run_dir, "results.jsonl")
     if not os.path.exists(path):
         return []
@@ -81,11 +89,21 @@ def read_records(run_dir: str, annulus: Optional[int] = None, last_segment: bool
                 recs.append(json.loads(line))
     if annulus is not None:
         recs = [r for r in recs if int(r.get("annulus", 0)) == int(annulus)]
-    if last_segment and recs:
-        starts = [i for i, r in enumerate(recs) if int(r.get("index", 0)) == 0]
-        if starts:
-            recs = recs[starts[-1]:]
-    return recs
+    starts = [i for i, r in enumerate(recs) if int(r.get("index", 0)) == 0]
+    if last_segment and recs and starts:
+        recs = recs[starts[-1]:]
+        starts = [0]
+    # segment boundaries, always covering the whole list even if it does not open at index 0
+    bounds = sorted({0, *starts, len(recs)})
+    out: List[Dict[str, Any]] = []
+    for a, b in zip(bounds, bounds[1:]):
+        seen = set()
+        for r in recs[a:b]:
+            key = (r.get("annulus"), r.get("index"))
+            if key not in seen:
+                seen.add(key)
+                out.append(r)
+    return out
 
 
 def running_best(scores: Sequence[Optional[float]]) -> np.ndarray:

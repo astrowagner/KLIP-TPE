@@ -2353,6 +2353,30 @@ class Runner:
             return None, None
         starts = [i for i, r in enumerate(recs) if r.get("index") == 0]
         seg = recs[starts[-1]:] if starts else recs
+        # One evaluation must enter the history once.  results.jsonl is append-only and
+        # nothing guarantees an index appears in it once: two processes on the same run
+        # directory both append (the registry guard is best-effort, and a stale entry lets a
+        # second one start), and a resume can re-log what it replayed.  A duplicated point
+        # is not harmless -- TPE fits a density to these points, so a repeat doubles that
+        # configuration's weight and pulls later proposals towards it.  Keep the FIRST
+        # record of each index: it is the one whose wall_s was measured without the second
+        # process competing for cores.
+        seen, uniq, ndup = set(), [], 0
+        for r in seg:
+            key = r.get("index")
+            if key in seen:
+                ndup += 1
+                continue
+            seen.add(key)
+            uniq.append(r)
+        if ndup:
+            try:
+                self.log(f"  results.jsonl: annulus {ia + 1} had {ndup} duplicated evaluation(s); "
+                         f"kept the first of each ({len(uniq)} unique). "
+                         f"scripts/dedup_results.py rewrites the file itself.")
+            except Exception:
+                pass
+        seg = uniq
         h = History(self.space.ndim)
         for r in seg:
             h.append(np.asarray(r["x"], float), np.nan if r.get("score") is None else float(r["score"]),
