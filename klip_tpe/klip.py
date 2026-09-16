@@ -527,7 +527,12 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
             "k_requested": int(k_req), "k_effective": int(k), "k_capped": bool(k_capped),
             "fm_selfsub": bool(fm_selfsub) if do_fm else None}
 
-    shape_out = (k, n, ny, nx) if p.k_scan else (n, ny, nx)
+    # A k-scan returns one image per requested k, and that count must NOT depend on the cap:
+    # a PartitionedReducer stacks the per-partition scans, and two channels whose binned
+    # frame counts differ by one would cap differently and produce stacks of different
+    # length ("all input arrays must have the same shape").  Slices past the cap repeat the
+    # capped result, which is what the non-scan path returns for those k anyway.
+    shape_out = (k_req, n, ny, nx) if p.k_scan else (n, ny, nx)
     out = np.full(shape_out, np.nan, np.float32)
     flat = cube.reshape(n, ny * nx)
     fm_flat = fm_cube.reshape(n, ny * nx) if do_fm else None
@@ -575,8 +580,9 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
             kk_max = min(Z.shape[0], k)
             if p.k_scan:
                 S = T @ Z.T
-                for kk in range(kk_max):
-                    res = T - S[:, :kk + 1] @ Z[:kk + 1]
+                for kk in range(k_req):
+                    m = min(kk + 1, kk_max)                 # past the cap: repeat the cap
+                    res = T - S[:, :m] @ Z[:m] if m else T.copy()
                     o = out[kk].reshape(n, ny * nx)
                     o[:, idx] = res
             else:
@@ -627,8 +633,9 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
             kk_max = min(Z.shape[0], k)
             if p.k_scan:
                 S = T @ Z.T
-                for kk in range(kk_max):
-                    out[kk, t].reshape(-1)[idx] = (T - S[:, :kk + 1] @ Z[:kk + 1])[0]
+                for kk in range(k_req):
+                    m = min(kk + 1, kk_max)                 # past the cap: repeat the cap
+                    out[kk, t].reshape(-1)[idx] = (T - S[:, :m] @ Z[:m] if m else T)[0]
             else:
                 out[t].reshape(-1)[idx] = _project(T, Z, kk_max)[0]
             if do_fm:

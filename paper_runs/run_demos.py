@@ -452,12 +452,20 @@ def run_G2():
     # and HD 95086 b is at 0.620" = 50.6 px -- 5.6 px (1.26 FWHM) beyond the outer edge.  So
     # the one benchmark on a field with a real companion never looked at it, while E2/F2
     # (beta Pic b at 16.6 px in [8, 22]) and H2 (HIP 65426 b at 13.2 px in [6, 20]) both do.
-    # C's full range puts the planet inside the second annulus and makes the three benches
-    # consistent.  The contrasts are C's own, one per annulus, on the ABSOLUTE axis:
-    # 7.946e-6 and 6.201e-6 are annulus 1 and 2 of C_hd95086/calibration.json scaled by the
-    # 1347.0246 star-flux fix of ff20c4b (see the note in run_G2's history).
-    _bench_hi("G2", 1, ("tpe", "random"), 30, None, {"k_klip": 10}, (7.946e-6, 6.201e-6),
-              [20, 45, 75], "G2_bench_sphere",
+    # C's own split, [20, 45, 75], puts it inside annulus 2 but only 1.26 FWHM in, still on
+    # the boundary.  [20, 36, 66] centres it instead -- 3.3 FWHM from the inner edge and 3.5
+    # from the outer -- and keeps annulus 2 at C's 30 px width so one forced contrast stays
+    # appropriate across the zone.
+    #
+    # Moving an edge invalidates C's calibrated contrasts, because the contrast that puts the
+    # default configuration at median S/N 5 depends on the radii the sources are injected at.
+    # These two were MEASURED for these zones by scripts/calibrate_g2_annuli.py, which runs
+    # Runner.calibrate -- the same code path the science runs use: 1.112e-5 -> S/N 5.70
+    # (k_default 2) and 4.773e-6 -> S/N 5.21 (k_default 4), both inside the (4, 6) target.
+    # That script's control reproduces run C on C's own zones, 6.58 and 6.95 against C's
+    # recorded 5.88 and 5.40.
+    _bench_hi("G2", 1, ("tpe", "random"), 30, None, {"k_klip": 10}, (1.112e-5, 4.773e-6),
+              [20, 36, 66], "G2_bench_sphere",
               make_red=hd95086_objects, known=[HD], n_sources=3, n_min_ref=10)
 
 

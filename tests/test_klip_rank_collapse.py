@@ -116,3 +116,49 @@ def test_the_forward_model_collapses_with_the_image():
     img, info, fm = klip_annular(cube, ang, p, 4.0, fm_cube=model)
     assert info["k_capped"] is True
     assert np.nanmax(np.abs(fm)) / 50.0 > 1e-6, "a capped FM must carry real planet response"
+
+
+def test_a_k_scan_returns_one_image_per_REQUESTED_k_even_when_capped():
+    """The cap must not change the k-scan's output length.
+
+    A PartitionedReducer stacks the per-partition scans, so two channels whose binned frame
+    counts differ by one would cap at different k and hand np.stack arrays of different
+    length -- "all input arrays must have the same shape".  That is not hypothetical: it
+    broke the calibration k-scan on HD 95086's [20, 36] px annulus, which then fell back to
+    k = 10 where the optimum is k = 2, and the contrast loop diverged (median S/N 2.02 and
+    falling as the contrast rose) instead of settling at 1.11e-05 / S/N 5.7.
+
+    Slices past the cap repeat the capped image, which is what the non-scan path returns for
+    those k anyway, so a k-scan plateaus instead of lying or crashing.
+    """
+    cube = _cube(n=6)
+    ang = np.linspace(0.0, 20.0, 6)
+    kreq = 11
+    p = KLIPParams(k_klip=kreq, inrad=5, outrad=20, n_ang=1, fast=True, n_min_ref=1, k_scan=True)
+    out, info = klip_annular(cube, ang, p, 4.0)
+    assert info["k_capped"] is True and info["k_effective"] == 5
+    assert out.shape[0] == kreq, f"k-scan must return {kreq} images, got {out.shape[0]}"
+    # up to the cap the images differ; past it they repeat
+    for kk in range(info["k_effective"], kreq):
+        assert np.allclose(np.nan_to_num(out[kk]), np.nan_to_num(out[info["k_effective"] - 1])), \
+            f"slice {kk} past the cap must repeat the capped image"
+    assert not np.allclose(np.nan_to_num(out[0]), np.nan_to_num(out[3])), "and below it, not"
+    # the capped scan's last useful slice is the same image the non-scan path gives
+    p2 = KLIPParams(k_klip=kreq, inrad=5, outrad=20, n_ang=1, fast=True, n_min_ref=1)
+    img, _ = klip_annular(cube, ang, p2, 4.0)
+    assert np.allclose(np.nan_to_num(out[-1]), np.nan_to_num(img), atol=1e-6)
+
+
+def test_two_partitions_capping_differently_still_stack():
+    """The exact shape mismatch, in the form the reducer hits it: one channel with 6 frames
+    and one with 7, scanned to the same requested k."""
+    ang6, ang7 = np.linspace(0, 20, 6), np.linspace(0, 20, 7)
+    kreq = 9
+    shapes = []
+    for cube, ang in ((_cube(n=6), ang6), (_cube(n=7, seed=3), ang7)):
+        p = KLIPParams(k_klip=kreq, inrad=5, outrad=20, n_ang=1, fast=True, n_min_ref=1, k_scan=True)
+        out, info = klip_annular(cube, ang, p, 4.0)
+        shapes.append(out.shape[0])
+        assert info["k_effective"] == cube.shape[0] - 1
+    assert shapes[0] == shapes[1] == kreq, f"scans must be stackable, got {shapes}"
+    np.stack([np.zeros((s, 4, 4)) for s in shapes])      # would raise before the fix
