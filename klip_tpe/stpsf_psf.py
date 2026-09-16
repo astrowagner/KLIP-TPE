@@ -80,10 +80,46 @@ def have_stpsf() -> bool:
 
 
 def cache_dir() -> str:
+    """Where NEW cache files are written: ``$KLIP_TPE_DATA/stpsf_cache`` when the variable
+    is set, else ``~/.klip_tpe/stpsf_cache``.  Reads go through :func:`_cache_path`, which
+    also looks in the other layout, so a grid computed in one shell is found from another."""
     d = os.environ.get("KLIP_TPE_DATA") or os.path.join(os.path.expanduser("~"), ".klip_tpe")
     d = os.path.join(d, "stpsf_cache")
     os.makedirs(d, exist_ok=True)
     return d
+
+
+def _cache_dirs() -> list:
+    """Every directory a cached PSF may be READ from, in order of preference.
+
+    ``cache_dir()`` depends on ``KLIP_TPE_DATA``: set to ``~/.klip_tpe/data`` (a common way
+    to point the package at its own default data directory explicitly) it puts the cache at
+    ``~/.klip_tpe/data/stpsf_cache``; unset, at ``~/.klip_tpe/stpsf_cache``.  A grid computed
+    under one setting was invisible under the other, and on a machine without STPSF that is
+    fatal: paper run D refused to start on 2026-09-16 with "the grid is not in the cache"
+    while the grid sat one directory over.  So a read tries both layouts.
+    """
+    home = os.path.join(os.path.expanduser("~"), ".klip_tpe")
+    cands = [cache_dir()]
+    env = os.environ.get("KLIP_TPE_DATA")
+    if env:
+        cands.append(os.path.join(env, "stpsf_cache"))
+    cands += [os.path.join(home, "data", "stpsf_cache"), os.path.join(home, "stpsf_cache")]
+    out: list = []
+    for c in cands:
+        c = os.path.abspath(c)
+        if c not in out:
+            out.append(c)
+    return out
+
+
+def _cache_path(name: str) -> str:
+    """The existing cache file ``name`` wherever it is, else its path in :func:`cache_dir`."""
+    for d in _cache_dirs():
+        p = os.path.join(d, name)
+        if os.path.exists(p):
+            return p
+    return os.path.join(cache_dir(), name)
 
 
 def _key(meta: Dict[str, Any]) -> str:
@@ -232,8 +268,7 @@ def offaxis_grid(instrument: str = "NIRCam", filter: str = "F444W",
             "aperture": aperture, "detector_position": detector_position, "date": date,
             "seps": [round(float(s), 4) for s in seps],
             "source": str(source) if source is not None else None, "version": _CACHE_VERSION}
-    path = os.path.join(cache_dir(),
-                        f"stpsf_{instrument}_{filter}_{image_mask or 'nomask'}_{_key(meta)}.fits")
+    path = _cache_path(f"stpsf_{instrument}_{filter}_{image_mask or 'nomask'}_{_key(meta)}.fits")
     if cache and os.path.exists(path):
         try:
             out = _read_cache(path)
@@ -405,7 +440,7 @@ def unocculted_ee(radius_px: float, instrument: str = "NIRCam", filter: str = "F
             "pupil_mask": pupil_mask, "fov_arcsec": float(fov_arcsec), "oversample": int(oversample),
             "nlambda": int(nlambda), "aperture": aperture, "detector_position": detector_position,
             "date": date, "version": _CACHE_VERSION}
-    path = os.path.join(cache_dir(), f"eeunocc_{instrument}_{filter}_{_key(meta)}.fits")
+    path = _cache_path(f"eeunocc_{instrument}_{filter}_{_key(meta)}.fits")
     if cache and os.path.exists(path):
         try:
             from astropy.io import fits

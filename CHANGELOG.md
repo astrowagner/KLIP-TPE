@@ -33,6 +33,12 @@
   archived HIP 65426 result — runs D, H2, the psf-shape investigation and its figures — was made on
   median-filtered frames and is void.**  `scripts/check_hip65426_psf_shape.py` is removed; its
   "roll-2 over-subtraction" finding was the repair.
+- **Fixed**: the STPSF cache was invisible across the two `KLIP_TPE_DATA` layouts.  `cache_dir()` is
+  `$KLIP_TPE_DATA/stpsf_cache` when set, else `~/.klip_tpe/stpsf_cache`; a grid computed with
+  `KLIP_TPE_DATA=~/.klip_tpe/data` therefore sat in `~/.klip_tpe/data/stpsf_cache`, where a shell
+  without the variable never looked — and on a machine without STPSF that stopped paper run D at
+  start-up ("the grid is not in the cache").  Reads now try both layouts (`_cache_path`); writes
+  still go to `cache_dir()`.
 - Tutorial 03's `repair()` cell — the version students copy — now fills DQ pixels only, and the
   text says why a value-based outlier filter must never be run on a coronagraphic PSF.  Notebook
   rebuilt from scratch (RDI k=10: planet S/N 12.0; ADI −0.2; ADI+RDI 1.2).

@@ -327,3 +327,33 @@ def test_the_jwst_call_sites_use_the_model_and_the_measured_centre():
         assert "1.637e-04" in h2.split("\n")[0]
         # the hand-rolled loader is gone in favour of the shared one
         assert "load_calints" in src
+
+
+# ------------------------------------------------------------------ the STPSF cache layouts
+
+def test_a_cached_stpsf_grid_is_found_under_either_data_layout(tmp_path, monkeypatch):
+    """cache_dir() is $KLIP_TPE_DATA/stpsf_cache or ~/.klip_tpe/stpsf_cache.  With
+    KLIP_TPE_DATA=~/.klip_tpe/data -- a natural way to name the default data directory
+    explicitly -- the two differ, and a grid computed in one shell was invisible from the
+    other.  On a machine without STPSF that is fatal: paper run D refused to start on
+    2026-09-16 with "the grid is not in the cache" while the grid sat one directory over.
+    Reads now try both layouts; writes still go to cache_dir()."""
+    from klip_tpe import stpsf_psf
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("KLIP_TPE_DATA", raising=False)
+    (home / ".klip_tpe" / "data" / "stpsf_cache").mkdir(parents=True)
+    (home / ".klip_tpe" / "data" / "stpsf_cache" / "stpsf_x.fits").write_bytes(b"grid")
+    # unset: the default write dir is ~/.klip_tpe/stpsf_cache, but the read finds the file
+    assert stpsf_psf.cache_dir() == str(home / ".klip_tpe" / "stpsf_cache")
+    assert stpsf_psf._cache_path("stpsf_x.fits") == str(home / ".klip_tpe" / "data" / "stpsf_cache" / "stpsf_x.fits")
+    # a name that exists nowhere resolves to the write dir
+    assert stpsf_psf._cache_path("nope.fits") == str(home / ".klip_tpe" / "stpsf_cache" / "nope.fits")
+    # set to the data dir: same file found, and the write dir follows the variable
+    monkeypatch.setenv("KLIP_TPE_DATA", str(home / ".klip_tpe" / "data"))
+    assert stpsf_psf.cache_dir() == str(home / ".klip_tpe" / "data" / "stpsf_cache")
+    assert stpsf_psf._cache_path("stpsf_x.fits").endswith("data/stpsf_cache/stpsf_x.fits")
+    # and the reverse: a file in the plain default is found when the variable IS set
+    (home / ".klip_tpe" / "stpsf_cache").mkdir(parents=True, exist_ok=True)
+    (home / ".klip_tpe" / "stpsf_cache" / "eeunocc_y.fits").write_bytes(b"ee")
+    assert stpsf_psf._cache_path("eeunocc_y.fits") == str(home / ".klip_tpe" / "stpsf_cache" / "eeunocc_y.fits")
