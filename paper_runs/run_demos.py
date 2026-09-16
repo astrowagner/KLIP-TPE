@@ -322,6 +322,18 @@ def run_F():
                   n_iter=300, n_init=60, out_dir=os.path.join(OUT, "F_bench_highdim"), log=log)
 
 
+def _forced_list(forced, ann_edges):
+    """``CalibrationConfig.forced`` is per annulus, so a multi-annulus bench needs one
+    contrast per annulus.  A scalar means "this one everywhere", which is right for the
+    single-annulus benches and wrong the moment a bench grows a second annulus: the
+    calibrated contrast is a property of the zone, not of the target."""
+    nann = max(len(ann_edges) - 1, 1)
+    vals = list(forced) if isinstance(forced, (list, tuple)) else [forced] * nann
+    if len(vals) != nann:
+        raise ValueError(f"{len(vals)} forced contrast(s) for {nann} annuli: give one each")
+    return vals
+
+
 def _bench_hi(tag, groups, modes, k_max, max_drop, defaults, forced, ann_edges, out, seeds=range(8),
               n_iter=800, n_init=80, n_top=8, n_valid=15, make_red=None, known=None, n_sources=3,
               add_params=None, search_angles=True, n_min_ref=5):
@@ -362,7 +374,8 @@ def _bench_hi(tag, groups, modes, k_max, max_drop, defaults, forced, ann_edges, 
         space.project = generic.make_guard(red, k_max=k_max, n_min_ref=n_min_ref)
         cfg = RunConfig(ann_edges=ann_edges, n_iter=n_iter, n_init=n_init, seed=seed, search_mode=mode,
                         n_sources=n_sources, validation=ValidationConfig(n_top=n_top, n_valid=n_valid),
-                        calibration=CalibrationConfig(forced=[forced]), defaults=defaults,
+                        calibration=CalibrationConfig(forced=_forced_list(forced, ann_edges)),
+                        defaults=defaults,
                         fm_curve=False, save_fits=False, save_eval_images=False, write_setup_files=False)
         # a display per slot, all blitting into the one shared window (see LiveDisplay._win):
         # a benchmark is the run you most want to watch and the one that had no window at all
@@ -435,7 +448,16 @@ def run_G2():
     # below the float32 quantum, so the fakes were being rounded away before KLIP saw them
     # (reducer.py raises the RuntimeWarning that says so).  Run C itself still has to be
     # redone for the same reason -- its calibration.json predates the fix as well.
-    _bench_hi("G2", 1, ("tpe", "random"), 30, None, {"k_klip": 10}, 7.946e-6, [20, 45], "G2_bench_sphere",
+    # Two annuli, not one.  G2 used to take only C's FIRST annulus, [20, 45] px = 0.245-0.551",
+    # and HD 95086 b is at 0.620" = 50.6 px -- 5.6 px (1.26 FWHM) beyond the outer edge.  So
+    # the one benchmark on a field with a real companion never looked at it, while E2/F2
+    # (beta Pic b at 16.6 px in [8, 22]) and H2 (HIP 65426 b at 13.2 px in [6, 20]) both do.
+    # C's full range puts the planet inside the second annulus and makes the three benches
+    # consistent.  The contrasts are C's own, one per annulus, on the ABSOLUTE axis:
+    # 7.946e-6 and 6.201e-6 are annulus 1 and 2 of C_hd95086/calibration.json scaled by the
+    # 1347.0246 star-flux fix of ff20c4b (see the note in run_G2's history).
+    _bench_hi("G2", 1, ("tpe", "random"), 30, None, {"k_klip": 10}, (7.946e-6, 6.201e-6),
+              [20, 45, 75], "G2_bench_sphere",
               make_red=hd95086_objects, known=[HD], n_sources=3, n_min_ref=10)
 
 
