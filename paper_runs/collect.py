@@ -47,7 +47,10 @@ N_DEFAULT_TRIALS = 5
 #: published starphot (3.3268e6; see docs/FLUX_CALIBRATION.md) and comes out at 1.21 -- the
 #: 0.2 mag residual against Absil -- where the halo fit it replaced gave 5.28 and 8.04 on the
 #: same data.  SPHERE's flux frames are already on the science scale (a second DIT/ND factor
-#: cost run C a 1071x axis).  HIP 65426 still has no stellar photometry at all.
+#: cost run C a 1071x axis).  HIP 65426 now has a chain too (STPSF off-axis grid + a stellar
+#: flux density through the MJy/sr calibration), but its last term -- the transmissive
+#: throughput of the coronagraphic optics -- is itself anchored on HIP 65426 b, so run D's
+#: flux_scale is 1 by construction rather than as a check.  docs/FLUX_CALIBRATION.md says so.
 ANCHOR = {
     "betapic":  (6.25e-4, "Absil et al. 2013, dL' = 8.01 +/- 0.16 (this very data set)"),
     "hd95086":  (1.32e-5, "Chauvin et al. 2018, dK1 = 12.2 +/- 0.1 (2015-02-03)"),

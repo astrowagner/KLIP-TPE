@@ -214,64 +214,40 @@ def run_C():
 
 # ---------------------------------------------------------------- HIP 65426 (JWST)
 def hip65426_objects():
+    """RDI reducer for the ERS 1386 F444W rolls, on an absolute contrast axis.
+
+    The star cannot be measured off these frames -- HIP 65426 and the reference star phi Cen
+    are both behind MASK335R in every exposure -- so both the flux scale and the star's
+    position are imported.  ``datasets.PHOTOMETRY['hip65426_f444w']`` carries them with their
+    provenance and the check that pins them; ``docs/FLUX_CALIBRATION.md`` has the reasoning,
+    including why the occulter's T(rho) is deliberately NOT part of the star flux.
+    """
     import glob
-    from scipy import ndimage
+    from klip_tpe import stpsf_psf
     from klip_tpe.backends import spaceklip as sk
     D = os.path.expanduser("~/.klip_tpe/data/jwst_hip65426")
     files = sorted(glob.glob(os.path.join(D, "jw*calints.fits")))
-    targ = lambda f: str(fits.getheader(f).get("TARGPROP", "")).replace("-", "").upper()
-    sci = [f for f in files if targ(f).startswith("HIP65426")]
-    ref = [f for f in files if f not in sci]
-
-    def read(fs):
-        ims, pas = [], []
-        for f in fs:
-            with fits.open(f) as h:
-                d = np.asarray(h["SCI"].data, float); dq = np.asarray(h["DQ"].data, int); s = h["SCI"].header
-                pa = float(s["ROLL_REF"]) - float(s.get("V3I_YANG", 0)) * float(s.get("VPARITY", 1))
-                d = np.where((dq & 1).astype(bool), np.nan, d)
-                for i in range(d.shape[0]):
-                    ims.append(d[i]); pas.append(pa)
-        return np.array(ims), np.array(pas)
-
-    def repair(cube, size=5, nsig=7.0):
-        out = np.array(cube, float)
-        for i, im in enumerate(out):
-            bad = ~np.isfinite(im)
-            med = ndimage.median_filter(np.where(bad, np.nanmedian(im), im), size=size)
-            r = np.abs(im - med); s = 1.4826 * np.nanmedian(np.abs(r - np.nanmedian(r)))
-            out[i] = np.where(bad | (r > nsig * s), med, im)
-        return out
-
-    def xs(im, ref_, search=6):
-        cc = np.fft.fftshift(np.fft.irfft2(np.fft.rfft2(im) * np.conj(np.fft.rfft2(ref_)), s=im.shape))
-        c = np.array(im.shape) // 2
-        sub = cc[c[0] - search:c[0] + search + 1, c[1] - search:c[1] + search + 1]
-        k = np.unravel_index(np.argmax(sub), sub.shape); dy, dx = k[0] - search, k[1] - search
-        p = lambda a, b, c_: 0.0 if (a - 2 * b + c_) == 0 else 0.5 * (a - c_) / (a - 2 * b + c_)
-        if 0 < k[0] < sub.shape[0] - 1: dy += p(sub[k[0] - 1, k[1]], sub[k[0], k[1]], sub[k[0] + 1, k[1]])
-        if 0 < k[1] < sub.shape[1] - 1: dx += p(sub[k[0], k[1] - 1], sub[k[0], k[1]], sub[k[0], k[1] + 1])
-        return dx, dy
-
-    S, pas = read(sci); R, _ = read(ref)
-    S, R = repair(S), repair(R)
-    a0 = np.median(S, axis=0)
-    S = np.array([ndimage.shift(im, (-d[1], -d[0]), order=3) for im, d in ((im, xs(im, a0)) for im in S)])
-    R = np.array([ndimage.shift(im, (-d[1], -d[0]), order=3) for im, d in ((im, xs(im, a0)) for im in R)])
-    hdr = fits.getheader(sci[0], "SCI")
-    px = float(np.sqrt(hdr["PIXAR_A2"])); cx, cy = hdr["CRPIX1"] - 1, hdr["CRPIX2"] - 1; H = 55
-
-    def crop(cube):
-        fx, fy = cx - round(cx), cy - round(cy); x0, y0 = int(round(cx)) - H, int(round(cy)) - H
-        return np.array([ndimage.shift(im, (-fy, -fx), order=3)[y0:y0 + 2 * H, x0:x0 + 2 * H] for im in cube], np.float32)
-
-    Sx, Rx = crop(S), crop(R)
-    dsets = {}
-    for k, pa in enumerate(np.unique(np.round(pas, 1))):
-        m = np.round(pas, 1) == pa
-        dsets[f"roll{k + 1}"] = Dataset(Sx[m], pas[m], name=f"roll{k + 1}", ref_cube=Rx,
-                                        meta={"pxscale": px, "wavelength_m": 4.44e-6})
-    red = sk.make_reducer(dsets, mode="RDI", max_workers=workers(), log=log)
+    if not stpsf_psf.have_stpsf():
+        raise RuntimeError(
+            "runs D and H2 need STPSF and its data files (pip install stpsf; export "
+            "STPSF_PATH=<stpsf-data>).  There is no fallback on purpose: without the off-axis "
+            "grid this path used GaussianPSF(star_flux=1.0) and called raw detector units a "
+            "contrast, which is how run D shipped an axis 2.3e5 off.  See "
+            "docs/FLUX_CALIBRATION.md.")
+    phot = datasets.PHOTOMETRY["hip65426_f444w"]
+    dsets, info = sk.load_calints(files, science_target="HIP65426",
+                                  star_center=tuple(phot["star_center"]), log=log)
+    # Off-axis PSF of the actual mask on a ladder of separations, with the mask throughput
+    # measured from the same grid.  A Gaussian is the wrong shape AND the wrong scale here:
+    # it needs contrast 40 to reach the peak the real PSF reaches at 320.
+    grid = stpsf_psf.offaxis_grid("NIRCam", info["filter"] or "F444W", image_mask="MASK335R",
+                                 seps_as=np.arange(0.2, 3.01, 0.2), stamp_px=41, nlambda=3,
+                                 log=log)
+    sf = stpsf_psf.star_flux_from_flux_density(
+        grid, phot["flux_density_jy"], info["pixar_sr"], bunit=info["bunit"] or "MJy/sr",
+        optics_transmission=phot["optics_transmission"], log=log)
+    model = stpsf_psf.library(grid, star_flux=sf)
+    red = sk.make_reducer(dsets, injection_model=model, mode="RDI", max_workers=workers(), log=log)
     return red
 
 

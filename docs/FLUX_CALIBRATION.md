@@ -127,23 +127,71 @@ interchangeable and nothing checks them against each other.
 
 ### HIP 65426 — JWST/NIRCam F444W (tutorial 03; paper runs D, H2)
 
-* **Template**: whatever `spaceklip.make_reducer` falls through to. Runs D and H2 pass no
-  `psf_template`, no `star_flux` and no `injection_model`, so they get
-  `GaussianPSF(1.028 λ/D, star_flux=1.0)`.
-* **Star flux**: **1.0.** There is no photometry.
-* **Status**: **absent.** The contrast axis is raw detector units. `run_H2`'s forced
-  calibration contrast of `5.270e1` is the tell — a contrast of 52.7 is not a contrast.
-  `collect.py` records `flux_scale = 2.35e+05` for run D, implying a companion "contrast"
-  of 77 against a published 3.30e-04 (Carter et al. 2023).
-* Tutorial 03 is honest about it: its contrast-curve label reads `"(template units)"`
-  when `STAR_FLUX` is None. The paper runs are not, because they go through
-  `contrast_curve.txt`, which always says "injection-calibrated".
+* **Template**: `stpsf_psf.library(grid)` — the STPSF off-axis PSF of MASK335R on a ladder
+  of separations, as a `LibraryPSF` normalised to unit flux inside `ee_radius_px = 16.5 px`,
+  with the grid's measured mask throughput as `throughput(ρ)`.
+* **Star flux**: `1.707e6` (MJy/sr summed inside that radius), from
+  `stpsf_psf.star_flux_from_flux_density(grid, 0.40259, PIXAR_SR, optics_transmission=0.561)`.
+* **Status**: **the chain is complete and closes on HIP 65426 b — but its last term is
+  anchored on that companion, so it is a calibration of this mode, not an independent
+  check.** Everything else in the chain is independent and is what the check exercises.
+* **Runs D and H2 now build this model** (`run_demos.hip65426_objects`), and raise rather
+  than fall back if STPSF is missing — the old silent `GaussianPSF(1.028 λ/D, star_flux=1.0)`
+  is what put run D's axis in raw detector units (`flux_scale = 2.35e+05`, a companion
+  "contrast" of 77; `run_H2`'s forced calibration contrast of `5.270e1` is the same tell —
+  a contrast of 52.7 is not a contrast). **The runs themselves still have to be redone**:
+  both the flux scale and the star centre changed.
+
+There is no off-axis stellar image anywhere in ERS 1386 — HIP 65426 and the reference star
+φ Cen are both behind MASK335R in every exposure — so the star has to be imported, and with
+a coronagraph that import has four terms that are easy to confuse:
+
+| term | value | where it comes from | what gets it wrong |
+|---|---|---|---|
+| `S` | 0.40259 Jy | synthetic photometry: Planck(8600 K) through the F444W bandpass, normalised to 2MASS Ks = 6.771 | ±3%, of which 1.9% is Ks and <2% the system-response shape |
+| units | `S / (10⁶·PIXAR_SR)` = 4.372e6 | `BUNIT = MJy/sr`, `PIXAR_SR` from the SCI header | using `PIXAR_A2`, or forgetting the 10⁶ |
+| `EE` | 0.6960 at 16.5 px | `unocculted_ee` — the model PSF **unocculted through the Lyot stop** | using an *imaging* PSF (EE 0.928 — counts the Lyot stop twice), or a stamp-sized field (the EE is still climbing at 5″) |
+| `T_optics` | 0.561 | see below | leaving it at 1.0 — a factor of two |
+
+and one term that is deliberately **not** in `flux_unit` at all: the occulter's spatial
+transmission `T(ρ) = 0.778` at 0.826″, which multiplies it inside `inject_sources`. Folding
+it into the star flux, or applying it twice, is the classic coronagraphic error.
+
+* **The term nobody supplies.** STPSF's `calc_psf` defaults to `normalize='first'`, which
+  normalises at the *entrance pupil* and then propagates "ignoring any reflective or
+  transmissive losses from mirrors or filters … and calculates only the diffractive losses
+  from slits and stops" (Perrin, `webbpsf#112`). That default is exactly what makes the
+  grid's `transmission` a real measurement of the occulter — `normalize='last'` would
+  renormalise every slice and report `T ≈ 1` everywhere — but it also means the model
+  carries **only** the Lyot stop's diffractive loss. Measured from the model: 0.187 of the
+  entrance pupil, matching JDox's "each Lyot stop has a throughput of ~20%". The
+  *transmissive* losses — the COM sapphire substrate and its AR coating, which every
+  coronagraphic beam crosses and which the NIRCam filter curves explicitly exclude, plus the
+  BaF₂ Lyot substrate — are in neither the model nor the data: the NIRCam `photom`
+  reference file has no column for the occulting mask at all
+  ([spacetelescope/jwst#10309](https://github.com/spacetelescope/jwst/issues/10309)), so the
+  `PHOTMJSR` applied to NRC_CORON data cannot be mask-specific.
+* **How 0.561 was obtained, and what it is worth.** It is what puts HIP 65426 b at Carter et
+  al. (2023)'s ΔF444W = 8.693. JDox brackets it independently: "the combined loss of light
+  from the coronagraphic optics at distances > 1″ … is ~86–90%", i.e. a combined throughput
+  of 0.10–0.14, which after removing the model's own 0.187 leaves 0.53–0.75. 0.561 sits
+  inside that. It is a property of the mode, not of the target, so it transfers to other
+  F444W/MASK335R programmes — but until it is replaced by the tabulated COM transmission
+  (JDox "NIRCam Filters for Coronagraphy", or `webbpsf_ext`'s COM throughput) the HIP 65426 b
+  comparison is a calibration and not a test.
+* **The star is not at CRPIX.** `CRPIX` is the aperture reference point — identical in every
+  file of the programme, dithers included — and misses HIP 65426 by **1.48 px**, which puts
+  the companion 1.5 px inside its own separation and mismatches its KLIP throughput against
+  the fakes injected to calibrate it. Two other routes failed: there is no off-axis stellar
+  image to centroid, and a 180° symmetry fit to the coronagraphic residual moved the centre
+  by 2 px between the two rolls of these very data. What works is the companion itself:
+  derotation about a centre wrong by `δ` puts it at `u + R(PA_k)·δ` in roll `k`, so each roll
+  gives `δ = R(−PA_k)·(measured − expected)` independently. The two rolls agree to 0.71 px.
+  `load_calints(..., star_center=)` takes the answer; the proper source is spaceKLIP's own
+  star-centring step (`STARCENX/Y`).
 * A Gaussian is also the wrong *shape*. Measured on these data: an STPSF off-axis template
-  needs contrast 320 to reach the peak a Gaussian reaches at 40 — 8× — because the real
-  PSF puts most of its light in wings and spikes. The Gaussian both misses the structure
-  (see below) and mis-scales peak-to-flux.
-* `psf="stpsf"` is available on the same `make_reducer` call and would supply both the
-  right shape and a measured mask throughput. It is unused by runs D and H2.
+  needs contrast 320 to reach the peak a Gaussian reaches at 40 — 8× — because the real PSF
+  puts most of its light in wings and spikes.
 
 ### α Cen — VLT/NEAR (`instruments/near.py`; `scripts/run_near2_production.sh`)
 
@@ -209,7 +257,7 @@ run                   flux_scale    reading
 A2  beta Pic            5.28        halo estimate ~5x too small     [as run; see below]
 B2  beta Pic            8.04        same method, same data, 8x -- the estimator is noisy
 C   HD 95086         9.34e-04       1/1071: the DIT/ND factor applied twice (fixed)
-D   HIP 65426        2.35e+05       no photometry at all: flux_unit = 1.0
+D   HIP 65426        2.35e+05       no photometry at all: flux_unit = 1.0  [pre-fix; rerun needed]
 ```
 
 Runs A2 and B2 above predate the β Pic star flux; with `star_flux = 3.3268e6` the same
@@ -220,25 +268,32 @@ common star flux cancels out of every S/N comparison the optimizer makes.
 
 ## Open items
 
-1. ~~**β Pic has no absolute photometry.**~~ **Done.** `star_flux = 3.3268e6` from VIP's
-   published `starphot`, checked against β Pic b at 1.1 σ. See the β Pic entry above and
-   `scripts/check_betapic_contrast.py`.
-2. **HIP 65426 has no photometry.** Either give runs D and H2 `psf="stpsf"` plus a measured
-   stellar flux (the target-acquisition image, or reference-star photometry in the same
-   aperture), or keep the Gaussian and label the axis "template units" everywhere,
-   including in `contrast_curve.txt`.
-3. **`contrast_curve.txt` claims more than it knows.** The header should say when
+Closed on 2026-09-15: β Pic's absolute photometry (`star_flux = 3.3268e6` from VIP's
+published `starphot`, checked against β Pic b at 1.1 σ) and HIP 65426's, which had none at
+all. What remains:
+
+1. **`optics_transmission = 0.561` is anchored on HIP 65426 b.** Replacing it with the
+   tabulated COM substrate transmission (JDox "NIRCam Filters for Coronagraphy", or
+   `webbpsf_ext`'s COM throughput) at 4.44 µm would turn the HIP 65426 b comparison from a
+   calibration into a real check, and would let the same number serve other NIRCam
+   coronagraphic programmes without re-anchoring. It is the last assumed number in the table.
+2. **Runs D and H2 have to be redone.** They now build the model above, but the archived
+   results predate both the flux scale and the 1.48 px star-centre correction.
+3. **`star_center` for HIP 65426 is solved from published astrometry**, so it is the geometry
+   the photometry needs rather than an astrometric measurement. spaceKLIP's own star-centring
+   step (`STARCENX/Y`) would make it independent; `load_calints(star_center=)` takes it.
+4. **`contrast_curve.txt` claims more than it knows.** The header should say when
    `flux_unit == 1.0` that the axis is not a contrast.
-4. **`star_flux` is silently ignored when `injection_model` is passed**
-   (`spaceklip.make_reducer`). Tutorial 03 passes both. It should warn.
-5. **The aperture pairing is a convention nothing enforces.** Four different normalisation
+5. **`star_flux` is silently ignored when `injection_model` is passed**
+   (`spaceklip.make_reducer`). No call site passes both any more, but nothing stops one.
+6. **The aperture pairing is a convention nothing enforces.** Four different normalisation
    apertures are in use and a `star_flux` has to match whichever the model used. A check
    comparing the model's aperture with the provenance of the star flux would catch this
    class of error at construction rather than in a contrast curve.
-6. **The live display's contrast curve omits the throughput correction** the written
+7. **The live display's contrast curve omits the throughput correction** the written
    product applies (`display.py` calls `contrast_curve` with no `throughput_fn`). On the
    NEAR path the on-screen and saved curves are different functions of the same data.
-7. **An injection can be too faint for the cube's dtype.** `inject_sources` holds the cube
+8. **An injection can be too faint for the cube's dtype.** `inject_sources` holds the cube
    in float32, so a stamp whose pixels fall below the float32 quantum of the science pixels
    they land on is rounded away entirely — on β Pic a stamp peaking at 1e-4 counts loses a
    quarter of its flux, and the loss *grows* as the contrast falls, so the recovered S/N

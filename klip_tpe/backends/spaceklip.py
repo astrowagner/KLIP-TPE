@@ -32,7 +32,7 @@ from ..injection import GaussianPSF, InjectionModel, TemplatePSF
 from ..reducer import Dataset, PartitionedReducer
 from .pyklip import PyKLIPReducer, dataset_from_pyklip
 
-__all__ = ["load_spaceklip", "make_reducer", "read_jwst_files", "JWST_DIAM"]
+__all__ = ["load_spaceklip", "load_calints", "make_reducer", "read_jwst_files", "JWST_DIAM"]
 
 JWST_DIAM = 6.5   # m (effective; lambda/D for the angsep unit and the default FWHM)
 
@@ -180,6 +180,141 @@ def load_spaceklip(database=None, key: Optional[str] = None, sci_files: Optional
         log(f"  {ds.name}: {ds.nframes} frames, PA {ds.angles.min():.1f}..{ds.angles.max():.1f} deg, "
             f"refs {0 if ds.ref_cube is None else ds.ref_cube.shape[0]}")
     return out
+
+
+def load_calints(files: Sequence[str], science_target: Optional[str] = None, half_px: int = 55,
+                 align: bool = True, repair: bool = True,
+                 star_center: Optional[Tuple[float, float]] = None,
+                 log: Callable[[str], None] = print) -> Tuple[Dict[str, Dataset], Dict[str, Any]]:
+    """Stage-2 ``*_calints.fits`` straight into ``{roll: Dataset}``, without spaceKLIP.
+
+    One partition per unique roll angle, the other target's exposures as the RDI library.
+    ``PA = ROLL_REF - V3I_YANG * VPARITY``; DQ-flagged and deviant pixels are replaced by a
+    median filter; frames are registered to the median science frame by cross-correlation
+    and cropped about ``CRPIX`` to ``2*half_px + 1`` pixels.
+
+    That crop is **odd on purpose**.  :func:`klip_tpe.metrics.star_center` puts the star at
+    ``((nx-1)/2, (ny-1)/2)``, so an even crop with the star on an integer pixel leaves it
+    half a pixel off in each axis -- 0.7 px radially, which at HIP 65426 b's 13 px
+    separation is a 3 degree error in position angle and a throughput mismatch between the
+    companion and the fakes injected to calibrate it.
+
+    ``star_center`` (0-based detector pixels) overrides ``CRPIX`` as the point the crop is
+    centred on.  **Use it.**  ``CRPIX`` is the aperture reference point, not a measured star
+    position -- it is identical in every file of a programme, dithers included -- and on
+    ERS 1386 it misses HIP 65426 by about 1.4 px, which throws the companion 1.5 px inside
+    its own separation and mismatches its KLIP throughput against the fakes injected to
+    calibrate it.  The right source is spaceKLIP's star-centring step (``STARCENX/Y``);
+    failing that, ``scripts/check_hip65426_contrast.py`` shows how to solve for it from the
+    companion's position in each roll.
+
+    ``info`` carries ``pxscale`` (arcsec/px from ``PIXAR_A2``), ``pixar_sr``, ``bunit``,
+    ``filter``, ``star_center`` and the first science ``SCI`` header, which is what the flux
+    calibration in :mod:`klip_tpe.stpsf_psf` needs.
+    """
+    from astropy.io import fits
+    from scipy import ndimage
+
+    files = sorted(files)
+    if not files:
+        raise ValueError("load_calints got no files")
+
+    def targ(f):
+        return str(fits.getheader(f).get("TARGPROP", "")).replace("-", "").replace("_", "").upper()
+
+    want = (science_target or targ(files[0])).replace("-", "").replace("_", "").upper()
+    sci = [f for f in files if targ(f).startswith(want)]
+    ref = [f for f in files if f not in sci]
+    if not sci:
+        raise ValueError(f"no science files matching TARGPROP {want!r} among {len(files)} files")
+
+    def read(fs):
+        ims, pas = [], []
+        for f in fs:
+            with fits.open(f) as h:
+                d = np.asarray(h["SCI"].data, float)
+                dq = np.asarray(h["DQ"].data, int)
+                s = h["SCI"].header
+                pa = float(s["ROLL_REF"]) - float(s.get("V3I_YANG", 0)) * float(s.get("VPARITY", 1))
+                d = np.where((dq & 1).astype(bool), np.nan, d)
+                for i in range(d.shape[0]):
+                    ims.append(d[i])
+                    pas.append(pa)
+        return np.array(ims), np.array(pas)
+
+    def _repair(cube, size=5, nsig=7.0):
+        out = np.array(cube, float)
+        for i, im in enumerate(out):
+            bad = ~np.isfinite(im)
+            med = ndimage.median_filter(np.where(bad, np.nanmedian(im), im), size=size)
+            r = np.abs(im - med)
+            s = 1.4826 * np.nanmedian(np.abs(r - np.nanmedian(r)))
+            out[i] = np.where(bad | (r > nsig * s), med, im)
+        return out
+
+    def _xs(im, ref_, search=6):
+        cc = np.fft.fftshift(np.fft.irfft2(np.fft.rfft2(im) * np.conj(np.fft.rfft2(ref_)), s=im.shape))
+        c = np.array(im.shape) // 2
+        sub = cc[c[0] - search:c[0] + search + 1, c[1] - search:c[1] + search + 1]
+        k = np.unravel_index(np.argmax(sub), sub.shape)
+        dy, dx = k[0] - search, k[1] - search
+        p = lambda a, b, c_: 0.0 if (a - 2 * b + c_) == 0 else 0.5 * (a - c_) / (a - 2 * b + c_)
+        if 0 < k[0] < sub.shape[0] - 1:
+            dy += p(sub[k[0] - 1, k[1]], sub[k[0], k[1]], sub[k[0] + 1, k[1]])
+        if 0 < k[1] < sub.shape[1] - 1:
+            dx += p(sub[k[0], k[1] - 1], sub[k[0], k[1]], sub[k[0], k[1] + 1])
+        return dx, dy
+
+    S, pas = read(sci)
+    R, _ = read(ref) if ref else (np.zeros((0,) + S.shape[1:]), np.zeros(0))
+    if repair:
+        S = _repair(S)
+        R = _repair(R) if R.size else R
+    if align:
+        a0 = np.median(S, axis=0)
+        S = np.array([ndimage.shift(im, (-d[1], -d[0]), order=3)
+                      for im, d in ((im, _xs(im, a0)) for im in S)])
+        if R.size:
+            R = np.array([ndimage.shift(im, (-d[1], -d[0]), order=3)
+                          for im, d in ((im, _xs(im, a0)) for im in R)])
+
+    hdr = fits.getheader(sci[0], "SCI")
+    px = float(np.sqrt(hdr["PIXAR_A2"]))
+    if star_center is not None:
+        cx, cy = float(star_center[0]), float(star_center[1])
+    else:
+        cx, cy = hdr["CRPIX1"] - 1, hdr["CRPIX2"] - 1
+        log(f"  calints: centring on CRPIX ({cx:.2f}, {cy:.2f}) -- the APERTURE reference "
+            f"point, not a measured star position; pass star_center= if you have one")
+    H = int(half_px)
+    n = 2 * H + 1                                        # ODD: see the docstring
+
+    def crop(cube):
+        if not cube.size:
+            return cube
+        fx, fy = cx - round(cx), cy - round(cy)
+        x0, y0 = int(round(cx)) - H, int(round(cy)) - H
+        return np.array([ndimage.shift(im, (-fy, -fx), order=3)[y0:y0 + n, x0:x0 + n]
+                         for im in cube], np.float32)
+
+    Sx, Rx = crop(S), crop(R)
+    meta = {"pxscale": px, "wavelength_m": _wavelength_m(fits.getheader(sci[0])),
+            "header": dict(fits.getheader(sci[0])), "pixar_sr": float(hdr.get("PIXAR_SR", np.nan)),
+            "bunit": str(hdr.get("BUNIT", "")).strip()}
+    dsets: Dict[str, Dataset] = {}
+    for k, pa in enumerate(np.unique(np.round(pas, 1))):
+        m = np.round(pas, 1) == pa
+        dsets[f"roll{k + 1}"] = Dataset(Sx[m], pas[m], name=f"roll{k + 1}",
+                                        ref_cube=Rx if Rx.size else None, meta=dict(meta))
+    info = dict(meta, n_sci=int(S.shape[0]), n_ref=int(R.shape[0]), crop_px=n,
+                filter=str(fits.getheader(sci[0]).get("FILTER", "")),
+                star_center=(float(cx), float(cy)),
+                crpix=(float(hdr["CRPIX1"] - 1), float(hdr["CRPIX2"] - 1)),
+                rolls=[float(v) for v in np.unique(np.round(pas, 1))])
+    log(f"  calints: {len(sci)} science / {len(ref)} reference files -> {S.shape[0]} + "
+        f"{R.shape[0]} frames, {n}x{n} px at {px*1e3:.2f} mas, rolls {info['rolls']}, "
+        f"{info['bunit']!r}")
+    return dsets, info
 
 
 def _recentre_stack(imgs: np.ndarray, centers: np.ndarray, target: Tuple[float, float]) -> np.ndarray:

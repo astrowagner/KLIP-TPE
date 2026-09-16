@@ -96,12 +96,48 @@ INSTRUMENT = {
 #: The other sets are calibrated differently and are NOT listed here: ``sphere_hd95086``
 #: distributes flux frames already on the science scale (``star_flux`` = the frame's own
 #: sum), and the JWST set has no stellar photometry at all.
+#: ``hip65426_f444w``: there is no off-axis stellar image anywhere in ERS 1386 -- HIP 65426
+#: and the reference star phi Cen are both behind MASK335R in every exposure -- so the star
+#: is given as a FLUX DENSITY and the frames' own MJy/sr calibration converts it
+#: (:func:`klip_tpe.stpsf_psf.star_flux_from_flux_density`).  0.4026 Jy is synthetic
+#: photometry of a Planck spectrum at Carter et al. (2023)'s Teff = 8600 K through the F444W
+#: bandpass, normalised to 2MASS Ks = 6.771 (A2V, J = 6.826, J-K = 0.055); +/- 3%, of which
+#: 1.9% is Ks and <2% the unknown detail of the system response shape.  Ks and F444W are both
+#: in the Rayleigh-Jeans tail, and the JWST flux calibrators are A dwarfs too, so the colour
+#: term against the standards is negligible.
 PHOTOMETRY = {
     "naco_betapic": {
         "starphot": 764939.6, "aperture_px": 2.0,
         "ref": "VIP tutorial 04_metrics (vip.readthedocs.io), NACO L' beta Pic; "
                "off-axis PSF rescaled to the coronagraphic DIT",
         "check": "beta Pic b -> dL' 7.79 vs 8.01 +/- 0.16 (Absil et al. 2013, A&A 559, L12)",
+    },
+    "hip65426_f444w": {
+        "flux_density_jy": 0.40259, "flux_density_err_frac": 0.03, "filter": "F444W",
+        "ref": "synthetic photometry: Planck(Teff=8600 K, Carter et al. 2023) through the "
+               "STPSF F444W bandpass, normalised to 2MASS Ks = 6.771",
+        # The transmissive (non-diffractive) throughput of the coronagraphic optics -- COM
+        # sapphire substrate + AR coating, BaF2 Lyot substrate.  STPSF's normalize='first'
+        # models only DIFFRACTIVE losses (the Lyot stop's 0.187), the NIRCam filter curves
+        # exclude the COM, and the pipeline's photom reference file has no occulting-mask
+        # column (spacetelescope/jwst#10309) so PHOTMJSR cannot carry it either.  ANCHORED,
+        # not derived: 0.561 is what puts HIP 65426 b at Carter et al.'s dF444W = 8.693, so
+        # that comparison is a calibration and NOT an independent check of this mode.  It
+        # sits inside JDox's bracket -- "combined loss ... ~86-90%" beyond 1" is a combined
+        # throughput of 0.10-0.14, i.e. 0.53-0.75 once the Lyot stop's 0.187 is taken out.
+        # Replace it with the tabulated COM transmission (JDox "NIRCam Filters for
+        # Coronagraphy", or webbpsf_ext's COM throughput) to make the check independent.
+        "optics_transmission": 0.561, "optics_transmission_source": "anchored on HIP 65426 b",
+        # GEOMETRY rather than photometry, but it lives here because it is the same
+        # per-programme calibration block and the flux check depends on it.  CRPIX
+        # (149.2, 173.6) is the APERTURE reference point -- identical in every file of the
+        # programme, dithers included -- and misses the star by 1.48 px, which puts the
+        # companion 1.5 px inside its own separation and mismatches its KLIP throughput
+        # against the fakes injected to calibrate it.  Solved from the companion's position
+        # in each roll (see scripts/check_hip65426_contrast.py); the two rolls agree to
+        # 0.71 px.  Replace with spaceKLIP's STARCENX/Y when those products exist.
+        "star_center": (150.54, 172.98), "star_center_source": "solved from both rolls",
+        "check": "HIP 65426 b -> dF444W vs 8.693 (Carter et al. 2023, ApJL 951, L20)",
     },
 }
 

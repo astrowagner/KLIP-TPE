@@ -12,11 +12,25 @@
     (`scripts/check_betapic_contrast.py`).
   - **HD 95086** — the SPHERE flux frames are already on the science frames' scale; applying
     `dit_science/dit_flux/nd_transmission` a second time over-counted the star by 1347×.
-  - **HIP 65426** — still has no stellar photometry; that is now stated rather than implied.
+  - **HIP 65426** — had no stellar photometry at all (`flux_unit = 1.0`, `flux_scale = 2.35e5`).
+    It now has a full chain (see below), and runs D and H2 build it rather than falling back to a
+    Gaussian.  **Runs D and H2 have to be redone**: both the flux scale and the star centre changed.
 - **`star_flux_from_halo` removed**, with no opt-in (also the `--star-flux halo` CLI value).  Fitting an
   off-axis template to a *coronagraphic* halo compares two different functions: the same method on the
   same data gave star fluxes 5.28× and 8.04× apart on paper runs A2 and B2.  A PSF template is now
   **required** — the old `GaussianPSF(flux_unit=1)` fallback silently called raw detector units a contrast.
+- **HIP 65426 / NIRCam coronagraphy — the flux chain, and the term neither side supplies.**
+  New `stpsf_psf.unocculted_ee` and `stpsf_psf.star_flux_from_flux_density` turn a stellar flux
+  density into `flux_unit` for MJy/sr JWST data: `S / (10^6 PIXAR_SR) x EE x T_optics`, with the
+  occulter's `T(rho)` deliberately left out (it multiplies `flux_unit` inside `inject_sources`).
+  The `EE` is of the **unocculted-through-the-Lyot-stop** PSF, not an imaging one.  `T_optics`
+  covers the *transmissive* losses of the coronagraphic optics (COM sapphire substrate, BaF2 Lyot
+  substrate): STPSF's `normalize='first'` models only *diffractive* losses, and the NIRCam `photom`
+  reference file has no occulting-mask column ([jwst#10309](https://github.com/spacetelescope/jwst/issues/10309)),
+  so neither the model nor the pipeline carries it -- a factor of ~1.8 on the contrast axis.
+- **New**: `spaceklip.load_calints` -- stage-2 `*_calints.fits` into partitions without spaceKLIP,
+  with an **odd** crop (an even one leaves the star half a pixel off in each axis) and a
+  `star_center=` override.  `CRPIX` is the aperture reference point and misses HIP 65426 by 1.48 px.
 - **New**: `generic.aperture_sum` (exact partial-pixel circular photometry, no photutils dependency) and
   `generic.star_flux_from_aperture_photometry`.
 - **Fixed**: `inject_sources` builds the cube in float32, so an injected stamp below the float32 quantum

@@ -44,7 +44,8 @@ import numpy as np
 from .injection import LibraryPSF
 
 __all__ = ["offaxis_grid", "library", "throughput_fn", "model_for_datasets",
-           "mode_from_header", "cache_dir", "DEFAULTS", "have_stpsf"]
+           "mode_from_header", "cache_dir", "DEFAULTS", "have_stpsf",
+           "unocculted_ee", "star_flux_from_flux_density"]
 
 #: ``image_mask`` -> the instrument and pupil stop that go with it, so callers only have
 #: to name the coronagraph they used.
@@ -376,6 +377,120 @@ def library(g: Dict[str, Any], star_flux: float = 1.0, ee_radius_px: Optional[fl
     return LibraryPSF(sl, g["seps"], center=c, ee_radius_px=rap,
                       throughput_fn=throughput_fn(g), refpa_deg=float(refpa_deg),
                       flux_unit=float(star_flux))
+
+
+# ------------------------------------------------------------------ absolute flux scale
+def unocculted_ee(radius_px: float, instrument: str = "NIRCam", filter: str = "F444W",
+                  pupil_mask: Optional[str] = "MASKRND", fov_arcsec: float = 30.0,
+                  oversample: int = 2, nlambda: int = 3, aperture: Optional[str] = None,
+                  detector_position: Optional[Tuple[int, int]] = None, date: Optional[str] = None,
+                  cache: bool = True, log: Callable[[str], None] = print) -> float:
+    """Fraction of an **unocculted** point source's flux that lands inside ``radius_px``.
+
+    Unocculted *through the Lyot stop* -- ``image_mask`` removed, ``pupil_mask`` kept --
+    because that is the configuration the data's own flux calibration refers to.  The
+    coronagraphic ``PHOTOM`` reference files are derived from standards observed in this
+    same mode, so the MJy/sr in the file already carries the Lyot stop and the mask
+    substrate; the only things left for a model to supply are the PSF's *shape* and the
+    occulter's spatial transmission ``T(rho)``, which :func:`offaxis_grid` measures
+    separately against this same reference.  Feeding an ordinary imaging PSF in here
+    instead would count the Lyot stop's effect on the PSF shape twice.
+
+    ``fov_arcsec`` has to be big: the encircled energy of a NIRCam LW PSF is still climbing
+    at 5 arcsec (0.96 at 5", 0.99 at 12.5" for F444W), so a stamp-sized field overstates
+    the fraction by tens of percent and the contrast axis inherits it.
+    """
+    from .instruments.generic import aperture_sum
+    meta = {"kind": "unocculted_ee", "instrument": instrument, "filter": filter,
+            "pupil_mask": pupil_mask, "fov_arcsec": float(fov_arcsec), "oversample": int(oversample),
+            "nlambda": int(nlambda), "aperture": aperture, "detector_position": detector_position,
+            "date": date, "version": _CACHE_VERSION}
+    path = os.path.join(cache_dir(), f"eeunocc_{instrument}_{filter}_{_key(meta)}.fits")
+    if cache and os.path.exists(path):
+        try:
+            from astropy.io import fits
+            with fits.open(path) as h:
+                img = np.asarray(h[0].data, float)
+                tot, px = float(h[0].header["PSFTOTAL"]), float(h[0].header["PIXELSCL"])
+            c = ((img.shape[1] - 1) / 2.0, (img.shape[0] - 1) / 2.0)
+            return float(aperture_sum(img, c[0], c[1], float(radius_px)) / tot)
+        except Exception as exc:                                # pragma: no cover - corrupt cache
+            log(f"  stpsf: ignoring unreadable EE cache {os.path.basename(path)} ({exc})")
+
+    inst = _instrument(instrument, filter, None, pupil_mask, aperture, detector_position, date)
+    inst.image_mask = None                                      # the occulter, and only it, comes out
+    p = inst.calc_psf(fov_arcsec=float(fov_arcsec), oversample=int(oversample), nlambda=int(nlambda))
+    img = np.asarray(p["DET_SAMP"].data, float)
+    tot = float(np.nansum(img))
+    if not np.isfinite(tot) or tot <= 0:                        # pragma: no cover - defensive
+        raise RuntimeError("the unocculted PSF has no flux")
+    if cache:
+        from astropy.io import fits
+        hdr = fits.Header()
+        hdr["PSFTOTAL"] = (tot, "sum over the computed field")
+        hdr["PIXELSCL"] = (float(inst.pixelscale), "arcsec / detector pixel")
+        hdr["KTVER"] = _CACHE_VERSION
+        for i, line in enumerate(_chunk(json.dumps(meta), 60)):
+            hdr[f"KTMETA{i:02d}"] = line
+        fits.PrimaryHDU(np.asarray(img, np.float32), header=hdr).writeto(path, overwrite=True)
+        log(f"  stpsf: cached unocculted PSF -> {os.path.basename(path)}")
+    c = ((img.shape[1] - 1) / 2.0, (img.shape[0] - 1) / 2.0)
+    return float(aperture_sum(img, c[0], c[1], float(radius_px)) / tot)
+
+
+def star_flux_from_flux_density(g: Dict[str, Any], flux_density_jy: float, pixar_sr: float,
+                                ee_radius_px: Optional[float] = None, bunit: str = "MJy/sr",
+                                optics_transmission: float = 1.0,
+                                log: Callable[[str], None] = print, **kw) -> float:
+    """``star_flux`` for :func:`library` from the star's flux density in the band.
+
+    ``flux_density_jy`` is the star's flux density [Jy] in this filter -- synthetic
+    photometry of a stellar model, or published photometry -- and ``pixar_sr`` the
+    ``PIXAR_SR`` of the science frames.  The JWST pipeline calibrates NRC_CORON data to
+    surface brightness, so a point source of flux density ``S`` deposits
+    ``S / (1e6 * PIXAR_SR)`` summed over its pixels; only the fraction inside the injection
+    model's normalisation radius belongs in ``flux_unit``, and :func:`unocculted_ee`
+    supplies it.  The occulter is *not* applied here -- that is ``throughput(rho)``, and
+    applying it twice is the classic way to get a contrast axis wrong by 1/T.
+
+    ``optics_transmission`` is the piece **neither** side of that supplies, and leaving it
+    at 1.0 is wrong for NIRCam coronagraphy by about a factor of two.  STPSF's
+    ``normalize='first'`` normalises at the entrance pupil and propagates "ignoring any
+    reflective or transmissive losses from mirrors or filters ... and calculates only the
+    diffractive losses from slits and stops" (Perrin, webbpsf#112).  So the model PSF
+    carries the Lyot stop's *diffractive* loss -- 0.187 of the pupil for MASKRND, matching
+    JDox's "each Lyot stop has a throughput of ~20%" -- but none of the *transmissive* loss
+    of the coronagraphic optics: the COM sapphire substrate with its AR coating, which every
+    coronagraphic beam passes through and which the NIRCam filter curves explicitly exclude,
+    plus the BaF2 Lyot substrate.  JDox puts the combined coronagraphic loss beyond 1" at
+    "~86-90%", i.e. a combined throughput of 0.10-0.14, so the transmissive remainder after
+    the 0.187 is 0.53-0.75.  The pipeline does not restore it either: the NIRCam ``photom``
+    reference file has no column for the occulting mask at all
+    (spacetelescope/jwst#10309), so the ``PHOTMJSR`` applied to NRC_CORON data cannot be
+    mask-specific.  Measure it once per mode against a companion of known contrast and
+    reuse it -- it is a property of the optics, not of the target.
+
+    Extra keywords go to :func:`unocculted_ee` (``fov_arcsec``, ``date``, ...).
+    """
+    if str(bunit).replace(" ", "").upper() not in ("MJY/SR",):
+        raise ValueError(f"star_flux_from_flux_density expects MJy/sr data, got {bunit!r}; "
+                         "convert the frames or compute the flux unit for their own units")
+    m = g.get("meta") or {}
+    rap = float(ee_radius_px if ee_radius_px is not None else g.get("ee_radius_px") or 3.0)
+    ee = unocculted_ee(rap, instrument=m.get("instrument", "NIRCam"), filter=m.get("filter", "F444W"),
+                       pupil_mask=m.get("pupil_mask"), aperture=m.get("aperture"),
+                       detector_position=m.get("detector_position"), date=m.get("date"),
+                       oversample=int(m.get("oversample", 2)), nlambda=int(m.get("nlambda", 3)),
+                       log=log, **kw)
+    total = float(flux_density_jy) / (1e6 * float(pixar_sr))
+    t = float(optics_transmission)
+    log(f"  stpsf: S = {flux_density_jy:.4f} Jy -> {total:.4e} MJy/sr summed over the PSF; "
+        f"EE({rap:.2f} px) = {ee:.4f}; optics transmission {t:.4f} "
+        f"-> star_flux = {total * ee * t:.4e}")
+    if t == 1.0:
+        log("  stpsf: optics_transmission is 1.0 -- for NIRCam coronagraphy that omits the "
+            "COM substrate and is wrong by about a factor of two; see the docstring")
+    return total * ee * t
 
 
 # ------------------------------------------------------------------ from the data itself

@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt
 from astropy.io import fits
 from scipy import ndimage
 
-from klip_tpe import Runner, RunConfig, ValidationConfig, CalibrationConfig
+from klip_tpe import Runner, RunConfig, ValidationConfig, CalibrationConfig, datasets, stpsf_psf
 from klip_tpe.reducer import Dataset, ReductionRequest
 from klip_tpe.backends import spaceklip as sk
 from klip_tpe.instruments import generic
@@ -128,27 +128,36 @@ if HAVE_DATA:
 # %% [markdown]
 # ## 2. Partitions: one per roll, references as the RDI library
 #
-# The star sits on the coronagraph reference pixel (`CRPIX`; spaceKLIP products carry the
-# measured `STARCENX/Y`), so the crop is taken about it — klip-tpe expects the star at the
-# centre of the array.  Each roll becomes a `Dataset` with its own parameter block, and both
-# carry the same reference cube.
+# klip-tpe expects the star at the centre of the array, so the crop is taken about it.  Each
+# roll becomes a `Dataset` with its own parameter block, and both carry the same reference cube.
 #
-# **`CRPIX` is where the mask is, not where the star is**, and the difference is the
-# astrometric floor of this notebook.  Measured on these frames, HIP 65426 b lands **1.3 px
-# (81 mas, 5.6° of position angle at its separation)** from the catalogued 0.826″ / 150.2°,
-# which is why the circle below does not sit dead centre on it and why the S/N quoted at the
-# catalogued position (5.6) is below the peak (6.4).  Nothing downstream is wrong — the
-# injections are placed about the same assumed centre, so they recover exactly where they
-# were put — but a *real* source is measured against the sky, and it exposes the offset.
-# Section 6's spaceKLIP path carries the measured `STARCENX/Y` and removes it; use that for
-# anything astrometric.
+# **`CRPIX` is where the mask is, not where the star is.**  It is the *aperture reference
+# point* — identical in every file of the programme, dithers included — and on these frames it
+# misses HIP 65426 by **1.48 px**, which throws the companion 1.5 px inside its own separation
+# and, worse, mismatches its KLIP throughput against the fakes injected to calibrate it.
+#
+# Three ways to find the star, two of which fail here: there is no off-axis stellar image
+# anywhere in the programme to centroid (HIP 65426 *and* the reference star φ Cen are behind
+# MASK335R in every exposure), and a 180° symmetry fit to the coronagraphic residual is too
+# speckle-dominated — it moved the centre by 2 px between the two rolls of these very data.
+# What works is the companion itself: derotating about a centre that is wrong by `δ` puts it at
+# `u + R(PA_k)·δ` in roll `k`, so each roll gives `δ = R(−PA_k)·(measured − expected)`
+# independently, and the two agree to 0.71 px.  `datasets.PHOTOMETRY` carries the answer and
+# `scripts/check_hip65426_contrast.py` is the solve; the proper source is spaceKLIP's own
+# star-centring step (`STARCENX/Y`), which section 6's path uses.
+#
+# Note this fixes the *geometry* only.  It leaves the contrast axis alone — that is section 3.
 
 # %%
 if HAVE_DATA:
     hdr = fits.getheader(sci_files[0], "SCI")
     pxscale = float(np.sqrt(hdr["PIXAR_A2"]))                      # 0.0626"/px (NIRCam LW)
+    pixar_sr = float(hdr["PIXAR_SR"])                              # for the flux scale, section 3
     wavelength = 4.44e-6                                           # F444W pivot
-    cx, cy = hdr["CRPIX1"] - 1.0, hdr["CRPIX2"] - 1.0              # 0-based star pixel
+    PHOT = datasets.PHOTOMETRY["hip65426_f444w"]
+    cx, cy = PHOT["star_center"]                                   # NOT CRPIX -- see above
+    print(f"CRPIX ({hdr['CRPIX1']-1:.2f}, {hdr['CRPIX2']-1:.2f}) vs the star at "
+          f"({cx:.2f}, {cy:.2f}): {np.hypot(cx-hdr['CRPIX1']+1, cy-hdr['CRPIX2']+1):.2f} px apart")
     H = 55                                                          # 111x111 px = 6.9" square
 
     def crop(cube):
@@ -187,18 +196,47 @@ if HAVE_DATA:
 # library — and with a 10° roll that decision matters: in `ADI+RDI` the other roll enters
 # the basis at ~1 FWHM of planet motion and eats the companion, while pure `RDI` keeps it.
 #
-# For calibrated contrasts the injection template should be a webbpsf / `webbpsf_ext`
-# off-axis PSF (`psf_template=`, e.g. from spaceKLIP's `analysistools.get_offsetpsf`) with
-# the star's measured flux (`star_flux=`).  Without one, a Gaussian of 1.028 λ/D and flux
-# unit 1 is used: parameter *ranking* is unaffected, only the contrast axis is arbitrary.
+# **The contrast axis.** HIP 65426 is behind the mask in every exposure and so is the
+# reference star, so the star's brightness has to be imported — and with a coronagraph the
+# import has four terms that are easy to confuse:
+#
+# | term | value | from |
+# |---|---|---|
+# | `S` | 0.4026 Jy | synthetic photometry: Planck(8600 K) through F444W, normalised to 2MASS Ks = 6.771 |
+# | units | `S / (10⁶·PIXAR_SR)` | `BUNIT = MJy/sr` and `PIXAR_SR` from the header |
+# | `EE` | 0.696 at 16.5 px | the model PSF **unocculted through the Lyot stop** — an *imaging* PSF gives 0.928 and counts the stop twice |
+# | `T_optics` | 0.561 | the *transmissive* losses of the coronagraphic optics |
+#
+# and one term that is deliberately **not** in `flux_unit`: the occulter's spatial
+# transmission `T(ρ)`, which multiplies it inside `inject_sources`.  Folding it into the star
+# flux, or applying it twice, is the classic coronagraphic error.
+#
+# `T_optics` is there because STPSF's `calc_psf` defaults to `normalize='first'` — normalise at
+# the *entrance pupil*, then propagate "ignoring any reflective or transmissive losses … and
+# calculates only the diffractive losses from slits and stops".  That default is what makes the
+# grid's measured `transmission` a real number (`normalize='last'` would renormalise every
+# slice and report `T ≈ 1` everywhere), but it also means the model carries only the Lyot
+# stop's diffractive 0.187 — matching JDox's "each Lyot stop has a throughput of ~20%" — and
+# none of the COM sapphire substrate, which the NIRCam filter curves explicitly exclude.  The
+# pipeline does not restore it either: the `photom` reference file has no column for the
+# occulting mask at all (`spacetelescope/jwst#10309`).  See `docs/FLUX_CALIBRATION.md`.
 
 # %%
-PSF_TEMPLATE = os.path.join(DATA, "offset_psf_F444W.fits")
-PSF_TEMPLATE = PSF_TEMPLATE if os.path.exists(PSF_TEMPLATE) else None
-STAR_FLUX = None
+STAR_FLUX, PSF_MODEL = None, None
+if HAVE_DATA and stpsf_psf.have_stpsf():
+    grid = stpsf_psf.offaxis_grid("NIRCam", "F444W", image_mask="MASK335R",
+                                  seps_as=np.arange(0.2, 3.01, 0.2), stamp_px=41, nlambda=3)
+    STAR_FLUX = stpsf_psf.star_flux_from_flux_density(
+        grid, PHOT["flux_density_jy"], pixar_sr,
+        optics_transmission=PHOT["optics_transmission"])
+    PSF_MODEL = stpsf_psf.library(grid, star_flux=STAR_FLUX)
+elif HAVE_DATA:
+    print("STPSF unavailable -- falling back to a Gaussian of flux unit 1: parameter *ranking*"
+          "\nis unaffected, only the contrast axis becomes arbitrary (template units).")
+
 if HAVE_DATA:
     from klip_tpe import Param
-    red = sk.make_reducer(dsets, psf_template=PSF_TEMPLATE, star_flux=STAR_FLUX, mode="RDI",
+    red = sk.make_reducer(dsets, injection_model=PSF_MODEL, mode="RDI",
                           max_workers="auto")          # pool="threads": pyKLIP forks its own workers
     space = generic.make_space(red, k_klip_max=18, search_angles=False)
     space.add(Param("mode", 0, 2, "categorical", choices=["ADI", "RDI", "ADI+RDI"], default="RDI",
@@ -294,7 +332,6 @@ if HAVE_DATA:
 
 # %%
 if HAVE_DATA:
-    from klip_tpe import stpsf_psf
     try:
         # The grid has to span the SEARCH ANNULUS, not just the planet: the injections are
         # spread from the inner to the outer edge, and `LibraryPSF` has no template outside
@@ -304,7 +341,7 @@ if HAVE_DATA:
         grid = stpsf_psf.offaxis_grid("NIRCam", "F444W", image_mask="MASK335R",
                                       seps_as=np.arange(0.2, 45 * pxscale + 0.21, 0.2),
                                       stamp_px=21, nlambda=1)
-        psf_model = stpsf_psf.library(grid, star_flux=STAR_FLUX or 1.0)
+        psf_model = PSF_MODEL or stpsf_psf.library(grid, star_flux=STAR_FLUX or 1.0)
         plt.figure(figsize=(9, 3.2))
         plt.subplot(1, 2, 1)
         plt.plot(grid["seps"], grid["transmission"], "-o", ms=3)
@@ -331,7 +368,7 @@ if HAVE_DATA:
 # %%
 if HAVE_DATA:
     from klip_tpe.fmmf import FMMFSNR
-    red_fm = sk.make_reducer(dsets, injection_model=psf_model, star_flux=STAR_FLUX,
+    red_fm = sk.make_reducer(dsets, injection_model=psf_model,
                              mode="RDI", max_workers="auto")
     objective_fm, _ = generic.default_config(red_fm, metric="fmmf", known=[PLANET])
     metric_fm = objective_fm.metric

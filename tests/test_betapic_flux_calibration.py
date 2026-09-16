@@ -177,3 +177,86 @@ def test_the_float32_warning_names_the_flux_unit_as_the_likely_cause():
     msg = str(rec[0].message)
     assert "flux_unit" in msg and "star_flux" in msg
     assert "star_flux_from_aperture_photometry" in msg
+
+
+# ------------------------------------------------------------------ JWST: the coronagraph terms
+
+def test_the_jwst_photometry_entry_separates_the_four_terms():
+    """The HIP 65426 flux unit is S x (1/1e6 PIXAR_SR) x EE x T_optics, and the occulter's
+    T(rho) is deliberately NOT among them -- it multiplies flux_unit inside inject_sources.
+    This pins the entry and the fact that the last term is an anchor, not a measurement."""
+    p = datasets.PHOTOMETRY["hip65426_f444w"]
+    assert p["filter"] == "F444W"
+    assert p["flux_density_jy"] == pytest.approx(0.4026, rel=1e-3)
+    assert 0.5 <= p["optics_transmission"] <= 0.75, \
+        "outside JDox's 0.53-0.75 bracket for the transmissive coronagraphic losses"
+    assert "anchor" in p["optics_transmission_source"].lower(), \
+        "if this stops being an anchor the check script's disclaimer has to change too"
+    assert "Carter" in p["check"]
+
+
+def test_star_flux_from_flux_density_applies_each_term_once():
+    """Arithmetic only -- no STPSF -- so it runs anywhere."""
+    from klip_tpe import stpsf_psf
+    calls = {}
+
+    def fake_ee(radius_px, **kw):
+        calls["radius"] = radius_px
+        calls["pupil"] = kw.get("pupil_mask")
+        return 0.25
+
+    g = {"ee_radius_px": 8.0, "meta": {"instrument": "NIRCam", "filter": "F444W",
+                                       "pupil_mask": "MASKRND"}}
+    real, stpsf_psf.unocculted_ee = stpsf_psf.unocculted_ee, fake_ee
+    try:
+        sf = stpsf_psf.star_flux_from_flux_density(g, 1.0, 1e-13, optics_transmission=0.5,
+                                                   log=lambda s: None)
+    finally:
+        stpsf_psf.unocculted_ee = real
+    assert sf == pytest.approx(1.0 / (1e6 * 1e-13) * 0.25 * 0.5, rel=1e-12)
+    assert calls["radius"] == 8.0
+    assert calls["pupil"] == "MASKRND", "the EE must be the Lyot-stop PSF, not an imaging one"
+
+
+def test_star_flux_from_flux_density_refuses_units_it_cannot_convert():
+    from klip_tpe import stpsf_psf
+    with pytest.raises(ValueError, match="MJy/sr"):
+        stpsf_psf.star_flux_from_flux_density({"ee_radius_px": 8.0}, 1.0, 1e-13,
+                                              bunit="DN/s", log=lambda s: None)
+
+
+def test_load_calints_crops_odd_and_reports_the_centre_it_used():
+    """An even crop with the star on an integer pixel leaves it half a pixel off in each
+    axis -- 0.7 px radially, a 3 degree PA error at HIP 65426 b's separation."""
+    import inspect
+
+    from klip_tpe.backends import spaceklip as sk
+    src = inspect.getsource(sk.load_calints)
+    assert "n = 2 * H + 1" in src, "the crop has to be odd"
+    assert "y0 + n" in src and "x0 + n" in src
+    assert "star_center" in inspect.signature(sk.load_calints).parameters
+    assert "APERTURE reference" in src, "CRPIX being the wrong centre must stay documented"
+
+
+def test_the_jwst_call_sites_use_the_model_and_the_measured_centre():
+    """Neither the runs nor the tutorial may fall back to a Gaussian of flux unit 1 or to
+    CRPIX: those are the two things that made run D's axis 2.3e5 off and put the companion
+    1.5 px inside its own separation."""
+    p = datasets.PHOTOMETRY["hip65426_f444w"]
+    cx, cy = p["star_center"]
+    assert np.hypot(cx - 149.2, cy - 173.6) == pytest.approx(1.48, abs=0.05), \
+        "the offset from CRPIX is the whole point of storing this"
+
+    tut = open(os.path.join(HERE, "tutorials", "03_jwst_nircam_hip65426.py")).read()
+    assert "star_flux_from_flux_density" in tut and 'PHOT["star_center"]' in tut
+    assert "psf_template=PSF_TEMPLATE" not in tut, "the old Gaussian fallback path is gone"
+
+    pr = next((q for q in (os.path.join(HERE, "paper_runs", "run_demos.py"),
+                           os.path.join(os.path.dirname(HERE), "paper_runs", "run_demos.py"))
+               if os.path.exists(q)), None)
+    if pr:
+        src = open(pr).read()
+        assert "star_flux_from_flux_density" in src
+        assert "have_stpsf()" in src, "runs D/H2 must refuse rather than fall back silently"
+        # the hand-rolled loader is gone in favour of the shared one
+        assert "load_calints" in src
