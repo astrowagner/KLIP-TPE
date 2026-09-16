@@ -210,6 +210,37 @@ it into the star flux, or applying it twice, is the classic coronagraphic error.
   needs contrast 320 to reach the peak a Gaussian reaches at 40 — 8× — because the real PSF
   puts most of its light in wings and spikes.
 
+**How much data there actually is.** Four science frames looks thin next to a ground-based
+ADI sequence of hundreds, and it is worth being precise about why there is no more to be had.
+A NIRCam exposure is a ladder, and only the top rung ever leaves the spacecraft as an image:
+
+| rung | science (roll 1 and roll 2) | reference (each of 9 dithers) |
+|---|---|---|
+| frame — one non-destructive read of SUB320A335R | `TFRAME` = 1.06904 s | 1.06904 s |
+| group — `NFRAMES` frames averaged **on the detector**, then `GROUPGAP` dropped | `DEEP8`: 8 + 12 → `TGROUP` = 21.381 s | `MEDIUM8`: 8 + 2 → 10.690 s |
+| integration — `NGROUPS` groups up one charge ramp, fitted to a slope | 15 groups, `EFFINTTM` = **307.884 s** | 4 groups, **40.623 s** |
+| exposure — `NINTS` integrations, one reset frame apart | 2 → `EFFEXPTM` = 615.767 s | 2 → 81.247 s |
+
+`EFFINTTM` is the ramp span, `(NGROUPS·NFRAMES + (NGROUPS−1)·GROUPGAP) · TFRAME` — 288 frames
+for `DEEP8`, 38 for `MEDIUM8`. It is *not* `(NGROUPS−1)·TGROUP`, which is the definition that
+looks right and is off by 3% here and 21% for the reference. `INT_TIMES` confirms the
+structure independently: each integration measures 288.04 frame times and the two are exactly
+one frame apart, the reset.
+
+So the JWST analogue of a DIT is `EFFINTTM`, and one plane of a calints cube is exactly one
+of them. **There is nothing below it to recover.** The 8 frames of each group were averaged
+in hardware before downlink, and the 15 groups are cumulative samples of a single charge
+accumulation, not independent exposures — sub-ramp fitting would produce images that are
+strongly correlated, share the same speckle realisation, and carry no new PSF diversity.
+Total: 4 × 307.884 s = 1231.5 s on HIP 65426, 18 × 40.623 s = 731.2 s on φ Cen. The temporal
+diversity available to KLIP is 2 integrations per roll; the *PSF* diversity comes from the
+reference star's 18, which is the point of the 9-point dither.
+
+`load_calints` records `effinttm`, `int_mid_mjd` (from `INT_TIMES`), `readpatt`, `ngroups`,
+`nframes`, `groupgap` and `tframe` per frame in `info["frames"]`, because science and
+reference integrations differ by 7.6× and any per-frame weighting that assumed a single
+exposure time would be wrong for 18 of the 22 frames.
+
 ### α Cen — VLT/NEAR (`instruments/near.py`; `scripts/run_near2_production.sh`)
 
 * **Template**: the measured off-axis AGPM-N4 library `n4_psf_cube_EEnorm.fits`, a

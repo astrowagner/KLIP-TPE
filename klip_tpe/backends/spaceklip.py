@@ -213,7 +213,13 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
     calibration in :mod:`klip_tpe.stpsf_psf` needs.  It also carries ``frames``: one dict per
     individual integration with the archive file it came from, its integration index, role,
     position angle, commanded dither offset, how many pixels the DQ and the outlier repair
-    touched, and the shift the registration measured and removed.  ``keep_frames=True``
+    touched, the shift the registration measured and removed, and the integration's own
+    clock -- ``effinttm`` (its exposure time, the JWST analogue of a DIT), ``int_mid_mjd``
+    from ``INT_TIMES``, and the ``readpatt``/``ngroups``/``nframes``/``groupgap``/``tframe``
+    that build it.  There is nothing below an integration to recover: the ``nframes`` frames
+    of each group are averaged on the detector, and the ``ngroups`` groups are cumulative
+    samples of one charge ramp, already collapsed to a slope in a calints file.
+    ``keep_frames=True``
     additionally attaches the image stacks themselves (``raw_sci``/``raw_ref``,
     ``aligned_sci``/``aligned_ref``, ``crop_sci``/``crop_ref``) -- about 18 MB for this
     programme, which is why it is off by default.
@@ -245,12 +251,31 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
                 pa = float(s["ROLL_REF"]) - float(s.get("V3I_YANG", 0)) * float(s.get("VPARITY", 1))
                 bad = (dq & 1).astype(bool)
                 d = np.where(bad, np.nan, d)
+                # One plane of a calints cube is ONE integration -- a single up-the-ramp
+                # charge accumulation, already fitted to a slope.  EFFINTTM is its
+                # exposure time, the JWST analogue of a DIT; the NFRAMES frames that
+                # build each group were averaged on the detector and no longer exist
+                # separately.  int_mid_mjd comes from INT_TIMES when the extension is
+                # there, so each frame carries its own clock rather than the exposure's.
+                mids = None
+                if "INT_TIMES" in h and h["INT_TIMES"].data is not None:
+                    t = h["INT_TIMES"].data
+                    if "int_mid_MJD_UTC" in t.columns.names:
+                        mids = np.asarray(t["int_mid_MJD_UTC"], float)
                 for i in range(d.shape[0]):
                     ims.append(d[i])
                     pas.append(pa)
                     prov.append({"file": os.path.basename(f), "integration": i, "role": role,
                                  "target": str(ph.get("TARGPROP", "")), "pa": pa,
                                  "n_dq": int(bad[i].sum()),
+                                 "effinttm": float(ph.get("EFFINTTM", np.nan)),
+                                 "readpatt": str(ph.get("READPATT", "")),
+                                 "ngroups": int(ph.get("NGROUPS", 0)),
+                                 "nframes": int(ph.get("NFRAMES", 0)),
+                                 "groupgap": int(ph.get("GROUPGAP", 0)),
+                                 "tframe": float(ph.get("TFRAME", np.nan)),
+                                 "int_mid_mjd": (float(mids[i]) if mids is not None
+                                                 and i < mids.size else float("nan")),
                                  # the small-grid dither offsets live in the PRIMARY
                                  # header, not SCI -- read_jwst_files gets this right too
                                  "xoffset": float(ph.get("XOFFSET", 0.0)),

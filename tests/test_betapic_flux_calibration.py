@@ -238,6 +238,39 @@ def test_load_calints_crops_odd_and_reports_the_centre_it_used():
     assert "APERTURE reference" in src, "CRPIX being the wrong centre must stay documented"
 
 
+def test_every_frame_carries_its_own_integration_time():
+    """One plane of a calints cube is one integration, and EFFINTTM is its exposure time --
+    the JWST analogue of a DIT.  The provenance has to record it per frame rather than per
+    exposure, because science (DEEP8, 307.884 s) and reference (MEDIUM8, 40.623 s) differ by
+    7.6x and any per-frame weighting that assumed one number would be wrong for 18 of 22."""
+    import inspect
+
+    from klip_tpe.backends import spaceklip as sk
+    src = inspect.getsource(sk.load_calints)
+    for k in ("effinttm", "int_mid_mjd", "readpatt", "ngroups", "nframes", "groupgap", "tframe"):
+        assert f'"{k}"' in src, f"per-frame provenance must record {k}"
+    assert "INT_TIMES" in src, "the per-integration clock comes from INT_TIMES, not EXPSTART"
+    # PRIMARY, not SCI: the same trap that made XOFFSET/YOFFSET silently zero
+    assert "ph.get(\"EFFINTTM\"" in src
+
+
+def test_the_readout_ladder_closes_for_both_hip65426_patterns():
+    """EFFINTTM is the ramp span, (NGROUPS*NFRAMES + (NGROUPS-1)*GROUPGAP) * TFRAME -- NOT
+    (NGROUPS-1)*TGROUP, which is off by 3% for DEEP8 and 21% for MEDIUM8.  Getting this wrong
+    would misreport the exposure time in the paper's observation table."""
+    tframe = 1.06904
+    for readpatt, ngroups, nframes, groupgap, tgroup, effinttm, nints in (
+            ("DEEP8", 15, 8, 12, 21.381, 307.884, 2),      # HIP 65426, each roll
+            ("MEDIUM8", 4, 8, 2, 10.690, 40.623, 2)):      # HIP 68245, each dither
+        assert (nframes + groupgap) * tframe == pytest.approx(tgroup, abs=5e-3), readpatt
+        nfr = ngroups * nframes + (ngroups - 1) * groupgap
+        assert nfr * tframe == pytest.approx(effinttm, abs=5e-3), readpatt
+        # the formula that looks right and is not
+        assert (ngroups - 1) * tgroup != pytest.approx(effinttm, rel=0.02), readpatt
+    # 2 rolls x 2 integrations x 307.884 s
+    assert 2 * 2 * 307.884 == pytest.approx(1231.5, abs=0.1)
+
+
 def test_the_jwst_call_sites_use_the_model_and_the_measured_centre():
     """Neither the runs nor the tutorial may fall back to a Gaussian of flux unit 1 or to
     CRPIX: those are the two things that made run D's axis 2.3e5 off and put the companion
