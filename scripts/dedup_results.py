@@ -21,10 +21,13 @@ so a run legitimately holds several segments that all start at ``index == 0`` wi
 ``contrast``.  Those are kept.  This only collapses repeats *within* a segment, keeping the
 first record of each index -- the one whose ``wall_s`` was measured uncontended.
 
-A live run is still appending, so ``--in-place`` refuses while ``heartbeat.json`` is fresh:
-replacing the file under a writer that holds it open in append mode sends every later
-evaluation to an orphaned inode.  Use ``--write`` now and swap when the run is done, or just
-leave it -- the loader drops duplicates at read time either way.
+Both writing modes refuse while ``heartbeat.json`` is fresh.  ``--in-place`` would replace
+the file under a writer holding it open in append mode, sending every later evaluation to an
+orphaned inode.  ``--write`` is no safer in practice: its copy is a snapshot that the live
+run has already outgrown by the time you read the message, so moving it over the original
+silently discards everything evaluated since.  On a live run this reports and stops --
+which costs nothing, because both readers drop duplicates at read time.  Clean the file
+itself with ``--in-place`` once the run is finished.
 """
 from __future__ import annotations
 
@@ -106,13 +109,18 @@ def main(argv=None):
         print("  nothing to do")
         return 0
 
+    if live and (a.in_place or a.write) and not a.force:
+        raise SystemExit(
+            "  refusing to write while the run is live.\n"
+            "  --in-place would replace the file under a writer holding it open in append mode,\n"
+            "  sending every later evaluation to an orphaned inode.  --write is no safer: its\n"
+            "  copy is a snapshot the run has already outgrown, so moving it over the original\n"
+            "  would discard everything evaluated since.\n"
+            "  Nothing needs doing now -- Runner._load_history_jsonl and bench.read_records both\n"
+            "  drop the repeats at read time.  Re-run with --in-place once the run is finished\n"
+            "  (or --force if you are certain the writer is gone).")
+
     if a.in_place:
-        if live and not a.force:
-            raise SystemExit(
-                "  refusing --in-place on a live run: the writer holds this file open in append\n"
-                "  mode, so replacing it would send every later evaluation to an orphaned inode.\n"
-                "  Use --write now and swap when the run finishes (the loader de-duplicates at\n"
-                "  read time meanwhile), or re-run with --force if you know the writer is gone.")
         bak = src + ".dup." + time.strftime("%Y%m%d_%H%M%S")
         shutil.copy2(src, bak)
         tmp = src + ".tmp"
@@ -126,7 +134,7 @@ def main(argv=None):
         with open(dst, "w") as f:
             f.write("\n".join(out) + "\n")
         print(f"  wrote   {dst}")
-        print("  swap it in when the run is idle:  mv results.dedup.jsonl results.jsonl")
+        print("  this is a COPY; the original is untouched. Prefer --in-place on a finished run.")
     else:
         print("  (report only; --write for a copy, --in-place to replace)")
     return 0
