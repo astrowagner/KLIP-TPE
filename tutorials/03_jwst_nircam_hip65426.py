@@ -20,7 +20,7 @@
 # The notebook skips the run (and says so) when the files are not there.
 
 # %%
-import glob, os, time
+import glob, os, time, warnings
 import numpy as np
 import matplotlib.pyplot as plt
 from astropy.io import fits
@@ -60,8 +60,17 @@ print(f"science exposures: {len(sci_files)}, reference exposures: {len(ref_files
 # **In production, use spaceKLIP's `ImageTools`** (`quick_cleaning`, `align_frames`, …),
 # which does this properly and writes `STARCENX/Y` into the headers; `load_spaceklip` then
 # reads its products directly (section 6).  So that this notebook stands alone, here is the
-# minimal version: repair the flagged and outlying pixels, then register every frame on the
-# median science frame by FFT cross-correlation.
+# minimal version: fill the flagged pixels from their neighbours, then register every frame
+# on the median science frame by FFT cross-correlation.
+#
+# **Fill the flagged pixels and nothing else.**  A coronagraphic PSF is *supposed* to be
+# full of sharp, isolated blobs — the six-lobed Lyot-stop pattern of the star, and for a
+# companion behind MASK335R a three-bar "hamburger" core (Carter et al. 2023, Fig. 3).  Any
+# repair that decides from the pixel *values* what is an outlier — a median filter with a
+# sigma clip against the frame's scatter, which is set by empty sky — will rewrite the PSF:
+# on these frames such a filter touched ~5,000 pixels per frame of which only ~1,560 were
+# flagged, and turned HIP 65426 b into one smeared blob at a third of its peak.  Until
+# 2026-09-16 this notebook and `load_calints` did exactly that.
 
 # %%
 def read_calints(paths):
@@ -78,15 +87,22 @@ def read_calints(paths):
                 ims.append(d[i]); pas.append(pa)
     return np.array(ims), np.array(pas)
 
-def repair(cube, size=5, nsig=7.0):
-    """Replace flagged pixels and >nsig outliers by the local median."""
+def repair(cube, maxit=20):
+    """Fill every DQ-flagged (NaN) pixel with the median of its finite 8 neighbours --
+    spaceKLIP's treatment -- and touch nothing else.  Clusters close from the rim inward."""
     out = np.array(cube, float)
     for i, im in enumerate(out):
-        bad = ~np.isfinite(im)
-        med = ndimage.median_filter(np.where(bad, np.nanmedian(im), im), size=size)
-        res = np.abs(im - med)
-        s = 1.4826 * np.nanmedian(np.abs(res - np.nanmedian(res)))
-        out[i] = np.where(bad | (res > nsig * s), med, im)
+        for _ in range(maxit):
+            bad = ~np.isfinite(im)
+            if not bad.any():
+                break
+            p = np.pad(im, 1, constant_values=np.nan)
+            st = np.stack([p[1 + dy:1 + dy + im.shape[0], 1 + dx:1 + dx + im.shape[1]]
+                           for dy in (-1, 0, 1) for dx in (-1, 0, 1) if (dy, dx) != (0, 0)])
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)          # all-NaN stencils inside a cluster
+                im[bad] = np.nanmedian(st, axis=0)[bad]
+        out[i] = im
     return out
 
 def xcorr_shift(im, ref, search=6):
@@ -119,7 +135,7 @@ if HAVE_DATA:
 
     fig, ax = plt.subplots(1, 3, figsize=(12, 3.8))
     for a, im, t in zip(ax, (sci_raw[0], sci_a[0], ref_a[0]),
-                        ("raw science integration (DQ masked)", "repaired + aligned", "reference star")):
+                        ("raw science integration (DQ masked)", "DQ filled + aligned", "reference star")):
         v = np.nanpercentile(im[np.isfinite(im)], [5, 99.5])
         a.imshow(im, origin="lower", cmap="inferno", vmin=v[0], vmax=v[1]); a.set_title(t, fontsize=9)
         a.set_xticks([]); a.set_yticks([])
@@ -194,7 +210,10 @@ if HAVE_DATA:
 # (`ADI`, `RDI`, `ADI+RDI`).  Any `Param` whose name matches a backend option is passed
 # straight through to the engine, so the optimizer can decide how to use the reference
 # library — and with a 10° roll that decision matters: in `ADI+RDI` the other roll enters
-# the basis at ~1 FWHM of planet motion and eats the companion, while pure `RDI` keeps it.
+# the basis at ~1 FWHM of planet motion and self-subtracts the companion (two cells down:
+# S/N 14 → 2 at k = 10 in this annulus; in the whole-image 20-mode reduction of Carter et
+# al.'s Fig. 3 it keeps half the flux, against 0.8 for pure `RDI`), which is why Carter et
+# al. quote their photometry from forward-modelled fits rather than from the images.
 #
 # **The contrast axis.** HIP 65426 is behind the mask in every exposure and so is the
 # reference star, so the star's brightness has to be imported — and with a coronagraph the
@@ -205,21 +224,24 @@ if HAVE_DATA:
 # | `S` | 0.4026 Jy | synthetic photometry: Planck(8600 K) through F444W, normalised to 2MASS Ks = 6.771 |
 # | units | `S / (10⁶·PIXAR_SR)` | `BUNIT = MJy/sr` and `PIXAR_SR` from the header |
 # | `EE` | 0.696 at 16.5 px | the model PSF **unocculted through the Lyot stop** — an *imaging* PSF gives 0.928 and counts the stop twice |
-# | `T_optics` | 0.561 | the *transmissive* losses of the coronagraphic optics |
+# | `T_optics` | 1.0 | nothing left to add: `PHOTMJSR` for `PUPIL=MASKRND` already carries the coronagraphic optics |
 #
 # and one term that is deliberately **not** in `flux_unit`: the occulter's spatial
 # transmission `T(ρ)`, which multiplies it inside `inject_sources`.  Folding it into the star
 # flux, or applying it twice, is the classic coronagraphic error.
 #
-# `T_optics` is there because STPSF's `calc_psf` defaults to `normalize='first'` — normalise at
-# the *entrance pupil*, then propagate "ignoring any reflective or transmissive losses … and
-# calculates only the diffractive losses from slits and stops".  That default is what makes the
-# grid's measured `transmission` a real number (`normalize='last'` would renormalise every
-# slice and report `T ≈ 1` everywhere), but it also means the model carries only the Lyot
-# stop's diffractive 0.187 — matching JDox's "each Lyot stop has a throughput of ~20%" — and
-# none of the COM sapphire substrate, which the NIRCam filter curves explicitly exclude.  The
-# pipeline does not restore it either: the `photom` reference file has no column for the
-# occulting mask at all (`spacetelescope/jwst#10309`).  See `docs/FLUX_CALIBRATION.md`.
+# Why `T_optics` is 1: STPSF's `calc_psf` defaults to `normalize='first'` — normalise at the
+# *entrance pupil* and propagate only diffractive losses — which is what makes the grid's
+# measured `transmission` a real number (`normalize='last'` would report `T ≈ 1` everywhere).
+# The model therefore lacks the COM substrate and the Lyot substrate, but so did every flux
+# standard observed through them: `PHOTMJSR` for this pupil (2.486, against ~0.4 for CLEAR
+# imaging) was derived in this very optical train, so the MJy/sr in the file already put an
+# off-mask source at its true flux, and `EE` is a *fraction* of the Lyot-stop PSF in which the
+# stop's own 0.18 cancels.  The proof is the planet: with nothing tuned, HIP 65426 b measures
+# ΔF444W = 8.61 ± 0.08 against Carter et al. (2023)'s 8.703 ± 0.055
+# (`scripts/check_hip65426_contrast.py`).  Until 2026-09-16 a `T_optics` of 0.561 sat here,
+# "anchored" on the companion — it was compensating for the median-filter damage described in
+# section 1, not for any optics.  See `docs/FLUX_CALIBRATION.md`.
 
 # %%
 STAR_FLUX, PSF_MODEL = None, None
@@ -247,7 +269,10 @@ if HAVE_DATA:
 
 # %% [markdown]
 # A default RDI reduction with 10 KL modes: HIP 65426 b is the point source at 0.83″,
-# PA 150° (circled).  (Try `mode="ADI+RDI"` here to see the companion disappear.)
+# PA 150° (circled).  Look at its shape: a three-bar "hamburger" core with six faint lobes
+# around it, exactly as in Carter et al. (2023)'s Fig. 3 — that is what an off-axis source
+# behind MASK335R looks like through the round Lyot stop, not two sources.  (Try
+# `mode="ADI+RDI"` here to see the companion fade.)
 
 # %%
 if HAVE_DATA:
@@ -264,7 +289,7 @@ if HAVE_DATA:
     plt.title(f"pyKLIP RDI, k=10   (planet S/N {snr0:.1f})")
 
 # %%
-if HAVE_DATA:                                    # the same reduction in ADI+RDI: the roll pair self-subtracts
+if HAVE_DATA:                                    # the same reduction in ADI and ADI+RDI: the roll pair self-subtracts
     for m in ("ADI", "RDI", "ADI+RDI"):
         im = red.reduce(ReductionRequest(params=dict(cfg0.params, inrad=6, outrad=45, k_klip=10, mode=m))).image
         print(f"mode={m:8s} planet S/N {float(metric.per_source(im, None, [PLANET[0]], [PLANET[1]])[0]):5.1f}")

@@ -453,22 +453,26 @@ def star_flux_from_flux_density(g: Dict[str, Any], flux_density_jy: float, pixar
     supplies it.  The occulter is *not* applied here -- that is ``throughput(rho)``, and
     applying it twice is the classic way to get a contrast axis wrong by 1/T.
 
-    ``optics_transmission`` is the piece **neither** side of that supplies, and leaving it
-    at 1.0 is wrong for NIRCam coronagraphy by about a factor of two.  STPSF's
-    ``normalize='first'`` normalises at the entrance pupil and propagates "ignoring any
-    reflective or transmissive losses from mirrors or filters ... and calculates only the
-    diffractive losses from slits and stops" (Perrin, webbpsf#112).  So the model PSF
-    carries the Lyot stop's *diffractive* loss -- 0.187 of the pupil for MASKRND, matching
-    JDox's "each Lyot stop has a throughput of ~20%" -- but none of the *transmissive* loss
-    of the coronagraphic optics: the COM sapphire substrate with its AR coating, which every
-    coronagraphic beam passes through and which the NIRCam filter curves explicitly exclude,
-    plus the BaF2 Lyot substrate.  JDox puts the combined coronagraphic loss beyond 1" at
-    "~86-90%", i.e. a combined throughput of 0.10-0.14, so the transmissive remainder after
-    the 0.187 is 0.53-0.75.  The pipeline does not restore it either: the NIRCam ``photom``
-    reference file has no column for the occulting mask at all
-    (spacetelescope/jwst#10309), so the ``PHOTMJSR`` applied to NRC_CORON data cannot be
-    mask-specific.  Measure it once per mode against a companion of known contrast and
-    reuse it -- it is a property of the optics, not of the target.
+    ``optics_transmission`` scales the result for any transmissive loss that neither the
+    data's calibration nor the model carries.  **For JWST calints, leave it at 1.0.**
+    STPSF's ``normalize='first'`` propagates only diffractive losses, so the model PSF is
+    missing the COM substrate and the Lyot substrate -- but so is every calibration
+    standard that was observed through them: ``PHOTMJSR`` for ``PUPIL=MASKRND`` (2.486 in
+    F444W, against ~0.4 for CLEAR imaging) is derived from stars observed in this very
+    optical train, so the MJy/sr in the file already put an off-mask point source at its
+    true flux, and the ``EE`` here is a *fraction* of the Lyot-stop PSF, in which the
+    stop's own 0.18 cancels.  The occulter's ``T(rho)`` is the one thing the photom file
+    cannot hold (it varies across the field), and it comes in through the injection
+    model's ``throughput``.
+
+    A value of 0.561 was carried here for HIP 65426 until 2026-09-16, "anchored" on the
+    companion.  It was not an optics number: the calints loader's sigma-clip repair had
+    median-filtered the companion's core to 36% of its peak while the fakes, injected
+    after the repair, kept theirs; 0.561 = 1/1.9 was what hid that.  With the repair fixed
+    and 1.0 here, HIP 65426 b gives dF444W = 8.61 +/- 0.08 against Carter et al. (2023)'s
+    8.703 +/- 0.055 with nothing tuned (``scripts/check_hip65426_contrast.py``).  Use a
+    value other than 1.0 only for data whose flux calibration demonstrably excludes part
+    of the optical train, and say where the number comes from.
 
     Extra keywords go to :func:`unocculted_ee` (``fov_arcsec``, ``date``, ...).
     """
@@ -487,9 +491,10 @@ def star_flux_from_flux_density(g: Dict[str, Any], flux_density_jy: float, pixar
     log(f"  stpsf: S = {flux_density_jy:.4f} Jy -> {total:.4e} MJy/sr summed over the PSF; "
         f"EE({rap:.2f} px) = {ee:.4f}; optics transmission {t:.4f} "
         f"-> star_flux = {total * ee * t:.4e}")
-    if t == 1.0:
-        log("  stpsf: optics_transmission is 1.0 -- for NIRCam coronagraphy that omits the "
-            "COM substrate and is wrong by about a factor of two; see the docstring")
+    if t != 1.0:
+        log(f"  stpsf: optics_transmission {t:.3f} != 1 -- PHOTMJSR of a JWST coronagraphic "
+            "mode already carries its optics; only use this for data whose calibration "
+            "demonstrably excludes part of the train (see the docstring)")
     return total * ee * t
 
 

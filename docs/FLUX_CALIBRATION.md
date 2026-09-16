@@ -138,17 +138,23 @@ interchangeable and nothing checks them against each other.
 * **Template**: `stpsf_psf.library(grid)` — the STPSF off-axis PSF of MASK335R on a ladder
   of separations, as a `LibraryPSF` normalised to unit flux inside `ee_radius_px = 16.5 px`,
   with the grid's measured mask throughput as `throughput(ρ)`.
-* **Star flux**: `1.707e6` (MJy/sr summed inside that radius), from
-  `stpsf_psf.star_flux_from_flux_density(grid, 0.40259, PIXAR_SR, optics_transmission=0.561)`.
-* **Status**: **the chain is complete and closes on HIP 65426 b — but its last term is
-  anchored on that companion, so it is a calibration of this mode, not an independent
-  check.** Everything else in the chain is independent and is what the check exercises.
+* **Star flux**: `3.042e6` (MJy/sr summed inside that radius), from
+  `stpsf_psf.star_flux_from_flux_density(grid, 0.40259, PIXAR_SR)` — `optics_transmission`
+  at its default of 1.0.
+* **Status**: **the chain is complete, nothing in it is anchored on the companion, and it
+  closes on HIP 65426 b: ΔF444W = 8.615 ± 0.084 against Carter et al. (2023)'s 8.703 ± 0.055
+  (Table 3), −0.09 mag** (`scripts/check_hip65426_contrast.py`, 2026-09-16). An independent
+  route agrees: injecting the STPSF off-axis PSF at Carter's published flux density
+  (127 µJy) and recovering it through the same pyKLIP reduction as the companion gives
+  F_measured / F_Carter = 1.03 ± 0.08 (ADI+RDI, 20 modes, r ≤ 4 px) and 1.14 ± 0.10 (RDI,
+  18 modes) (`scripts/check_hip65426_fig3.py`).
 * **Runs D and H2 now build this model** (`run_demos.hip65426_objects`), and raise rather
   than fall back if STPSF is missing — the old silent `GaussianPSF(1.028 λ/D, star_flux=1.0)`
   is what put run D's axis in raw detector units (`flux_scale = 2.35e+05`, a companion
   "contrast" of 77; `run_H2`'s forced calibration contrast of `5.270e1` is the same tell —
   a contrast of 52.7 is not a contrast). **The runs themselves still have to be redone**:
-  both the flux scale and the star centre changed.
+  the input frames (see "the repair that ate the planet" below), the flux scale and the
+  star centre all changed since they were made.
 
 There is no off-axis stellar image anywhere in ERS 1386 — HIP 65426 and the reference star
 φ Cen are both behind MASK335R in every exposure — so the star has to be imported, and with
@@ -159,34 +165,43 @@ a coronagraph that import has four terms that are easy to confuse:
 | `S` | 0.40259 Jy | synthetic photometry: Planck(8600 K) through the F444W bandpass, normalised to 2MASS Ks = 6.771 | ±3%, of which 1.9% is Ks and <2% the system-response shape |
 | units | `S / (10⁶·PIXAR_SR)` = 4.372e6 | `BUNIT = MJy/sr`, `PIXAR_SR` from the SCI header | using `PIXAR_A2`, or forgetting the 10⁶ |
 | `EE` | 0.6960 at 16.5 px | `unocculted_ee` — the model PSF **unocculted through the Lyot stop** | using an *imaging* PSF (EE 0.928 — counts the Lyot stop twice), or a stamp-sized field (the EE is still climbing at 5″) |
-| `T_optics` | 0.561 | see below | leaving it at 1.0 — a factor of two |
+| `T_optics` | 1.0 | nothing left to supply — see below | putting the median-filter damage to the companion here and calling it optics (0.561, until 2026-09-16) |
 
 and one term that is deliberately **not** in `flux_unit` at all: the occulter's spatial
 transmission `T(ρ) = 0.778` at 0.826″, which multiplies it inside `inject_sources`. Folding
 it into the star flux, or applying it twice, is the classic coronagraphic error.
 
-* **The term nobody supplies.** STPSF's `calc_psf` defaults to `normalize='first'`, which
-  normalises at the *entrance pupil* and then propagates "ignoring any reflective or
+* **Why there is no fourth term.** STPSF's `calc_psf` defaults to `normalize='first'`,
+  which normalises at the *entrance pupil* and then propagates "ignoring any reflective or
   transmissive losses from mirrors or filters … and calculates only the diffractive losses
   from slits and stops" (Perrin, `webbpsf#112`). That default is exactly what makes the
   grid's `transmission` a real measurement of the occulter — `normalize='last'` would
-  renormalise every slice and report `T ≈ 1` everywhere — but it also means the model
-  carries **only** the Lyot stop's diffractive loss. Measured from the model: 0.187 of the
-  entrance pupil, matching JDox's "each Lyot stop has a throughput of ~20%". The
-  *transmissive* losses — the COM sapphire substrate and its AR coating, which every
-  coronagraphic beam crosses and which the NIRCam filter curves explicitly exclude, plus the
-  BaF₂ Lyot substrate — are in neither the model nor the data: the NIRCam `photom`
-  reference file has no column for the occulting mask at all
-  ([spacetelescope/jwst#10309](https://github.com/spacetelescope/jwst/issues/10309)), so the
-  `PHOTMJSR` applied to NRC_CORON data cannot be mask-specific.
-* **How 0.561 was obtained, and what it is worth.** It is what puts HIP 65426 b at Carter et
-  al. (2023)'s ΔF444W = 8.693. JDox brackets it independently: "the combined loss of light
-  from the coronagraphic optics at distances > 1″ … is ~86–90%", i.e. a combined throughput
-  of 0.10–0.14, which after removing the model's own 0.187 leaves 0.53–0.75. 0.561 sits
-  inside that. It is a property of the mode, not of the target, so it transfers to other
-  F444W/MASK335R programmes — but until it is replaced by the tabulated COM transmission
-  (JDox "NIRCam Filters for Coronagraphy", or `webbpsf_ext`'s COM throughput) the HIP 65426 b
-  comparison is a calibration and not a test.
+  renormalise every slice and report `T ≈ 1` everywhere — and it means the model carries the
+  Lyot stop's diffractive loss (0.177 of the entrance pupil for MASKRND in F444W) and none of
+  the transmissive ones (COM sapphire substrate, BaF₂ Lyot substrate). But the data's
+  calibration is not missing them: `PHOTMJSR` for `PUPIL = MASKRND` (2.486 in F444W, against
+  ~0.4 for CLEAR imaging) is derived from standard stars observed through this very optical
+  train, so the MJy/sr in a calints file already put an off-mask point source at its true
+  flux density; and `EE` is a *fraction* of the Lyot-stop PSF, in which the stop's 0.177
+  cancels. The occulter's `T(ρ)` is the one thing a photom file cannot hold — it varies across
+  the field — and the injection model supplies it. The earlier argument that "the photom file
+  has no column for the occulting mask ([spacetelescope/jwst#10309](https://github.com/spacetelescope/jwst/issues/10309)),
+  so PHOTMJSR cannot carry the coronagraphic optics" confused the occulter (spatially
+  varying, not in photom) with the substrate (uniform, in it).
+* **What 0.561 really was.** Until 2026-09-16 `optics_transmission` was 0.561, "anchored" on
+  HIP 65426 b, and the JDox bracket for the coronagraphic losses ("~86–90% beyond 1″", i.e.
+  0.53–0.75 once the Lyot stop's diffractive loss is removed) made it look plausible. It was
+  not an optics number. `load_calints`' repair step was a 5×5 median filter plus a 7σ clip
+  against the frame-wide scatter of the residual — a scatter set by empty sky, which every
+  structured pixel of a coronagraphic PSF exceeds — and it rewrote ~4,600–5,500 pixels per
+  320×320 frame, of which only 1,564 were DQ-flagged. The rest was the PSF, star and
+  companion alike, median-filtered. Fakes are injected *after* the repair, so they kept their
+  cores while the companion's had been flattened to 36% of its peak (7.1 vs 19.5 MJy/sr):
+  the companion looked 1.9× too faint relative to the fakes, and 0.561 = 1/1.9. The repair
+  now fills DQ pixels from their neighbours (spaceKLIP's method, `fill_dq_neighbours`) and
+  touches nothing else; `repair='sigma'` keeps the old behaviour reachable, with a warning, for
+  reproducing old runs. With that fixed and `T_optics = 1`, the check passes with nothing
+  tuned — which is what makes it a check.
 * **The star is not at CRPIX.** `CRPIX` is the aperture reference point — identical in every
   file of the programme, dithers included — and misses HIP 65426 by **1.48 px**, which puts
   the companion 1.5 px inside its own separation and mismatches its KLIP throughput against
@@ -197,41 +212,30 @@ it into the star flux, or applying it twice, is the classic coronagraphic error.
   gives `δ = R(−PA_k)·(measured − expected)` independently. The two rolls agree to 0.71 px.
   `load_calints(..., star_center=)` takes the answer; the proper source is spaceKLIP's own
   star-centring step (`STARCENX/Y`).
-* **The "double peak" is real, and it is roll 2's RDI eating the companion.** The companion
-  looked like two peaks of *equal* height, and an earlier pass called the second one "a
-  speckle at 89% of the companion's peak" — which cannot be right after two rolls are
-  averaged (it would be ~45%). Traced frame by frame
-  (`scripts/check_hip65426_psf_shape.py` and the forensics recorded in its log): in the
-  **raw** halo-subtracted frames the companion is one source of the same brightness in both
-  rolls (6.3 / 6.2), the four frames land within a pixel of each other after derotation, and
-  the stellar speckles move by exactly +10° from roll 1 to roll 2 — so derotation,
-  registration and the star centre are all fine. After **RDI** with the 18 φ Cen frames,
-  roll 1 has one peak (the companion, 4.86); roll 2 has two of nearly equal height — the
-  companion at **2.21** and a residual at 1.03″, PA 166° at **1.86**. The blob is absent from
-  roll 1 and from the raw frames of either roll. So the asymmetry is not a brighter blob in
-  roll 2, it is a *fainter companion*: pure RDI recovers 79% of it in roll 1 and 35% in roll 2.
+* **The "double peak" was the repair, not the sky.** Carter et al. (2023)'s Fig. 3 shows what
+  HIP 65426 b looks like in F444W: a three-bar "hamburger" core with six faint lobes around it
+  — "expected features that are related to the Lyot stop design, and … not indicative of
+  discrete astrophysical sources". Our images showed one smeared blob at a third of the peak,
+  with a second blob beside it that differed between rolls, and two successive investigations
+  explained it as a speckle (first "a speckle at 89% of the companion's peak", then "roll 2's
+  RDI over-subtracting the companion against a quasi-static speckle at 0.78″", with a 79% /
+  35% per-roll recovery). Both were describing the median filter: it flattened the core in
+  every frame, and because the set of rewritten pixels depends on each frame's own values it
+  left a residual that was different in the two rolls and did not subtract. With the DQ-only
+  fill, `scripts/check_hip65426_fig3.py` reproduces Carter's Fig. 3 panels directly (ADI 2 /
+  RDI 18 / ADI+RDI 20 modes, one annulus, one subsection): the hamburger core, the six lobes,
+  the ring of negative lobes, and the same companion in both rolls (RDI peak 19.5 MJy/sr from
+  all four frames, 19.3 from roll 2 alone). `scripts/check_hip65426_psf_shape.py` and the
+  figures `hip65426_b_stamps.png` / `hip65426_reference_feature.png` are retired; their
+  "findings" were artefacts of the input.
 
-  The cause is geometry, not code. In detector coordinates there is a bright, extended
-  quasi-static speckle (FWHM 6.5 px, present at the same amplitude in all 18 reference frames,
-  77–84) at r ≈ 0.78″. The 10° roll moves the companion by 2.3 px between rolls: in roll 1 it
-  sits 2 px off that speckle and separates cleanly; in roll 2 it sits on the speckle's
-  shoulder, where the φ Cen version of the speckle is brighter than HIP 65426's (9.88 vs 7.83
-  after scaling), so the subtraction takes half the companion with it and leaves the
-  speckle's mismatched wing beside it. **Classical RDI shows the same thing** (+7.71 left at
-  roll 1's companion pixel, +3.26 at roll 2's), and it is k-independent (blob 2.1–2.2 at k =
-  2, 10, 17) because the mismatch is not in the span of the library. Reference alignment is
-  0.01–0.02 px in both rolls and roll 2's overall PSF match is *better* than roll 1's (rms
-  0.64 vs 0.73), so it is local to that one position.
-
-  Consequences: the combined image averages a 79% and a 35% recovery, so the companion's
-  matched-filter S/N is roll-limited, and any injection-recovery throughput measured at random
-  position angles will not describe the companion's own position in roll 2. This is exactly
-  the case a forward-modelled matched filter exists for — KLIP-FM predicts the over-subtraction
-  — and it is why two rolls are taken at all. It belongs in the paper as a sentence on
-  roll-dependent throughput, not as a bug. Two smaller things fell out of the same
-  investigation: `load_calints(repair=False)` breaks the pyKLIP RDI path ("Dataset not found in
-  PSF Library" — NaNs reach the library prep), and the outlier repair rewrites ~4,500–5,200
-  pixels per frame, which deserves a look of its own.
+  What survives of that work: the raw-frame checks (the four frames land within a pixel of
+  each other after derotation; the stellar speckles move by exactly the 10.08° roll), the
+  star-centre solve, and the observation that `ADI+RDI` costs the companion about a third of
+  its flux relative to pure RDI at this 10° roll (recovered 0.5 vs 0.8 of the injected flux
+  inside 4 px) — which is a property of the observing geometry and the reason Carter et al.
+  quote forward-modelled photometry. `load_calints(repair=False)` still breaks the pyKLIP RDI
+  path (NaNs reach the library prep); `repair='dq'` is the default and the right choice.
 * A Gaussian is also the wrong *shape*. Measured on these data: an STPSF off-axis template
   needs contrast 320 to reach the peak a Gaussian reaches at 40 — 8× — because the real PSF
   puts most of its light in wings and spikes.
@@ -367,17 +371,19 @@ common star flux cancels out of every S/N comparison the optimizer makes.
 
 Closed on 2026-09-15: β Pic's absolute photometry (`star_flux = 3.3268e6` from VIP's
 published `starphot`, checked against β Pic b at 1.1 σ) and HIP 65426's, which had none at
-all. What remains:
+all. Closed on 2026-09-16: the last assumed number in the HIP 65426 table — the 0.561
+"optics transmission" anchored on the companion was the calints loader's median filter
+damaging the companion and not the fakes; with the repair fixed and no anchor, HIP 65426 b
+measures ΔF444W = 8.615 ± 0.084 against Carter et al.'s 8.703 ± 0.055. What remains:
 
-1. **`optics_transmission = 0.561` is anchored on HIP 65426 b.** Replacing it with the
-   tabulated COM substrate transmission (JDox "NIRCam Filters for Coronagraphy", or
-   `webbpsf_ext`'s COM throughput) at 4.44 µm would turn the HIP 65426 b comparison from a
-   calibration into a real check, and would let the same number serve other NIRCam
-   coronagraphic programmes without re-anchoring. It is the last assumed number in the table.
+1. ~~`optics_transmission = 0.561` is anchored on HIP 65426 b.~~ Closed — see above and
+   "What 0.561 really was" in the HIP 65426 section.
 2. **Runs C, D, G2 and H2 have to be redone.** D and H2 now build the model above, but the
-   archived results predate both the flux scale and the 1.48 px star-centre correction. C and
-   G2 predate the HD 95086 star-flux fix (see that section). G2 additionally has to be redone
-   because of the rank collapse below.
+   archived results predate the flux scale, the 1.48 px star-centre correction **and the
+   repair fix** — every HIP 65426 frame those runs saw had been median-filtered, so nothing
+   measured on them (H2's forced contrast `2.324e-04` included) carries over. C and G2 predate
+   the HD 95086 star-flux fix (see that section). G2 additionally has to be redone because of
+   the rank collapse below.
 2b. **Every archived run needs the rank-collapse audit.** A shared KL basis built from the
    frames it subtracts spans them exactly, so `k_klip >= n_binned_frames` returned float64
    round-off (image rms ~1e-15) and an S/N that is an O(1) random draw. `klip_annular` now

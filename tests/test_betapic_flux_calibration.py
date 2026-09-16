@@ -184,15 +184,22 @@ def test_the_float32_warning_names_the_flux_unit_as_the_likely_cause():
 def test_the_jwst_photometry_entry_separates_the_four_terms():
     """The HIP 65426 flux unit is S x (1/1e6 PIXAR_SR) x EE x T_optics, and the occulter's
     T(rho) is deliberately NOT among them -- it multiplies flux_unit inside inject_sources.
-    This pins the entry and the fact that the last term is an anchor, not a measurement."""
+
+    T_optics is 1.0 and NOT anchored on anything: PHOTMJSR for PUPIL=MASKRND is derived
+    from standards observed through the coronagraphic optics, so the calints already put an
+    off-mask source at its true flux.  The 0.561 that sat here until 2026-09-16 was 1/1.9
+    -- the factor by which the loader's sigma-clip repair had median-filtered the companion
+    (and not the fakes, injected after it).  If a value other than 1.0 ever comes back, it
+    needs a source that is not the companion, or the Carter comparison stops being a check."""
     p = datasets.PHOTOMETRY["hip65426_f444w"]
     assert p["filter"] == "F444W"
     assert p["flux_density_jy"] == pytest.approx(0.4026, rel=1e-3)
-    assert 0.5 <= p["optics_transmission"] <= 0.75, \
-        "outside JDox's 0.53-0.75 bracket for the transmissive coronagraphic losses"
-    assert "anchor" in p["optics_transmission_source"].lower(), \
-        "if this stops being an anchor the check script's disclaimer has to change too"
-    assert "Carter" in p["check"]
+    assert p["optics_transmission"] == 1.0, \
+        "0.561 was the sigma-clip repair's damage to the companion, not an optics number"
+    assert "anchor" not in p["optics_transmission_source"].lower(), \
+        "the Carter comparison is an independent check only while nothing is anchored on b"
+    assert "PHOTMJSR" in p["optics_transmission_source"]
+    assert "Carter" in p["check"] and "8.703" in p["check"]
 
 
 def test_star_flux_from_flux_density_applies_each_term_once():
@@ -315,6 +322,8 @@ def test_the_jwst_call_sites_use_the_model_and_the_measured_centre():
         h2 = src[src.index('_bench_hi("H2"'):]
         assert "5.270e1" not in h2.split("\n")[0], \
             "H2's forced contrast must be on the absolute axis, not raw detector units"
-        assert "2.324e-04" in h2.split("\n")[0]
+        assert "2.324e-04" not in h2.split("\n")[0], \
+            "2.324e-04 was measured on median-filtered frames (the pre-2026-09-16 repair)"
+        assert "1.740e-04" in h2.split("\n")[0]
         # the hand-rolled loader is gone in favour of the shared one
         assert "load_calints" in src

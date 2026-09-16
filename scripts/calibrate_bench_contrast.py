@@ -50,6 +50,11 @@ BENCH = {
                n_sources=3, n_min_ref=5,  search_angles=True,  target="betapic"),
     "G2": dict(groups=1, k_max=30, max_drop=None, defaults={"k_klip": 10}, edges=[20, 36, 66],
                n_sources=3, n_min_ref=10, search_angles=True,  target="hd95086"),
+    # H2's space carries pyKLIP's `mode` (ADI / RDI / ADI+RDI) as run_H2 adds it; the default
+    # configuration the calibration measures at is mode=RDI, k=10, the fakes' KLIP throughput
+    # included.  Needs the STPSF grid (cached is enough) -- see run_demos.hip65426_objects.
+    "H2": dict(groups=1, k_max=18, max_drop=None, defaults={"k_klip": 10}, edges=[6, 20],
+               n_sources=4, n_min_ref=4,  search_angles=False, target="hip65426"),
 }
 
 
@@ -77,11 +82,16 @@ def main(argv=None):
         known = [R.BP]
         fpa, pmask = R.bp_disk(red)
         px = inst["pxscale"]
-    else:
+    elif B["target"] == "hd95086":
         red = R.hd95086_objects()
         known = [R.HD]
         fpa, pmask = (), None
         px = datasets.INSTRUMENT["sphere_hd95086"]["pxscale"]
+    else:
+        red = R.hip65426_objects()
+        known = [R.HIP]
+        fpa, pmask = (), None
+        px = next(iter(red.reducers.values())).pxscale
     r0 = next(iter(red.reducers.values()))
     log(f"\n{a.bench}: {B['target']} groups={B['groups']}  star_flux/flux_unit = "
         f"{getattr(r0.model, 'flux_unit', float('nan')):.4e}  edges {edges}")
@@ -93,6 +103,10 @@ def main(argv=None):
 
     kw = {} if B["max_drop"] is None else {"max_drop": B["max_drop"]}
     space = generic.make_space(red, k_klip_max=B["k_max"], search_angles=B["search_angles"], **kw)
+    if B["target"] == "hip65426":                       # as run_H2 adds it
+        from klip_tpe import Param
+        space.add(Param("mode", 0, 2, "categorical", choices=["ADI", "RDI", "ADI+RDI"], default="RDI",
+                        doc="pyKLIP PSF-subtraction mode"))
     space.project = generic.make_guard(red, k_max=B["k_max"], n_min_ref=B["n_min_ref"])
     obj, samp = generic.default_config(red, known=known, forbidden_pa=fpa, pixel_mask=pmask)
     cfg = RunConfig(ann_edges=edges, n_iter=1, n_init=1, seed=a.seed, search_mode="tpe",

@@ -116,18 +116,25 @@ PHOTOMETRY = {
         "flux_density_jy": 0.40259, "flux_density_err_frac": 0.03, "filter": "F444W",
         "ref": "synthetic photometry: Planck(Teff=8600 K, Carter et al. 2023) through the "
                "STPSF F444W bandpass, normalised to 2MASS Ks = 6.771",
-        # The transmissive (non-diffractive) throughput of the coronagraphic optics -- COM
-        # sapphire substrate + AR coating, BaF2 Lyot substrate.  STPSF's normalize='first'
-        # models only DIFFRACTIVE losses (the Lyot stop's 0.187), the NIRCam filter curves
-        # exclude the COM, and the pipeline's photom reference file has no occulting-mask
-        # column (spacetelescope/jwst#10309) so PHOTMJSR cannot carry it either.  ANCHORED,
-        # not derived: 0.561 is what puts HIP 65426 b at Carter et al.'s dF444W = 8.693, so
-        # that comparison is a calibration and NOT an independent check of this mode.  It
-        # sits inside JDox's bracket -- "combined loss ... ~86-90%" beyond 1" is a combined
-        # throughput of 0.10-0.14, i.e. 0.53-0.75 once the Lyot stop's 0.187 is taken out.
-        # Replace it with the tabulated COM transmission (JDox "NIRCam Filters for
-        # Coronagraphy", or webbpsf_ext's COM throughput) to make the check independent.
-        "optics_transmission": 0.561, "optics_transmission_source": "anchored on HIP 65426 b",
+        # Transmissive losses of the coronagraphic optics that the model PSF does not carry
+        # (COM sapphire substrate, BaF2 Lyot substrate): NONE are left to supply.  PHOTMJSR
+        # for PUPIL=MASKRND (2.486, against ~0.4 for CLEAR imaging in the same filter) is
+        # derived from standards observed through this very optical train, so the MJy/sr
+        # in a calints file already puts an off-mask point source at its true flux; the
+        # only things a model adds are the PSF's shape and the occulter's T(rho).  The
+        # "no occulting-mask column in the photom file" argument confused the occulter
+        # (spatially varying, not in photom) with the substrate (uniform, in it).
+        #
+        # HISTORY: 0.561, "anchored on HIP 65426 b", until 2026-09-16.  It was not an
+        # optics number at all: the loader's sigma-clip repair had median-filtered the
+        # companion's core down to 36% of its peak while the fakes were injected AFTER the
+        # repair and kept theirs, so the companion looked 1.9x too faint relative to them,
+        # and 0.561 = 1/1.9 was what hid it.  With the repair fixed and 1.0 here, HIP 65426 b
+        # measures dF444W = 8.6 against Carter et al. (2023)'s 8.703 +/- 0.055 with nothing
+        # tuned -- an INDEPENDENT check of the whole axis (S, PIXAR_SR, EE, T(rho), centring,
+        # recovery).  See scripts/check_hip65426_contrast.py and docs/FLUX_CALIBRATION.md.
+        "optics_transmission": 1.0,
+        "optics_transmission_source": "PHOTMJSR (PUPIL=MASKRND) already carries the coronagraphic optics",
         # GEOMETRY rather than photometry, but it lives here because it is the same
         # per-programme calibration block and the flux check depends on it.  CRPIX
         # (149.2, 173.6) is the APERTURE reference point -- identical in every file of the
@@ -137,7 +144,7 @@ PHOTOMETRY = {
         # in each roll (see scripts/check_hip65426_contrast.py); the two rolls agree to
         # 0.71 px.  Replace with spaceKLIP's STARCENX/Y when those products exist.
         "star_center": (150.54, 172.98), "star_center_source": "solved from both rolls",
-        "check": "HIP 65426 b -> dF444W vs 8.693 (Carter et al. 2023, ApJL 951, L20)",
+        "check": "HIP 65426 b -> dF444W vs 8.703 +/- 0.055 (Carter et al. 2023, ApJL 951, L20, Table 3)",
     },
 }
 

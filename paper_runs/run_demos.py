@@ -486,11 +486,14 @@ def run_H2():
     ADI/RDI/ADI+RDI mode, and a field with no disk at all.  Angles are not searched (run D
     does not search them either: with two frames per roll there is nothing to select on).
     """
-    # 2.324e-04 is the calibrated contrast for this annulus on the ABSOLUTE axis (the
-    # default configuration detects the fakes at S/N 4.6).  It replaces a forced 5.270e1 --
-    # a "contrast" of 52.7, which is what the old flux_unit = 1.0 raw-detector-units axis
-    # produced and the clearest possible sign that the axis was not a contrast at all.
-    _bench_hi("H2", 1, ("tpe", "random"), 18, None, {"k_klip": 10}, 2.324e-04, [6, 20], "H2_bench_jwst",
+    # 1.740e-04 is the calibrated contrast for this annulus on the ABSOLUTE axis, measured by
+    # scripts/calibrate_bench_contrast.py H2 on 2026-09-16 (median S/N 4.1 at the default
+    # configuration) -- on DQ-filled frames with optics_transmission = 1.  It replaces
+    # 2.324e-04, which was measured on frames the old sigma-clip repair had median-filtered
+    # (the whole PSF, companion included) against a 0.561 "optics transmission" that only
+    # existed to hide that; and before it a forced 5.270e1 -- a "contrast" of 52.7, the
+    # raw-detector-units axis of flux_unit = 1.0.  See docs/FLUX_CALIBRATION.md.
+    _bench_hi("H2", 1, ("tpe", "random"), 18, None, {"k_klip": 10}, 1.740e-04, [6, 20], "H2_bench_jwst",
               make_red=hip65426_objects, known=[HIP], n_sources=4, search_angles=False, n_min_ref=4,
               add_params=[lambda: Param("mode", 0, 2, "categorical", choices=["ADI", "RDI", "ADI+RDI"],
                                         default="RDI", doc="pyKLIP PSF-subtraction mode")])

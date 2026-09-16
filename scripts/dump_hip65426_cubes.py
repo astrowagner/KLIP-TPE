@@ -4,12 +4,12 @@
     TQDM_DISABLE=1 python scripts/dump_hip65426_cubes.py [-o out.fits] [--params k=v ...]
 
 There is normally no such file: `spaceklip.load_calints` reads the stage-2 `calints`,
-repairs, registers and crops them in memory and hands the arrays straight to the reducer.
+fills the DQ pixels, registers and crops them in memory and hands the arrays to the reducer.
 This writes that state to disk so it can be inspected, at the two levels that matter:
 
   SCI_ROLL1 / SCI_ROLL2 / REF   the REGISTERED, CROPPED cubes as the reducer receives them
                                 -- `Dataset.cube` and `Dataset.ref_cube`.  This is the
-                                alignment product: repaired, cross-correlation registered on
+                                alignment product: DQ pixels filled, cross-correlation registered on
                                 the median science frame, and cropped about the star (NOT
                                 about CRPIX -- see datasets.PHOTOMETRY).
   KLIP_ROLL1 / KLIP_ROLL2       what `pyklip.parallelized.klip_parallelized` is actually
@@ -189,10 +189,10 @@ def _write_frames(out, info, hdr, fits):
     """One file per role, with every individual frame at each processing stage.
 
     RAW is the archive frame with the DQ DO_NOT_USE pixels set to NaN and nothing else;
-    ALIGNED is after the outlier repair and the cross-correlation shift, still full frame;
+    ALIGNED is after the DQ fill and the cross-correlation shift, still full frame;
     CROP is the individual frame the reducer actually receives.  The FRAMES table says
     which archive file and integration each slice came from, the shift that was applied to
-    it, and how many pixels the DQ and the repair touched.
+    it, and how many pixels the DQ flagged and the fill rewrote (equal, by construction).
     """
     base = out[:-5] if out.endswith(".fits") else out
     rows = info["frames"]

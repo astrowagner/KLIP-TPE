@@ -32,9 +32,66 @@ from ..injection import GaussianPSF, InjectionModel, TemplatePSF
 from ..reducer import Dataset, PartitionedReducer
 from .pyklip import PyKLIPReducer, dataset_from_pyklip
 
-__all__ = ["load_spaceklip", "load_calints", "make_reducer", "read_jwst_files", "JWST_DIAM"]
+__all__ = ["load_spaceklip", "load_calints", "make_reducer", "read_jwst_files", "JWST_DIAM",
+           "fill_dq_neighbours", "sigma_clip_repair"]
 
 JWST_DIAM = 6.5   # m (effective; lambda/D for the angsep unit and the default FWHM)
+
+
+def fill_dq_neighbours(im: np.ndarray, maxit: int = 20) -> Tuple[np.ndarray, int]:
+    """Replace every non-finite pixel by the median of its finite orthogonal and diagonal
+    neighbours -- spaceKLIP's bad-pixel treatment (Carter et al. 2023, section 2.2) -- and
+    nothing else.  Clusters are closed from their rims inward, ``maxit`` passes at most.
+    Returns ``(filled image, number of pixels filled)``.
+
+    This touches ONLY the pixels the pipeline flagged (DQ ``DO_NOT_USE``, which
+    :func:`load_calints` has already turned into NaN).  A coronagraphic PSF is *supposed*
+    to be full of sharp, isolated blobs -- the six-lobed Lyot-stop pattern and, for a
+    companion behind MASK335R, a "hamburger" core of three bars -- and any filter that
+    decides from the pixel values what is an outlier will eat those.  See
+    :func:`sigma_clip_repair` for the one that did.
+    """
+    out = np.array(im, float)
+    n0 = int((~np.isfinite(out)).sum())
+    ny, nx = out.shape
+    for _ in range(int(maxit)):
+        bad = ~np.isfinite(out)
+        if not bad.any():
+            break
+        p = np.pad(out, 1, constant_values=np.nan)
+        st = np.stack([p[1 + dy:1 + dy + ny, 1 + dx:1 + dx + nx]
+                       for dy in (-1, 0, 1) for dx in (-1, 0, 1) if (dy, dx) != (0, 0)])
+        with np.errstate(all="ignore"):
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                med = np.nanmedian(st, axis=0)
+        out[bad] = med[bad]
+    return out, n0
+
+
+def sigma_clip_repair(im: np.ndarray, size: int = 5, nsig: float = 7.0) -> Tuple[np.ndarray, int, int]:
+    """The pre-1.1 ``load_calints`` repair: a ``size x size`` median filter, and every pixel
+    that differs from it by more than ``nsig`` times the *frame-wide* robust scatter of that
+    difference is replaced by the median.  Returns ``(image, n_rewritten, n_of_those_flagged)``.
+
+    **Do not use this on coronagraphic frames.**  The scatter is set by the empty sky, so
+    the threshold is a few counts, and every pixel of the structured PSF -- star and
+    companion alike -- exceeds it: on ERS 1386 F444W it rewrites ~4,500-5,500 pixels per
+    320x320 frame, of which only ~1,560 are DQ-flagged; the rest is the PSF, median-filtered.
+    That blurred HIP 65426 b from Carter et al. (2023)'s three-bar core into one blob at
+    36% of its peak, and because the set of rewritten pixels differs from frame to frame it
+    left a roll-dependent residual that was mistaken for a speckle.  Kept only so that runs
+    made before the fix can be reproduced (``repair='sigma'``).
+    """
+    from scipy import ndimage
+    im = np.asarray(im, float)
+    bad = ~np.isfinite(im)
+    med = ndimage.median_filter(np.where(bad, np.nanmedian(im), im), size=int(size))
+    r = np.abs(im - med)
+    s = 1.4826 * np.nanmedian(np.abs(r - np.nanmedian(r)))
+    hit = bad | (r > float(nsig) * s)
+    return np.where(hit, med, im), int(hit.sum()), int(bad.sum())
 
 
 def _files_from_database(database, key: str) -> Tuple[List[str], List[str], Dict[str, Any]]:
@@ -183,15 +240,22 @@ def load_spaceklip(database=None, key: Optional[str] = None, sci_files: Optional
 
 
 def load_calints(files: Sequence[str], science_target: Optional[str] = None, half_px: int = 55,
-                 align: bool = True, repair: bool = True,
+                 align: bool = True, repair: Union[bool, str] = True,
                  star_center: Optional[Tuple[float, float]] = None, keep_frames: bool = False,
                  log: Callable[[str], None] = print) -> Tuple[Dict[str, Dataset], Dict[str, Any]]:
     """Stage-2 ``*_calints.fits`` straight into ``{roll: Dataset}``, without spaceKLIP.
 
     One partition per unique roll angle, the other target's exposures as the RDI library.
-    ``PA = ROLL_REF - V3I_YANG * VPARITY``; DQ-flagged and deviant pixels are replaced by a
-    median filter; frames are registered to the median science frame by cross-correlation
-    and cropped about ``CRPIX`` to ``2*half_px + 1`` pixels.
+    ``PA = ROLL_REF - V3I_YANG * VPARITY``; DQ ``DO_NOT_USE`` pixels are replaced by the
+    median of their neighbours (:func:`fill_dq_neighbours`, spaceKLIP's treatment) and
+    **nothing else is touched**; frames are registered to the median science frame by
+    cross-correlation and cropped about the star to ``2*half_px + 1`` pixels.
+
+    ``repair``: ``True`` / ``'dq'`` (default) fills the flagged pixels only; ``False`` leaves
+    them NaN (the built-in reducers cope, pyKLIP's RDI library does not); ``'sigma'`` is the
+    pre-1.1 behaviour, :func:`sigma_clip_repair`, which median-filters the whole PSF and is
+    kept only to reproduce old runs -- it is logged loudly when used.  The per-frame
+    ``n_repaired`` in ``info['frames']`` says how many pixels were rewritten either way.
 
     That crop is **odd on purpose**.  :func:`klip_tpe.metrics.star_center` puts the star at
     ``((nx-1)/2, (ny-1)/2)``, so an even crop with the star on an integer pixel leaves it
@@ -283,17 +347,24 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
                                  "yoffset": float(ph.get("YOFFSET", 0.0))})
         return np.array(ims), np.array(pas), prov
 
-    def _repair(cube, prov=None, size=5, nsig=7.0):
+    rmode = {True: "dq", False: "none", None: "none"}.get(repair, repair)
+    rmode = str(rmode).lower()
+    if rmode not in ("dq", "sigma", "none"):
+        raise ValueError(f"repair must be True/'dq', False or 'sigma', got {repair!r}")
+
+    unflagged_rewritten: List[int] = []
+
+    def _repair(cube, prov=None):
         out = np.array(cube, float)
         for i, im in enumerate(out):
-            bad = ~np.isfinite(im)
-            med = ndimage.median_filter(np.where(bad, np.nanmedian(im), im), size=size)
-            r = np.abs(im - med)
-            s = 1.4826 * np.nanmedian(np.abs(r - np.nanmedian(r)))
-            hit = bad | (r > nsig * s)
-            out[i] = np.where(hit, med, im)
+            if rmode == "sigma":
+                out[i], n_hit, n_bad = sigma_clip_repair(im)
+                unflagged_rewritten.append(n_hit - n_bad)
+            else:
+                out[i], n_hit = fill_dq_neighbours(im)
             if prov is not None:
-                prov[i]["n_repaired"] = int(hit.sum())
+                prov[i]["n_repaired"] = int(n_hit)
+                prov[i]["repair"] = rmode
         return out
 
     def _xs(im, ref_, search=6):
@@ -316,9 +387,13 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
         R, prov_r = np.zeros((0,) + S.shape[1:]), []
     raw_s = np.array(S, np.float32) if keep_frames else None
     raw_r = np.array(R, np.float32) if keep_frames else None
-    if repair:
+    if rmode != "none":
         S = _repair(S, prov_s)
         R = _repair(R, prov_r) if R.size else R
+    if unflagged_rewritten:
+        log(f"  calints: repair='sigma' rewrote a median of {int(np.median(unflagged_rewritten))} UNFLAGGED "
+            f"pixels per frame on top of the DQ ones -- that is the PSF being median-filtered, star and "
+            f"companion alike (HIP 65426 b peaks at 7 instead of 19.5 MJy/sr).  Use repair='dq'.")
     if align:
         a0 = np.median(S, axis=0)
 
@@ -364,7 +439,7 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
         dsets[f"roll{k + 1}"] = Dataset(Sx[m], pas[m], name=f"roll{k + 1}",
                                         ref_cube=Rx if Rx.size else None, meta=dict(meta))
     info = dict(meta, n_sci=int(S.shape[0]), n_ref=int(R.shape[0]), crop_px=n,
-                frames=prov_s + prov_r,
+                frames=prov_s + prov_r, repair=rmode,
                 filter=str(fits.getheader(sci[0]).get("FILTER", "")),
                 star_center=(float(cx), float(cy)),
                 crpix=(float(hdr["CRPIX1"] - 1), float(hdr["CRPIX2"] - 1)),
@@ -373,9 +448,11 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
         info.update(raw_sci=raw_s, raw_ref=raw_r,
                     aligned_sci=np.asarray(S, np.float32), aligned_ref=np.asarray(R, np.float32),
                     crop_sci=Sx, crop_ref=Rx)
+    nrep = [p.get("n_repaired", 0) for p in prov_s + prov_r]
     log(f"  calints: {len(sci)} science / {len(ref)} reference files -> {S.shape[0]} + "
         f"{R.shape[0]} frames, {n}x{n} px at {px*1e3:.2f} mas, rolls {info['rolls']}, "
-        f"{info['bunit']!r}")
+        f"{info['bunit']!r}; repair={rmode!r}"
+        + (f" ({int(np.median(nrep))} px/frame)" if nrep and rmode != "none" else ""))
     return dsets, info
 
 

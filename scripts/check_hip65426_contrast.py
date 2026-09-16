@@ -26,7 +26,11 @@ companion's separation and measure it in `inj - clean`, and solve for the contra
 fixed point so the fake and the companion are equally bright and their KLIP throughputs are
 therefore identical.
 
-Expected: dF444W ~ 8.7 against Carter et al. (2023)'s 8.693 for the same data.
+Expected: dF444W ~ 8.6 against Carter et al. (2023)'s 8.703 +/- 0.055 (Table 3) for the same
+data, with NOTHING anchored on the companion: optics_transmission is 1.0 because PHOTMJSR
+for PUPIL=MASKRND already carries the coronagraphic optics.  Until 2026-09-16 the loader's
+sigma-clip repair median-filtered the companion (and not the fakes, which are injected after
+it), and a 0.561 'optics transmission' hid the 1.9x that cost; see docs/FLUX_CALIBRATION.md.
 """
 from __future__ import annotations
 
@@ -44,11 +48,11 @@ from klip_tpe.instruments import generic
 from klip_tpe.metrics import Source, mawet_peak_snr, radprof
 from klip_tpe.reducer import ReductionRequest
 
-PUB_DMAG = 8.693                     # Carter et al. 2023, Table 3, F444W
+PUB_DMAG = 8.703                     # Carter et al. 2023, Table 3, F444W (+/- 0.015 stat, 0.055 total)
 PUB_REF = "Carter et al. 2023, ApJL 951, L20 -- the same programme (ERS 1386)"
 PUB = 10.0 ** (-0.4 * PUB_DMAG)
 
-RHO, PA = 0.826, 150.2               # as the paper runs use it (Carter: 819 +/- 6 mas, 149.8 +/- 0.4)
+RHO, PA = 0.826, 150.2               # as the paper runs use it (Carter Table 3, F444W: 820 +/- 6 mas, 149.9 +/- 0.4)
 INRAD, OUTRAD = 6, 30
 TEST_PA = [30.0, 90.0, 240.0, 300.0]      # clear of the companion
 TOL_MAG = 0.45
