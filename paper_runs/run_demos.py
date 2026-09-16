@@ -227,25 +227,33 @@ def hip65426_objects():
     from klip_tpe.backends import spaceklip as sk
     D = os.path.expanduser("~/.klip_tpe/data/jwst_hip65426")
     files = sorted(glob.glob(os.path.join(D, "jw*calints.fits")))
-    if not stpsf_psf.have_stpsf():
-        raise RuntimeError(
-            "runs D and H2 need STPSF and its data files (pip install stpsf; export "
-            "STPSF_PATH=<stpsf-data>).  There is no fallback on purpose: without the off-axis "
-            "grid this path used GaussianPSF(star_flux=1.0) and called raw detector units a "
-            "contrast, which is how run D shipped an axis 2.3e5 off.  See "
-            "docs/FLUX_CALIBRATION.md.")
     phot = datasets.PHOTOMETRY["hip65426_f444w"]
     dsets, info = sk.load_calints(files, science_target="HIP65426",
                                   star_center=tuple(phot["star_center"]), log=log)
     # Off-axis PSF of the actual mask on a ladder of separations, with the mask throughput
     # measured from the same grid.  A Gaussian is the wrong shape AND the wrong scale here:
     # it needs contrast 40 to reach the peak the real PSF reaches at 320.
-    grid = stpsf_psf.offaxis_grid("NIRCam", info["filter"] or "F444W", image_mask="MASK335R",
-                                 seps_as=np.arange(0.2, 3.01, 0.2), stamp_px=41, nlambda=3,
-                                 log=log)
-    sf = stpsf_psf.star_flux_from_flux_density(
-        grid, phot["flux_density_jy"], info["pixar_sr"], bunit=info["bunit"] or "MJy/sr",
-        optics_transmission=phot["optics_transmission"], log=log)
+    #
+    # STPSF itself is only needed when the grid is NOT cached -- offaxis_grid and
+    # unocculted_ee both check the cache before importing it -- so a machine whose Python is
+    # too old for STPSF (it wants >= 3.10) can still run this from a copied cache.  Point
+    # KLIP_TPE_DATA at the directory that holds `stpsf_cache/`.  There is deliberately no
+    # fallback: without the grid this path used GaussianPSF(star_flux=1.0) and called raw
+    # detector units a contrast, which is how run D shipped an axis 2.3e5 off.
+    try:
+        grid = stpsf_psf.offaxis_grid("NIRCam", info["filter"] or "F444W", image_mask="MASK335R",
+                                      seps_as=np.arange(0.2, 3.01, 0.2), stamp_px=41, nlambda=3,
+                                      log=log)
+        sf = stpsf_psf.star_flux_from_flux_density(
+            grid, phot["flux_density_jy"], info["pixar_sr"], bunit=info["bunit"] or "MJy/sr",
+            optics_transmission=phot["optics_transmission"], log=log)
+    except ImportError as exc:
+        raise RuntimeError(
+            f"runs D and H2 need the STPSF off-axis grid and it is not in the cache "
+            f"({stpsf_psf.cache_dir()}).  Either install STPSF and its data files "
+            f"(pip install stpsf, Python >= 3.10, STPSF_PATH=<stpsf-data>) or copy a cached "
+            f"grid there and set KLIP_TPE_DATA.  See docs/FLUX_CALIBRATION.md.  ({exc})"
+        ) from exc
     model = stpsf_psf.library(grid, star_flux=sf)
     red = sk.make_reducer(dsets, injection_model=model, mode="RDI", max_workers=workers(), log=log)
     return red
@@ -428,7 +436,11 @@ def run_H2():
     ADI/RDI/ADI+RDI mode, and a field with no disk at all.  Angles are not searched (run D
     does not search them either: with two frames per roll there is nothing to select on).
     """
-    _bench_hi("H2", 1, ("tpe", "random"), 18, None, {"k_klip": 10}, 5.270e1, [6, 20], "H2_bench_jwst",
+    # 2.324e-04 is the calibrated contrast for this annulus on the ABSOLUTE axis (the
+    # default configuration detects the fakes at S/N 4.6).  It replaces a forced 5.270e1 --
+    # a "contrast" of 52.7, which is what the old flux_unit = 1.0 raw-detector-units axis
+    # produced and the clearest possible sign that the axis was not a contrast at all.
+    _bench_hi("H2", 1, ("tpe", "random"), 18, None, {"k_klip": 10}, 2.324e-04, [6, 20], "H2_bench_jwst",
               make_red=hip65426_objects, known=[HIP], n_sources=4, search_angles=False, n_min_ref=4,
               add_params=[lambda: Param("mode", 0, 2, "categorical", choices=["ADI", "RDI", "ADI+RDI"],
                                         default="RDI", doc="pyKLIP PSF-subtraction mode")])

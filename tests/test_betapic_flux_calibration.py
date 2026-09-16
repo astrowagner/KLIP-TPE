@@ -257,6 +257,12 @@ def test_the_jwst_call_sites_use_the_model_and_the_measured_centre():
     if pr:
         src = open(pr).read()
         assert "star_flux_from_flux_density" in src
-        assert "have_stpsf()" in src, "runs D/H2 must refuse rather than fall back silently"
+        assert "raise RuntimeError" in src and "GaussianPSF" in src, \
+            "runs D/H2 must refuse rather than fall back silently"
+        # the *argument*, not the comment that explains where 52.7 came from
+        h2 = src[src.index('_bench_hi("H2"'):]
+        assert "5.270e1" not in h2.split("\n")[0], \
+            "H2's forced contrast must be on the absolute axis, not raw detector units"
+        assert "2.324e-04" in h2.split("\n")[0]
         # the hand-rolled loader is gone in favour of the shared one
         assert "load_calints" in src
