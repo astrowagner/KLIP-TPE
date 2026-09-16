@@ -4,6 +4,9 @@ import os
 
 import numpy as np
 import pytest
+
+# end-to-end on synthetic data (~20 s on two cores); `-m \"not slow\"` skips it
+pytestmark = pytest.mark.slow
 from astropy.io import fits
 
 from klip_tpe import (CalibrationConfig, MawetPeakSNR, Objective, Param, PositionSampler, ReductionRequest,

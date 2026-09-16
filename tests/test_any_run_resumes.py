@@ -14,6 +14,9 @@ import os
 import numpy as np
 import pytest
 
+# end-to-end on synthetic data (~35 s on two cores); `-m \"not slow\"` skips it
+pytestmark = pytest.mark.slow
+
 from klip_tpe import Runner
 from klip_tpe import registry
 from conftest import build_synthetic_run

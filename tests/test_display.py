@@ -4,6 +4,9 @@ import os
 import numpy as np
 import pytest
 
+# end-to-end on synthetic data (~5 min: a real run rendering every panel and PDF book on two cores); `-m \"not slow\"` skips it
+pytestmark = pytest.mark.slow
+
 from klip_tpe import CalibrationConfig, Runner, ValidationConfig
 from klip_tpe import plots
 from klip_tpe.display import (AnnulusData, LiveDisplay, StepImages, annulus_from_run, plot_annulus_books,

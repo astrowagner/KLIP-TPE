@@ -4,6 +4,9 @@ import os
 import numpy as np
 import pytest
 
+# end-to-end on synthetic data (~20 s on two cores); `-m \"not slow\"` skips it
+pytestmark = pytest.mark.slow
+
 matplotlib = pytest.importorskip("matplotlib")
 matplotlib.use("Agg")
 

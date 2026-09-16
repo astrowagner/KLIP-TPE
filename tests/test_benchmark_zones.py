@@ -78,7 +78,7 @@ def test_run_G2_searches_both_annuli_with_one_contrast_each():
     call = m.group(0)
     assert "[20, 36, 66]" in call, "G2 must search the zones HD 95086 b is centred in"
     assert "1.112e-5" in call and "4.773e-6" in call, \
-        "the contrasts MEASURED for these zones by scripts/calibrate_g2_annuli.py"
+        "the contrasts MEASURED for these zones by scripts/calibrate_bench_contrast.py"
     assert "5.899e-9" not in call, "the pre-ff20c4b contrast must not come back"
     assert "7.946e-6" not in call, \
         "C's contrast is a calibration of C's zone; these edges are not C's edges"
@@ -101,3 +101,43 @@ def test_forced_contrasts_are_per_annulus():
     assert rd._forced_list((7.946e-6, 6.201e-6), [20, 45, 75]) == [7.946e-6, 6.201e-6]
     with pytest.raises(ValueError):
         rd._forced_list((1.0, 2.0, 3.0), [20, 45, 75])
+
+
+def test_every_forced_bench_contrast_is_on_the_current_flux_axis():
+    """A forced contrast is a calibration on a flux axis.  ff20c4b moved the beta Pic axis
+    from the template's own sum (4.3491) to VIP's published 3.3268e6 and HD 95086's by
+    1347.0246; every forced constant that was not re-measured afterwards injects something
+    else entirely.  E2's 1.31e-3 and F2's 2.087e-3 were "run A's / run B's calibration" on
+    the OLD axis -- on the current one they put a 105-168 count peak into a cube whose
+    beta Pic b peaks at ~50, so the benchmark was on a source brighter than the planet.
+
+    These are the values scripts/calibrate_bench_contrast.py measures through
+    Runner.calibrate on the current axis.  If one changes, re-measure; do not convert."""
+    src = _run_demos()
+    want = {"E2": ("3.0e-4", "[8, 22]"), "F2": ("3.0e-4", "[8, 22]"),
+            "G2": ("(1.112e-5, 4.773e-6)", "[20, 36, 66]"), "H2": ("2.324e-04", "[6, 20]")}
+    for tag, (contrast, edges) in want.items():
+        m = re.search(r'_bench_hi\(\s*"%s".*?\)\n' % tag, src, re.S)
+        assert m, f"run_{tag}'s _bench_hi call not found"
+        call = m.group(0)
+        assert contrast in call, f"{tag}: forced contrast must be the measured {contrast}"
+        assert edges in call, f"{tag}: edges {edges}"
+    # the old constants may stay in the comments that explain what replaced them, but not
+    # as an ARGUMENT: check the call lines only (the same trap once caught H2's 5.270e1 in
+    # a comment and let the real one through)
+    calls = "\n".join(l for l in src.splitlines() if "_bench_hi(" in l or "forced=[" in l)
+    for stale in ("1.31e-3", "2.087e-3", "5.899e-9", "5.270e1", "7.946e-6, 6.201e-6"):
+        assert stale not in calls, f"pre-fix constant {stale} is still being passed"
+    # the superseded single-annulus E and F use the same measured value
+    assert src.count("forced=[3.0e-4]") == 2, "run_E and run_F carry the measured contrast too"
+    assert "forced=[1.31e-3]" not in src and "forced=[2.087e-3]" not in src
+
+
+def test_beta_pic_b_is_brighter_than_the_calibrated_injection():
+    """Sanity of the measured number: 3.0e-4 gives median S/N ~4.2-4.5 at the default config,
+    and beta Pic b (published 6.25e-4, Absil et al. 2013) is 2.1x brighter -- so the real
+    planet should stand out at roughly twice that, which is what the runs see."""
+    assert 6.25e-4 / 3.0e-4 == pytest.approx(2.08, abs=0.05)
+    # and the OLD constants, on the CURRENT axis, are brighter than the planet itself
+    for old in (1.31e-3, 2.087e-3):
+        assert old > 6.25e-4, "this is why the old E2/F2 would not have been a benchmark"

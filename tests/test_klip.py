@@ -259,9 +259,16 @@ def test_klip_annular_slow_path_and_k_scan(ds):
     assert fs.shape == (3,) + ds.cube.shape and finfo["fast"]
     f1, _ = klip_annular(ds.cube, ds.angles, KLIPParams(k_klip=1, inrad=5, outrad=20), LOD)
     np.testing.assert_allclose(fs[0], f1, atol=1e-5, equal_nan=True)
-    # k larger than the frame count is capped in the fast path (extra scan slices stay NaN)
-    big, _ = klip_annular(ds.cube[:4], ds.angles[:4], KLIPParams(k_klip=6, inrad=5, outrad=20, k_scan=True), LOD)
-    assert big.shape[0] == 6 and np.isnan(big[5]).all() and np.isfinite(big[0]).any()
+    # k larger than the frame count in the fast path: the scan still returns one image per
+    # REQUESTED k (so per-partition scans stack), the basis is capped at n-1 (a complete
+    # basis built from the frames it subtracts would leave only round-off), and the slices
+    # past the cap repeat the capped image rather than staying NaN.  See
+    # test_klip_rank_collapse.py for why; this used to assert the NaN slices.
+    big, binfo = klip_annular(ds.cube[:4], ds.angles[:4], KLIPParams(k_klip=6, inrad=5, outrad=20, k_scan=True), LOD)
+    assert big.shape[0] == 6 and np.isfinite(big[0]).any()
+    assert binfo["k_capped"] and binfo["k_effective"] == 3 and binfo["k_requested"] == 6
+    np.testing.assert_allclose(big[5], big[2], atol=1e-6, equal_nan=True)
+    assert not np.allclose(np.nan_to_num(big[0]), np.nan_to_num(big[2]))
 
 
 def test_klip_annular_starved_targets_drop_vs_safety_floor(ds):

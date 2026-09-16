@@ -288,7 +288,7 @@ def run_E():
         space.project = generic.make_guard(red, k_max=30)
         cfg = RunConfig(ann_edges=[8, 22], n_iter=300, n_init=60, seed=seed, search_mode=mode, n_sources=3,
                         validation=ValidationConfig(n_top=3, n_valid=5),
-                        calibration=CalibrationConfig(forced=[1.31e-3]),      # the contrast run A calibrated
+                        calibration=CalibrationConfig(forced=[3.0e-4]),    # measured on the current axis, see run_E2
                         defaults={"k_klip": 10}, fm_curve=False, save_fits=False, save_eval_images=False,
                         write_setup_files=False)
         return Runner(red, space, obj, samp, cfg, run_dir, log=lambda s: None)
@@ -313,7 +313,7 @@ def run_F():
         space.project = generic.make_guard(red, k_max=12, n_min_ref=5)
         cfg = RunConfig(ann_edges=[8, 22], n_iter=300, n_init=60, seed=seed, search_mode=mode,
                         n_sources=3, validation=ValidationConfig(n_top=3, n_valid=5),
-                        calibration=CalibrationConfig(forced=[2.087e-3]),   # run B's calibration
+                        calibration=CalibrationConfig(forced=[3.0e-4]),    # measured on the current axis, see run_F2
                         defaults={"k_klip": 5}, fm_curve=False, save_fits=False,
                         save_eval_images=False, write_setup_files=False)
         return Runner(red, space, obj, samp, cfg, run_dir, log=lambda s: None)
@@ -406,12 +406,22 @@ def run_B2():
 
 def run_F2():
     """Run F at 800 evaluations, 8 validated candidates x 15 trials, 8 seeds (38-D)."""
-    _bench_hi("F2", 4, ("tpe", "random"), 12, 2, {"k_klip": 5}, 2.087e-3, [8, 22], "F2_bench_highdim")
+    # 3.0e-4 is MEASURED on the current beta Pic flux axis (scripts/calibrate_bench_contrast.py
+    # F2: median S/N 4.47 at the default config, k_default 2).  It replaces 2.087e-3, "run B's
+    # calibration" -- a number from before ff20c4b moved star_flux from the template's own sum
+    # (4.3491) to VIP's published 3.3268e6.  On today's axis 2.087e-3 injects a 168-count peak,
+    # a source nearly three times brighter than beta Pic b, and every configuration detects it.
+    _bench_hi("F2", 4, ("tpe", "random"), 12, 2, {"k_klip": 5}, 3.0e-4, [8, 22], "F2_bench_highdim")
 
 
 def run_E2():
     """Run E at the same power (9-D), so the two dimensionalities stay comparable."""
-    _bench_hi("E2", 1, ("tpe", "random", "grid"), 30, 0, {"k_klip": 10}, 1.31e-3, [8, 22], "E2_bench")
+    # 3.0e-4, measured the same way (E2: median S/N 4.21, k_default 3); it replaces 1.31e-3,
+    # "the contrast run A calibrated" on the pre-ff20c4b axis, which today injects a 105-count
+    # peak -- about twice beta Pic b.  The archived E2_bench / F2_bench_highdim results were
+    # produced on the old axis: their optimisation is valid (every configuration saw the same
+    # injections) but their contrast labels are not comparable with anything measured now.
+    _bench_hi("E2", 1, ("tpe", "random", "grid"), 30, 0, {"k_klip": 10}, 3.0e-4, [8, 22], "E2_bench")
 
 
 # -- the same benchmark on the other two data sets --------------------------------------
@@ -459,7 +469,7 @@ def run_G2():
     #
     # Moving an edge invalidates C's calibrated contrasts, because the contrast that puts the
     # default configuration at median S/N 5 depends on the radii the sources are injected at.
-    # These two were MEASURED for these zones by scripts/calibrate_g2_annuli.py, which runs
+    # These two were MEASURED for these zones by scripts/calibrate_bench_contrast.py, which runs
     # Runner.calibrate -- the same code path the science runs use: 1.112e-5 -> S/N 5.70
     # (k_default 2) and 4.773e-6 -> S/N 5.21 (k_default 4), both inside the (4, 6) target.
     # That script's control reproduces run C on C's own zones, 6.58 and 6.95 against C's

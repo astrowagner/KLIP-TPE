@@ -38,3 +38,6 @@ include = ["klip_tpe*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "slow: end-to-end searches on synthetic data (tens of seconds to minutes each); `-m 'not slow'` for the quick suite",
+]

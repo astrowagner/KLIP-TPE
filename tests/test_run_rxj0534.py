@@ -13,6 +13,9 @@ import types
 
 import numpy as np
 import pytest
+
+# end-to-end on synthetic data (>15 min: 17 end-to-end driver runs on two cores); `-m \"not slow\"` skips it
+pytestmark = pytest.mark.slow
 from astropy.io import fits
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))

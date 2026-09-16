@@ -7,6 +7,9 @@ import os
 import numpy as np
 import pytest
 
+# end-to-end on synthetic data (~70 s on two cores); `-m \"not slow\"` skips it
+pytestmark = pytest.mark.slow
+
 from klip_tpe import (CalibrationConfig, InjectionDifferenceSNR, MawetPeakSNR, Objective, PartitionedReducer,
                       PositionSampler, RunConfig, Runner, ValidationConfig)
 from klip_tpe.display import LiveDisplay

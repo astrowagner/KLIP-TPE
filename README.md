@@ -16,12 +16,16 @@ optimizer it was ported from (the KLIP-TPE code used for the NEAR and LBTI campa
 ## Install
 
 ```
-pip install "klip-tpe[plots]"                 # numpy, scipy, astropy, matplotlib, pillow, imageio, threadpoolctl
-pip install "klip-tpe[all]"                   # + jupyter, pytest, pyklip, vip_hci
-# from a clone:
-git clone https://github.com/astrowagner/KLIP-TPE && cd KLIP-TPE && pip install -e ".[all]"
-python -m pytest -q                           # ~3 min, synthetic data only
+git clone https://github.com/astrowagner/KLIP-TPE && cd KLIP-TPE
+pip install -e ".[plots]"                     # numpy, scipy, astropy, matplotlib, pillow, imageio, threadpoolctl
+pip install -e ".[all]"                       # + jupyter, pytest, pyklip, vip_hci
+# without a clone:
+pip install "klip-tpe[plots] @ git+https://github.com/astrowagner/KLIP-TPE"
+python -m pytest -q -m "not slow"             # the unit tests, a few minutes; the full suite runs
+                                              # end-to-end searches and takes ~30 min
 ```
+
+klip-tpe is not on PyPI yet; install from GitHub as above.
 
 Python ≥ 3.9.  A GUI matplotlib backend (MacOSX, Qt, Tk) is needed for the live window;
 Jupyter for the inline display.
