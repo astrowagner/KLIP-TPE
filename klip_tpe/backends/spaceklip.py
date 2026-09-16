@@ -80,7 +80,7 @@ def sigma_clip_repair(im: np.ndarray, size: int = 5, nsig: float = 7.0) -> Tuple
     companion alike -- exceeds it: on ERS 1386 F444W it rewrites ~4,500-5,500 pixels per
     320x320 frame, of which only ~1,560 are DQ-flagged; the rest is the PSF, median-filtered.
     That blurred HIP 65426 b from Carter et al. (2023)'s three-bar core into one blob at
-    36% of its peak, and because the set of rewritten pixels differs from frame to frame it
+    39% of its peak, and because the set of rewritten pixels differs from frame to frame it
     left a roll-dependent residual that was mistaken for a speckle.  Kept only so that runs
     made before the fix can be reproduced (``repair='sigma'``).
     """
@@ -266,7 +266,7 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
     ``star_center`` (0-based detector pixels) overrides ``CRPIX`` as the point the crop is
     centred on.  **Use it.**  ``CRPIX`` is the aperture reference point, not a measured star
     position -- it is identical in every file of a programme, dithers included -- and on
-    ERS 1386 it misses HIP 65426 by about 1.4 px, which throws the companion 1.5 px inside
+    ERS 1386 it misses HIP 65426 by about 0.8 px, which throws the companion 0.8 px inside
     its own separation and mismatches its KLIP throughput against the fakes injected to
     calibrate it.  The right source is spaceKLIP's star-centring step (``STARCENX/Y``);
     failing that, ``scripts/check_hip65426_contrast.py`` shows how to solve for it from the
@@ -393,7 +393,7 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
     if unflagged_rewritten:
         log(f"  calints: repair='sigma' rewrote a median of {int(np.median(unflagged_rewritten))} UNFLAGGED "
             f"pixels per frame on top of the DQ ones -- that is the PSF being median-filtered, star and "
-            f"companion alike (HIP 65426 b peaks at 7 instead of 19.5 MJy/sr).  Use repair='dq'.")
+            f"companion alike (HIP 65426 b peaks at 7 instead of 19 MJy/sr).  Use repair='dq'.")
     if align:
         a0 = np.median(S, axis=0)
 

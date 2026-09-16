@@ -149,7 +149,7 @@ if HAVE_DATA:
 #
 # **`CRPIX` is where the mask is, not where the star is.**  It is the *aperture reference
 # point* — identical in every file of the programme, dithers included — and on these frames it
-# misses HIP 65426 by **1.48 px**, which throws the companion 1.5 px inside its own separation
+# misses HIP 65426 by **0.78 px**, which throws the companion 0.8 px inside its own separation
 # and, worse, mismatches its KLIP throughput against the fakes injected to calibrate it.
 #
 # Three ways to find the star, two of which fail here: there is no off-axis stellar image
@@ -158,7 +158,8 @@ if HAVE_DATA:
 # speckle-dominated — it moved the centre by 2 px between the two rolls of these very data.
 # What works is the companion itself: derotating about a centre that is wrong by `δ` puts it at
 # `u + R(PA_k)·δ` in roll `k`, so each roll gives `δ = R(−PA_k)·(measured − expected)`
-# independently, and the two agree to 0.71 px.  `datasets.PHOTOMETRY` carries the answer and
+# independently, and the two agree to 0.12 px (on the median-filtered frames of section 1's
+# warning they disagreed by 0.71 px — the smear had moved the peak).  `datasets.PHOTOMETRY` carries the answer and
 # `scripts/check_hip65426_contrast.py` is the solve; the proper source is spaceKLIP's own
 # star-centring step (`STARCENX/Y`), which section 6's path uses.
 #
@@ -211,7 +212,7 @@ if HAVE_DATA:
 # straight through to the engine, so the optimizer can decide how to use the reference
 # library — and with a 10° roll that decision matters: in `ADI+RDI` the other roll enters
 # the basis at ~1 FWHM of planet motion and self-subtracts the companion (two cells down:
-# S/N 14 → 2 at k = 10 in this annulus; in the whole-image 20-mode reduction of Carter et
+# S/N 12 → 1 at k = 10 in this annulus; in the whole-image 20-mode reduction of Carter et
 # al.'s Fig. 3 it keeps half the flux, against 0.8 for pure `RDI`), which is why Carter et
 # al. quote their photometry from forward-modelled fits rather than from the images.
 #
@@ -238,7 +239,7 @@ if HAVE_DATA:
 # imaging) was derived in this very optical train, so the MJy/sr in the file already put an
 # off-mask source at its true flux, and `EE` is a *fraction* of the Lyot-stop PSF in which the
 # stop's own 0.18 cancels.  The proof is the planet: with nothing tuned, HIP 65426 b measures
-# ΔF444W = 8.61 ± 0.08 against Carter et al. (2023)'s 8.703 ± 0.055
+# ΔF444W = 8.74 ± 0.09 against Carter et al. (2023)'s 8.703 ± 0.055
 # (`scripts/check_hip65426_contrast.py`).  Until 2026-09-16 a `T_optics` of 0.561 sat here,
 # "anchored" on the companion — it was compensating for the median-filter damage described in
 # section 1, not for any optics.  See `docs/FLUX_CALIBRATION.md`.

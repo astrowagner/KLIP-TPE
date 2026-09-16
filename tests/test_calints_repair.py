@@ -5,7 +5,7 @@ FRAME-WIDE robust scatter of the residual.  On a coronagraphic frame that scatte
 empty sky, so every structured pixel -- the star's six-lobed Lyot pattern and the companion's
 three-bar core alike -- exceeded it: ~4,600-5,500 pixels per 320x320 ERS 1386 frame were
 replaced by the local median, of which only 1,564 were DQ-flagged.  HIP 65426 b came out as
-one smeared blob at 36% of its peak instead of Carter et al. (2023)'s Fig. 3 core, a
+one smeared blob at 39% of its peak instead of Carter et al. (2023)'s Fig. 3 core, a
 different set of pixels was rewritten in every frame (so the residual looked roll-dependent
 and was mistaken for a speckle), and because fakes are injected AFTER the repair they kept
 their cores while the companion lost 1.9x -- which a 0.561 "optics transmission" then hid.
@@ -92,7 +92,7 @@ def test_the_old_sigma_clip_rewrote_the_psf_and_the_new_repair_does_not():
     assert old[box].max() < 0.85 * im[box].max(), "the old repair clipped the three-bar core"
     # ... and it is the brightest pixels it goes for: most of the 200 brightest inside 40 px
     # were rewritten (on the synthetic frame the medians are close to the peaks, so the
-    # numerical damage is mild here; on the real F444W frames it took the companion to 36%)
+    # numerical damage is mild here; on the real F444W frames it took the companion to 39%)
     top = np.argsort(im[r < 40].ravel())[-200:]
     assert changed_old[r < 40].ravel()[top].mean() > 0.4, "the sigma clip spares the PSF peaks?"
 
@@ -146,7 +146,7 @@ def test_on_the_real_frames_only_the_dq_pixels_are_rewritten():
     files = sorted(glob.glob(os.path.expanduser("~/.klip_tpe/data/jwst_hip65426/jw*calints.fits")))
     if len(files) < 3:
         pytest.skip("not enough calints files")
-    _, info = load_calints(files, science_target="HIP65426", star_center=(150.54, 172.98), log=lambda s: None)
+    _, info = load_calints(files, science_target="HIP65426", star_center=(149.65, 172.96), log=lambda s: None)
     for f in info["frames"]:
         assert f["n_repaired"] == f["n_dq"], f"{f['file']}[{f['integration']}]: rewrote {f['n_repaired']} != DQ {f['n_dq']}"
     assert 1500 < info["frames"][0]["n_dq"] < 1700, "the ERS 1386 F444W DQ count is ~1,564 per frame"

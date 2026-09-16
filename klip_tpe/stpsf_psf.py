@@ -467,9 +467,9 @@ def star_flux_from_flux_density(g: Dict[str, Any], flux_density_jy: float, pixar
 
     A value of 0.561 was carried here for HIP 65426 until 2026-09-16, "anchored" on the
     companion.  It was not an optics number: the calints loader's sigma-clip repair had
-    median-filtered the companion's core to 36% of its peak while the fakes, injected
+    median-filtered the companion's core to 39% of its peak while the fakes, injected
     after the repair, kept theirs; 0.561 = 1/1.9 was what hid that.  With the repair fixed
-    and 1.0 here, HIP 65426 b gives dF444W = 8.61 +/- 0.08 against Carter et al. (2023)'s
+    and 1.0 here, HIP 65426 b gives dF444W = 8.74 +/- 0.09 against Carter et al. (2023)'s
     8.703 +/- 0.055 with nothing tuned (``scripts/check_hip65426_contrast.py``).  Use a
     value other than 1.0 only for data whose flux calibration demonstrably excludes part
     of the optical train, and say where the number comes from.

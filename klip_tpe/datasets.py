@@ -127,10 +127,10 @@ PHOTOMETRY = {
         #
         # HISTORY: 0.561, "anchored on HIP 65426 b", until 2026-09-16.  It was not an
         # optics number at all: the loader's sigma-clip repair had median-filtered the
-        # companion's core down to 36% of its peak while the fakes were injected AFTER the
+        # companion's core down to 39% of its peak while the fakes were injected AFTER the
         # repair and kept theirs, so the companion looked 1.9x too faint relative to them,
         # and 0.561 = 1/1.9 was what hid it.  With the repair fixed and 1.0 here, HIP 65426 b
-        # measures dF444W = 8.6 against Carter et al. (2023)'s 8.703 +/- 0.055 with nothing
+        # measures dF444W = 8.74 against Carter et al. (2023)'s 8.703 +/- 0.055 with nothing
         # tuned -- an INDEPENDENT check of the whole axis (S, PIXAR_SR, EE, T(rho), centring,
         # recovery).  See scripts/check_hip65426_contrast.py and docs/FLUX_CALIBRATION.md.
         "optics_transmission": 1.0,
@@ -138,12 +138,15 @@ PHOTOMETRY = {
         # GEOMETRY rather than photometry, but it lives here because it is the same
         # per-programme calibration block and the flux check depends on it.  CRPIX
         # (149.2, 173.6) is the APERTURE reference point -- identical in every file of the
-        # programme, dithers included -- and misses the star by 1.48 px, which puts the
-        # companion 1.5 px inside its own separation and mismatches its KLIP throughput
-        # against the fakes injected to calibrate it.  Solved from the companion's position
-        # in each roll (see scripts/check_hip65426_contrast.py); the two rolls agree to
-        # 0.71 px.  Replace with spaceKLIP's STARCENX/Y when those products exist.
-        "star_center": (150.54, 172.98), "star_center_source": "solved from both rolls",
+        # programme, dithers included -- and misses the star by 0.78 px, which puts the
+        # companion inside its own separation and mismatches its KLIP throughput against
+        # the fakes injected to calibrate it.  Solved from the companion's position in each
+        # roll against Carter et al. (2023)'s F444W astrometry (820 mas, 149.9 deg; see
+        # scripts/check_hip65426_contrast.py); the two rolls agree to 0.12 px.  The value
+        # before 2026-09-16, (150.54, 172.98), was solved on median-filtered frames whose
+        # smeared companion peak had moved: the rolls disagreed by 0.71 px then.  Replace
+        # with spaceKLIP's STARCENX/Y when those products exist.
+        "star_center": (149.65, 172.96), "star_center_source": "solved from both rolls (agree to 0.12 px)",
         "check": "HIP 65426 b -> dF444W vs 8.703 +/- 0.055 (Carter et al. 2023, ApJL 951, L20, Table 3)",
     },
 }

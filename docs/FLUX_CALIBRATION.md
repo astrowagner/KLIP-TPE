@@ -142,11 +142,11 @@ interchangeable and nothing checks them against each other.
   `stpsf_psf.star_flux_from_flux_density(grid, 0.40259, PIXAR_SR)` — `optics_transmission`
   at its default of 1.0.
 * **Status**: **the chain is complete, nothing in it is anchored on the companion, and it
-  closes on HIP 65426 b: ΔF444W = 8.615 ± 0.084 against Carter et al. (2023)'s 8.703 ± 0.055
-  (Table 3), −0.09 mag** (`scripts/check_hip65426_contrast.py`, 2026-09-16). An independent
+  closes on HIP 65426 b: ΔF444W = 8.735 ± 0.094 against Carter et al. (2023)'s 8.703 ± 0.055
+  (Table 3), +0.03 mag** (`scripts/check_hip65426_contrast.py`, 2026-09-16). An independent
   route agrees: injecting the STPSF off-axis PSF at Carter's published flux density
   (127 µJy) and recovering it through the same pyKLIP reduction as the companion gives
-  F_measured / F_Carter = 1.03 ± 0.08 (ADI+RDI, 20 modes, r ≤ 4 px) and 1.14 ± 0.10 (RDI,
+  F_measured / F_Carter = 1.01 ± 0.10 (ADI+RDI, 20 modes, r ≤ 4 px) and 1.16 ± 0.13 (RDI,
   18 modes) (`scripts/check_hip65426_fig3.py`).
 * **Runs D and H2 now build this model** (`run_demos.hip65426_objects`), and raise rather
   than fall back if STPSF is missing — the old silent `GaussianPSF(1.028 λ/D, star_flux=1.0)`
@@ -196,20 +196,23 @@ it into the star flux, or applying it twice, is the classic coronagraphic error.
   structured pixel of a coronagraphic PSF exceeds — and it rewrote ~4,600–5,500 pixels per
   320×320 frame, of which only 1,564 were DQ-flagged. The rest was the PSF, star and
   companion alike, median-filtered. Fakes are injected *after* the repair, so they kept their
-  cores while the companion's had been flattened to 36% of its peak (7.1 vs 19.5 MJy/sr):
+  cores while the companion's had been flattened to 39% of its peak (7.3 vs 18.6 MJy/sr):
   the companion looked 1.9× too faint relative to the fakes, and 0.561 = 1/1.9. The repair
   now fills DQ pixels from their neighbours (spaceKLIP's method, `fill_dq_neighbours`) and
   touches nothing else; `repair='sigma'` keeps the old behaviour reachable, with a warning, for
   reproducing old runs. With that fixed and `T_optics = 1`, the check passes with nothing
   tuned — which is what makes it a check.
 * **The star is not at CRPIX.** `CRPIX` is the aperture reference point — identical in every
-  file of the programme, dithers included — and misses HIP 65426 by **1.48 px**, which puts
-  the companion 1.5 px inside its own separation and mismatches its KLIP throughput against
+  file of the programme, dithers included — and misses HIP 65426 by **0.78 px**, which puts
+  the companion 0.8 px inside its own separation and mismatches its KLIP throughput against
   the fakes injected to calibrate it. Two other routes failed: there is no off-axis stellar
   image to centroid, and a 180° symmetry fit to the coronagraphic residual moved the centre
   by 2 px between the two rolls of these very data. What works is the companion itself:
   derotation about a centre wrong by `δ` puts it at `u + R(PA_k)·δ` in roll `k`, so each roll
-  gives `δ = R(−PA_k)·(measured − expected)` independently. The two rolls agree to 0.71 px.
+  gives `δ = R(−PA_k)·(measured − expected)` independently, against Carter et al.'s F444W
+  astrometry (820 mas, 149.9°). The two rolls agree to 0.12 px: (149.65, 172.96). The value
+  used until 2026-09-16, (150.54, 172.98), was the same solve on median-filtered frames, whose
+  smeared companion peak had moved — the rolls disagreed by 0.71 px then, which was the tell.
   `load_calints(..., star_center=)` takes the answer; the proper source is spaceKLIP's own
   star-centring step (`STARCENX/Y`).
 * **The "double peak" was the repair, not the sky.** Carter et al. (2023)'s Fig. 3 shows what
@@ -224,8 +227,9 @@ it into the star flux, or applying it twice, is the classic coronagraphic error.
   left a residual that was different in the two rolls and did not subtract. With the DQ-only
   fill, `scripts/check_hip65426_fig3.py` reproduces Carter's Fig. 3 panels directly (ADI 2 /
   RDI 18 / ADI+RDI 20 modes, one annulus, one subsection): the hamburger core, the six lobes,
-  the ring of negative lobes, and the same companion in both rolls (RDI peak 19.5 MJy/sr from
-  all four frames, 19.3 from roll 2 alone). `scripts/check_hip65426_psf_shape.py` and the
+  the ring of negative lobes, and the same companion in both rolls (RDI peak 18.6 MJy/sr from
+  all four frames; 18.4 from roll 1 alone, 18.9 from roll 2 — against 9.2 / 5.3 through the old
+  repair). `scripts/check_hip65426_psf_shape.py` and the
   figures `hip65426_b_stamps.png` / `hip65426_reference_feature.png` are retired; their
   "findings" were artefacts of the input.
 
@@ -373,15 +377,17 @@ Closed on 2026-09-15: β Pic's absolute photometry (`star_flux = 3.3268e6` from 
 published `starphot`, checked against β Pic b at 1.1 σ) and HIP 65426's, which had none at
 all. Closed on 2026-09-16: the last assumed number in the HIP 65426 table — the 0.561
 "optics transmission" anchored on the companion was the calints loader's median filter
-damaging the companion and not the fakes; with the repair fixed and no anchor, HIP 65426 b
-measures ΔF444W = 8.615 ± 0.084 against Carter et al.'s 8.703 ± 0.055. What remains:
+damaging the companion and not the fakes; with the repair fixed, the star centre re-solved on
+clean frames and no anchor, HIP 65426 b measures ΔF444W = 8.735 ± 0.094 against Carter et al.'s
+8.703 ± 0.055. What remains:
 
 1. ~~`optics_transmission = 0.561` is anchored on HIP 65426 b.~~ Closed — see above and
    "What 0.561 really was" in the HIP 65426 section.
 2. **Runs C, D, G2 and H2 have to be redone.** D and H2 now build the model above, but the
-   archived results predate the flux scale, the 1.48 px star-centre correction **and the
+   archived results predate the flux scale, the star-centre correction **and the
    repair fix** — every HIP 65426 frame those runs saw had been median-filtered, so nothing
-   measured on them (H2's forced contrast `2.324e-04` included) carries over. C and G2 predate
+   measured on them (H2's forced contrast `2.324e-04` included) carries over; H2's is now
+   `1.637e-04`. C and G2 predate
    the HD 95086 star-flux fix (see that section). G2 additionally has to be redone because of
    the rank collapse below.
 2b. **Every archived run needs the rank-collapse audit.** A shared KL basis built from the

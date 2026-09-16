@@ -303,8 +303,8 @@ def test_the_jwst_call_sites_use_the_model_and_the_measured_centre():
     1.5 px inside its own separation."""
     p = datasets.PHOTOMETRY["hip65426_f444w"]
     cx, cy = p["star_center"]
-    assert np.hypot(cx - 149.2, cy - 173.6) == pytest.approx(1.48, abs=0.05), \
-        "the offset from CRPIX is the whole point of storing this"
+    assert np.hypot(cx - 149.2, cy - 173.6) == pytest.approx(0.78, abs=0.05), \
+        "the offset from CRPIX is the whole point of storing this (1.48 px was the solve on median-filtered frames)"
 
     tut = open(os.path.join(HERE, "tutorials", "03_jwst_nircam_hip65426.py")).read()
     assert "star_flux_from_flux_density" in tut and 'PHOT["star_center"]' in tut
@@ -324,6 +324,6 @@ def test_the_jwst_call_sites_use_the_model_and_the_measured_centre():
             "H2's forced contrast must be on the absolute axis, not raw detector units"
         assert "2.324e-04" not in h2.split("\n")[0], \
             "2.324e-04 was measured on median-filtered frames (the pre-2026-09-16 repair)"
-        assert "1.740e-04" in h2.split("\n")[0]
+        assert "1.637e-04" in h2.split("\n")[0]
         # the hand-rolled loader is gone in favour of the shared one
         assert "load_calints" in src

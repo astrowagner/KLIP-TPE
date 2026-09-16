@@ -5,8 +5,8 @@
   7σ clip against the *frame-wide* robust scatter of the residual — a scatter set by empty sky, which
   every structured pixel of a coronagraphic PSF exceeds.  On ERS 1386 F444W it rewrote ~4,600–5,500
   pixels per 320×320 frame, of which only 1,564 were DQ-flagged; the rest was the star's Lyot pattern
-  and HIP 65426 b, median-filtered.  The companion came out as one smeared blob at 36% of its peak
-  (7.1 vs 19.5 MJy/sr) instead of the three-bar "hamburger" core of Carter et al. (2023)'s Fig. 3, and
+  and HIP 65426 b, median-filtered.  The companion came out as one smeared blob at 39% of its peak
+  (7.3 vs 18.6 MJy/sr) instead of the three-bar "hamburger" core of Carter et al. (2023)'s Fig. 3, and
   because the set of rewritten pixels depends on each frame's own values, a residual that differed
   between the two rolls was left beside it and was diagnosed — twice — as a speckle.  The repair now
   fills DQ `DO_NOT_USE` pixels from their eight neighbours (spaceKLIP's treatment, new
@@ -14,7 +14,7 @@
   with a loud warning, only to reproduce old runs.  `scripts/check_hip65426_fig3.py` reproduces
   Carter's Fig. 3 panels from the MAST calints (one annulus, one subsection, ADI 2 / RDI 18 /
   ADI+RDI 20 modes) and injects the STPSF off-axis PSF at their published flux: F_measured/F_Carter
-  = 1.03 ± 0.08 (ADI+RDI) and 1.14 ± 0.10 (RDI).  `tests/test_calints_repair.py` pins it.
+  = 1.01 ± 0.10 (ADI+RDI) and 1.16 ± 0.13 (RDI).  `tests/test_calints_repair.py` pins it.
 - **`optics_transmission` for HIP 65426 is 1.0, not 0.561 — and the Carter comparison is now a check,
   not a calibration.** Fakes are injected *after* the repair, so they kept their cores while the
   companion's had been flattened: the companion looked 1.9× too faint relative to them, and the 0.561
@@ -22,15 +22,20 @@
   observed through the coronagraphic optics, so the calints already put an off-mask source at its
   true flux; the earlier "no occulting-mask column in photom" argument confused the occulter
   (spatially varying, not in photom) with the substrate (uniform, in it).  With the repair fixed and
-  nothing tuned, `scripts/check_hip65426_contrast.py` gives **ΔF444W = 8.615 ± 0.084 against Carter
+  nothing tuned, `scripts/check_hip65426_contrast.py` gives **ΔF444W = 8.735 ± 0.094 against Carter
   et al.'s 8.703 ± 0.055**.  `star_flux_from_flux_density` now warns when the value is *not* 1.
-- **H2's forced contrast re-measured**: `1.740e-04` (median S/N 4.1) on DQ-filled frames with
-  `T_optics = 1`, replacing `2.324e-04` (`scripts/calibrate_bench_contrast.py H2`, new entry).  **Every
+- **HIP 65426's star centre re-solved on clean frames**: (149.65, 172.96), 0.78 px from CRPIX, the two
+  rolls agreeing to 0.12 px — against Carter et al.'s F444W astrometry (820 mas, 149.9°).  The old
+  (150.54, 172.98) was the same solve on median-filtered frames, whose smeared companion peak had
+  moved; the rolls disagreed by 0.71 px then, which was the tell.
+- **H2's forced contrast re-measured**: `1.637e-04` (median S/N 4.05) on DQ-filled frames with
+  `T_optics = 1` and the new centre, replacing `2.324e-04` (`scripts/calibrate_bench_contrast.py H2`, new entry).  **Every
   archived HIP 65426 result — runs D, H2, the psf-shape investigation and its figures — was made on
   median-filtered frames and is void.**  `scripts/check_hip65426_psf_shape.py` is removed; its
   "roll-2 over-subtraction" finding was the repair.
 - Tutorial 03's `repair()` cell — the version students copy — now fills DQ pixels only, and the
-  text says why a value-based outlier filter must never be run on a coronagraphic PSF.
+  text says why a value-based outlier filter must never be run on a coronagraphic PSF.  Notebook
+  rebuilt from scratch (RDI k=10: planet S/N 12.0; ADI −0.2; ADI+RDI 1.2).
 
 ## Unreleased — 2026-09-15
 - **Flux calibration audited end to end** (`docs/FLUX_CALIBRATION.md`): what PSF is injected, what the

@@ -26,7 +26,7 @@ companion's separation and measure it in `inj - clean`, and solve for the contra
 fixed point so the fake and the companion are equally bright and their KLIP throughputs are
 therefore identical.
 
-Expected: dF444W ~ 8.6 against Carter et al. (2023)'s 8.703 +/- 0.055 (Table 3) for the same
+Expected: dF444W ~ 8.7 against Carter et al. (2023)'s 8.703 +/- 0.055 (Table 3) for the same
 data, with NOTHING anchored on the companion: optics_transmission is 1.0 because PHOTMJSR
 for PUPIL=MASKRND already carries the coronagraphic optics.  Until 2026-09-16 the loader's
 sigma-clip repair median-filtered the companion (and not the fakes, which are injected after
@@ -52,7 +52,7 @@ PUB_DMAG = 8.703                     # Carter et al. 2023, Table 3, F444W (+/- 0
 PUB_REF = "Carter et al. 2023, ApJL 951, L20 -- the same programme (ERS 1386)"
 PUB = 10.0 ** (-0.4 * PUB_DMAG)
 
-RHO, PA = 0.826, 150.2               # as the paper runs use it (Carter Table 3, F444W: 820 +/- 6 mas, 149.9 +/- 0.4)
+RHO, PA = 0.820, 149.9               # Carter et al. 2023 Table 3, F444W (820 +/- 6 mas, 149.9 +/- 0.4 deg)
 INRAD, OUTRAD = 6, 30
 TEST_PA = [30.0, 90.0, 240.0, 300.0]      # clear of the companion
 TOL_MAG = 0.45
@@ -148,7 +148,8 @@ def main(verbose=True):
     if stored is not None:
         d = np.hypot(center[0] - stored[0], center[1] - stored[1])
         log(f"   datasets.PHOTOMETRY has ({stored[0]:.2f}, {stored[1]:.2f}); this solve is "
-            f"{d:.2f} px away -- using the stored value so the runs are reproducible")
+            f"{d:.2f} px away -- using the stored value so the runs are reproducible"
+            + ("" if d < 0.3 else "  <-- MORE THAN 0.3 px: re-solve and update PHOTOMETRY"))
         center = tuple(stored)
     dsets, info = sk.load_calints(files, science_target="HIP65426", star_center=center,
                                   log=lambda s: None)
