@@ -189,6 +189,23 @@ it into the star flux, or applying it twice, is the classic coronagraphic error.
   gives `δ = R(−PA_k)·(measured − expected)` independently. The two rolls agree to 0.71 px.
   `load_calints(..., star_center=)` takes the answer; the proper source is spaceKLIP's own
   star-centring step (`STARCENX/Y`).
+* **The "double peak" is gone, and what is left is a speckle, not a bug.** The companion
+  looked like two blended peaks in earlier reductions — the signature of a derotation or
+  registration failure — so it was measured rather than eyeballed
+  (`scripts/check_hip65426_psf_shape.py`). Against the STPSF model's 1.08 axis ratio, the
+  recovered companion is 1.27 combined and 1.24 / 1.92 in rolls 1 / 2, with **one** peak
+  everywhere, and the centring fix improved the combined figure from 1.46 and moved the peak
+  from 1.52 px off the catalogued position to 0.63 px. The residual stretch is not
+  azimuthal — it lies 2.4–8.2° from the **detector** direction (which after derotation is the
+  roll's own position angle, not zero). Four things say it is a speckle blended into the
+  source and not an error in the pipeline: fakes injected at the same separation in the same
+  reduction come out round (1.06–1.21, including at PA 120/130/170/180, right in the
+  companion's neighbourhood); the frames are co-registered to 0.17 px; the shape does not
+  move with `k_klip` (1.92–1.94 for k = 2…18, so it is not self-subtraction); and roll 2
+  carries a residual at 1.03″, PA 166° at 89% of the companion's own peak that roll 1 does
+  not have. A known speckle rotates by +8.97° between the rolls against the expected +10.08°,
+  which is the geometry checking out. Combining the rolls dilutes the blend to 1.27 — which
+  is what roll diversity is for.
 * A Gaussian is also the wrong *shape*. Measured on these data: an STPSF off-axis template
   needs contrast 320 to reach the peak a Gaussian reaches at 40 — 8× — because the real PSF
   puts most of its light in wings and spikes.
