@@ -90,7 +90,16 @@ cfg0 = space.decode(space.default_vector())
 res = red.reduce(ReductionRequest(params=dict(cfg0.params, inrad=30, outrad=70, k_klip=10)))
 c = 120; rho = 0.62 / inst["pxscale"]; pa = np.deg2rad(145.0)
 xb, yb = c - rho * np.sin(pa), c + rho * np.cos(pa)
-plt.figure(figsize=(5, 5)); plt.imshow(res.image, origin="lower", cmap="inferno", vmin=-3, vmax=12)
+def stretch(img, lo=-1.0, hi=5.0):
+    """Per-image robust stretch, the one the live dashboard uses: [lo, hi] x the image's own
+    robust sigma.  A fixed count range cannot serve both the default reduction and the winner --
+    a more aggressive configuration leaves residuals several times smaller, so a stretch tuned
+    for the default renders the winner black."""
+    from klip_tpe.display import _robust_sigma
+    s_ = _robust_sigma(img)
+    return dict(vmin=lo * s_, vmax=hi * s_)
+
+plt.figure(figsize=(5, 5)); plt.imshow(res.image, origin="lower", cmap="inferno", **stretch(res.image))
 plt.plot(xb, yb, "o", mfc="none", mec="c", ms=20); plt.title("K1+K2 default KLIP (k=10), HD 95086 b circled"); plt.colorbar();
 
 # %% [markdown]
@@ -137,9 +146,9 @@ parts = fits.getdata(os.path.join(RUN_DIR, "annulus01", "best_clean_partitions.f
 parts = parts[None] if parts.ndim == 2 else parts                              # one kept partition -> (ny, nx)
 fig, ax = plt.subplots(1, 1 + parts.shape[0], figsize=(4.5 * (1 + parts.shape[0]), 4.4), squeeze=False)
 ax = ax.ravel()
-ax[0].imshow(best_clean, origin="lower", cmap="inferno", vmin=-3, vmax=12); ax[0].set_title("winner, combined")
+ax[0].imshow(best_clean, origin="lower", cmap="inferno", **stretch(best_clean)); ax[0].set_title("winner, combined")
 for a_, im, pid in zip(ax[1:], parts, r.partitions):
-    a_.imshow(im, origin="lower", cmap="inferno", vmin=-3, vmax=12); a_.set_title(f"winner, {pid}")
+    a_.imshow(im, origin="lower", cmap="inferno", **stretch(im)); a_.set_title(f"winner, {pid}")
 for a_ in ax:
     a_.plot(xb, yb, "o", mfc="none", mec="c", ms=20)
 plt.tight_layout()

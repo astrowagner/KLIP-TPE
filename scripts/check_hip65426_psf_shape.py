@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Is HIP 65426 b still double-peaked, and if it is elongated, along what?
+"""Why HIP 65426 b looks double-peaked in roll 2: pure RDI recovers 35% of it there.
 
     TQDM_DISABLE=1 python scripts/check_hip65426_psf_shape.py [--png out.png]
 
@@ -158,12 +158,15 @@ def main(argv=None):
         "coronagraph and KLIP self-subtraction; AZIMUTHAL is derotation or a wrong centre; "
         "along the DETECTOR direction is something fixed on the array -- a registration "
         "error, or a speckle residual blended into the source.")
-    log("On these data the answer is the last one and it is a speckle, not a bug: fakes "
-        "injected at the same separation in the same reduction come out round (1.06-1.21 "
-        "against the companion's 1.92 in roll2), the frames are co-registered to 0.17 px, "
-        "the shape does not move with k_klip (1.92-1.94 for k = 2..18), and roll2 carries a "
-        "residual at 1.03\", PA 166 at 89% of the companion's own peak that roll1 does not. "
-        "Combining the rolls dilutes it (1.27), which is what roll diversity is for.")
+    log("On these data the roll-2 stretch is RDI over-subtraction, not a brighter speckle: the "
+        "raw companion is the same in both rolls (6.3 / 6.2), but pure RDI with the phi Cen "
+        "library recovers 4.86 in roll 1 and only 2.21 in roll 2, beside a 1.86 residual at "
+        "1.03\", PA 166 that roll 1 does not have.  The 10 deg roll puts the companion on the "
+        "shoulder of a bright quasi-static speckle in roll 2 (FWHM 6.5 px, in all 18 reference "
+        "frames at 77-84), where phi Cen's copy of that speckle is brighter than HIP 65426's; "
+        "classical RDI shows the same (+7.71 vs +3.26 at the companion pixel) and it is "
+        "k-independent.  Reference alignment is 0.01-0.02 px in both rolls.  See "
+        "docs/FLUX_CALIBRATION.md, HIP 65426.")
 
     if a.png:
         import matplotlib

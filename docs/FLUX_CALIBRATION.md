@@ -197,23 +197,41 @@ it into the star flux, or applying it twice, is the classic coronagraphic error.
   gives `δ = R(−PA_k)·(measured − expected)` independently. The two rolls agree to 0.71 px.
   `load_calints(..., star_center=)` takes the answer; the proper source is spaceKLIP's own
   star-centring step (`STARCENX/Y`).
-* **The "double peak" is gone, and what is left is a speckle, not a bug.** The companion
-  looked like two blended peaks in earlier reductions — the signature of a derotation or
-  registration failure — so it was measured rather than eyeballed
-  (`scripts/check_hip65426_psf_shape.py`). Against the STPSF model's 1.08 axis ratio, the
-  recovered companion is 1.27 combined and 1.24 / 1.92 in rolls 1 / 2, with **one** peak
-  everywhere, and the centring fix improved the combined figure from 1.46 and moved the peak
-  from 1.52 px off the catalogued position to 0.63 px. The residual stretch is not
-  azimuthal — it lies 2.4–8.2° from the **detector** direction (which after derotation is the
-  roll's own position angle, not zero). Four things say it is a speckle blended into the
-  source and not an error in the pipeline: fakes injected at the same separation in the same
-  reduction come out round (1.06–1.21, including at PA 120/130/170/180, right in the
-  companion's neighbourhood); the frames are co-registered to 0.17 px; the shape does not
-  move with `k_klip` (1.92–1.94 for k = 2…18, so it is not self-subtraction); and roll 2
-  carries a residual at 1.03″, PA 166° at 89% of the companion's own peak that roll 1 does
-  not have. A known speckle rotates by +8.97° between the rolls against the expected +10.08°,
-  which is the geometry checking out. Combining the rolls dilutes the blend to 1.27 — which
-  is what roll diversity is for.
+* **The "double peak" is real, and it is roll 2's RDI eating the companion.** The companion
+  looked like two peaks of *equal* height, and an earlier pass called the second one "a
+  speckle at 89% of the companion's peak" — which cannot be right after two rolls are
+  averaged (it would be ~45%). Traced frame by frame
+  (`scripts/check_hip65426_psf_shape.py` and the forensics recorded in its log): in the
+  **raw** halo-subtracted frames the companion is one source of the same brightness in both
+  rolls (6.3 / 6.2), the four frames land within a pixel of each other after derotation, and
+  the stellar speckles move by exactly +10° from roll 1 to roll 2 — so derotation,
+  registration and the star centre are all fine. After **RDI** with the 18 φ Cen frames,
+  roll 1 has one peak (the companion, 4.86); roll 2 has two of nearly equal height — the
+  companion at **2.21** and a residual at 1.03″, PA 166° at **1.86**. The blob is absent from
+  roll 1 and from the raw frames of either roll. So the asymmetry is not a brighter blob in
+  roll 2, it is a *fainter companion*: pure RDI recovers 79% of it in roll 1 and 35% in roll 2.
+
+  The cause is geometry, not code. In detector coordinates there is a bright, extended
+  quasi-static speckle (FWHM 6.5 px, present at the same amplitude in all 18 reference frames,
+  77–84) at r ≈ 0.78″. The 10° roll moves the companion by 2.3 px between rolls: in roll 1 it
+  sits 2 px off that speckle and separates cleanly; in roll 2 it sits on the speckle's
+  shoulder, where the φ Cen version of the speckle is brighter than HIP 65426's (9.88 vs 7.83
+  after scaling), so the subtraction takes half the companion with it and leaves the
+  speckle's mismatched wing beside it. **Classical RDI shows the same thing** (+7.71 left at
+  roll 1's companion pixel, +3.26 at roll 2's), and it is k-independent (blob 2.1–2.2 at k =
+  2, 10, 17) because the mismatch is not in the span of the library. Reference alignment is
+  0.01–0.02 px in both rolls and roll 2's overall PSF match is *better* than roll 1's (rms
+  0.64 vs 0.73), so it is local to that one position.
+
+  Consequences: the combined image averages a 79% and a 35% recovery, so the companion's
+  matched-filter S/N is roll-limited, and any injection-recovery throughput measured at random
+  position angles will not describe the companion's own position in roll 2. This is exactly
+  the case a forward-modelled matched filter exists for — KLIP-FM predicts the over-subtraction
+  — and it is why two rolls are taken at all. It belongs in the paper as a sentence on
+  roll-dependent throughput, not as a bug. Two smaller things fell out of the same
+  investigation: `load_calints(repair=False)` breaks the pyKLIP RDI path ("Dataset not found in
+  PSF Library" — NaNs reach the library prep), and the outlier repair rewrites ~4,500–5,200
+  pixels per frame, which deserves a look of its own.
 * A Gaussian is also the wrong *shape*. Measured on these data: an STPSF off-axis template
   needs contrast 320 to reach the peak a Gaussian reaches at 40 — 8× — because the real PSF
   puts most of its light in wings and spikes.
