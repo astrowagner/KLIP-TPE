@@ -54,7 +54,14 @@
   matplotlib's Type 3 font embedding asking FreeType for cp1252's five undefined slots, whose own
   `catch_warnings()` guard a concurrent `catch_warnings()` on the reducer's thread wiped at random;
   the display and paper-figure rc now embed TrueType (`pdf.fonttype 42`), which never builds that
-  table and gives the PDFs real, selectable text.  Two regression tests in `test_display.py`.
+  table and gives the PDFs real, selectable text.  Two regression tests in `test_display.py` (the
+  Type 3 leak is a matplotlib ≤ 3.10 phenomenon — 3.11 builds the widths from the font's charmap and
+  no longer imports `warnings` in `backend_pdf` — so on 3.11+ the test only checks that the rc
+  selects Type 42 and the PDFs stay warning-free; the first version of the test broke the CI `slow`
+  job, which installs the newest matplotlib).  The same red CI job exposed two RX J0534 tests that
+  had been running the default band on 48-px frames — the one evaluation failed off the edge and the
+  run used to finish "quietly" with no winner; with the all-failed guard above it now stops, so both
+  tests use the 140-px tree like the rest of the default-band tests.
   pyKLIP's `klip_parallelized` draws a tqdm bar per call whatever `verbose` says — in a notebook with
   ipywidgets that is one widget per reduction (tutorial 03: 426 of them, 3.7 MB of widget state) —
   so the backend swaps pyklip's `trange`/`tqdm` for disabled ones (`KLIP_TPE_PYKLIP_PROGRESS=1`

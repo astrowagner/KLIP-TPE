@@ -319,10 +319,13 @@ def test_show_does_not_break_a_headless_run(tree, tmp_path):
 
 
 # ------------------------------------------------------- injecting on the companion's ring
-def test_the_annulus_is_built_around_the_companion(tree, tmp_path):
+def test_the_annulus_is_built_around_the_companion(big_tree, tmp_path):
     """The band must be symmetric about the companion, because 'fixed_pa' injects at the
     band's *mid-radius* -- so a band chosen any other way would put every test source at
-    the wrong separation while still looking correct in the log."""
+    the wrong separation while still looking correct in the log.
+
+    On the big tree: the default band reaches 54 px, which the 48-px frames cannot hold, and
+    a run whose only evaluation fails no longer finishes quietly -- the Runner stops it."""
     out = str(tmp_path / "o_ann")
     run_rxj0534.main(["--partitions", "4", "--default-only", "--out", out,
                       "--k-max", "4", "--max-drop", "0", "--crop", "0", "--workers", "1"])
@@ -333,8 +336,9 @@ def test_the_annulus_is_built_around_the_companion(tree, tmp_path):
     assert "note:" not in open(os.path.join(out, "run.log")).read()
 
 
-def test_injections_land_on_the_companions_ring_and_clear_of_it(tree, tmp_path, monkeypatch):
-    """End to end through the sampler the run actually uses."""
+def test_injections_land_on_the_companions_ring_and_clear_of_it(big_tree, tmp_path, monkeypatch):
+    """End to end through the sampler the run actually uses (big tree: the default band
+    must fit in the frame for the one evaluation to succeed)."""
     from klip_tpe.instruments import generic
     seen = {}
     real = generic.default_config

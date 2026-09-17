@@ -521,12 +521,17 @@ def test_walk_and_parhist_pages_do_not_warn_on_a_pinned_dimension():
 
 
 def test_display_pdfs_never_ask_freetype_for_u_fffe():
-    """Type 3 embedding builds a cp1252 width table whose five undefined slots decode to
-    U+FFFE, and matplotlib hides the resulting 'Glyph 65534 missing' warning behind a
-    warnings.catch_warnings() that a concurrent catch_warnings() on another thread (the
-    reducer's, every evaluation) wipes -- so it leaked out of live runs at random.  With
+    """Type 3 embedding (matplotlib <= 3.10) builds a cp1252 width table whose five undefined
+    slots decode to U+FFFE, and matplotlib hides the resulting 'Glyph 65534 missing' warning
+    behind a warnings.catch_warnings() that a concurrent catch_warnings() on another thread
+    (the reducer's, every evaluation) wipes -- so it leaked out of live runs at random.  With
     pdf.fonttype 42 the table is never built.  The race is simulated by taking matplotlib's
-    filter away: any Glyph warning then fails the test."""
+    filter away: any Glyph warning then fails the test.
+
+    matplotlib 3.11 builds the Type 3 widths from the font's own charmap, never asks FreeType
+    for U+FFFE, and no longer imports `warnings` in backend_pdf: there the leak cannot be
+    reproduced, and the test only checks that the display rc still selects Type 42 (the Macs
+    the runs happen on are on older matplotlibs) and that its PDFs are warning-free."""
     import io
     import warnings
     import matplotlib
@@ -542,12 +547,16 @@ def test_display_pdfs_never_ask_freetype_for_u_fffe():
 
         def __exit__(self, *a):
             return False
+    mpl_version = tuple(int(p) for p in matplotlib.__version__.split(".")[:2])
+    leak_exists = mpl_version < (3, 11)
     # backend_pdf's `warnings` name is swapped for a stand-in whose filter does nothing; the
-    # real module (and this test's own recording) is untouched
-    real = backend_pdf.warnings
-    backend_pdf.warnings = types.SimpleNamespace(catch_warnings=lambda *a, **k: _NoFilter(),
-                                                 filterwarnings=lambda *a, **k: None,
-                                                 simplefilter=lambda *a, **k: None, warn=warnings.warn)
+    # real module (and this test's own recording) is untouched.  3.11 has no such name (and no
+    # filter to take away) -- nothing to swap.
+    real = getattr(backend_pdf, "warnings", None)
+    if real is not None:
+        backend_pdf.warnings = types.SimpleNamespace(catch_warnings=lambda *a, **k: _NoFilter(),
+                                                     filterwarnings=lambda *a, **k: None,
+                                                     simplefilter=lambda *a, **k: None, warn=warnings.warn)
     try:
         def render(fonttype):
             with matplotlib.rc_context({"pdf.fonttype": fonttype}):
@@ -558,7 +567,9 @@ def test_display_pdfs_never_ask_freetype_for_u_fffe():
                     warnings.simplefilter("always")
                     fig.savefig(io.BytesIO(), format="pdf")
             return [str(x.message) for x in w if "Glyph" in str(x.message)]
-        assert render(3), "the fixture must reproduce the leak with Type 3 (else the test proves nothing)"
+        if leak_exists:
+            assert real is not None, "matplotlib < 3.11 hides the U+FFFE lookups behind backend_pdf.warnings"
+            assert render(3), "the fixture must reproduce the leak with Type 3 (else the test proves nothing)"
         assert render(42) == []
         with _rc():
             assert matplotlib.rcParams["pdf.fonttype"] == 42, "the display rc must select Type 42"
@@ -568,4 +579,5 @@ def test_display_pdfs_never_ask_freetype_for_u_fffe():
                 fig.savefig(io.BytesIO(), format="pdf")
             assert not [x for x in w if "Glyph" in str(x.message)]
     finally:
-        backend_pdf.warnings = real
+        if real is not None:
+            backend_pdf.warnings = real
