@@ -36,21 +36,26 @@ TARGETS = {"A": ("A_betapic", "betapic", R.BP), "A2": ("A2_betapic", "betapic", 
            "C": ("C_hd95086", "hd95086", R.HD), "D": ("D_hip65426", "hip65426", R.HIP)}
 N_DEFAULT_TRIALS = 5
 
-#: Published contrast of the companion in each data set's own band.  Every contrast axis is
-#: anchored on the companion itself: we measure the companion's S/N and the injected S/N at a
-#: known contrast in the same annulus, which gives the companion's contrast in the injection
-#: template's units, and rescale so that it equals the published value.  Ratios -- gains,
-#: curve shapes -- are untouched by this.
+#: Published contrast of the companion in each data set's own band -- the CHECK on each
+#: contrast axis.  Every axis is now calibrated in its own right (beta Pic from VIP's
+#: published starphot, HD 95086 from the flux frames, HIP 65426 from a stellar flux density
+#: through the MJy/sr calibration and the STPSF off-axis PSF; docs/FLUX_CALIBRATION.md), and
+#: the companion is what the calibration is tested against: ``flux_scale`` is the ratio of
+#: the companion's contrast as this axis measures it to the published value, and it should
+#: be 1.  It is recorded, not applied, unless ANCHOR_APPLY=1 is set -- rescaling a
+#: calibrated axis onto the companion would turn the check into a tautology.
 #:
-#: The anchor is also the DIAGNOSTIC on the star fluxes, and the recorded ``flux_scale``
-#: should be read that way: it is 1 when the star flux is right.  beta Pic now carries VIP's
-#: published starphot (3.3268e6; see docs/FLUX_CALIBRATION.md) and comes out at 1.21 -- the
-#: 0.2 mag residual against Absil -- where the halo fit it replaced gave 5.28 and 8.04 on the
-#: same data.  SPHERE's flux frames are already on the science scale (a second DIT/ND factor
-#: cost run C a 1071x axis).  HIP 65426 now has a chain too (STPSF off-axis grid + a stellar
-#: flux density through the MJy/sr calibration), but its last term -- the transmissive
-#: throughput of the coronagraphic optics -- is itself anchored on HIP 65426 b, so run D's
-#: flux_scale is 1 by construction rather than as a check.  docs/FLUX_CALIBRATION.md says so.
+#: HOW it is measured matters.  Until 2026-09-17 the companion's S/N in the clean image was
+#: compared with the S/N of three sources injected on its ring, and S/N is not a flux: an
+#: injected source's noise ring holds the OTHER sources' PSF structure -- for the NIRCam
+#: coronagraphic PSF, six lobes at 2-3 FWHM that the 1.5-FWHM exclusion does not remove --
+#: so the fakes' S/N was depressed relative to the lone companion's (run D: 7.27 against
+#: 11.68 at a contrast the peaks put 16% apart) and ``flux_scale`` came out 1.87 on an axis
+#: that scripts/check_hip65426_contrast.py puts at 0.97.  The comparison is now a ratio of
+#: matched-filter PEAKS -- each fake in (injected - clean), the companion in the
+#: radial-profile-subtracted clean image, same reduction, same separation, same kernel -- so
+#: the throughput cancels and only the flux ratio is left.  The earlier beta Pic (1.21) and
+#: HD 95086 values were made with the S/N method and have to be re-collected.
 ANCHOR = {
     "betapic":  (6.25e-4, "Absil et al. 2013, dL' = 8.01 +/- 0.16 (this very data set)"),
     "hd95086":  (1.32e-5, "Chauvin et al. 2018, dK1 = 12.2 +/- 0.1 (2015-02-03)"),
@@ -122,7 +127,13 @@ def collect(which, n_trials=N_DEFAULT_TRIALS):
            "setup": {k: setup.get(k) for k in ("n_iter", "n_init", "seed", "n_sources",
                                                "ann_edges", "search_mode") if k in setup},
            "annuli": []}
-    x0 = space.default_vector()
+    # the vector the run was SEEDED with: the space's per-parameter defaults with the run's
+    # RunConfig.defaults on top (D, C and the beta Pic runs all seed k_klip = 10 that way).
+    # Until 2026-09-17 this took space.default_vector() alone -- k = 6 for D -- so the
+    # "default" column measured a configuration the run never started from.
+    seeded = dict(setup.get("defaults") or {})
+    x0 = space.default_vector(seeded)
+    out["seeded_defaults"] = seeded
     tmp = os.path.join(OUT, f"_default_{which}")
     for a in fr["annuli"]:
         ia, rin, rout = a["annulus"], a["inrad"], a["outrad"]
@@ -176,7 +187,7 @@ def collect(which, n_trials=N_DEFAULT_TRIALS):
             f"{-1 if rec['planet_snr_optimized'] is None else rec['planet_snr_optimized']:.1f}")
         out["annuli"].append(rec)
 
-    anchor(out, red, space, planet)
+    anchor(out, red, space, planet, x0=x0)
     st = os.path.join(run, "klip_stitched.fits")
     if os.path.exists(st):
         out["stitched_planet_snr"] = planet_snr(np.asarray(fits.getdata(st), float), red, planet)
@@ -215,15 +226,21 @@ def read_curves(run):
     return {"curves": blocks}
 
 
-def anchor(out, red=None, space=None, planet=None):
-    """Put the contrast axis on the companion's published scale (see ANCHOR).
+def anchor(out, red=None, space=None, planet=None, x0=None):
+    """Check the contrast axis against the companion's published contrast (see ANCHOR), and
+    rescale onto it only when ANCHOR_APPLY=1.
 
-    The companion's contrast in template units is measured against injections *at its own
-    separation* -- three sources on the same ring, 90/180/270 deg away -- reduced with the
-    same (default) configuration, so the throughput of the comparison matches the
-    companion's exactly and only the flux ratio is left."""
+    Three sources are injected at the companion's own separation, 90/180/270 deg away, at
+    the annulus' calibrated contrast, and reduced with the same default configuration.  The
+    companion's contrast in this axis' units is ``c x peak_companion / median(peak_fake)``,
+    with each fake's matched-filter peak read in (injected - clean) and the companion's in
+    the radial-profile-subtracted clean image: same reduction, same separation, same kernel,
+    so the KLIP throughput cancels.  The S/N values are recorded alongside for the record;
+    they are NOT used for the scale (see the note above ANCHOR)."""
+    from klip_tpe.metrics import mawet_peak_snr, radprof
     pub, ref = ANCHOR.get(out["target"], (None, None))
     out["anchor_reference"] = ref
+    out["flux_scale_applied"] = 1.0
     if pub is None or red is None:
         return
     rho, pa = planet
@@ -232,26 +249,44 @@ def anchor(out, red=None, space=None, planet=None):
         out["flux_scale"] = None
         return
     c = float(a["contrast"])
-    p0 = dict(space.decode(space.default_vector()).params,
-              inrad=a["inrad_px"], outrad=a["outrad_px"])
+    x0 = space.default_vector() if x0 is None else x0
+    p0 = dict(space.decode(x0).params, inrad=a["inrad_px"], outrad=a["outrad_px"])
+    clean = red.reduce(ReductionRequest(params=p0)).image
     srcs = [Source(rho, (pa + d) % 360.0, c) for d in (90.0, 180.0, 270.0)]
     img = red.reduce(ReductionRequest(params=p0, injections=srcs)).image
-    m = MawetPeakSNR(pxscale=red.pxscale, fwhm=red.fwhm, kernel_fn=red.matched_filter_kernel,
-                     known=[(rho, pa)])
-    sn = m.per_source(img, None, [s.rho for s in srcs], [s.theta for s in srcs])
-    sn = float(np.nanmedian(sn))
-    if not np.isfinite(sn) or sn <= 0:
+    ker = red.matched_filter_kernel(rho)
+    ac = red.angle_convention if hasattr(red, "angle_convention") else "pa"
+    _, dc = mawet_peak_snr(radprof(clean), [rho], [pa], red.pxscale, red.fwhm, kernel=ker,
+                           return_details=True, angle_convention=ac)
+    sn_f, df = mawet_peak_snr(radprof(img - clean), [s.rho for s in srcs], [s.theta for s in srcs],
+                              red.pxscale, red.fwhm, kernel=ker, known=[(rho, pa)],
+                              return_details=True, angle_convention=ac)
+    sn_img, _ = mawet_peak_snr(radprof(img), [s.rho for s in srcs], [s.theta for s in srcs],
+                               red.pxscale, red.fwhm, kernel=ker, known=[(rho, pa)],
+                               return_details=True, angle_convention=ac)
+    pk_c = float(dc[0]["peak"])
+    pk_f = np.array([d["peak"] for d in df], float)
+    pk_f = pk_f[np.isfinite(pk_f) & (pk_f > 0)]
+    if not np.isfinite(pk_c) or pk_c <= 0 or pk_f.size == 0:
         out["flux_scale"] = None
         return
-    implied = c * a["planet_snr_default"] / sn     # companion contrast in template units
+    implied = c * pk_c / float(np.median(pk_f))       # companion contrast in this axis' units
+    scale = implied / pub
+    apply = os.environ.get("ANCHOR_APPLY", "") == "1"
     out.update(implied_companion_contrast=implied, published_companion_contrast=pub,
-               anchor_inj_contrast=c, anchor_inj_snr=sn,
-               anchor_companion_snr=a["planet_snr_default"], flux_scale=implied / pub)
+               anchor_inj_contrast=c, anchor_companion_peak=pk_c,
+               anchor_inj_peaks=[float(v) for v in pk_f],
+               anchor_inj_snr=float(np.nanmedian(sn_img)), anchor_companion_snr=a["planet_snr_default"],
+               flux_scale=scale, flux_scale_applied=(scale if apply else 1.0),
+               anchor_method="matched-filter peak ratio, fakes in (inj - clean)")
     for aa in out["annuli"]:
-        aa["contrast_anchored"] = aa["contrast"] / out["flux_scale"]
-    log(f"  anchor: {sn:.2f} S/N for injections at {c:.3e} on the companion's ring vs "
-        f"{a['planet_snr_default']:.2f} for the companion -> {implied:.3e} in template units, "
-        f"published {pub:.3e} (scale / {out['flux_scale']:.4g})")
+        aa["contrast_anchored"] = aa["contrast"] / out["flux_scale_applied"]
+    dmag = -2.5 * np.log10(implied) - (-2.5 * np.log10(pub))
+    log(f"  check: companion peak {pk_c:.4g} vs fakes {np.median(pk_f):.4g} at {c:.3e} on its ring "
+        f"-> {implied:.3e} in this axis' units, published {pub:.3e}: ratio {scale:.3f} "
+        f"({dmag:+.2f} mag); S/N for the record {np.nanmedian(sn_img):.2f} (fakes) / "
+        f"{a['planet_snr_default']:.2f} (companion).  "
+        + ("axis RESCALED by it (ANCHOR_APPLY=1)" if apply else "axis left on its calibrated scale"))
 
 
 #: Which directory each benchmark reads, newest acceptable first, so a half-migrated tree

@@ -276,3 +276,28 @@ def test_external_reducer_runs_in_runner(tmp_path):
                     param_verify=False)
     res = Runner(red, space, obj, samp, cfg, str(tmp_path / "ext"), log=QUIET).run()
     assert len(res) == 1 and res[0].validated
+
+
+def test_pyklip_adi_at_angsep_zero_does_not_subtract_the_frame_from_itself():
+    """pyKLIP's reference selection is ``moves >= movement``; at movement 0 the target frame
+    is in its own KL basis and any source is annihilated (paper run D: ADI peak 3e-7 against
+    2.8 in RDI).  angsep = 0 must mean 'the frame itself only', as in the built-in reducer."""
+    pytest.importorskip("pyklip")
+    from klip_tpe.backends.pyklip import PyKLIPReducer, MIN_MOVEMENT_PX
+    from klip_tpe.metrics import Source
+    ds = _ds(nframes=8)
+    red = PyKLIPReducer(ds, pxscale=PX, lam_m=LAM, diam_m=D, injection_model=GaussianPSF(4.0, star_flux=1e4),
+                        fwhm_px=4.0, outrad_cap=28)
+    src = [Source(0.4, 90.0, 5e-2)]
+    for mode in ("ADI", "ADI+RDI"):
+        if mode == "ADI+RDI":
+            ds.ref_cube = ds.cube[:4] * 1.02
+        p = _params(mode=mode, angsep=0.0, k_klip=3, bin=1, n_ang=1)
+        clean = red.reduce(ReductionRequest(p, None))
+        inj = red.reduce(ReductionRequest(p, src))
+        assert clean.meta["movement_px"] == pytest.approx(MIN_MOVEMENT_PX)
+        diff = np.nan_to_num(inj.image - clean.image)
+        x, y = _expected_xy(0.4, 90.0)
+        peak = float(np.nanmax(diff[int(y) - 3:int(y) + 4, int(x) - 3:int(x) + 4]))
+        # an annihilated source is round-off (~1e-7 of the injection); a recovered one is not
+        assert peak > 1e-3 * 5e-2 * 1e4, f"{mode}: the injected source was subtracted away (peak {peak:.3g})"

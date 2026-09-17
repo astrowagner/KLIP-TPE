@@ -150,3 +150,35 @@ def test_on_the_real_frames_only_the_dq_pixels_are_rewritten():
     for f in info["frames"]:
         assert f["n_repaired"] == f["n_dq"], f"{f['file']}[{f['integration']}]: rewrote {f['n_repaired']} != DQ {f['n_dq']}"
     assert 1500 < info["frames"][0]["n_dq"] < 1700, "the ERS 1386 F444W DQ count is ~1,564 per frame"
+
+
+def test_load_calints_partition_all_keeps_every_frame_with_its_own_pa(tmp_path):
+    """With one partition per roll pyKLIP's ADI has no reference frames (every frame in the
+    partition shares its PA) and ADI+RDI is RDI; only a single partition with both rolls
+    lets ADI subtract the other roll.  partition='all' builds that."""
+    from astropy.io import fits
+    from klip_tpe.backends.spaceklip import load_calints
+
+    def write(path, targ, roll, seed):
+        n, ny, nx = 2, 100, 100
+        data = np.stack([_coronagraphic_frame(seed + i, ny, nx) for i in range(n)]).astype(np.float32)
+        dq = np.zeros((n, ny, nx), np.uint32)
+        ph = fits.Header(); ph["TARGPROP"] = targ; ph["FILTER"] = "F444W"; ph["EFFINTTM"] = 10.0
+        ph["INSTRUME"] = "NIRCAM"; ph["CORONMSK"] = "MASKA335R"; ph["PUPIL"] = "MASKRND"
+        sh = fits.Header(); sh["ROLL_REF"] = roll; sh["V3I_YANG"] = 0.0; sh["VPARITY"] = -1
+        sh["PIXAR_A2"] = 0.0039; sh["PIXAR_SR"] = 9.2e-14; sh["BUNIT"] = "MJy/sr"
+        sh["CRPIX1"] = 50.5; sh["CRPIX2"] = 50.5
+        fits.HDUList([fits.PrimaryHDU(header=ph), fits.ImageHDU(data, header=sh, name="SCI"),
+                      fits.ImageHDU(dq, name="DQ")]).writeto(path, overwrite=True)
+    a, b, r = (str(tmp_path / f"jw{i}_calints.fits") for i in range(3))
+    write(a, "HIP-65426", 110.0, 0); write(b, "HIP-65426", 120.0, 3); write(r, "HIP-68245", 110.0, 7)
+    rolls, info = load_calints([a, b, r], science_target="HIP65426", half_px=15, log=lambda s: None)
+    assert list(rolls) == ["roll1", "roll2"] and info["partition"] == "roll"
+    assert all(len(set(np.round(d.angles, 1))) == 1 for d in rolls.values()), "a per-roll partition has one PA"
+    one, info = load_calints([a, b, r], science_target="HIP65426", half_px=15, partition="all", log=lambda s: None)
+    assert list(one) == ["sci"] and info["partition"] == "all"
+    d = one["sci"]
+    assert d.cube.shape[0] == 4 and sorted(set(np.round(d.angles, 1))) == [110.0, 120.0]
+    assert d.ref_cube is not None and d.ref_cube.shape[0] == 2
+    with pytest.raises(ValueError):
+        load_calints([a, b, r], science_target="HIP65426", half_px=15, partition="both", log=lambda s: None)

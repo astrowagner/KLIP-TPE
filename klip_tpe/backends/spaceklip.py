@@ -242,10 +242,20 @@ def load_spaceklip(database=None, key: Optional[str] = None, sci_files: Optional
 def load_calints(files: Sequence[str], science_target: Optional[str] = None, half_px: int = 55,
                  align: bool = True, repair: Union[bool, str] = True,
                  star_center: Optional[Tuple[float, float]] = None, keep_frames: bool = False,
+                 partition: str = "roll",
                  log: Callable[[str], None] = print) -> Tuple[Dict[str, Dataset], Dict[str, Any]]:
-    """Stage-2 ``*_calints.fits`` straight into ``{roll: Dataset}``, without spaceKLIP.
+    """Stage-2 ``*_calints.fits`` straight into ``{name: Dataset}``, without spaceKLIP.
 
-    One partition per unique roll angle, the other target's exposures as the RDI library.
+    ``partition='roll'`` (default): one partition per unique roll angle, the other target's
+    exposures as the RDI library of each.  ``partition='all'``: ONE partition holding every
+    science frame with its own PA, plus the library.  **The choice decides what pyKLIP's
+    ``mode`` can mean.**  A partition is reduced on its own, so with one per roll every frame
+    in it has the same PA: ADI has no reference frames at all (pyKLIP returns NaN) and
+    ADI+RDI is RDI -- the other roll is never in the basis, because it is in the other
+    partition.  Only with ``'all'`` does ADI subtract the other roll, and only then is a
+    searched ``mode`` a real choice (on ERS 1386 F444W at k = 10: injected S/N 6.2 ADI,
+    6.9 RDI, 7.2 ADI+RDI; companion peak 1.7 / 2.9 / 2.6 MJy/sr).  The price of ``'all'``
+    is one ``k_klip`` block for both rolls instead of one per roll.
     ``PA = ROLL_REF - V3I_YANG * VPARITY``; DQ ``DO_NOT_USE`` pixels are replaced by the
     median of their neighbours (:func:`fill_dq_neighbours`, spaceKLIP's treatment) and
     **nothing else is touched**; frames are registered to the median science frame by
@@ -433,13 +443,18 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
     meta = {"pxscale": px, "wavelength_m": _wavelength_m(fits.getheader(sci[0])),
             "header": dict(fits.getheader(sci[0])), "pixar_sr": float(hdr.get("PIXAR_SR", np.nan)),
             "bunit": str(hdr.get("BUNIT", "")).strip()}
+    if str(partition).lower() not in ("roll", "all"):
+        raise ValueError(f"partition must be 'roll' or 'all', got {partition!r}")
     dsets: Dict[str, Dataset] = {}
-    for k, pa in enumerate(np.unique(np.round(pas, 1))):
-        m = np.round(pas, 1) == pa
-        dsets[f"roll{k + 1}"] = Dataset(Sx[m], pas[m], name=f"roll{k + 1}",
-                                        ref_cube=Rx if Rx.size else None, meta=dict(meta))
+    if str(partition).lower() == "all":
+        dsets["sci"] = Dataset(Sx, pas, name="sci", ref_cube=Rx if Rx.size else None, meta=dict(meta))
+    else:
+        for k, pa in enumerate(np.unique(np.round(pas, 1))):
+            m = np.round(pas, 1) == pa
+            dsets[f"roll{k + 1}"] = Dataset(Sx[m], pas[m], name=f"roll{k + 1}",
+                                            ref_cube=Rx if Rx.size else None, meta=dict(meta))
     info = dict(meta, n_sci=int(S.shape[0]), n_ref=int(R.shape[0]), crop_px=n,
-                frames=prov_s + prov_r, repair=rmode,
+                frames=prov_s + prov_r, repair=rmode, partition=str(partition).lower(),
                 filter=str(fits.getheader(sci[0]).get("FILTER", "")),
                 star_center=(float(cx), float(cy)),
                 crpix=(float(hdr["CRPIX1"] - 1), float(hdr["CRPIX2"] - 1)),

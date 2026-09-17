@@ -9,7 +9,7 @@
   ``k_klip``       ``numbasis`` (k-scan: ``numbasis = 1..k`` in one call)
   ``n_ang``        ``subsections``
   ``inrad/outrad`` ``IWA / OWA`` with ``annuli = n_annuli`` (default 1)
-  ``angsep``       ``movement = angsep * lambda/D [px]``
+  ``angsep``       ``movement = max(angsep * lambda/D, 1e-6) [px]`` (0 = the frame itself only)
   ``anglemax``     ``maxrot``
   ``bin, filter, corr_thresh, noise_max, coronoise_max``  handled upstream
   ==============  ==========================================================
@@ -29,7 +29,12 @@ import numpy as np
 from ..klip import derotate, nw_ang_comb
 from ..reducer import Dataset, KLIPParams, KLIPReducer
 
-__all__ = ["PyKLIPReducer", "dataset_from_pyklip"]
+__all__ = ["PyKLIPReducer", "dataset_from_pyklip", "MIN_MOVEMENT_PX"]
+
+#: Smallest ``movement`` handed to pyKLIP.  Its reference selection is ``moves >= movement``
+#: with no other exclusion, so 0 puts the target frame in its own basis (see ``_subtract``);
+#: 1e-6 px excludes only frames with no motion at all.
+MIN_MOVEMENT_PX = 1e-6
 
 
 def _require_pyklip():
@@ -150,7 +155,16 @@ class PyKLIPReducer(KLIPReducer):
                 lib.prepare_library(gdata)          # science frames excluded from their own library
                 psflib = dict(psf_library=lib.master_library, psf_library_corr=lib.correlation,
                               psf_library_good=lib.isgoodpsf)
-        movement = float(kp.angsep) * self.lam_over_d_px
+        # pyKLIP selects reference frames with ``moves >= movement`` and nothing else, so at
+        # movement = 0 the target frame -- and every frame at the same PA -- is in its own KL
+        # basis: in ADI and ADI+RDI the frame is then subtracted from itself and a companion
+        # comes back at the level of round-off (paper run D: peak 3e-7 in ADI, 2e-6 in
+        # ADI+RDI, against 2.8 in RDI, which made the search's "election" of RDI a foregone
+        # conclusion).  The built-in reducer's angsep = 0 means "exclude the target frame
+        # only", so give pyKLIP the same: a floor just above zero keeps out exactly the
+        # frames with no motion at all -- the frame itself and, on a roll pair, its
+        # same-roll twins -- and no others.
+        movement = max(float(kp.angsep) * self.lam_over_d_px, MIN_MOVEMENT_PX)
         out = par.klip_parallelized(np.asarray(bcube, np.float32), centers, np.asarray(bang, float),
                                        np.ones(n), np.zeros(n, int), kp.inrad, OWA=kp.outrad, mode=mode,
                                        annuli=int(p["n_annuli"]), subsections=int(kp.n_ang), movement=movement,

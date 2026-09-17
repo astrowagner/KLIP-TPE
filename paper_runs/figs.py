@@ -198,7 +198,7 @@ def fig_contrast(s):
         w = PRIMARY[t]
         r = s[w]
         cur = r.get("curves") or {}
-        fs = float(r.get("flux_scale") or 1.0)          # published-companion anchor
+        fs = float(r.get("flux_scale_applied") or 1.0)  # 1.0 unless collect ran with ANCHOR_APPLY=1
         if "main" in cur:
             ax.semilogy(cur["main"]["r_as"], np.asarray(cur["main"]["c5"]) / fs, "k-", lw=1.3,
                         label="optimized (injection-calibrated)")

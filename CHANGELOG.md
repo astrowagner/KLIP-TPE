@@ -59,6 +59,23 @@
   ipywidgets that is one widget per reduction (tutorial 03: 426 of them, 3.7 MB of widget state) —
   so the backend swaps pyklip's `trange`/`tqdm` for disabled ones (`KLIP_TPE_PYKLIP_PROGRESS=1`
   keeps them).  All four notebooks rebuilt: no warnings, no widgets.
+- **pyKLIP ADI / ADI+RDI were subtracting each frame from itself.**  pyKLIP selects references with
+  `moves >= movement` and nothing else, so at `angsep = 0` (`movement = 0`) the target frame — and every
+  frame at its PA — sat in its own KL basis, and a companion came back at round-off (run D: peak 3e-7
+  in ADI, 2e-6 in ADI+RDI, 2.8 in RDI).  The paper's "RDI 7.8 / ADI+RDI 1.7 / ADI 0.03" and tutorial
+  03's "ADI −0.2 / ADI+RDI 1.2" were this, not the other roll eating the planet.  `movement` now floors
+  at `MIN_MOVEMENT_PX = 1e-6`, which excludes exactly the zero-motion frames (the frame and its
+  same-roll twins).  `test_pyklip_adi_at_angsep_zero_does_not_subtract_the_frame_from_itself`.
+- **`load_calints(partition='all')`.**  A partition is reduced on its own, so with one partition per
+  roll every frame in it shares a PA: ADI has no references and ADI+RDI *is* RDI — the other roll is
+  never in the basis.  `'all'` puts both rolls in one partition, where pyKLIP's `mode` is a real
+  choice (ERS 1386 F444W, k=10: injected S/N 6.2 ADI, 6.9 RDI, 7.2 ADI+RDI).  Default stays `'roll'`.
+- **`paper_runs/collect.py`**: the "default" column now uses the vector the run was seeded with
+  (`RunConfig.defaults` on top of the space's defaults — k=10, not the space's k=6); the companion
+  anchor compares matched-filter *peaks* (fakes in inj−clean) instead of S/N values, which the
+  NIRCam PSF's lobes in the noise ring biased by ~1.9×, and records `flux_scale` as a check without
+  rescaling the axis unless `ANCHOR_APPLY=1` (`figs.py` follows `flux_scale_applied`).  Earlier
+  β Pic / HD 95086 anchor values were made with the S/N method and must be re-collected.
 - Tutorial 03's `repair()` cell — the version students copy — now fills DQ pixels only, and the
   text says why a value-based outlier filter must never be run on a coronagraphic PSF.  Notebook
   rebuilt from scratch (RDI k=10: planet S/N 12.0; ADI −0.2; ADI+RDI 1.2).
