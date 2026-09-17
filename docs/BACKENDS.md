@@ -83,10 +83,16 @@ red = sk.make_reducer(datasets, psf_template="offset_psf_F444W.fits", star_flux=
 SCI/REF, `FITSFILE`), reads the ImageTools products with pyKLIP's `JWSTData` when
 available (else an equivalent built-in reader: `STARCENX/Y` or `CRPIX`,
 `PA = ROLL_REF − V3I_YANG·VPARITY`, wavelength from `CWAVEL` or pyKLIP's filter tables),
-makes one partition per roll and attaches the reference exposures as the RDI library.
-`make_reducer` builds `PyKLIPReducer`s in `ADI+RDI` (spaceKLIP's default; `mode="RDI"` when
-the roll is too small to separate a companion from itself — with a few degrees of roll
-`ADI+RDI` self-subtracts, and `mode` can be *searched* by adding a categorical `Param`),
+makes one partition per roll (`partition_by="roll"`) or one for everything
+(`partition_by=None`) and attaches the reference exposures as the RDI library.  **Use one
+partition if `mode` is to mean anything**: a partition is reduced on its own, so with one
+per roll every frame in it shares a PA — pyKLIP's `ADI` then has no reference frames and
+`ADI+RDI` is `RDI`.  (`load_calints(partition='all')` is the same choice for raw stage-2
+files.)  `make_reducer` builds `PyKLIPReducer`s in `ADI+RDI` (spaceKLIP's default; with a
+few degrees of roll `ADI+RDI` gives up companion flux to the other roll, and `mode` can be
+*searched* by adding a categorical `Param`).  `angsep = 0` is handed to pyKLIP as a
+`movement` of 1e-6 px, not 0: pyKLIP keeps every reference with `moves >= movement`, so 0
+would put the target frame in its own basis and annihilate any source.
 mapping the partitions onto threads (`pool="threads"`: pyKLIP forks its own workers) with λ/D from
 the filter wavelength and D = 6.5 m. For injection pass a webbpsf / `webbpsf_ext` offset
 PSF at the data's pixel scale (`psf_template`, e.g. from spaceKLIP's

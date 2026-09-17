@@ -235,11 +235,20 @@ it into the star flux, or applying it twice, is the classic coronagraphic error.
 
   What survives of that work: the raw-frame checks (the four frames land within a pixel of
   each other after derotation; the stellar speckles move by exactly the 10.08° roll), the
-  star-centre solve, and the observation that `ADI+RDI` costs the companion about a third of
-  its flux relative to pure RDI at this 10° roll (recovered 0.5 vs 0.8 of the injected flux
-  inside 4 px) — which is a property of the observing geometry and the reason Carter et al.
-  quote forward-modelled photometry. `load_calints(repair=False)` still breaks the pyKLIP RDI
-  path (NaNs reach the library prep); `repair='dq'` is the default and the right choice.
+  star-centre solve, and the observation that `ADI+RDI` costs the companion part of its
+  flux relative to pure RDI at this 10° roll (whole-image, 20 modes: 0.5 vs 0.8 of the
+  injected flux inside 4 px; in the [6, 20] px annulus at k = 10: peak 2.6 vs 2.9 MJy/sr) —
+  a property of the observing geometry and the reason Carter et al. quote forward-modelled
+  photometry. `load_calints(repair=False)` still breaks the pyKLIP RDI path (NaNs reach the
+  library prep); `repair='dq'` is the default and the right choice.
+* **The "RDI election" of the earlier runs was two artefacts, not a result.** pyKLIP keeps
+  every reference frame with `moves >= movement`, so at `angsep = 0` (movement 0) the target
+  frame sat in its own KL basis and ADI / ADI+RDI annihilated everything (companion peak 3e-7
+  / 2e-6 against 2.8 in RDI); and with one partition per roll the other roll was never in the
+  basis anyway (ADI had no references, ADI+RDI *was* RDI). Both fixed on 2026-09-17: the
+  backend floors `movement` at 1e-6 px, and `load_calints(partition='all')` puts both rolls
+  in one partition, which is what runs D and H2 and tutorial 03 now use. Measured there at
+  the seeded default (k = 10, [6, 20] px): injected S/N ADI 6.2, RDI 6.9, ADI+RDI 7.2.
 * A Gaussian is also the wrong *shape*. Measured on these data: an STPSF off-axis template
   needs contrast 320 to reach the peak a Gaussian reaches at 40 — 8× — because the real PSF
   puts most of its light in wings and spikes.

@@ -8,8 +8,8 @@
 # not the field rotation.
 #
 # spaceKLIP is the community pipeline for these data and hands them to pyKLIP; klip-tpe
-# plugs in at that hand-over: one partition per roll, the reference exposures as the RDI
-# library, pyKLIP's `klip_parallelized` as the engine, and the TPE search on top.
+# plugs in at that hand-over: both rolls in one partition, the reference exposures as the
+# RDI library, pyKLIP's `klip_parallelized` as the engine, and the TPE search on top.
 #
 # **Data.**  `tutorials/fetch_jwst_hip65426.py` pulls the F444W `calints` products from
 # MAST (no login, ~60 MB):
@@ -142,10 +142,18 @@ if HAVE_DATA:
     plt.tight_layout()
 
 # %% [markdown]
-# ## 2. Partitions: one per roll, references as the RDI library
+# ## 2. One partition, both rolls, the reference star as the RDI library
 #
-# klip-tpe expects the star at the centre of the array, so the crop is taken about it.  Each
-# roll becomes a `Dataset` with its own parameter block, and both carry the same reference cube.
+# klip-tpe expects the star at the centre of the array, so the crop is taken about it.  The
+# four science integrations — two per roll, each with its own position angle — go into **one**
+# `Dataset`, and the 18 reference integrations ride along as its `ref_cube`.
+#
+# **Why one partition and not one per roll.**  A partition is reduced on its own.  With a
+# partition per roll every frame in it has the same PA, so pyKLIP's `ADI` has no reference
+# frames at all and `ADI+RDI` is just `RDI` — the other roll is never in the basis, because it
+# is in the other partition.  Only with both rolls together does `ADI` mean what it means
+# for JWST: subtract roll 2 from roll 1 and vice versa.  (`spaceklip.load_calints` does all of
+# section 1 and this in one call; `partition='all'` is this layout, `'roll'` the other.)
 #
 # **`CRPIX` is where the mask is, not where the star is.**  It is the *aperture reference
 # point* — identical in every file of the programme, dithers included — and on these frames it
@@ -189,32 +197,31 @@ if HAVE_DATA:
                          for im in cube], np.float32)
 
     sci_x, ref_x = crop(sci_a), crop(ref_a)
-    dsets = {}
-    for k, pa in enumerate(np.unique(np.round(pas, 1))):
-        m = np.round(pas, 1) == pa
-        dsets[f"roll{k + 1}"] = Dataset(sci_x[m], pas[m], name=f"roll{k + 1}", ref_cube=ref_x,
-                                        meta={"pxscale": pxscale, "wavelength_m": wavelength})
-    for pid, d in dsets.items():
-        print(f"{pid}: {d.cube.shape[0]} integrations, PA {d.angles[0]:.1f} deg, "
-              f"RDI library {d.ref_cube.shape[0]} frames")
+    dsets = {"sci": Dataset(sci_x, pas, name="sci", ref_cube=ref_x,
+                            meta={"pxscale": pxscale, "wavelength_m": wavelength})}
+    d = dsets["sci"]
+    print(f"sci: {d.cube.shape[0]} integrations at PA {np.unique(np.round(d.angles, 1))} deg, "
+          f"RDI library {d.ref_cube.shape[0]} frames")
 
 # %% [markdown]
 # ## 3. Reducer, space, objective
 #
-# `spaceklip.make_reducer` builds one `PyKLIPReducer` per partition, with λ/D from the
-# filter and D = 6.5 m.  The searched block per roll is small here — the high-pass filter,
-# `n_ang` (pyKLIP `subsections`) and `k_klip` (`numbasis`) — because `make_space` scales the
-# ranges to the data: with two integrations per roll there is nothing to bin and no angular
-# exclusion worth searching.
+# `spaceklip.make_reducer` builds a `PyKLIPReducer` per partition — one here — with λ/D
+# from the filter and D = 6.5 m.  The searched block is small: the high-pass filter, `n_ang`
+# (pyKLIP `subsections`) and `k_klip` (`numbasis`), because `make_space` scales the ranges
+# to the data: with four frames there is nothing to bin and no angular exclusion worth
+# searching (`angsep` stays 0, which for pyKLIP means "exclude only the frames with no
+# motion at all" — the frame itself and its same-roll twin).
 #
 # On top of that we add one *global categorical* dimension: pyKLIP's **`mode`**
 # (`ADI`, `RDI`, `ADI+RDI`).  Any `Param` whose name matches a backend option is passed
-# straight through to the engine, so the optimizer can decide how to use the reference
-# library — and with a 10° roll that decision matters: in `ADI+RDI` the other roll enters
-# the basis at ~1 FWHM of planet motion and self-subtracts the companion (two cells down:
-# S/N 12 → 1 at k = 10 in this annulus; in the whole-image 20-mode reduction of Carter et
-# al.'s Fig. 3 it keeps half the flux, against 0.8 for pure `RDI`), which is why Carter et
-# al. quote their photometry from forward-modelled fits rather than from the images.
+# straight through to the engine, so the optimizer decides how to use the two rolls and the
+# reference library.  With a 10° roll it is a real trade-off: `ADI` has only the other
+# roll's two frames to build a basis from and self-subtracts part of the companion (which
+# moves ~1 FWHM between rolls); `RDI` keeps the most companion flux; `ADI+RDI` gives up some
+# throughput for whiter speckles.  Two cells down measures the three at the seeded default.
+# Carter et al. (2023) compare the same three and quote their photometry from
+# forward-modelled fits for exactly this reason.
 #
 # **The contrast axis.** HIP 65426 is behind the mask in every exposure and so is the
 # reference star, so the star's brightness has to be imported — and with a coronagraph the
@@ -273,7 +280,7 @@ if HAVE_DATA:
 # PA 150° (circled).  Look at its shape: a three-bar "hamburger" core with six faint lobes
 # around it, exactly as in Carter et al. (2023)'s Fig. 3 — that is what an off-axis source
 # behind MASK335R looks like through the round Lyot stop, not two sources.  (Try
-# `mode="ADI+RDI"` here to see the companion fade.)
+# `mode="ADI"` here to see the other roll's two frames do what they can.)
 
 # %%
 if HAVE_DATA:
@@ -290,10 +297,11 @@ if HAVE_DATA:
     plt.title(f"pyKLIP RDI, k=10   (planet S/N {snr0:.1f})")
 
 # %%
-if HAVE_DATA:                                    # the same reduction in ADI and ADI+RDI: the roll pair self-subtracts
+if HAVE_DATA:                                    # the same reduction in each mode
     for m in ("ADI", "RDI", "ADI+RDI"):
         im = red.reduce(ReductionRequest(params=dict(cfg0.params, inrad=6, outrad=45, k_klip=10, mode=m))).image
-        print(f"mode={m:8s} planet S/N {float(metric.per_source(im, None, [PLANET[0]], [PLANET[1]])[0]):5.1f}")
+        s_, det = metric.per_source(im, None, [PLANET[0]], [PLANET[1]]), None
+        print(f"mode={m:8s} planet S/N {float(s_[0]):5.1f}")
 
 # %% [markdown]
 # ## 4. Optimize
@@ -316,7 +324,7 @@ if HAVE_DATA:
 if HAVE_DATA:
     r = results[0]
     print(f"winner: eval {r.winner_index + 1}, validated {r.validated}, injected S/N {r.winner_score:.2f}"
-          f"   rolls kept: {r.partitions}")
+          f"   partitions: {r.partitions}")
     print(f"  mode = {r.winner_config['params'].get('mode')}")
     for pid, blk in r.winner_config["per_partition"].items():
         print(f"  {pid}: " + "  ".join(f"{k}={v}" for k, v in blk.items() if k in ("filter", "n_ang", "k_klip")))
@@ -433,8 +441,8 @@ if HAVE_DATA:
 # * **Small data sets.**  With four science integrations a single evaluation's score is
 #   noisy; raise `n_sources` (more injections per evaluation cost nothing — one reduction
 #   either way) rather than the number of evaluations.
-# * **What is searched** here is the number of KL modes per roll, the high-pass filter, the
-#   azimuthal subdivision and pyKLIP's `mode` — the RDI knobs.  Any other backend option
+# * **What is searched** here is the number of KL modes, the high-pass filter, the
+#   azimuthal subdivision and pyKLIP's `mode` — five dimensions.  Any other backend option
 #   (`annuli_spacing`, `algo`, `corr_smooth`, …) becomes searchable the same way: add a
 #   `Param` with that name.
 #
@@ -446,7 +454,7 @@ if HAVE_DATA:
 # db = database.Database(output_dir="spaceklip/")
 # db.read_jwst_s012_data(datapaths=sorted(glob.glob("spaceklip/IMGPROCESS/*_calints.fits")))
 # dsets = sk.load_spaceklip(db, key="JWST_NIRCAM_NRCALONG_F444W_MASKRND_MASK335R_SUB320A335R",
-#                           crop_half=55)          # partition_by="roll" by default
+#                           crop_half=55, partition_by=None)   # one Dataset; "roll" splits it
 # red = sk.make_reducer(dsets, psf_template="offset_psf_F444W.fits", star_flux=F_star)
 # ```
 # Everything from section 3 on is identical.

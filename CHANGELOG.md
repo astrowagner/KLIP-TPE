@@ -77,8 +77,11 @@
   rescaling the axis unless `ANCHOR_APPLY=1` (`figs.py` follows `flux_scale_applied`).  Earlier
   β Pic / HD 95086 anchor values were made with the S/N method and must be re-collected.
 - Tutorial 03's `repair()` cell — the version students copy — now fills DQ pixels only, and the
-  text says why a value-based outlier filter must never be run on a coronagraphic PSF.  Notebook
-  rebuilt from scratch (RDI k=10: planet S/N 12.0; ADI −0.2; ADI+RDI 1.2).
+  text says why a value-based outlier filter must never be run on a coronagraphic PSF.  The notebook
+  now builds ONE partition with both rolls (section 2 explains why per-roll partitions make `mode`
+  meaningless) and its mode comparison is real: at k=10 in [6, 45] px the companion is at S/N 13.3
+  (ADI), 12.8 (RDI), 13.2 (ADI+RDI); the 50-evaluation search elected ADI with a strong high-pass
+  filter.  `docs/BACKENDS.md`, `docs/TUTORIALS.md` and `docs/FLUX_CALIBRATION.md` corrected likewise.
 
 ## Unreleased — 2026-09-15
 - **Flux calibration audited end to end** (`docs/FLUX_CALIBRATION.md`): what PSF is injected, what the
