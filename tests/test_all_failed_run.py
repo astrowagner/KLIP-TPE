@@ -110,3 +110,25 @@ def test_rerun_paper_retires_a_stage_whose_results_have_no_winner(tmp_path):
     for d, code in ((good, 0), (bad, 2), (tmp_path / "missing", 1)):
         rc = subprocess.run(["bash", "-c", fn + f'\nfinished "{d}"'], capture_output=True).returncode
         assert rc == code, f"{d.name}: exit {rc}, expected {code}"
+
+
+def test_pyklip_progress_bars_are_disabled_by_the_backend(monkeypatch):
+    """klip_parallelized draws a tqdm bar per call whatever `verbose` says; in a notebook
+    with ipywidgets that is one widget per reduction (tutorial 03: 426 of them, 3.7 MB of
+    widget state).  The backend swaps pyklip's trange/tqdm for disabled ones, once."""
+    par = pytest.importorskip("pyklip.parallelized")
+    from klip_tpe.backends import pyklip as backend
+    monkeypatch.delenv("KLIP_TPE_PYKLIP_PROGRESS", raising=False)
+    monkeypatch.setattr(par, "_klip_tpe_quiet", False, raising=False)
+    backend._quiet_pyklip_progress(par)
+    bar = par.trange(3)
+    assert getattr(bar, "disable", False) is True, "pyklip's trange must be a disabled tqdm"
+    assert list(bar) == [0, 1, 2], "and still iterate"
+    assert getattr(par.tqdm(range(2)), "disable", False) is True
+    # an explicit request keeps them
+    monkeypatch.setenv("KLIP_TPE_PYKLIP_PROGRESS", "1")
+    monkeypatch.setattr(par, "_klip_tpe_quiet", False, raising=False)
+    from tqdm.auto import trange as real
+    par.trange = real
+    backend._quiet_pyklip_progress(par)
+    assert par.trange is real

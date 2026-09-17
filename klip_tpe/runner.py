@@ -1514,11 +1514,11 @@ class Runner:
             # resume logic then treated the directory as finished.  A search with no valid
             # evaluation is not a result -- stop, and say how to start over.
             raise RuntimeError(
-                f"every one of the {ntot} evaluations of annulus {ia+1} FAILED -- there is no winner "
-                f"and no best image.  The usual cause is an injection model that does not span the "
-                f"annulus; the reason is on the 'evaluation failed:' lines above.  This run directory "
-                f"now holds only failed evaluations: fix the cause, move {self.run_dir} aside and start "
-                f"again (a resume would just find the same {ntot} failures and stop here).")
+                f"every one of the {ntot} evaluations of annulus {ia+1} FAILED -- there is "
+                f"no winner and no best image.  The usual cause is an injection model that does not "
+                f"span the annulus; the reason is on the 'evaluation failed:' lines above.  This run "
+                f"directory now holds only failed evaluations: fix the cause, move {self.run_dir} aside "
+                f"and start again (a resume would just find the same {ntot} failures and stop here).")
         elif ntot and nok < ntot:
             self.log(f"  note: {ntot - nok}/{ntot} evaluations failed")
         self.log(f"  search done: best {bs:.3f} at eval {bi+1}")

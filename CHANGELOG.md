@@ -55,6 +55,10 @@
   `catch_warnings()` guard a concurrent `catch_warnings()` on the reducer's thread wiped at random;
   the display and paper-figure rc now embed TrueType (`pdf.fonttype 42`), which never builds that
   table and gives the PDFs real, selectable text.  Two regression tests in `test_display.py`.
+  pyKLIP's `klip_parallelized` draws a tqdm bar per call whatever `verbose` says — in a notebook with
+  ipywidgets that is one widget per reduction (tutorial 03: 426 of them, 3.7 MB of widget state) —
+  so the backend swaps pyklip's `trange`/`tqdm` for disabled ones (`KLIP_TPE_PYKLIP_PROGRESS=1`
+  keeps them).  All four notebooks rebuilt: no warnings, no widgets.
 - Tutorial 03's `repair()` cell — the version students copy — now fills DQ pixels only, and the
   text says why a value-based outlier filter must never be run on a coronagraphic PSF.  Notebook
   rebuilt from scratch (RDI k=10: planet S/N 12.0; ADI −0.2; ADI+RDI 1.2).

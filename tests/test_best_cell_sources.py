@@ -245,6 +245,9 @@ def test_an_annulus_where_everything_failed_says_so():
     i_guard = src.index("no winner and no best image")
     i_done = src.index('search done: best')
     assert i_guard < i_done, "the warning belongs before the search-done line, not after it"
+    # since 2026-09-17 it is not a warning but a stop: a log line let paper run D write products
+    # for 350 failed evaluations and be reported "done" (tests/test_all_failed_run.py)
+    assert "raise RuntimeError" in src[i_guard - 400:i_guard], "an all-failed annulus must raise"
 
 
 # ----------------------------------------- the star flux the contrast axis is built on

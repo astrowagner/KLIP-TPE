@@ -21,6 +21,7 @@
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, Dict, Optional, Sequence
 
 import numpy as np
@@ -38,6 +39,35 @@ def _require_pyklip():
     except ImportError as exc:  # pragma: no cover
         raise ImportError("PyKLIPReducer needs pyklip: pip install pyklip") from exc
     _check_pyklip_numpy(pk)
+    _quiet_pyklip_progress(par)
+
+
+def _quiet_pyklip_progress(par) -> None:
+    """Turn off pyklip's per-call progress bar.
+
+    ``klip_parallelized`` waits for its workers inside ``trange(len(outputs))`` regardless
+    of ``verbose``, so an optimizer that calls it hundreds of times draws hundreds of bars:
+    in a terminal that is scrolling noise, and in a notebook with ipywidgets installed each
+    bar is a widget output with its state saved into the file -- tutorial 03 grew from 2 to
+    7 MB (426 widgets) the day ipywidgets appeared.  The bars are replaced by disabled ones
+    on the pyklip module itself, once; ``KLIP_TPE_PYKLIP_PROGRESS=1`` keeps them.
+    """
+    if getattr(par, "_klip_tpe_quiet", False) or os.environ.get("KLIP_TPE_PYKLIP_PROGRESS"):
+        return
+    try:
+        from tqdm import tqdm as _tqdm
+    except ImportError:                                           # pragma: no cover
+        return
+
+    def _trange(*a, **k):
+        k.setdefault("disable", True)
+        return _tqdm(range(*a), **k)
+
+    def _tq(*a, **k):
+        k.setdefault("disable", True)
+        return _tqdm(*a, **k)
+    par.trange, par.tqdm = _trange, _tq
+    par._klip_tpe_quiet = True
 
 
 def _check_pyklip_numpy(pk=None) -> None:
