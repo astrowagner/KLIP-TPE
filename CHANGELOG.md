@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased — 2026-09-17
+- **The calibration k-scan was choosing the seed's k by noise.**  `Runner.calibrate` scanned k once
+  at the *starting* contrast (`contrast0`, 3e-5) and only then walked the contrast into the S/N 4–6
+  window — faithful to `optimize_near_2_tpe`, whose starting contrast was NEAR's per-annulus
+  `use_contrast` and therefore already close.  On the public data sets 3e-5 is orders of magnitude
+  from the calibrated values (8.8e-3 … 3.5e-6), the sources scored S/N ~0 (β Pic) or ~40 (HD 95086)
+  at the scan, and `argmax_k` of that curve was a coin: the seeds of runs A2, B2, C and D came out
+  k = 4/6/13, 8, 4/1 and 18/6 — a different "default" per annulus, and the k each contrast was
+  calibrated at.  The scan now runs once the contrast has reached the window at the configured
+  default k (median over `n_remeasure` draws instead of one), and the window is re-measured at the
+  k it picks, with a full trial budget to walk the contrast back if the S/N moved.  A forced
+  contrast still scans at that contrast and keeps its single trial (the benchmark slots are
+  unchanged).  `calibration.json` gains `k_default_initial`, `kscan_contrast` and a `k` per trial;
+  the log says `k-scan at contrast …`.  `tests/test_runner.py::
+  test_the_k_scan_happens_at_the_calibrated_contrast_not_the_starting_one`.  **Runs A2, B2, C and D
+  are to be redone under this protocol** (`FORCE=1 ./rerun_paper.sh A2 B2 C D`); E2 and F2 also
+  predate the rank-collapse fix of 16037ac and go after them.
+- **`collect.py` measured a default no run ever evaluates.**  Its "default" was
+  `space.default_vector()` unprojected — angsep 1.923 λ/D, anglemax 26° — while the Runner seeds
+  the guard-*projected* default (angsep 0, anglemax = the PA span, k capped) at the calibration's
+  k; and it compared that with the run's validated score from a different set of draws, whose
+  draw-to-draw scatter is a factor ~1.4.  collect now re-scores the projected seed (at the run's
+  `k_default`), the configured default (k from `RunConfig.defaults`, before the k-scan) and the
+  validated winner on the SAME `N_TRIALS = 8` injection sets with the validation metric, and
+  records `winner_remeasured`, paired `gain`, `paired_wins`, `gain_vs_validated`,
+  `default_flat_*`; the anchor check uses the companion annulus' projected seed.  On the current
+  C and D: HD 95086 ×1.14 / ×1.96 (winner better in 6/8, 8/8), HIP 65426 ×1.04 / ×1.47 (5/8, 8/8);
+  against the flat k = 10 default ×1.25 / ×1.39 and ×1.04 / ×1.43.  `figs.py` scales the default
+  curve by the paired gain.
+- **`FORCE=1 ./rerun_paper.sh <science stage>` did not redo anything.**  It got past the
+  finished-stage skip and launched the stage into its existing directory, where `Runner.run()`
+  auto-resumes the checkpoint, finds every annulus complete, rewrites the products and reports
+  "done in 2 min".  A finished science run is now retired to `<dir>_superseded_<stamp>` like a
+  benchmark batch; I2 (days of LMIRCam compute) is never retired by a flag.  `DRY=1` says what
+  FORCE would do.  `tests/test_paper_runs_stages.py` (+3).
+- CI: the two RX J0534 tests that ran the default band on the 48-px tree now use the 140-px one
+  (the all-failed guard stops such a run, correctly); `test_display_pdfs_never_ask_freetype_for_u_fffe`
+  is matplotlib-3.11 aware.  Slow job green on Python 3.12 / numpy 2.5 / matplotlib 3.11.
+
 ## Unreleased — 2026-09-16
 - **`load_calints` was median-filtering the planet.** Its repair step was a 5×5 median filter plus a
   7σ clip against the *frame-wide* robust scatter of the residual — a scatter set by empty sky, which
@@ -57,11 +96,7 @@
   table and gives the PDFs real, selectable text.  Two regression tests in `test_display.py` (the
   Type 3 leak is a matplotlib ≤ 3.10 phenomenon — 3.11 builds the widths from the font's charmap and
   no longer imports `warnings` in `backend_pdf` — so on 3.11+ the test only checks that the rc
-  selects Type 42 and the PDFs stay warning-free; the first version of the test broke the CI `slow`
-  job, which installs the newest matplotlib).  The same red CI job exposed two RX J0534 tests that
-  had been running the default band on 48-px frames — the one evaluation failed off the edge and the
-  run used to finish "quietly" with no winner; with the all-failed guard above it now stops, so both
-  tests use the 140-px tree like the rest of the default-band tests.
+  selects Type 42 and the PDFs stay warning-free).
   pyKLIP's `klip_parallelized` draws a tqdm bar per call whatever `verbose` says — in a notebook with
   ipywidgets that is one widget per reduction (tutorial 03: 426 of them, 3.7 MB of widget state) —
   so the backend swaps pyklip's `trange`/`tqdm` for disabled ones (`KLIP_TPE_PYKLIP_PROGRESS=1`

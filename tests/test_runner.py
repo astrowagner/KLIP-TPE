@@ -622,3 +622,42 @@ def test_opt_width_stops_when_remaining_ring_below_w_lo():
     assert r._done(1)
     r.cfg.ann_edges = [8.0, 17.0]          # 13 px remain (>= w_lo): another annulus is due
     assert not r._done(1)
+
+
+def test_the_k_scan_happens_at_the_calibrated_contrast_not_the_starting_one(tmp_path):
+    """The seed's k used to come from a k-scan at ``contrast0`` -- 3e-5, orders of magnitude
+    from the calibrated contrast on every public data set -- where the sources scored S/N ~ 0
+    and ``argmax_k`` was noise (paper runs A2/C/D seeded k = 4/6/13, 4/1, 18/6 that way).
+    The scan now runs once the contrast has walked into the target window, at the k the
+    configuration defaults to, and the window is re-measured at the k it picks."""
+    red, space, obj, samp, cfg = build_synthetic_run(contrast0=3e-3, ann_edges=[8, 30], n_iter=10,
+                                                     validation=ValidationConfig(n_top=1, n_valid=1))
+    logs = []
+    runner = Runner(red, space, obj, samp, cfg, str(tmp_path), log=logs.append)
+    contrast, kdef, info = runner.calibrate(0)
+    cc = cfg.calibration
+    i_scan = next(i for i, l in enumerate(logs) if "calibration k-scan at contrast" in l)
+    before = [t for t in info["trials"] if t["k"] == info["k_default_initial"]]
+    assert before, "the walk starts at the configured default k"
+    # every trial before the scan is at the initial k, and the scan's contrast is the last of
+    # them -- the calibrated one, not contrast0
+    assert info["kscan_contrast"] == pytest.approx(before[-1]["contrast"])
+    assert info["kscan_contrast"] != pytest.approx(cfg.contrast0)
+    assert cc.target[0] <= before[-1]["snr"] <= cc.target[1], "the scan waits for the window"
+    n_before = sum(1 for l in logs[:i_scan] if "calibration trial" in l)
+    assert n_before == len(before)
+    # what the scan chose is what the seed will use, and the S/N reported for the annulus is
+    # the one measured AT that k
+    assert kdef == info["k_default"] and 1 <= kdef <= cfg.k_scan_max
+    if kdef != info["k_default_initial"]:
+        after = [t for t in info["trials"] if t["k"] == kdef]
+        assert after and info["trials"][-1]["k"] == kdef
+        assert info["snr"] == pytest.approx(info["trials"][-1]["snr"])
+    assert cc.target[0] <= info["snr"] <= cc.target[1]
+    # a forced contrast: one trial, the scan at that contrast, no re-measure
+    cfg.calibration.forced = [1e-4]
+    logs2 = []
+    r2 = Runner(red, space, obj, samp, cfg, str(tmp_path / "f"), log=logs2.append)
+    c2, k2, info2 = r2.calibrate(0)
+    assert c2 == 1e-4 and len(info2["trials"]) == 1 and info2["kscan_contrast"] == 1e-4
+    assert k2 == info2["k_default"]

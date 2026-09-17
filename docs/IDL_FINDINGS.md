@@ -197,6 +197,16 @@ same guard at its next pause (addendum 2 §2c).
   `coronoise_max_`), which breaks name-based parsing; the port writes JSON.
 * The calibration seed (`X[*,0]`) is not feasibility-projected in IDL and is excluded from
   the TPE training set; the port projects it and keeps it.
+* The calibration k-scan (`kbest_c`, A §4) runs once at the *starting* contrast, and the
+  contrast loop then calibrates at that k.  On NEAR the starting contrast is the per-annulus
+  `use_contrast` from experience, so the sources are already near S/N 5 when k is chosen.
+  With a generic `contrast0` (3e-5 in the port) the scan happened where the sources scored
+  S/N ~ 0 (beta Pic) or ~ 40 (HD 95086) and `argmax_k` was noise -- the public-data runs of
+  2026-09-16/17 seeded k = 4/6/13, 8, 4/1 and 18/6 across their annuli that way.  Since
+  2026-09-17 the port walks the contrast into the window at the configured default k first,
+  scans k *at that contrast* (median over `n_remeasure` draws rather than IDL's one), and
+  re-measures the window at the k it chose.  A forced contrast still scans at that contrast
+  and keeps its single trial, so the benchmarks' slot protocol is unchanged.
 * `optimize_tpe_results.txt` can contain duplicate `(annulus, iter)` rows after a
   re-calibration restart and `********` for failed scores; `klip_tpe.idl_replay` handles both.
 

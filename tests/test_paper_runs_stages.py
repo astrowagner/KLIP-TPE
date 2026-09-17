@@ -282,13 +282,32 @@ def test_force_on_a_benchmark_stage_retires_the_batch():
     directory takes bench_tag.txt with it, which is what forces a fresh tag.
     """
     sh = _text("rerun_paper.sh")
-    assert 'if [[ -n "${FORCE:-}" && -n "$d" && -f "$d/bench_tag.txt" ]]' in sh
+    assert 'if [[ -n "${FORCE:-}" && -n "$d" && -d "$d" ]]' in sh
+    assert 'if [[ -f "$d/bench_tag.txt" ]]' in sh
     assert "_superseded_" in sh
     assert 'mv "$d" "$keep"' in sh
-    # and it must not touch a science stage, which has no bench_tag.txt
     i_skip = sh.index('already finished ($d) -- skipping')
     i_force = sh.index('retiring the existing batch')
     assert i_skip < i_force, "the retire step has to come after the finished-stage skip"
+
+
+def test_force_on_a_finished_science_stage_retires_the_run_too():
+    """``FORCE=1 ./rerun_paper.sh A2`` on a finished A2 used to get past the skip and launch
+    ``run_demos.py A2`` into the same directory -- where ``Runner.run()`` auto-resumes the
+    checkpoint, finds every annulus complete, rewrites the products and reports "done in
+    2 min".  Nothing was searched again and the old calibration stayed.  The finished
+    directory is retired like a benchmark batch.  I2 -- days of LMIRCam compute -- is never
+    retired by a flag."""
+    sh = _text("rerun_paper.sh")
+    assert 'elif [[ -f "$d/final_results.json" ]]' in sh
+    assert "retiring the finished run" in sh
+    i_i2 = sh.index('if [[ "$s" == "I2" ]]')
+    i_mv = sh.index('say "$s: FORCE -- retiring the finished run')
+    assert i_i2 < i_mv, "the I2 exception has to be checked before a science run is moved"
+    assert "FORCE does not retire the LMIRCam run" in sh
+    assert "FORCE would retire the finished run" in sh, "a dry run should say what FORCE would do"
+    head = sh[:sh.index("set -uo pipefail")]
+    assert "science run" in head and "I2" in head
 
 
 def test_dry_reports_without_touching_the_tree():
@@ -345,3 +364,25 @@ def test_the_two_new_stages_use_their_science_runs_calibrated_contrast(demos):
     src = _text("run_demos.py")
     assert "5.899e-9" in src            # run C, HD 95086 annulus 1
     assert "5.270e1" in src             # run D, HIP 65426 annulus 1
+
+
+# ------------------------------------------------------- collect: the paired default
+def test_collect_measures_the_projected_seed_and_pairs_it_with_the_winner():
+    """The "default" of Table 2 is what the run was SEEDED with: the space defaults plus
+    RunConfig.defaults at the calibration k-scan's k, projected through the reference-count
+    guard (angsep -> 0, anglemax -> the PA span) as ``Runner._reset_history`` does.  Until
+    2026-09-17 collect measured ``space.default_vector()`` unprojected -- a configuration
+    no run ever evaluates -- and compared it with a validated score from other draws.
+    Default and winner are now re-scored on the same injection sets."""
+    col = _text("collect.py")
+    assert "runner._project(runner._default_vector(k_seed), is_random=False)" in col
+    assert 'a.get("k_default")' in col
+    assert "sources=src, raw_only=True" in col
+    assert '"paired_wins"' in col and '"winner_remeasured"' in col and '"gain_vs_validated"' in col
+    assert "default_flat" in col, "the configured k (before the k-scan) is measured as well"
+    assert "x0 = space.default_vector(seeded)" not in col
+
+
+def test_figs_scale_the_default_curve_by_the_paired_gain():
+    src = _text("figs.py")
+    assert 'a.get("gain") or (a["winner_score"] / max(a["default_score"], 1e-9))' in src

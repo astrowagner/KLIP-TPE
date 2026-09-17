@@ -212,7 +212,9 @@ def fig_contrast(s):
             rr = np.asarray(a["sigma_default"]["r_as"])
             if "main" in cur:
                 base = np.interp(rr, cur["main"]["r_as"], np.asarray(cur["main"]["c5"]) / fs)
-                fac = a["winner_score"] / max(a["default_score"], 1e-9)
+                # paired gain (winner and default re-measured on the same injections) when
+                # collect recorded one; the validated/default ratio otherwise
+                fac = a.get("gain") or (a["winner_score"] / max(a["default_score"], 1e-9))
                 ax.semilogy(rr, base * fac, ":", color="crimson", lw=1.1,
                             label="seeded default" if a is r["annuli"][0] else None)
             for e in (a["inrad_as"],):

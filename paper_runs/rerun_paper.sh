@@ -31,11 +31,15 @@
 #   ./rerun_paper.sh A2 C         just those
 #   WORKERS=4 ./rerun_paper.sh    leave cores for another run on the same machine
 #   SHOW=0 ./rerun_paper.sh       headless (panels still written to each run's steps/)
-#   FORCE=1 ./rerun_paper.sh A2   redo a stage that already finished.  On a benchmark stage
-#                                 this retires the whole batch to <dir>_superseded_<stamp>
-#                                 and starts a new tag, so the re-run is uniform: a
-#                                 benchmark that merely resumed would mix the old slots'
-#                                 settings with the new ones in a single directory.
+#   FORCE=1 ./rerun_paper.sh A2   redo a stage that already finished.  The finished directory
+#                                 is retired to <dir>_superseded_<stamp> first -- a benchmark
+#                                 as a whole batch, so the re-run is uniform (one that merely
+#                                 resumed would mix the old slots' settings with the new ones
+#                                 in a single directory), and a science run because
+#                                 Runner.run() resumes any directory holding a checkpoint:
+#                                 re-launched in place it would reload the finished search,
+#                                 rewrite the products and say "done in 2 min".  I2 (days of
+#                                 LMIRCam compute) is never retired by a flag: move it by hand.
 #
 # The live window is ON by default and is shared: one window that follows whichever stage --
 # or, inside a benchmark, whichever slot -- is running.
@@ -163,6 +167,10 @@ for s in "${STAGES[@]}"; do
     [[ -n "$failed" ]] && extra="   [would retire $d: its final_results.json has no winner]"
     [[ -n "${FORCE:-}" && -n "$d" && -f "$d/bench_tag.txt" ]] && \
       extra="$extra   [FORCE would retire batch $(cat "$d/bench_tag.txt")]"
+    [[ -n "${FORCE:-}" && -n "$d" && ! -f "$d/bench_tag.txt" && -f "$d/final_results.json" && "$s" != "I2" ]] && \
+      extra="$extra   [FORCE would retire the finished run $d]"
+    [[ -n "${FORCE:-}" && "$s" == "I2" && -n "$d" && -f "$d/final_results.json" ]] && \
+      extra="$extra   [FORCE does not retire I2; move $d aside by hand to redo it]"
     say "$s: would run  $(stage_cmd "$s")   [WORKERS=${WORKERS:-auto} SHOW=${SHOW:-window}]$extra"
     continue
   fi
@@ -171,17 +179,32 @@ for s in "${STAGES[@]}"; do
     say "$s: $d has a final_results.json with NO winner (every evaluation failed) -- retiring it to $(basename "$keep") and running again"
     mv "$d" "$keep"
   fi
-  # FORCE on a BENCHMARK stage has to retire the batch, not just get past the skip above.
+  # FORCE on a FINISHED stage has to retire its directory, not just get past the skip above.
   # A benchmark resumes by reading bench_tag.txt and rejoining the slots of that tag, so a
   # stage re-run with FORCE=1 used to march straight back into the batch it was meant to
   # replace -- and any setting changed for the re-run (DISK_CUT, the objective, the space)
   # then applied to the NEW slots only, leaving one directory holding two protocols.  That
   # is how F2 ended up with slot 0 uncut, slots 1-4 cut, and slot 5 half of each.
   # Retiring the directory takes bench_tag.txt with it, so the stage mints a fresh tag.
-  if [[ -n "${FORCE:-}" && -n "$d" && -f "$d/bench_tag.txt" ]]; then
-    keep="${d}_superseded_$(date +%Y%m%d_%H%M%S)"
-    say "$s: FORCE -- retiring the existing batch $(cat "$d/bench_tag.txt") to $(basename "$keep")"
-    mv "$d" "$keep"
+  # A science run is no different in effect: Runner.run() auto-resumes any directory that
+  # holds a checkpoint.json, so a finished A2 re-launched in place reloads the finished
+  # search, finds every annulus done, rewrites the final products and reports "done in
+  # 2 min" -- nothing searched again, and the old calibration kept.  I2 is the exception:
+  # a 5000-evaluation four-night LMIRCam search is days of compute, and no flag retires it.
+  if [[ -n "${FORCE:-}" && -n "$d" && -d "$d" ]]; then
+    if [[ -f "$d/bench_tag.txt" ]]; then
+      keep="${d}_superseded_$(date +%Y%m%d_%H%M%S)"
+      say "$s: FORCE -- retiring the existing batch $(cat "$d/bench_tag.txt") to $(basename "$keep")"
+      mv "$d" "$keep"
+    elif [[ -f "$d/final_results.json" ]]; then
+      if [[ "$s" == "I2" ]]; then
+        say "$s: FORCE does not retire the LMIRCam run ($d: days of compute) -- move it aside by hand to redo it; skipping"
+        continue
+      fi
+      keep="${d}_superseded_$(date +%Y%m%d_%H%M%S)"
+      say "$s: FORCE -- retiring the finished run to $(basename "$keep") (re-launched in place it would only resume)"
+      mv "$d" "$keep"
+    fi
   fi
   t0=$SECONDS
   say "$s: starting"

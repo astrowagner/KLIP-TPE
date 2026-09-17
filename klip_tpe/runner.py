@@ -37,6 +37,7 @@ import pickle
 import shutil
 import tempfile
 import time
+import warnings
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -952,9 +953,60 @@ class Runner:
         return rec, inj, clean
 
     # ------------------------------------------------------------ calibration
+    def _scan_k(self, cfg0: Config, rlo: float, rhi: float, nsrc: int, contrast: float,
+                info: Dict[str, Any], k_now: int) -> Optional[int]:
+        """The k-scan of the default configuration at ``contrast``: the search metric of
+        every k up to :meth:`_k_scan_max`, median over ``n_remeasure`` fresh source sets
+        (IDL scanned one set; one draw's argmax over a 30-point noisy curve is mostly the
+        draw).  Records the curve in ``info`` and returns the best k, or None when nothing
+        finite came back (the caller then keeps ``k_now``)."""
+        try:
+            kmax = self._k_scan_max()
+            curves = []
+            for _ in range(max(int(self.cfg.calibration.n_remeasure), 1)):
+                src = self.sampler.sample(nsrc, rlo, rhi, self.rng, contrast)
+                scan = self._reduce(self._with_k(cfg0, kmax), src, k_scan=True, tag="calib_scan")
+                cscan = self._reduce(self._with_k(cfg0, kmax), None, k_scan=True, tag="calib_cscan") \
+                    if self.objective.metric.needs_clean else None
+                curves.append([self.objective.score_raw(scan.image[kk], src,
+                                                        None if cscan is None else cscan.image[kk]).score
+                               for kk in range(scan.image.shape[0])])
+            n = min(len(c) for c in curves)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)        # all-NaN slices are a legal answer
+                sc = np.nanmedian(np.array([c[:n] for c in curves], float), axis=0)
+            info["kscan"] = [None if not np.isfinite(v) else float(v) for v in sc]
+            info["kscan_contrast"] = float(contrast)
+            if not np.any(np.isfinite(sc)):
+                self.log(f"  calibration k-scan at contrast {contrast:.3e}: no finite score at any k; keeping k = {k_now}")
+                return None
+            k = int(np.nanargmax(sc)) + 1
+            now = sc[k_now - 1] if 1 <= k_now <= sc.size else np.nan
+            self.log(f"  calibration k-scan at contrast {contrast:.3e}: k_default = {k} "
+                     f"(S/N {sc[k - 1]:.2f}; k = {k_now} scores {now:.2f})")
+            return k
+        except Exception as exc:
+            self.log(f"  calibration k-scan failed ({exc!r}); keeping k = {k_now}")
+            return None
+
     def calibrate(self, ia: int) -> Tuple[float, int, Dict[str, Any]]:
         """Choose the injection contrast for annulus ``ia`` (see :class:`CalibrationConfig`).
-        Returns ``(contrast, k_default, info)``."""
+        Returns ``(contrast, k_default, info)``.
+
+        Order of operations (since 2026-09-17): the contrast is walked into the target S/N
+        window at the configured default ``k`` first; the k-scan that picks the seed's ``k``
+        runs only once the sources sit at that S/N, and the window is then re-measured at
+        the k it chose (the contrast keeps moving if that took it out of the window).
+        ``optimize_near_2_tpe`` scanned k once at the *starting* contrast and calibrated at
+        that k -- fine when the starting contrast is close, which NEAR's per-annulus
+        ``use_contrast`` made it, but the generic ``contrast0 = 3e-5`` is orders of magnitude
+        from the calibrated value on every public data set here.  At 3e-5 the sources scored
+        S/N ~ 0 on beta Pic (and ~ 40 on HD 95086), ``argmax_k`` of that curve was the noise,
+        and the seed k -- also the k the contrast was calibrated at -- came out 4/6/13, 8,
+        4/1 and 18/6 across the annuli of runs A2, B2, C and D (2026-09-16/17): a different
+        "default" per annulus, chosen by a coin.  With a forced contrast the scan runs at
+        that contrast, as before, and the window is not enforced.
+        """
         cc = self.cfg.calibration
         self.hb.stage(f"annulus {ia + 1} calibration", annulus=ia)
         forced = 0.0
@@ -969,31 +1021,21 @@ class Runner:
             cfg0.params[k] = v
             for d in cfg0.per_partition.values():
                 d[k] = v
-        kdef = int(cfg0.params.get("k_klip", self.cfg.defaults.get("k_klip", 10)) or 10)
+        kdef0 = int(cfg0.params.get("k_klip", self.cfg.defaults.get("k_klip", 10)) or 10)
+        kdef = kdef0
+        info["k_default_initial"] = kdef0
         rlo, rhi = self._band(ia, cfg0)
         nsrc = self._nsrc(ia)
-        # optional k-scan for the default config
-        if cc.scan_k and ("k_klip" in self.space.bases or self.cfg.k_mode in SCAN_MODES) and self.reducer.supports_kscan:
-            try:
-                src = self.sampler.sample(nsrc, rlo, rhi, self.rng, contrast)
-                kmax = self._k_scan_max()
-                scan = self._reduce(self._with_k(cfg0, kmax), src, k_scan=True, tag="calib_scan")
-                cscan = self._reduce(self._with_k(cfg0, kmax), None, k_scan=True, tag="calib_cscan") \
-                    if self.objective.metric.needs_clean else None
-                sc = np.array([self.objective.score_raw(scan.image[kk], src, None if cscan is None else cscan.image[kk]).score
-                               for kk in range(scan.image.shape[0])])
-                if np.any(np.isfinite(sc)):
-                    kdef = int(np.nanargmax(sc)) + 1
-                info["kscan"] = [None if not np.isfinite(v) else float(v) for v in sc]
-                info["k_default"] = kdef
-                self.log(f"  calibration k-scan: k_default = {kdef}")
-            except Exception as exc:
-                self.log(f"  calibration k-scan failed ({exc!r}); keeping k = {kdef}")
+        scan_wanted = bool(cc.scan_k and ("k_klip" in self.space.bases or self.cfg.k_mode in SCAN_MODES)
+                           and self.reducer.supports_kscan)
+        scanned = False
         cfgk = self._with_k(cfg0, kdef)
         info["k_default"] = kdef
         self._calib_images = None
         msnr = np.nan
-        for trial in range(cc.max_trials):
+        budget = int(cc.max_trials)
+        trial = 0
+        while trial < budget:
             vals = []
             src = []
             errors: List[BaseException] = []
@@ -1026,23 +1068,51 @@ class Runner:
                     f"the default reduction of annulus {ia + 1} failed on all {len(errors)} attempts "
                     f"({errors[-1]!r}); nothing in the search can succeed until that is fixed") from errors[-1]
             msnr = nanmedian_even(vals)
-            info["trials"].append({"contrast": contrast, "snr": None if not np.isfinite(msnr) else float(msnr),
+            info["trials"].append({"contrast": contrast, "k": kdef,
+                                   "snr": None if not np.isfinite(msnr) else float(msnr),
                                    "values": [None if not np.isfinite(v) else float(v) for v in vals]})
-            self.log(f"  calibration trial {trial+1}: contrast={contrast:.3e}  median S/N={msnr:.2f}")
+            self.log(f"  calibration trial {trial+1}: contrast={contrast:.3e}  k={kdef}  median S/N={msnr:.2f}")
             self._emit("on_calibration_trial", ia, trial + 1, contrast, msnr, self._calib_images)
             if self.cfg.write_setup_files:
                 self._write_setup_file(os.path.join(self._ann_dir(ia), f"calib{trial+1:04d}_setup.txt"), "calib",
                                        ia, trial + 1, cfgk, src, contrast, msnr, kdef)
-            if forced > 0 or not np.isfinite(msnr):
-                break
-            if cc.target[0] <= msnr <= cc.target[1]:
+            in_window = bool(np.isfinite(msnr) and cc.target[0] <= msnr <= cc.target[1])
+            settled = forced > 0 or not np.isfinite(msnr) or in_window
+            if scan_wanted and not scanned and (forced > 0 or in_window):
+                # The sources now sit where the search will see them: pick the seed's k here.
+                scanned = True
+                knew = self._scan_k(cfg0, rlo, rhi, nsrc, contrast, info, kdef)
+                if knew is not None and knew != kdef:
+                    kdef = knew
+                    cfgk = self._with_k(cfg0, kdef)
+                    info["k_default"] = kdef
+                    if forced <= 0:
+                        # the window was measured at the old k; re-measure at the one the seed
+                        # will use, with a full budget to walk the contrast back into the window
+                        # (a scan's best k is by construction the one that raised the S/N most).
+                        # A forced contrast cannot move, so it keeps its one trial (the seed
+                        # evaluation reports the S/N at the chosen k anyway).
+                        budget = trial + 1 + int(cc.max_trials)
+                        trial += 1
+                        continue
+            if settled:
                 break
             fac = float(np.clip(cc.aim / max(msnr, 0.5), cc.step_clip[0], cc.step_clip[1]))
             contrast *= fac
             if cc.ceiling is not None:
                 contrast = min(contrast, cc.ceiling)
+            trial += 1
+        if scan_wanted and not scanned and np.isfinite(msnr) and msnr >= 2.0:
+            # the window was never reached within the budget, but the sources are detected:
+            # a scan here is still about the right regime (there is no budget left to
+            # re-measure at the chosen k, so the recorded S/N is the one at k = kdef0)
+            knew = self._scan_k(cfg0, rlo, rhi, nsrc, contrast, info, kdef)
+            if knew is not None:
+                kdef = knew
+                info["k_default"] = kdef
         info["contrast"] = contrast
         info["snr"] = None if not np.isfinite(msnr) else float(msnr)
+        info["k_default"] = kdef
         return contrast, kdef, info
 
     # ----------------------------------------------------------------- search

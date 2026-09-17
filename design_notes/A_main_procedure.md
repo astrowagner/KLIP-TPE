@@ -240,6 +240,7 @@ ccal = inj_contrast[0]
 Important details:
 - The calibration reductions (5243, 5299, 5303, 5329) do **not** pass `corr_thresh/noise_max/coronoise_max` → `near2m_reduce` defaults `corr_thresh=0.95` and leaves the others undefined (reduce_near_2 defaults, historically 2.0). Only the later clean seed reduction (5492) and the verify clean pass (5424) use `def_corr_thresh=0.907` etc. The "default config" of trial 0 is therefore *not* frame-selected identically to the `x0` vector recorded in `X[*,0]`.
 - The k-scan (`kbest_c`) is done once at the first contrast; the contrast loop re-measures only at fixed `kbest_c+1`.
+  **Port deviation (2026-09-17):** `Runner.calibrate` walks the contrast into the window at the configured default k first, scans k at the calibrated contrast (median over `n_remeasure` draws), then re-measures the window at the chosen k -- see `docs/IDL_FINDINGS.md` §5 for why.
 - Metric in the scan and re-measure: the same `near2_snrpk(radprof(img))` used in the search (raw), minus clip0(clean) if `clean_subtract`.
 - `nrev = 2`; with `nbridges > 1` both re-measures are dispatched concurrently with suffixes `_c0`/`_c1` and read back with `near2m_avg` (sqrt(texp)-weighted night average, 450-470).
 - Up to **8** trials; failure to converge only prints a warning.

@@ -4,11 +4,22 @@
     python collect.py A C D B E        # any subset; updates summary.json
 
 Every "default -> optimized" number comes from one comparison made the same way.  For
-each annulus we take the run's validated winner and re-run the *seeded default*
-configuration through the identical validation protocol: ``n_valid`` trials of fresh
-randomized injections at the annulus' own calibrated contrast, scored with the same
-metric.  Because the 5-sigma contrast is ``c5 = 5 x contrast / SNR_inj``, the ratio of
-those two median S/N values *is* the contrast gain, throughput included.
+each annulus the *seeded default* -- the very vector the run started from: the space's
+defaults with the run's ``RunConfig.defaults`` on top, at the k its calibration k-scan
+chose, pushed through the same reference-count guard the Runner projects every seed
+through -- and the run's validated winner are both re-scored on the SAME ``N_TRIALS``
+sets of fresh randomized injections at the annulus' own calibrated contrast, with the
+raw metric validation uses.  Because the 5-sigma contrast is ``c5 = 5 x contrast /
+SNR_inj``, the ratio of the two medians *is* the contrast gain, throughput included, and
+pairing the trials takes the draw-to-draw scatter (a factor ~1.4 between two draws of the
+same configuration) out of it.  The run's own validated score is kept beside the paired
+re-measurement; the configured default (``k_klip`` from RunConfig.defaults, before the
+k-scan) is measured too, so the paper can say what the one-dimensional k-scan bought and
+what the full search bought on top of it.
+
+Until 2026-09-17 the "default" here was ``space.default_vector()`` unprojected -- angsep
+1.923 lambda/D and anglemax 26 deg, which the guard rewrites to 0 / the PA span before any
+run sees them -- and the winner was the validated score from a different set of draws.
 
 Independently we measure the real companion in both clean images (Mawet small-sample
 matched-filter S/N), which is a check on a real source that no injection can fake.
@@ -34,7 +45,7 @@ OUT = R.OUT
 TARGETS = {"A": ("A_betapic", "betapic", R.BP), "A2": ("A2_betapic", "betapic", R.BP),
            "B": ("B_betapic_groups", "betapic", R.BP), "B2": ("B2_betapic_groups", "betapic", R.BP),
            "C": ("C_hd95086", "hd95086", R.HD), "D": ("D_hip65426", "hip65426", R.HIP)}
-N_DEFAULT_TRIALS = 5
+N_TRIALS = 8          # paired re-measurement sets per annulus (default, flat default, winner)
 
 #: Published contrast of the companion in each data set's own band -- the CHECK on each
 #: contrast axis.  Every axis is now calibrated in its own right (beta Pic from VIP's
@@ -113,7 +124,7 @@ def sigma_curve(img, red, rin_px, rout_px, known):
     return (rad[ok] * red.pxscale).tolist(), sig[ok].tolist()
 
 
-def collect(which, n_trials=N_DEFAULT_TRIALS):
+def collect(which, n_trials=N_TRIALS):
     d, tag, planet = TARGETS[which]
     run = os.path.join(OUT, d)
     fr = json.load(open(os.path.join(run, "final_results.json")))
@@ -132,12 +143,14 @@ def collect(which, n_trials=N_DEFAULT_TRIALS):
     # Until 2026-09-17 this took space.default_vector() alone -- k = 6 for D -- so the
     # "default" column measured a configuration the run never started from.
     seeded = dict(setup.get("defaults") or {})
-    x0 = space.default_vector(seeded)
     out["seeded_defaults"] = seeded
+    k_flat = int(seeded.get("k_klip", 10) or 10)
     tmp = os.path.join(OUT, f"_default_{which}")
+    x0_by_ann = {}
     for a in fr["annuli"]:
         ia, rin, rout = a["annulus"], a["inrad"], a["outrad"]
         contrast = a["contrast"]
+        k_seed = int(a.get("k_default") or k_flat)
         rec = {"annulus": ia, "inrad_px": rin, "outrad_px": rout,
                "inrad_as": rin * red.pxscale, "outrad_as": rout * red.pxscale,
                "contrast": contrast, "search_best": a["search_best_score"],
@@ -148,23 +161,57 @@ def collect(which, n_trials=N_DEFAULT_TRIALS):
                "validation_table": [{k: t.get(k) for k in ("eval_index", "search_score",
                                                            "validated_score", "trials")}
                                     for t in a["validation_table"]]}
-        # --- the seeded default through the identical validation protocol
+        # --- the seeded default and the winner, paired, through the validation metric
         cfg = RunConfig(ann_edges=list(setup.get("ann_edges") or [rin, rout]),
                         n_iter=1, n_init=1, seed=99 + ia,
-                        n_sources=int(setup.get("n_sources", 3)),
+                        n_sources=int(setup.get("n_sources", 3)), defaults=dict(seeded),
                         validation=ValidationConfig(n_top=1, n_valid=n_trials),
                         save_fits=False, save_eval_images=False, write_setup_files=False)
         runner = Runner(red, space, obj, samp, cfg, tmp, log=lambda s: None)
         runner.ia = ia
         runner.contrast = contrast
-        trials = []
+        # the Runner seeds the PROJECTED default: reference-count guard applied (angsep,
+        # anglemax, k cap), exactly as _reset_history does
+        x0 = runner._project(runner._default_vector(k_seed), is_random=False)
+        x_flat = runner._project(runner._default_vector(k_flat), is_random=False)
+        x_win = np.asarray(a["winner_x"], float) if a.get("winner_x") is not None else None
+        x0_by_ann[ia] = x0
+        cands = {"default": x0, "winner": x_win}
+        if k_flat != k_seed:
+            cands["default_flat"] = x_flat
+        trials = {k: [] for k in cands if cands[k] is not None}
+        rlo, rhi = runner._band(ia, space.decode(x0))
         for _ in range(n_trials):
-            r, _, _ = runner.evaluate(x0, "default", contrast=contrast, raw_only=True)
-            if r.raw_score is not None and np.isfinite(r.raw_score):
-                trials.append(float(r.raw_score))
-        rec["default_trials"] = trials
-        rec["default_score"] = float(np.median(trials)) if trials else float("nan")
-        rec["gain"] = (rec["winner_score"] / rec["default_score"]) if trials and rec["default_score"] > 0 else None
+            src = samp.sample(runner._nsrc(ia), rlo, rhi, runner.rng, contrast)
+            for name, x in cands.items():
+                if x is None:
+                    continue
+                r, _, _ = runner.evaluate(x, "default", contrast=contrast, sources=src, raw_only=True)
+                ok = r.raw_score is not None and np.isfinite(r.raw_score)
+                trials[name].append(float(r.raw_score) if ok else float("nan"))
+        d_tr = np.array(trials["default"], float)
+        rec["default_k"] = k_seed
+        rec["default_trials"] = [None if not np.isfinite(v) else float(v) for v in d_tr]
+        rec["default_score"] = float(np.nanmedian(d_tr)) if np.isfinite(d_tr).any() else float("nan")
+        if "default_flat" in trials:
+            f_tr = np.array(trials["default_flat"], float)
+            rec["default_flat_k"] = k_flat
+            rec["default_flat_trials"] = [None if not np.isfinite(v) else float(v) for v in f_tr]
+            rec["default_flat_score"] = float(np.nanmedian(f_tr)) if np.isfinite(f_tr).any() else float("nan")
+        if "winner" in trials:
+            w_tr = np.array(trials["winner"], float)
+            rec["winner_trials"] = [None if not np.isfinite(v) else float(v) for v in w_tr]
+            rec["winner_remeasured"] = float(np.nanmedian(w_tr)) if np.isfinite(w_tr).any() else float("nan")
+            both = np.isfinite(w_tr) & np.isfinite(d_tr)
+            rec["paired_wins"] = int(np.sum(w_tr[both] > d_tr[both]))
+            rec["paired_n"] = int(both.sum())
+            rec["gain"] = (rec["winner_remeasured"] / rec["default_score"]
+                           if both.any() and rec["default_score"] > 0 else None)
+            rec["gain_per_trial_median"] = float(np.nanmedian(w_tr[both] / d_tr[both])) if both.any() else None
+        else:
+            rec["gain"] = None
+        rec["gain_vs_validated"] = ((rec["winner_score"] / rec["default_score"])
+                                    if np.isfinite(rec["default_score"]) and rec["default_score"] > 0 else None)
         # --- the real companion, and the noise profile, in both clean images
         p0 = dict(space.decode(x0).params, inrad=rin, outrad=rout)
         img0 = red.reduce(ReductionRequest(params=p0)).image
@@ -181,13 +228,19 @@ def collect(which, n_trials=N_DEFAULT_TRIALS):
             rec["sigma_optimized"] = {"r_as": r1, "sigma": s1}
             rec["sigma_ratio_median"] = float(np.nanmedian(
                 np.asarray(s0) / np.interp(r0, r1, s1)))
-        log(f"  ann {ia + 1} [{rin:.0f}-{rout:.0f} px]: injected S/N {rec['default_score']:.2f} -> "
-            f"{rec['winner_score']:.2f} (x{rec['gain'] or float('nan'):.2f}); "
+        flat = ("" if "default_flat_score" not in rec
+                else f" [k={k_flat} flat default {rec['default_flat_score']:.2f}]")
+        log(f"  ann {ia + 1} [{rin:.0f}-{rout:.0f} px]: injected S/N default(k={k_seed}) {rec['default_score']:.2f} -> "
+            f"winner {rec.get('winner_remeasured', float('nan')):.2f} paired on {rec.get('paired_n', 0)} sets "
+            f"(x{rec['gain'] or float('nan'):.2f}, winner better in {rec.get('paired_wins', 0)}/{rec.get('paired_n', 0)}); "
+            f"run validated {rec['winner_score']:.2f}{flat}; "
             f"planet {rec['planet_snr_default']:.1f} -> "
             f"{-1 if rec['planet_snr_optimized'] is None else rec['planet_snr_optimized']:.1f}")
         out["annuli"].append(rec)
 
-    anchor(out, red, space, planet, x0=x0)
+    rho_c = planet[0]
+    ia_c = next((a["annulus"] for a in out["annuli"] if a["inrad_as"] <= rho_c <= a["outrad_as"]), None)
+    anchor(out, red, space, planet, x0=x0_by_ann.get(ia_c))
     st = os.path.join(run, "klip_stitched.fits")
     if os.path.exists(st):
         out["stitched_planet_snr"] = planet_snr(np.asarray(fits.getdata(st), float), red, planet)
@@ -236,7 +289,8 @@ def anchor(out, red=None, space=None, planet=None, x0=None):
     with each fake's matched-filter peak read in (injected - clean) and the companion's in
     the radial-profile-subtracted clean image: same reduction, same separation, same kernel,
     so the KLIP throughput cancels.  The S/N values are recorded alongside for the record;
-    they are NOT used for the scale (see the note above ANCHOR)."""
+    they are NOT used for the scale (see the note above ANCHOR).  ``x0`` is the companion
+    annulus' seeded default as :func:`collect` measured it (projected, at the run's k)."""
     from klip_tpe.metrics import mawet_peak_snr, radprof
     pub, ref = ANCHOR.get(out["target"], (None, None))
     out["anchor_reference"] = ref
