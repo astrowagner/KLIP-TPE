@@ -113,15 +113,16 @@ def test_every_forced_bench_contrast_is_on_the_current_flux_axis():
 
     H2's 2.324e-04 was measured on the right axis but the wrong FRAMES: the calints loader's
     sigma-clip repair had median-filtered the whole PSF, and a 0.561 "optics transmission"
-    anchored on the companion was hiding the damage.  1.637e-04 is the value on DQ-filled
-    frames with T_optics = 1 and the star centre re-solved on them (2026-09-16; 1.740e-04
-    was the same measurement before the centre moved 0.9 px).
+    anchored on the companion was hiding the damage.  1.637e-04 was the value on DQ-filled
+    frames with T_optics = 1 and the re-solved centre but with one partition per ROLL, where
+    pyKLIP's mode was degenerate (2026-09-16); 2.022e-04 is the same measurement with both
+    rolls in one partition (2026-09-17).
 
     These are the values scripts/calibrate_bench_contrast.py measures through
     Runner.calibrate on the current axis.  If one changes, re-measure; do not convert."""
     src = _run_demos()
     want = {"E2": ("3.0e-4", "[8, 22]"), "F2": ("3.0e-4", "[8, 22]"),
-            "G2": ("(1.112e-5, 4.773e-6)", "[20, 36, 66]"), "H2": ("1.637e-04", "[6, 20]")}
+            "G2": ("(1.112e-5, 4.773e-6)", "[20, 36, 66]"), "H2": ("2.022e-04", "[6, 20]")}
     for tag, (contrast, edges) in want.items():
         m = re.search(r'_bench_hi\(\s*"%s".*?\)\n' % tag, src, re.S)
         assert m, f"run_{tag}'s _bench_hi call not found"
@@ -132,7 +133,7 @@ def test_every_forced_bench_contrast_is_on_the_current_flux_axis():
     # as an ARGUMENT: check the call lines only (the same trap once caught H2's 5.270e1 in
     # a comment and let the real one through)
     calls = "\n".join(l for l in src.splitlines() if "_bench_hi(" in l or "forced=[" in l)
-    for stale in ("1.31e-3", "2.087e-3", "5.899e-9", "5.270e1", "7.946e-6, 6.201e-6", "2.324e-04", "1.740e-04"):
+    for stale in ("1.31e-3", "2.087e-3", "5.899e-9", "5.270e1", "7.946e-6, 6.201e-6", "2.324e-04", "1.740e-04", "1.637e-04"):
         assert stale not in calls, f"pre-fix constant {stale} is still being passed"
     # the superseded single-annulus E and F use the same measured value
     assert src.count("forced=[3.0e-4]") == 2, "run_E and run_F carry the measured contrast too"

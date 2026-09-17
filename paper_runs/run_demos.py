@@ -213,14 +213,24 @@ def run_C():
 
 
 # ---------------------------------------------------------------- HIP 65426 (JWST)
-def hip65426_objects():
-    """RDI reducer for the ERS 1386 F444W rolls, on an absolute contrast axis.
+def hip65426_objects(partition="all"):
+    """Reducer for the ERS 1386 F444W rolls, on an absolute contrast axis.
 
     The star cannot be measured off these frames -- HIP 65426 and the reference star phi Cen
     are both behind MASK335R in every exposure -- so both the flux scale and the star's
     position are imported.  ``datasets.PHOTOMETRY['hip65426_f444w']`` carries them with their
     provenance and the check that pins them; ``docs/FLUX_CALIBRATION.md`` has the reasoning,
     including why the occulter's T(rho) is deliberately NOT part of the star flux.
+
+    ``partition='all'`` (default since 2026-09-17): both rolls in ONE partition, so that
+    pyKLIP's searched ``mode`` means something.  A partition is reduced on its own; with one
+    per roll every frame in it shared a PA, so ADI had no reference frames and ADI+RDI was
+    RDI -- the other roll was never in the basis, and on top of that pyKLIP at movement 0
+    put each frame in its OWN basis (fixed in the backend).  Runs D and H2 before this date
+    "elected RDI" against two modes that could not work.  With both rolls together, at the
+    seeded default k = 10: injected S/N 6.2 ADI, 6.9 RDI, 7.2 ADI+RDI -- a real choice.
+    ``partition='roll'`` keeps the old per-roll layout (one k block per roll, RDI only in
+    effect).
     """
     import glob
     from klip_tpe import stpsf_psf
@@ -228,7 +238,7 @@ def hip65426_objects():
     D = os.path.expanduser("~/.klip_tpe/data/jwst_hip65426")
     files = sorted(glob.glob(os.path.join(D, "jw*calints.fits")))
     phot = datasets.PHOTOMETRY["hip65426_f444w"]
-    dsets, info = sk.load_calints(files, science_target="HIP65426",
+    dsets, info = sk.load_calints(files, science_target="HIP65426", partition=partition,
                                   star_center=tuple(phot["star_center"]), log=log)
     # Off-axis PSF of the actual mask on a ladder of separations, with the mask throughput
     # measured from the same grid.  A Gaussian is the wrong shape AND the wrong scale here:
@@ -480,21 +490,22 @@ def run_G2():
 
 
 def run_H2():
-    """HIP 65426, JWST/NIRCam F444W (11-D): two rolls, RDI against the reference library.
+    """HIP 65426, JWST/NIRCam F444W: both rolls in one partition, a searched ADI/RDI/ADI+RDI.
 
     The other end of the range from beta Pic -- space, two frames per roll, a searched
     ADI/RDI/ADI+RDI mode, and a field with no disk at all.  Angles are not searched (run D
     does not search them either: with two frames per roll there is nothing to select on).
     """
-    # 1.637e-04 is the calibrated contrast for this annulus on the ABSOLUTE axis, measured by
-    # scripts/calibrate_bench_contrast.py H2 on 2026-09-16 (median S/N 4.05 at the default
-    # configuration) -- on DQ-filled frames, optics_transmission = 1, star centre (149.65,
-    # 172.96).  It replaces
-    # 2.324e-04, which was measured on frames the old sigma-clip repair had median-filtered
+    # 2.022e-04 is the calibrated contrast for this annulus on the ABSOLUTE axis, measured by
+    # scripts/calibrate_bench_contrast.py H2 on 2026-09-17 (median S/N 4.74 at the default
+    # configuration, k-scan optimum 4) -- both rolls in one partition, DQ-filled frames,
+    # optics_transmission = 1, star centre (149.65, 172.96).  It replaces 1.637e-04 (the
+    # same measurement with one partition per roll, where mode was degenerate) and, before
+    # that, 2.324e-04, which was measured on frames the old sigma-clip repair had median-filtered
     # (the whole PSF, companion included) against a 0.561 "optics transmission" that only
     # existed to hide that; and before it a forced 5.270e1 -- a "contrast" of 52.7, the
     # raw-detector-units axis of flux_unit = 1.0.  See docs/FLUX_CALIBRATION.md.
-    _bench_hi("H2", 1, ("tpe", "random"), 18, None, {"k_klip": 10}, 1.637e-04, [6, 20], "H2_bench_jwst",
+    _bench_hi("H2", 1, ("tpe", "random"), 18, None, {"k_klip": 10}, 2.022e-04, [6, 20], "H2_bench_jwst",
               make_red=hip65426_objects, known=[HIP], n_sources=4, search_angles=False, n_min_ref=4,
               add_params=[lambda: Param("mode", 0, 2, "categorical", choices=["ADI", "RDI", "ADI+RDI"],
                                         default="RDI", doc="pyKLIP PSF-subtraction mode")])

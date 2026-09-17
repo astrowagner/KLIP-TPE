@@ -324,7 +324,7 @@ def test_the_jwst_call_sites_use_the_model_and_the_measured_centre():
             "H2's forced contrast must be on the absolute axis, not raw detector units"
         assert "2.324e-04" not in h2.split("\n")[0], \
             "2.324e-04 was measured on median-filtered frames (the pre-2026-09-16 repair)"
-        assert "1.637e-04" in h2.split("\n")[0]
+        assert "2.022e-04" in h2.split("\n")[0]
         # the hand-rolled loader is gone in favour of the shared one
         assert "load_calints" in src
 
