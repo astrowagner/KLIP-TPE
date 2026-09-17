@@ -128,18 +128,48 @@ then
   exit 1
 fi
 
+# A final_results.json is proof of completion only if it holds a winner.  On 2026-09-17
+# run D wrote one with winner_index -1 and score -inf in every annulus (350 evaluations,
+# every one a pyklip/numpy TypeError), this script called it "done in 3 min", and the skip
+# below would have kept it forever.  The Runner now refuses to write such a file, but the
+# check is cheap and older directories exist.
+finished() {
+  python3 - "$1" <<'PY'
+import json, sys
+try:
+    j = json.load(open(sys.argv[1] + "/final_results.json"))
+except Exception:
+    sys.exit(1)
+ann = j.get("annuli") or []
+ok = bool(ann) and all(a.get("winner_index", -1) >= 0 or a.get("search_best_index", -1) >= 0 for a in ann)
+sys.exit(0 if ok else 2)
+PY
+}
+
 for s in "${STAGES[@]}"; do
   d="$(outdir "$s")"
-  if [[ -z "${FORCE:-}" && -n "$d" && -f "$d/final_results.json" ]]; then
-    say "$s: already finished ($d) -- skipping.  FORCE=1 to redo"
-    continue
+  failed=""
+  if [[ -n "$d" && -f "$d/final_results.json" ]]; then
+    finished "$d"; fin=$?
+    if [[ $fin -eq 2 ]]; then
+      failed=1
+    elif [[ -z "${FORCE:-}" ]]; then
+      say "$s: already finished ($d) -- skipping.  FORCE=1 to redo"
+      continue
+    fi
   fi
   if [[ -n "${DRY:-}" ]]; then
     extra=""
+    [[ -n "$failed" ]] && extra="   [would retire $d: its final_results.json has no winner]"
     [[ -n "${FORCE:-}" && -n "$d" && -f "$d/bench_tag.txt" ]] && \
-      extra="   [FORCE would retire batch $(cat "$d/bench_tag.txt")]"
+      extra="$extra   [FORCE would retire batch $(cat "$d/bench_tag.txt")]"
     say "$s: would run  $(stage_cmd "$s")   [WORKERS=${WORKERS:-auto} SHOW=${SHOW:-window}]$extra"
     continue
+  fi
+  if [[ -n "$failed" ]]; then
+    keep="${d}_failed_$(date +%Y%m%d_%H%M%S)"
+    say "$s: $d has a final_results.json with NO winner (every evaluation failed) -- retiring it to $(basename "$keep") and running again"
+    mv "$d" "$keep"
   fi
   # FORCE on a BENCHMARK stage has to retire the batch, not just get past the skip above.
   # A benchmark resumes by reading bench_tag.txt and rejoining the slots of that tag, so a

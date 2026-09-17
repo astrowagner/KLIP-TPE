@@ -487,3 +487,85 @@ def test_image_panels_are_north_up_east_left():
         assert x_data < 0, "a source due East must be drawn to the LEFT of the star"
     finally:
         plt.close(fig)
+
+
+def test_walk_and_parhist_pages_do_not_warn_on_a_pinned_dimension():
+    """A dimension whose range collapsed (lo == hi: a partition the guard fixed, a
+    parameter pinned for this annulus) made draw_walk and _parhist_page call set_xlim /
+    set_ylim with identical limits -- one matplotlib UserWarning per cell per page, which
+    is what the tutorial notebooks were full of.  Both pages now widen flat ranges the way
+    the KDE corner already did."""
+    import warnings
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from klip_tpe.display import AnnulusData, ParamInfo, draw_walk, _parhist_page
+    n = 6
+    X = np.column_stack([np.linspace(2, 9, n), np.full(n, 12.0), np.linspace(1, 5, n)])   # middle one pinned
+    ad = AnnulusData(run_name="t", annulus=0, nann=1, inrad=6.0, outrad=20.0, pxscale=0.05, fwhm=3.0,
+                     params=[ParamInfo("k_klip", "k_klip", 1, 10, "int", None, "reduction"),
+                             ParamInfo("bin", "bin", 12, 12, "int", None, "reduction"),
+                             ParamInfo("angsep", "angsep", 0, 5, "float", None, "reduction")],
+                     partitions=["p"], X=X, y=np.linspace(1.0, 3.0, n), phases=["seed"] * 3 + ["tpe"] * 3,
+                     k_used=[5] * n, selected=[["p"]] * n, part_snr=[{}] * n, sources=[[]] * n,
+                     per_source=[[]] * n, raw_per_source=[[]] * n, clean_per_source=[None] * n,
+                     raw=np.linspace(1.0, 3.0, n), wall=np.ones(n), contrast=np.full(n, 1e-4),
+                     configs=[{}] * n, n_init=3, n_iter=n, gamma=0.25, metric_name="m", search_mode="tpe")
+    cs = ad.corner()
+    assert any(l == h for l, h in zip(cs["lo"], cs["hi"])), "the fixture must contain a flat dimension"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)          # any 'identical low and high' warning fails
+        fig = Figure(figsize=(6, 6)); FigureCanvasAgg(fig)
+        draw_walk(fig, cs, ad, "walk")
+        fig = Figure(figsize=(6, 8)); FigureCanvasAgg(fig)
+        _parhist_page(fig, ad, cs, "parhist", current=n - 1)
+
+
+def test_display_pdfs_never_ask_freetype_for_u_fffe():
+    """Type 3 embedding builds a cp1252 width table whose five undefined slots decode to
+    U+FFFE, and matplotlib hides the resulting 'Glyph 65534 missing' warning behind a
+    warnings.catch_warnings() that a concurrent catch_warnings() on another thread (the
+    reducer's, every evaluation) wipes -- so it leaked out of live runs at random.  With
+    pdf.fonttype 42 the table is never built.  The race is simulated by taking matplotlib's
+    filter away: any Glyph warning then fails the test."""
+    import io
+    import warnings
+    import matplotlib
+    from matplotlib.figure import Figure
+    from matplotlib.backends import backend_pdf
+    from klip_tpe.display import _rc
+
+    import types
+
+    class _NoFilter:                      # what the other thread's __exit__ does to the filter
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+    # backend_pdf's `warnings` name is swapped for a stand-in whose filter does nothing; the
+    # real module (and this test's own recording) is untouched
+    real = backend_pdf.warnings
+    backend_pdf.warnings = types.SimpleNamespace(catch_warnings=lambda *a, **k: _NoFilter(),
+                                                 filterwarnings=lambda *a, **k: None,
+                                                 simplefilter=lambda *a, **k: None, warn=warnings.warn)
+    try:
+        def render(fonttype):
+            with matplotlib.rc_context({"pdf.fonttype": fonttype}):
+                fig = Figure(figsize=(2, 1))
+                fig.text(0.1, 0.5, "final", family="sans-serif")
+                fig.text(0.1, 0.2, "k = 10", family="monospace")
+                with warnings.catch_warnings(record=True) as w:
+                    warnings.simplefilter("always")
+                    fig.savefig(io.BytesIO(), format="pdf")
+            return [str(x.message) for x in w if "Glyph" in str(x.message)]
+        assert render(3), "the fixture must reproduce the leak with Type 3 (else the test proves nothing)"
+        assert render(42) == []
+        with _rc():
+            assert matplotlib.rcParams["pdf.fonttype"] == 42, "the display rc must select Type 42"
+            fig = Figure(figsize=(2, 1)); fig.text(0.1, 0.5, "final")
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                fig.savefig(io.BytesIO(), format="pdf")
+            assert not [x for x in w if "Glyph" in str(x.message)]
+    finally:
+        backend_pdf.warnings = real

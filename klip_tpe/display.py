@@ -97,7 +97,17 @@ _RC = {"axes.spines.top": True, "axes.spines.right": True, "axes.grid": False,
        "grid.linewidth": 0.5, "font.size": 8, "axes.titlesize": 8.5, "axes.labelsize": 8,
        "xtick.labelsize": 7, "ytick.labelsize": 7, "legend.fontsize": 7, "legend.frameon": False,
        "axes.titlepad": 3, "axes.labelpad": 2, "xtick.major.pad": 2, "ytick.major.pad": 2,
-       "figure.facecolor": "white"}
+       "figure.facecolor": "white",
+       # TrueType (Type 42) font embedding in the PDFs, not the default Type 3.  Type 3
+       # embedding builds a 256-entry cp1252 width table and asks FreeType for the five
+       # undefined cp1252 slots, which decode to U+FFFE; matplotlib silences the resulting
+       # "Glyph 65534 missing" warning with a warnings.catch_warnings() -- which is
+       # process-global, and the reducer's own catch_warnings() on the main thread restores
+       # ITS snapshot of the filters while the panel thread is still inside matplotlib's,
+       # so the warning leaked out of live runs at random (twice per tutorial notebook).
+       # Type 42 never asks for those slots, and the text in the PDFs is real, selectable
+       # text besides.
+       "pdf.fonttype": 42}
 
 
 _RC_IDL = {"axes.spines.top": True, "axes.spines.right": True, "axes.grid": False, "legend.frameon": False,
@@ -1566,6 +1576,7 @@ def draw_walk(fig, cs: Dict[str, Any], ad: AnnulusData, title: str, rect=(0.07, 
     """near2m_pnwalk: chronological parameter walk per pair, random segments grey and
     guided segments in the TPE colour; the running-best path overlaid in orange."""
     names, lo, hi, X = cs["names"], cs["lo"], cs["hi"], cs["X"]
+    lo, hi = _widen_flat(lo, hi)          # pinned dimensions: no "identical xlims" warnings
     ev = cs["eval"]
     d = len(names)
     if X.shape[0] < 2 or d < 2:
@@ -1679,6 +1690,7 @@ def _parhist_page(fig, ad: AnnulusData, cs: Dict[str, Any], title: str, current:
     """near2m_parhist_page: one row per parameter -- history (value vs eval), distribution,
     score vs value; best value red, current dashed grey."""
     names, lo, hi, X, y, ev = cs["names"], cs["lo"], cs["hi"], cs["X"], cs["y"], cs["eval"]
+    lo, hi = _widen_flat(lo, hi)          # pinned dimensions: no "identical xlims" warnings
     d = len(names)
     if d == 0 or X.shape[0] == 0:
         fig.text(0.5, 0.5, "collecting...", ha="center", va="center")

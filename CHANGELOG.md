@@ -39,6 +39,22 @@
   without the variable never looked — and on a machine without STPSF that stopped paper run D at
   start-up ("the grid is not in the cache").  Reads now try both layouts (`_cache_path`); writes
   still go to `cache_dir()`.
+- **A run that cannot reduce now stops instead of finishing.**  Paper run D on 2026-09-17: pyklip 2.10
+  calls `numpy.reshape(copy=False)` (numpy ≥ 2.1 only, undeclared) against an older numpy, so every
+  reduction raised the same TypeError; the Runner logged 350 failures, wrote a `final_results.json`
+  with `winner_index -1`, and `rerun_paper.sh` said "done in 3 min".  Now: `PyKLIPReducer` refuses to
+  construct on that pyklip/numpy pair, naming both remedies (`_check_pyklip_numpy`); `Runner.calibrate`
+  raises when the default reduction fails on every attempt of its first trial; `_finish_annulus`
+  raises instead of logging when no evaluation succeeded; and the driver retires a stage whose
+  `final_results.json` has no winner to `<dir>_failed_<stamp>` rather than skipping it (after the
+  `DRY` check).  `tests/test_all_failed_run.py`.
+- **Notebook warnings.**  `draw_walk` and the parameter-history page set identical axis limits on a
+  pinned dimension (one matplotlib UserWarning per cell per page; the KDE corner already widened them
+  via `_widen_flat`, these two now do too).  The "Glyph 65534 (\ufffe) missing from font" lines were
+  matplotlib's Type 3 font embedding asking FreeType for cp1252's five undefined slots, whose own
+  `catch_warnings()` guard a concurrent `catch_warnings()` on the reducer's thread wiped at random;
+  the display and paper-figure rc now embed TrueType (`pdf.fonttype 42`), which never builds that
+  table and gives the PDFs real, selectable text.  Two regression tests in `test_display.py`.
 - Tutorial 03's `repair()` cell — the version students copy — now fills DQ pixels only, and the
   text says why a value-based outlier filter must never be run on a coronagraphic PSF.  Notebook
   rebuilt from scratch (RDI k=10: planet S/N 12.0; ADI −0.2; ADI+RDI 1.2).

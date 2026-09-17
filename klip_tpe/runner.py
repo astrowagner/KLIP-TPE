@@ -996,6 +996,7 @@ class Runner:
         for trial in range(cc.max_trials):
             vals = []
             src = []
+            errors: List[BaseException] = []
             for _ in range(cc.n_remeasure):
                 src = self.sampler.sample(nsrc, rlo, rhi, self.rng, contrast)
                 try:
@@ -1013,6 +1014,17 @@ class Runner:
                 except Exception as exc:
                     self.log(f"  calibration reduction failed: {exc!r}")
                     vals.append(np.nan)
+                    errors.append(exc)
+            if trial == 0 and errors and len(errors) == len(vals):
+                # Not a calibration problem: the DEFAULT reduction of this annulus does not run
+                # at all -- and every evaluation of the search uses the same reducer on the
+                # same zone with the same injection ladder, so every one of them would fail
+                # the same way.  Left alone, that is what happened: paper run D on 2026-09-17
+                # spent 350 evaluations on a pyklip/numpy mismatch and ended with "run
+                # complete" and no winner.  Stop here, with the reason.
+                raise RuntimeError(
+                    f"the default reduction of annulus {ia + 1} failed on all {len(errors)} attempts "
+                    f"({errors[-1]!r}); nothing in the search can succeed until that is fixed") from errors[-1]
             msnr = nanmedian_even(vals)
             info["trials"].append({"contrast": contrast, "snr": None if not np.isfinite(msnr) else float(msnr),
                                    "values": [None if not np.isfinite(v) else float(v) for v in vals]})
@@ -1497,10 +1509,16 @@ class Runner:
         ntot = len(self.history)
         nok = int(self.history.valid.sum()) if ntot else 0
         if ntot and nok == 0:
-            self.log(f"  ** every one of the {ntot} evaluations of annulus {ia+1} FAILED -- there "
-                     f"is no winner and no best image.  The usual cause is an injection model "
-                     f"that does not span the annulus; the reason is on the 'evaluation failed:' "
-                     f"lines above.")
+            # Logging it was not enough: the run went on to write final_results.json with
+            # winner_index -1 and score -inf, the driver called it "done in 3 min", and its
+            # resume logic then treated the directory as finished.  A search with no valid
+            # evaluation is not a result -- stop, and say how to start over.
+            raise RuntimeError(
+                f"every one of the {ntot} evaluations of annulus {ia+1} FAILED -- there is no winner "
+                f"and no best image.  The usual cause is an injection model that does not span the "
+                f"annulus; the reason is on the 'evaluation failed:' lines above.  This run directory "
+                f"now holds only failed evaluations: fix the cause, move {self.run_dir} aside and start "
+                f"again (a resume would just find the same {ntot} failures and stop here).")
         elif ntot and nok < ntot:
             self.log(f"  note: {ntot - nok}/{ntot} evaluations failed")
         self.log(f"  search done: best {bs:.3f} at eval {bi+1}")

@@ -35,7 +35,8 @@ VALID_LABEL = "validated (raw metric, fresh injections)"
 _STYLE = {"axes.spines.top": True, "axes.spines.right": True, "axes.grid": False,
           "xtick.direction": "in", "ytick.direction": "in", "xtick.top": True, "ytick.right": True, "grid.alpha": 0.25,
           "grid.linewidth": 0.6, "font.size": 9, "axes.titlesize": 10, "legend.fontsize": 8,
-          "legend.frameon": False, "figure.dpi": 100, "savefig.dpi": 130}
+          "legend.frameon": False, "figure.dpi": 100, "savefig.dpi": 130,
+          "pdf.fonttype": 42}          # TrueType embedding: real text in the paper figures (see display._RC)
 
 
 def _style():

@@ -34,8 +34,39 @@ __all__ = ["PyKLIPReducer", "dataset_from_pyklip"]
 def _require_pyklip():
     try:
         import pyklip.parallelized as par  # noqa: F401
+        import pyklip.klip as pk
     except ImportError as exc:  # pragma: no cover
         raise ImportError("PyKLIPReducer needs pyklip: pip install pyklip") from exc
+    _check_pyklip_numpy(pk)
+
+
+def _check_pyklip_numpy(pk=None) -> None:
+    """pyklip >= 2.9 calls ``numpy.reshape(..., copy=False)`` -- a keyword that exists only
+    in numpy >= 2.1 -- and declares no numpy version.  With an older numpy every rotation
+    and alignment raises ``TypeError("reshape() got an unexpected keyword argument 'copy'")``,
+    which inside a search is not one error but every evaluation failing the same way: paper
+    run D on 2026-09-17 spent 350 evaluations on it and ended with "run complete" and no
+    winner.  Probe once, at construction, and say what to do."""
+    try:
+        np.reshape(np.zeros(2), (2,), copy=False)
+        return                                                    # numpy >= 2.1: nothing to check
+    except TypeError:
+        pass
+    if pk is None:
+        import pyklip.klip as pk
+    try:
+        import inspect
+        uses = "copy=" in inspect.getsource(pk)
+    except (OSError, TypeError):                                  # no source (zipapp, frozen): assume the worst
+        uses = True
+    if uses:
+        import pyklip
+        raise ImportError(
+            f"pyklip {getattr(pyklip, '__version__', '?')} calls numpy.reshape(copy=...), which needs "
+            f"numpy >= 2.1, and this environment has numpy {np.__version__}: every reduction would fail "
+            f"with \"reshape() got an unexpected keyword argument 'copy'\".  Either upgrade numpy "
+            f"(pip install 'numpy>=2.1') or use pyklip <= 2.8.4 (pip install 'pyklip<2.9')."
+        )
 
 
 class PyKLIPReducer(KLIPReducer):
