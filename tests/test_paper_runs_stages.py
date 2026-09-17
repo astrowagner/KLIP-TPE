@@ -386,3 +386,33 @@ def test_collect_measures_the_projected_seed_and_pairs_it_with_the_winner():
 def test_figs_scale_the_default_curve_by_the_paired_gain():
     src = _text("figs.py")
     assert 'a.get("gain") or (a["winner_score"] / max(a["default_score"], 1e-9))' in src
+
+
+# ------------------------------------------------------- one driver, one run per directory
+def test_the_driver_refuses_a_second_instance_and_a_live_directory():
+    """2026-09-17: launched under nohup the driver prints nothing, which read as "it didn't
+    start"; a second launch 34 s later found a 34-second-old A2_betapic (no
+    final_results.json yet, so no skip) and started a second A2 into it -- two searches
+    appending to one results.jsonl.  A pid file refuses the second instance, and no stage
+    starts into a directory whose heartbeat is fresh."""
+    sh = _text("rerun_paper.sh")
+    assert 'PIDFILE=.rerun_paper.pid' in sh
+    assert 'kill -0 "$(cat "$PIDFILE"' in sh and "already running" in sh
+    assert "trap 'rm -f \"$PIDFILE\"' EXIT" in sh
+    assert "live_age()" in sh and "heartbeat.json" in sh
+    assert 'a run is LIVE in $d' in sh
+    i_live = sh.index('a run is LIVE in $d')
+    i_retire = sh.index('mv "$d" "$keep"')
+    assert i_live < i_retire, "a live directory must be recognised before anything could retire it"
+    assert "tail -f rerun_paper.log" in sh[:sh.index("set -uo pipefail")], "the header says how to follow a nohup'd run"
+
+
+def test_calibration_cannot_run_away_on_a_small_ring():
+    """Run A2's [6, 12] px annulus: three sources four FWHM apart on a 9-px ring, S/N ~ 0-1
+    from 3e-5 to 76, and the old run went on at contrast 4.6e+03.  The Runner now asks the
+    k-scan for a k that sees the sources before the contrast passes a tenth of the star, and
+    stops with the diagnosis if none does."""
+    from klip_tpe import CalibrationConfig
+    assert CalibrationConfig().max_contrast == 0.1
+    src = open(os.path.join(os.path.dirname(HERE), "klip_tpe", "runner.py")).read()
+    assert "walking again" in src and "cannot be calibrated" in src

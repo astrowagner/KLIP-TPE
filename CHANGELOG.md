@@ -29,6 +29,24 @@
   C and D: HD 95086 ×1.14 / ×1.96 (winner better in 6/8, 8/8), HIP 65426 ×1.04 / ×1.47 (5/8, 8/8);
   against the flat k = 10 default ×1.25 / ×1.39 and ×1.04 / ×1.43.  `figs.py` scales the default
   curve by the paired gain.
+- **A calibration that could not see its sources ran away; now it changes k, then stops.**  Run A2's
+  [6, 12] px annulus (three sources four FWHM apart on a 9-px ring, every reference frame holding the
+  source): at k = 10 the median S/N sat at 0–1 from 3e-5 to 76, the walk went on ×10 per trial, the
+  re-calibration revisit pushed it further, and the run searched at contrast **4.6e+03** — a source
+  4,600 times the star.  (The 2026-09-13 A2 had done the same to 88, and only the four ×0.1 revisits
+  brought it back to 8.8e-3.)  `CalibrationConfig.max_contrast = 0.1`: when the contrast is about to
+  pass a tenth of the star, the k-scan is asked whether *any* k detects the sources at the last
+  measured contrast — at that radius k = 1 sees them at S/N 7–9 where k = 10 gives 1 — and the walk
+  restarts from the starting contrast at that k (A2 annulus 1 now calibrates at 1.7e-3, k = 1; with
+  two sources 2.3e-3, k = 4).  If no k detects them the calibration raises with the diagnosis
+  (fewer sources — `RunConfig.n_sources` now takes a per-annulus list — or a wider annulus).  The
+  revisit caps at the same value, as IDL's `cmax_cal` did.  Three tests in `test_runner.py`.
+- **`rerun_paper.sh` runs one instance, one run per directory.**  Launched under `nohup` it prints
+  nothing, which read as "it didn't start" and got it started again 34 s later; the second instance
+  found a 34-second-old `A2_betapic` (no `final_results.json` yet, so no skip) and launched a second
+  A2 into it — two searches appending to one `results.jsonl`.  A pid file refuses a second instance,
+  no stage starts into a directory whose heartbeat is younger than five minutes (checked before
+  anything could retire it), and the header says to follow with `tail -f rerun_paper.log`.
 - **`FORCE=1 ./rerun_paper.sh <science stage>` did not redo anything.**  It got past the
   finished-stage skip and launched the stage into its existing directory, where `Runner.run()`
   auto-resumes the checkpoint, finds every annulus complete, rewrites the products and reports

@@ -90,6 +90,15 @@ class CalibrationConfig:
         and the annulus search restarted (at most ``recal_budget`` times).
     warm_start_previous
         start the calibration of annulus i from annulus i-1's contrast.
+    max_contrast
+        the contrast above which a calibration is no longer measuring anything: a source
+        brighter than a tenth of the star is not a high-contrast injection, and a default
+        configuration whose S/N has not reached the window by then is not going to -- its
+        injected sources are limiting each other's noise ring (three sources 4 FWHM apart
+        on a 9-px ring, run A2's [6, 12] px annulus: S/N ~ 0-1 from 3e-5 to 76, and the
+        run went on at contrast 4.6e+03).  Calibration raises there, with the fix (fewer
+        sources or a wider annulus); the re-calibration revisit stops raising the contrast
+        at it, as IDL's ``cmax_cal`` did.  ``None`` disables both.
     """
 
     target: Tuple[float, float] = (4.0, 6.0)
@@ -105,6 +114,7 @@ class CalibrationConfig:
     recal_ntop: int = 5
     recal_budget: int = 4
     warm_start_previous: bool = False
+    max_contrast: Optional[float] = 0.1
 
 
 @dataclass
@@ -175,7 +185,7 @@ class RunConfig:
     grid_axes: Optional[List[str]] = None
     seed: Optional[int] = None
     contrast0: float = 3e-5
-    n_sources: Optional[int] = None       # None -> per-annulus rule
+    n_sources: Any = None                 # None -> per-annulus rule; an int everywhere; a list per annulus
     inject_inset_fwhm: float = 1.0        # injection band inset from the annulus edges
     pair_area_midpoint: bool = True       # 2 sources -> both at sqrt((r_in^2+r_out^2)/2), 180 deg apart (IDL 2026-09-05)
     #: Freeze the search's injected sources -- radii AND azimuths -- for a whole annulus, so
@@ -564,7 +574,13 @@ class Runner:
             return []
 
     def _nsrc(self, ia: int) -> int:
-        return n_sources_rule(ia, self._annulus(ia)[1] * self.pxscale, self.cfg.n_sources)
+        ns = self.cfg.n_sources
+        if isinstance(ns, (list, tuple, np.ndarray)):
+            # per annulus, the last entry repeating (like n_iter / n_init); a 0 or None entry
+            # hands that annulus back to the rule
+            v = ns[min(ia, len(ns) - 1)] if len(ns) else None
+            ns = None if v is None else int(v)
+        return n_sources_rule(ia, self._annulus(ia)[1] * self.pxscale, ns)
 
     def search_sources(self, ia: int, contrast: float) -> List[Source]:
         """One frozen set of injected sources for annulus ``ia``.
@@ -1013,6 +1029,7 @@ class Runner:
         if cc.forced is not None and len(cc.forced) > ia and cc.forced[ia] and cc.forced[ia] > 0:
             forced = float(cc.forced[ia])
         contrast = forced if forced > 0 else self.contrast
+        c_start = contrast
         info: Dict[str, Any] = {"forced": forced, "trials": []}
         x0 = self._default_vector()
         x0 = self._project(x0, is_random=False)
@@ -1029,6 +1046,7 @@ class Runner:
         scan_wanted = bool(cc.scan_k and ("k_klip" in self.space.bases or self.cfg.k_mode in SCAN_MODES)
                            and self.reducer.supports_kscan)
         scanned = False
+        rescued = False
         cfgk = self._with_k(cfg0, kdef)
         info["k_default"] = kdef
         self._calib_images = None
@@ -1101,6 +1119,46 @@ class Runner:
             contrast *= fac
             if cc.ceiling is not None:
                 contrast = min(contrast, cc.ceiling)
+            if cc.max_contrast is not None and contrast > cc.max_contrast:
+                # The S/N is not following the injected flux at this k.  Before giving up,
+                # ask the k-scan whether ANY k detects the sources at the last measured
+                # contrast: at small radii the configured k over-subtracts a source that
+                # every reference frame contains (run A2's [6, 12] px annulus at k = 10:
+                # S/N ~ 1 from 3e-3 to 1e-1, while k = 1 sees the same sources at S/N 10).
+                # If one does, the walk continues at that k with a fresh budget; the seed's
+                # k is still chosen by the scan at the calibrated contrast afterwards.
+                c_last = float(info["trials"][-1]["contrast"])
+                if scan_wanted and not rescued:
+                    rescued = True
+                    knew = self._scan_k(cfg0, rlo, rhi, nsrc, c_last, info, kdef)
+                    best = np.nanmax(np.array([np.nan if v is None else v for v in info.get("kscan", [])], float)) \
+                        if info.get("kscan") else np.nan
+                    if knew is not None and knew != kdef and np.isfinite(best) and best >= 2.0:
+                        # walk again from the starting contrast, upward, so the first contrast
+                        # inside the window is the one adopted: the S/N of a bright source on
+                        # a small ring saturates, and a walk resumed at c_last would stop there
+                        self.log(f"  calibration: S/N did not follow the contrast at k = {kdef}; walking again "
+                                 f"from {c_start:.2e} at k = {knew} (scan S/N {best:.2f} at {c_last:.2e})")
+                        kdef = knew
+                        cfgk = self._with_k(cfg0, kdef)
+                        info["k_default"] = kdef
+                        info["rescue_k"] = kdef
+                        contrast = c_start
+                        budget = trial + 1 + int(cc.max_trials)
+                        trial += 1
+                        continue
+                hist = ", ".join(f"{t['contrast']:.1e} -> {t['snr'] if t['snr'] is None else round(t['snr'], 2)}"
+                                 for t in info["trials"])
+                raise RuntimeError(
+                    f"annulus {ia + 1} cannot be calibrated: the default configuration's median S/N "
+                    f"has not reached {cc.target[0]:g}-{cc.target[1]:g} by contrast {contrast:.2e}, past "
+                    f"max_contrast = {cc.max_contrast:g} ({hist}), and no k of the k-scan detects them "
+                    f"either.  An S/N that does not follow the injected flux means the {nsrc} injected "
+                    f"sources are limiting each other's noise ring (their KLIP wings land in each other's "
+                    f"apertures) or the zone is inside what this data's field rotation can reference -- "
+                    f"inject fewer sources in this annulus (RunConfig.n_sources takes a per-annulus list; "
+                    f"the rule gives {n_sources_rule(ia, self._annulus(ia)[1] * self.pxscale, None)} here) "
+                    f"or widen / move the annulus.  CalibrationConfig(max_contrast=None) runs on regardless.")
             trial += 1
         if scan_wanted and not scanned and np.isfinite(msnr) and msnr >= 2.0:
             # the window was never reached within the budget, but the sources are detected:
@@ -1208,13 +1266,19 @@ class Runner:
                         top = np.sort(yv)[::-1][:cc.recal_ntop]
                         mwu = float(np.median(top))
                         if not (cc.target[0] <= mwu <= cc.target[1]):
-                            if mwu < cc.target[0] and cc.ceiling is not None and self.contrast >= 0.999 * cc.ceiling:
-                                self.log("  re-cal: contrast already at ceiling; continuing")
+                            # the cap is the smaller of the two: `ceiling` (IDL cmax_cal, off by
+                            # default) and `max_contrast` (the physical one, 0.1 by default)
+                            caps = [v for v in (cc.ceiling, cc.max_contrast) if v is not None]
+                            cap = min(caps) if caps else None
+                            if mwu < cc.target[0] and cap is not None and self.contrast >= 0.999 * cap:
+                                self.log(f"  re-cal: median top-{cc.recal_ntop} S/N {mwu:.2f} below {cc.target}, but the "
+                                         f"contrast is already at its cap {cap:.2e} -- a source brighter than that is "
+                                         f"not a calibration; continuing at {self.contrast:.2e}")
                             else:
                                 fac = float(np.clip(cc.aim / max(mwu, 0.1), cc.step_clip[0], cc.step_clip[1]))
                                 newc = self.contrast * fac
-                                if cc.ceiling is not None:
-                                    newc = min(newc, cc.ceiling)
+                                if cap is not None:
+                                    newc = min(newc, cap)
                                 self.log(f"  re-cal: median top-{cc.recal_ntop} S/N {mwu:.2f} outside "
                                          f"{cc.target}; contrast {self.contrast:.2e} -> {newc:.2e}; restarting annulus")
                                 self.contrast = newc

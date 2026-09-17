@@ -57,8 +57,26 @@
 # Resumable: a stage whose output already carries final_results.json is skipped, and the
 # benchmarks skip their finished slots internally.  So if this is interrupted -- a closed
 # terminal, a reaped background job -- just run it again.
+#
+# One at a time.  Launched under nohup this prints nothing to the terminal, which on
+# 2026-09-17 read as "it didn't start" and got it started again 34 s later: the second
+# instance found a 34-second-old A2_betapic (no final_results.json yet, so no skip) and
+# launched a second A2 into it, two searches appending to one results.jsonl.  So: a pid
+# file refuses a second instance, and no stage starts into a directory whose heartbeat is
+# fresh.  Follow progress with  tail -f rerun_paper.log  (and <stage>.log).
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
+
+PIDFILE=.rerun_paper.pid
+if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+  printf '[%s] another rerun_paper.sh (pid %s) is already running -- not starting a second one.  tail -f rerun_paper.log to follow it.\n' \
+    "$(date +%H:%M:%S)" "$(cat "$PIDFILE")" | tee -a rerun_paper.log
+  exit 1
+fi
+if [[ -z "${DRY:-}" ]]; then
+  echo $$ > "$PIDFILE"
+  trap 'rm -f "$PIDFILE"' EXIT
+fi
 
 # The science group covers all four example instruments: NACO (A2, B2), SPHERE (C),
 # NIRCam (D) and LMIRCam (I2).  I2 goes last because it is the long one -- a 5000-evaluation
@@ -150,9 +168,36 @@ sys.exit(0 if ok else 2)
 PY
 }
 
+# Age in seconds of the youngest heartbeat.json under a stage directory (its own, or a
+# benchmark slot's), or nothing when there is none.  A heartbeat younger than 5 minutes
+# means a process is writing there now.
+live_age() {
+  python3 - "$1" <<'PY'
+import glob, json, os, sys, time
+d = sys.argv[1]
+ages = []
+for p in glob.glob(os.path.join(d, "heartbeat.json")) + glob.glob(os.path.join(d, "*", "heartbeat.json")):
+    try:
+        ages.append(time.time() - float(json.load(open(p)).get("t", 0)))
+    except Exception:
+        pass
+print(int(min(ages)) if ages else "")
+PY
+}
+LIVE_S=300
+
 for s in "${STAGES[@]}"; do
   d="$(outdir "$s")"
   failed=""
+  live=""
+  if [[ -n "$d" && -d "$d" ]]; then
+    age="$(live_age "$d")"
+    [[ -n "$age" && "$age" -lt "$LIVE_S" ]] && live="$age"
+  fi
+  if [[ -n "$live" && -z "${DRY:-}" ]]; then
+    say "$s: a run is LIVE in $d (heartbeat ${live}s old) -- not starting a second one into it; skipping.  tail -f $s.log to follow it"
+    continue
+  fi
   if [[ -n "$d" && -f "$d/final_results.json" ]]; then
     finished "$d"; fin=$?
     if [[ $fin -eq 2 ]]; then
@@ -171,6 +216,7 @@ for s in "${STAGES[@]}"; do
       extra="$extra   [FORCE would retire the finished run $d]"
     [[ -n "${FORCE:-}" && "$s" == "I2" && -n "$d" && -f "$d/final_results.json" ]] && \
       extra="$extra   [FORCE does not retire I2; move $d aside by hand to redo it]"
+    [[ -n "$live" ]] && extra="$extra   [LIVE: heartbeat ${live}s old -- would be skipped]"
     say "$s: would run  $(stage_cmd "$s")   [WORKERS=${WORKERS:-auto} SHOW=${SHOW:-window}]$extra"
     continue
   fi

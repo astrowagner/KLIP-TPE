@@ -4,6 +4,7 @@ All runs are tiny (2 partitions, <= 16 evaluations per annulus) so the whole fil
 takes a few tens of seconds.
 """
 import json
+import tempfile
 import os
 
 import numpy as np
@@ -661,3 +662,76 @@ def test_the_k_scan_happens_at_the_calibrated_contrast_not_the_starting_one(tmp_
     c2, k2, info2 = r2.calibrate(0)
     assert c2 == 1e-4 and len(info2["trials"]) == 1 and info2["kscan_contrast"] == 1e-4
     assert k2 == info2["k_default"]
+
+
+def test_n_sources_can_be_given_per_annulus():
+    """``RunConfig.n_sources`` was one integer for every annulus; run A2's [6, 12] px zone
+    needs fewer sources than its outer ones.  A list is per annulus, the last entry
+    repeating (like ``n_iter``); a 0 / None entry hands that annulus back to the rule."""
+    red, space, obj, samp, cfg = build_synthetic_run(ann_edges=[8, 30, 45], n_sources=[2, 3])
+    r = Runner(red, space, obj, samp, cfg, tempfile.mkdtemp(), log=QUIET)
+    assert [r._nsrc(0), r._nsrc(1)] == [2, 3]
+    cfg2 = RunConfig(ann_edges=[8, 30, 45], n_sources=[0, 3])
+    r2 = Runner(red, space, obj, samp, cfg2, tempfile.mkdtemp(), log=QUIET)
+    from klip_tpe.positions import n_sources_rule
+    assert r2._nsrc(0) == n_sources_rule(0, 30 * red.pxscale, None) and r2._nsrc(1) == 3
+    cfg3 = RunConfig(ann_edges=[8, 30, 45], n_sources=4)
+    assert Runner(red, space, obj, samp, cfg3, tempfile.mkdtemp(), log=QUIET)._nsrc(1) == 4
+
+
+def test_calibration_rescues_a_k_that_cannot_see_the_sources_and_walks_again(tmp_path):
+    """Run A2's innermost annulus: at k = 10 the median S/N sat at ~1 from 3e-5 to 1e-1 (every
+    reference frame contains the source, and the basis subtracts it), the contrast walked
+    on to 4.6e+03, and the run went on.  Now, when the contrast passes ``max_contrast``,
+    the k-scan is asked whether ANY k detects the sources; if one does the walk restarts
+    from the starting contrast at that k, and the seed's k is still the scan's choice at the
+    calibrated contrast.  Simulated by making the configured k blind to the injection."""
+    red, space, obj, samp, cfg = build_synthetic_run(ann_edges=[8, 30], n_iter=10,
+                                                     validation=ValidationConfig(n_top=1, n_valid=1))
+    kdef0 = cfg.defaults["k_klip"]
+    logs = []
+    runner = Runner(red, space, obj, samp, cfg, str(tmp_path), log=logs.append)
+    orig_reduce = runner._reduce
+
+    def blind_at_default_k(cfg_, sources, k_scan=False, tag=""):
+        k = int(cfg_.params.get("k_klip", -1))
+        if not k_scan and sources is not None and k == kdef0:
+            return orig_reduce(cfg_, None, k_scan, tag)       # the injection never lands
+        return orig_reduce(cfg_, sources, k_scan, tag)
+    runner._reduce = blind_at_default_k
+
+    def scan_says_eleven(cfg0, rlo, rhi, nsrc, contrast, info, k_now):
+        info["kscan"] = [None] * 10 + [6.0] + [None] * 19
+        info["kscan_contrast"] = float(contrast)
+        return 11
+    runner._scan_k = scan_says_eleven
+    contrast, kdef, info = runner.calibrate(0)
+    cc = cfg.calibration
+    assert info.get("rescue_k") == 11 and kdef == 11
+    ks = [t["k"] for t in info["trials"]]
+    i_switch = ks.index(11)
+    assert set(ks[:i_switch]) == {kdef0} and set(ks[i_switch:]) == {11}
+    assert info["trials"][i_switch]["contrast"] == pytest.approx(cfg.contrast0), "the walk restarts from the start"
+    assert max(t["contrast"] for t in info["trials"][:i_switch]) > 0.01, "the blind k was walked past the cap first"
+    assert cc.target[0] <= info["snr"] <= cc.target[1] and contrast < cc.max_contrast
+    assert any("walking again from" in l for l in logs)
+
+
+def test_calibration_raises_when_no_k_can_see_the_sources(tmp_path):
+    red, space, obj, samp, cfg = build_synthetic_run(ann_edges=[8, 30], n_iter=10,
+                                                     validation=ValidationConfig(n_top=1, n_valid=1))
+    runner = Runner(red, space, obj, samp, cfg, str(tmp_path), log=QUIET)
+    orig_reduce = runner._reduce
+    runner._reduce = lambda cfg_, sources, k_scan=False, tag="": orig_reduce(cfg_, None, k_scan, tag)
+    runner._scan_k = lambda *a, **k: None
+    with pytest.raises(RuntimeError, match="cannot be calibrated") as ei:
+        runner.calibrate(0)
+    msg = str(ei.value)
+    assert "max_contrast" in msg and "n_sources" in msg and "per-annulus" in msg
+    # and with the cap off, the walk simply runs its budget out, as before
+    cfg.calibration.max_contrast = None
+    r2 = Runner(red, space, obj, samp, cfg, str(tmp_path / "nocap"), log=QUIET)
+    r2._reduce = lambda cfg_, sources, k_scan=False, tag="": orig_reduce(cfg_, None, k_scan, tag)
+    r2._scan_k = lambda *a, **k: None
+    c, k, info = r2.calibrate(0)
+    assert len(info["trials"]) == cfg.calibration.max_trials
