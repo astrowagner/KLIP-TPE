@@ -219,6 +219,21 @@ def collect(which, n_trials=N_TRIALS):
         img1 = np.asarray(fits.getdata(best), float) if os.path.exists(best) else None
         rec["default_params"] = {k: (v if isinstance(v, (str, bool)) else float(v))
                                  for k, v in p0.items()}
+        # an annulus whose calibration never reached the S/N window is not on the usual
+        # scale -- neither its injected S/N nor its 5-sigma curve -- so say so here rather
+        # than letting a number into the table that looks like the others
+        cal_p = os.path.join(run, f"annulus{ia + 1:02d}", "calibration.json")
+        if os.path.exists(cal_p):
+            try:
+                cal = json.load(open(cal_p))
+            except Exception:
+                cal = {}
+            rec["calibration_snr"] = cal.get("snr")
+            rec["uncalibrated"] = bool(cal.get("uncalibrated", False))
+            rec["forced_contrast"] = float(cal.get("forced") or 0.0)
+            if rec["uncalibrated"]:
+                log(f"  ** ann {ia + 1} was NOT calibrated (default S/N {cal.get('snr')} at "
+                    f"{contrast:.3e}); its S/N and c5 are not comparable with the other annuli")
         rec["planet_snr_default"] = planet_snr(img0, red, planet)
         rec["planet_snr_optimized"] = None if img1 is None else planet_snr(img1, red, planet)
         r0, s0 = sigma_curve(img0, red, rin, rout, planet)

@@ -25,10 +25,12 @@
   `k_default`), the configured default (k from `RunConfig.defaults`, before the k-scan) and the
   validated winner on the SAME `N_TRIALS = 8` injection sets with the validation metric, and
   records `winner_remeasured`, paired `gain`, `paired_wins`, `gain_vs_validated`,
-  `default_flat_*`; the anchor check uses the companion annulus' projected seed.  On the current
-  C and D: HD 95086 ×1.14 / ×1.96 (winner better in 6/8, 8/8), HIP 65426 ×1.04 / ×1.47 (5/8, 8/8);
-  against the flat k = 10 default ×1.25 / ×1.39 and ×1.04 / ×1.43.  `figs.py` scales the default
-  curve by the paired gain.
+  `default_flat_*`; the anchor check uses the companion annulus' projected seed.  `figs.py` scales
+  the default curve by the paired gain.  On the reruns of 2026-09-17/18 (all four science runs under
+  the new calibration), the paired gain is ×1.38 / ×1.73 / ×1.14 (A2), ×1.64 (B2), ×1.13 / ×1.30 (C)
+  and ×1.21 / ×1.67 (D) — the winner better on **8 of 8** injection sets in every annulus — and the
+  companion checks land at 0.91, 1.10, 1.29 and 1.13 times the published contrast (+0.10, −0.11,
+  −0.28, −0.14 mag), against 1.55 / 3.03 / 1.23 / 1.10 before.
 - **A calibration that could not see its sources ran away; now it changes k, then stops.**  Run A2's
   [6, 12] px annulus (three sources four FWHM apart on a 9-px ring, every reference frame holding the
   source): at k = 10 the median S/N sat at 0–1 from 3e-5 to 76, the walk went on ×10 per trial, the
@@ -37,10 +39,15 @@
   brought it back to 8.8e-3.)  `CalibrationConfig.max_contrast = 0.1`: when the contrast is about to
   pass a tenth of the star, the k-scan is asked whether *any* k detects the sources at the last
   measured contrast — at that radius k = 1 sees them at S/N 7–9 where k = 10 gives 1 — and the walk
-  restarts from the starting contrast at that k (A2 annulus 1 now calibrates at 1.7e-3, k = 1; with
-  two sources 2.3e-3, k = 4).  If no k detects them the calibration raises with the diagnosis
-  (fewer sources — `RunConfig.n_sources` now takes a per-annulus list — or a wider annulus).  The
-  revisit caps at the same value, as IDL's `cmax_cal` did.  Three tests in `test_runner.py`.
+  restarts from the starting contrast at that k (A2 annulus 1 calibrated at 1.7e-3, k = 1, in the
+  rerun, and its winner went 8.89 → 12.26).  If no k detects them either, the contrast stays AT the
+  cap, the annulus is marked `uncalibrated` in `calibration.json`, the log says what that costs, and
+  the search runs anyway — a default configuration that cannot see an injection is a statement about
+  the default and not about the problem, and the synthetic RX J0534 fixture is exactly that (an
+  earlier version of this guard raised there instead, and took all 18 of its end-to-end tests with
+  it).  `collect.py` reads the flag and refuses to let such an annulus into the table unremarked.
+  The revisit caps at the same value, as IDL's `cmax_cal` did.  `RunConfig.n_sources` now takes a
+  per-annulus list, which is the other way out.  Four tests in `test_runner.py`.
 - **`rerun_paper.sh` runs one instance, one run per directory.**  Launched under `nohup` it prints
   nothing, which read as "it didn't start" and got it started again 34 s later; the second instance
   found a 34-second-old `A2_betapic` (no `final_results.json` yet, so no skip) and launched a second

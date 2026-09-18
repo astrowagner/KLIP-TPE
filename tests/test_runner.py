@@ -717,21 +717,49 @@ def test_calibration_rescues_a_k_that_cannot_see_the_sources_and_walks_again(tmp
     assert any("walking again from" in l for l in logs)
 
 
-def test_calibration_raises_when_no_k_can_see_the_sources(tmp_path):
+def test_a_calibration_no_k_can_rescue_stops_at_the_cap_and_says_so(tmp_path):
+    """When no k detects the injection either, the contrast stops AT ``max_contrast`` instead
+    of walking past it (run A2 reached 4.6e+03, a planet 4,600x its star), the annulus is
+    marked ``uncalibrated``, and the log says what that costs.  It does not raise: a default
+    configuration that cannot see an injection is a statement about the default, not about
+    the problem -- the synthetic RX J0534 fixture is exactly that, and its end-to-end tests
+    are about the driver, not about detectability."""
     red, space, obj, samp, cfg = build_synthetic_run(ann_edges=[8, 30], n_iter=10,
                                                      validation=ValidationConfig(n_top=1, n_valid=1))
-    runner = Runner(red, space, obj, samp, cfg, str(tmp_path), log=QUIET)
+    cc = cfg.calibration
+    cap = cc.max_contrast
+    logs = []
+    runner = Runner(red, space, obj, samp, cfg, str(tmp_path), log=logs.append)
     orig_reduce = runner._reduce
     runner._reduce = lambda cfg_, sources, k_scan=False, tag="": orig_reduce(cfg_, None, k_scan, tag)
     runner._scan_k = lambda *a, **k: None
-    with pytest.raises(RuntimeError, match="cannot be calibrated") as ei:
-        runner.calibrate(0)
-    msg = str(ei.value)
-    assert "max_contrast" in msg and "n_sources" in msg and "per-annulus" in msg
-    # and with the cap off, the walk simply runs its budget out, as before
+    contrast, kdef, info = runner.calibrate(0)
+    assert contrast == pytest.approx(cap), "the contrast stops at the cap"
+    assert all(t["contrast"] <= cap * 1.001 for t in info["trials"])
+    assert info["uncalibrated"] is True
+    said = [l for l in logs if "could NOT be calibrated" in l]
+    assert said and "cap" in said[0] and "n_sources" in said[0] and "5-sigma" in said[0]
+    # the run goes on, and its history records that contrast
+    res = runner.run()
+    assert res and res[0].contrast == pytest.approx(cap)
+    # with the cap off the walk simply runs its budget out, as before -- and still says so
     cfg.calibration.max_contrast = None
-    r2 = Runner(red, space, obj, samp, cfg, str(tmp_path / "nocap"), log=QUIET)
+    logs2 = []
+    r2 = Runner(red, space, obj, samp, cfg, str(tmp_path / "nocap"), log=logs2.append)
     r2._reduce = lambda cfg_, sources, k_scan=False, tag="": orig_reduce(cfg_, None, k_scan, tag)
     r2._scan_k = lambda *a, **k: None
-    c, k, info = r2.calibrate(0)
-    assert len(info["trials"]) == cfg.calibration.max_trials
+    c, k, info2 = r2.calibrate(0)
+    assert len(info2["trials"]) == cc.max_trials and info2["uncalibrated"] is True
+    assert c > cap, "no cap, no clamp"
+    assert any("could NOT be calibrated" in l for l in logs2)
+
+
+def test_a_calibrated_annulus_is_not_flagged(tmp_path):
+    red, space, obj, samp, cfg = build_synthetic_run(ann_edges=[8, 30], n_iter=6,
+                                                     validation=ValidationConfig(n_top=1, n_valid=1))
+    _, _, info = Runner(red, space, obj, samp, cfg, str(tmp_path), log=QUIET).calibrate(0)
+    assert info["uncalibrated"] is False
+    # a forced contrast is not "calibrated", but it is not a failure either
+    cfg.calibration.forced = [1e-4]
+    _, _, info2 = Runner(red, space, obj, samp, cfg, str(tmp_path / "f"), log=QUIET).calibrate(0)
+    assert info2["uncalibrated"] is False and info2["forced"] == 1e-4

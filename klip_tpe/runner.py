@@ -91,14 +91,19 @@ class CalibrationConfig:
     warm_start_previous
         start the calibration of annulus i from annulus i-1's contrast.
     max_contrast
-        the contrast above which a calibration is no longer measuring anything: a source
-        brighter than a tenth of the star is not a high-contrast injection, and a default
-        configuration whose S/N has not reached the window by then is not going to -- its
-        injected sources are limiting each other's noise ring (three sources 4 FWHM apart
-        on a 9-px ring, run A2's [6, 12] px annulus: S/N ~ 0-1 from 3e-5 to 76, and the
-        run went on at contrast 4.6e+03).  Calibration raises there, with the fix (fewer
-        sources or a wider annulus); the re-calibration revisit stops raising the contrast
-        at it, as IDL's ``cmax_cal`` did.  ``None`` disables both.
+        hard ceiling on the injection contrast, the one IDL's ``cmax_cal`` was for, on by
+        default: a source brighter than a tenth of the star is not a high-contrast
+        injection.  Without it a default configuration whose S/N does not follow the
+        injected flux walks the contrast up by x10 a trial for ever -- run A2's [6, 12] px
+        annulus (three sources 4 FWHM apart on a 9-px ring, every reference frame holding
+        the source) scored S/N 0-1 from 3e-5 to 76 and the search then ran at contrast
+        4.6e+03, a planet 4,600 times its star.  At the cap the k-scan is asked whether any
+        k detects the sources (at that radius k = 1 does, at S/N 7-9) and the walk starts
+        again there; failing that the contrast stays AT the cap, the annulus is marked
+        ``uncalibrated`` in ``calibration.json`` and the log says so, and the search runs
+        anyway -- a default configuration that cannot see an injection is a statement about
+        the default, not about the problem, and finding a configuration that can is the
+        whole point.  ``None`` removes the ceiling (and with it the k rescue).
     """
 
     target: Tuple[float, float] = (4.0, 6.0)
@@ -1047,6 +1052,7 @@ class Runner:
                            and self.reducer.supports_kscan)
         scanned = False
         rescued = False
+        c_at_cap = False
         cfgk = self._with_k(cfg0, kdef)
         info["k_default"] = kdef
         self._calib_images = None
@@ -1117,9 +1123,9 @@ class Runner:
                 break
             fac = float(np.clip(cc.aim / max(msnr, 0.5), cc.step_clip[0], cc.step_clip[1]))
             contrast *= fac
-            if cc.ceiling is not None:
-                contrast = min(contrast, cc.ceiling)
-            if cc.max_contrast is not None and contrast > cc.max_contrast:
+            caps = [v for v in (cc.ceiling, cc.max_contrast) if v is not None]
+            cap = min(caps) if caps else None
+            if cap is not None and contrast > cap:
                 # The S/N is not following the injected flux at this k.  Before giving up,
                 # ask the k-scan whether ANY k detects the sources at the last measured
                 # contrast: at small radii the configured k over-subtracts a source that
@@ -1128,7 +1134,7 @@ class Runner:
                 # If one does, the walk continues at that k with a fresh budget; the seed's
                 # k is still chosen by the scan at the calibrated contrast afterwards.
                 c_last = float(info["trials"][-1]["contrast"])
-                if scan_wanted and not rescued:
+                if scan_wanted and not rescued and cc.max_contrast is not None:
                     rescued = True
                     knew = self._scan_k(cfg0, rlo, rhi, nsrc, c_last, info, kdef)
                     best = np.nanmax(np.array([np.nan if v is None else v for v in info.get("kscan", [])], float)) \
@@ -1147,18 +1153,16 @@ class Runner:
                         budget = trial + 1 + int(cc.max_trials)
                         trial += 1
                         continue
-                hist = ", ".join(f"{t['contrast']:.1e} -> {t['snr'] if t['snr'] is None else round(t['snr'], 2)}"
-                                 for t in info["trials"])
-                raise RuntimeError(
-                    f"annulus {ia + 1} cannot be calibrated: the default configuration's median S/N "
-                    f"has not reached {cc.target[0]:g}-{cc.target[1]:g} by contrast {contrast:.2e}, past "
-                    f"max_contrast = {cc.max_contrast:g} ({hist}), and no k of the k-scan detects them "
-                    f"either.  An S/N that does not follow the injected flux means the {nsrc} injected "
-                    f"sources are limiting each other's noise ring (their KLIP wings land in each other's "
-                    f"apertures) or the zone is inside what this data's field rotation can reference -- "
-                    f"inject fewer sources in this annulus (RunConfig.n_sources takes a per-annulus list; "
-                    f"the rule gives {n_sources_rule(ia, self._annulus(ia)[1] * self.pxscale, None)} here) "
-                    f"or widen / move the annulus.  CalibrationConfig(max_contrast=None) runs on regardless.")
+                # No k sees them either.  Stay AT the cap rather than walking past it: one more
+                # trial measures the S/N the search will actually be scored against there, and
+                # if that is still outside the window the annulus is uncalibrated -- said
+                # loudly below, not raised, because a default configuration that cannot see an
+                # injection is a statement about the default and not about the problem.
+                if c_at_cap:
+                    contrast = cap
+                    break
+                contrast = cap
+                c_at_cap = True
             trial += 1
         if scan_wanted and not scanned and np.isfinite(msnr) and msnr >= 2.0:
             # the window was never reached within the budget, but the sources are detected:
@@ -1171,6 +1175,26 @@ class Runner:
         info["contrast"] = contrast
         info["snr"] = None if not np.isfinite(msnr) else float(msnr)
         info["k_default"] = kdef
+        # Did the calibration do its job?  A forced contrast is not calibrated by definition;
+        # otherwise the window is the job.  Saying so here is the difference between a run
+        # whose injected S/N means "5 sigma" and one whose axis is a guess: the old code
+        # printed nothing and the contrast kept climbing.
+        info["uncalibrated"] = bool(forced <= 0 and not (np.isfinite(msnr)
+                                                        and cc.target[0] <= msnr <= cc.target[1]))
+        if info["uncalibrated"]:
+            hist = ", ".join(f"{t['contrast']:.1e} -> {t['snr'] if t['snr'] is None else round(t['snr'], 2)}"
+                             for t in info["trials"])
+            caps = [v for v in (cc.ceiling, cc.max_contrast) if v is not None]
+            at_cap = bool(caps) and contrast >= 0.999 * min(caps)
+            self.log(f"  ** annulus {ia + 1} could NOT be calibrated: the default configuration's median S/N "
+                     f"is {msnr:.2f}, outside {cc.target[0]:g}-{cc.target[1]:g}, at contrast {contrast:.3e}"
+                     + (f" -- the cap (CalibrationConfig.max_contrast)" if at_cap else "")
+                     + f".  Trials: {hist}.  The search will run at that contrast, so its injected S/N is "
+                     f"not on the usual scale and neither is this annulus' 5-sigma curve.  An S/N that does "
+                     f"not follow the injected flux usually means the {nsrc} injected sources are limiting "
+                     f"each other's noise ring (their KLIP wings land in each other's apertures): inject "
+                     f"fewer in this annulus (RunConfig.n_sources takes a per-annulus list; the rule gives "
+                     f"{n_sources_rule(ia, self._annulus(ia)[1] * self.pxscale, None)} here) or widen it.")
         return contrast, kdef, info
 
     # ----------------------------------------------------------------- search

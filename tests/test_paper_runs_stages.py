@@ -409,10 +409,13 @@ def test_the_driver_refuses_a_second_instance_and_a_live_directory():
 
 def test_calibration_cannot_run_away_on_a_small_ring():
     """Run A2's [6, 12] px annulus: three sources four FWHM apart on a 9-px ring, S/N ~ 0-1
-    from 3e-5 to 76, and the old run went on at contrast 4.6e+03.  The Runner now asks the
+    from 3e-5 to 76, and the old run searched at contrast 4.6e+03.  The Runner now asks the
     k-scan for a k that sees the sources before the contrast passes a tenth of the star, and
-    stops with the diagnosis if none does."""
+    failing that stops AT that cap and marks the annulus uncalibrated -- it does not raise,
+    because a default configuration that cannot see an injection is a statement about the
+    default, not about the problem."""
     from klip_tpe import CalibrationConfig
     assert CalibrationConfig().max_contrast == 0.1
     src = open(os.path.join(os.path.dirname(HERE), "klip_tpe", "runner.py")).read()
-    assert "walking again" in src and "cannot be calibrated" in src
+    assert "walking again" in src and "could NOT be calibrated" in src
+    assert 'info["uncalibrated"]' in src
