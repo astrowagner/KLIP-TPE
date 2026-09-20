@@ -1521,12 +1521,32 @@ def draw_corner(fig, cs: Dict[str, Any], ad: AnnulusData, title: str, rect=(0.06
     fig.text(x0, y0 + h + 0.052, leg, fontsize=6.5, va="bottom", color=_grey("#444444", "#bbbbbb"))
 
 
+def _nw_bandwidth(v, lo, hi, ng=24):
+    """Kernel width for one axis of :func:`_nw_grid`.
+
+    ``span/8`` is right for a search that samples an axis densely, and blanks the figure
+    for one that does not.  A grid run with two values per axis puts its samples a full
+    span apart -- eight bandwidths -- where the Gaussian weight is ``exp(-32)``, so every
+    cell failed the support test except a few hard against the panel edge and the
+    landscape rendered as one mark on black.  Widening to half the typical spacing
+    between the values an axis actually took keeps dense searches exactly as they were
+    (their spacing is far below ``span/8``) and makes a coarse design legible instead of
+    invisible.
+    """
+    span = float(hi - lo)
+    base = span / 8.0
+    u = np.unique(np.asarray(v, float)[np.isfinite(v)])
+    if u.size >= 2:
+        base = max(base, 0.5 * float(np.median(np.diff(u))))
+    return max(base, span / max(ng, 1), 1e-6)
+
+
 def _nw_grid(x, y, v, xlo, xhi, ylo, yhi, ng=24):
     """near2m_nwgrid: Nadaraya-Watson kernel average of ``v`` on an ``ng x ng`` grid."""
     gx = xlo + (xhi - xlo) * (np.arange(ng) + 0.5) / ng
     gy = ylo + (yhi - ylo) * (np.arange(ng) + 0.5) / ng
-    hx = max((xhi - xlo) / 8.0, 1e-6)
-    hy = max((yhi - ylo) / 8.0, 1e-6)
+    hx = _nw_bandwidth(x, xlo, xhi, ng)
+    hy = _nw_bandwidth(y, ylo, yhi, ng)
     wx = np.exp(-0.5 * ((x[None, :] - gx[:, None]) / hx) ** 2)      # (ng, n)
     wy = np.exp(-0.5 * ((y[None, :] - gy[:, None]) / hy) ** 2)
     W = wy[:, None, :] * wx[None, :, :]                              # (ngy, ngx, n)
@@ -1564,8 +1584,18 @@ def draw_kde_corner(fig, cs: Dict[str, Any], title: str, rect=(0.06, 0.06, 0.90,
         ax.grid(False)
         im = ax.imshow(grid, origin="lower", extent=[lo[j], hi[j], lo[i], hi[i]], aspect="auto", cmap=cm,
                        vmin=vmin, vmax=vmax, interpolation="nearest")
+        # The design itself, so a coarse one reads as "four configurations were tried"
+        # rather than as an empty panel.  Marker area tracks how many evaluations landed
+        # on each position: a grid run stacks hundreds of evaluations on one node.
+        ux, iu = np.unique(np.column_stack([X[g, j], X[g, i]]), axis=0, return_inverse=True)
+        if ux.shape[0] <= 400:
+            mult = np.bincount(iu, minlength=ux.shape[0]).astype(float)
+            s = 3.0 + 9.0 * np.sqrt(mult / max(mult.max(), 1.0))
+            ax.scatter(ux[:, 0], ux[:, 1], s=s, facecolor="none", edgecolor="white", lw=0.45, alpha=0.75)
         if best_pt is not None and np.isfinite(best_pt[j]) and np.isfinite(best_pt[i]):
             ax.scatter([best_pt[j]], [best_pt[i]], s=60, marker="s", facecolor="none", edgecolor="white", lw=1.3)
+        ax.set_xlim(lo[j], hi[j])
+        ax.set_ylim(lo[i], hi[i])
         ax.tick_params(labelsize=6)
         if i < d - 1:
             ax.set_xticklabels([])
@@ -1580,7 +1610,9 @@ def draw_kde_corner(fig, cs: Dict[str, Any], title: str, rect=(0.06, 0.06, 0.90,
         fig.colorbar(im, cax=cax, orientation="horizontal").set_label("kernel-averaged search score", fontsize=7)
         cax.tick_params(labelsize=6)
     fig.text(x0, y0 + h + 0.06, title, fontsize=9, va="bottom")
-    fig.text(x0, y0 + h + 0.015, "black = unsupported (no nearby evaluations); square = best", fontsize=6.5, color="#444444")
+    fig.text(x0, y0 + h + 0.015,
+             "black = unsupported; circles = evaluated (area ~ count); square = best",
+             fontsize=6.0, color="#444444")
 
 
 def draw_walk(fig, cs: Dict[str, Any], ad: AnnulusData, title: str, rect=(0.07, 0.06, 0.90, 0.86)):

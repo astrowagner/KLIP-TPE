@@ -318,44 +318,115 @@ class RandomSearch(Optimizer):
 
 
 class GridSearch(Optimizer):
-    """Regular grid over ``axes`` (default: all reduction dims) with
-    ``round(budget**(1/naxes))`` points per axis; other dims sit at the default
-    vector.  Cells are visited in order and wrap when exhausted."""
+    """Regular grid over ``axes`` (default: all reduction dims), cell-centred and
+    refined in place when the cells run out.  Dims outside ``axes`` sit at the
+    default vector.
+
+    ``gpts = floor(budget**(1/naxes))`` points per axis, so the first pass fits inside
+    the budget; ``floor`` rather than ``round`` because rounding up overruns it and the
+    overrun is what used to wrap.  Few points per axis is the honest grid-search regime
+    in many dimensions -- ``budget**(1/d)`` is the Bergstra & Bengio (2012) argument for
+    why grid search loses to random search as ``d`` grows -- so a small ``gpts`` is
+    reported, not corrected.  Two things about the old implementation were defects
+    rather than that regime:
+
+    *Cell centres, not endpoints.*  ``lo + span*i/(g-1)`` puts both points of a
+    two-point axis on the bounds of the box, and in this problem the bounds are where
+    the reduction degenerates: ``corr_thresh = 1`` keeps no frames, the largest
+    ``filter`` smooths the signal away, ``k_klip = 1`` subtracts almost nothing.  A
+    nine-axis grid at ``gpts = 2`` therefore spent its whole budget on the 512 corners
+    of the box and never evaluated one interior configuration.  Cells are now centred --
+    ``lo + span*(i + 0.5)/g`` -- which is the usual convention for a grid design and
+    never lands on a degenerate face.
+
+    *Refinement, not wrap-around.*  Cell ``k`` used to be ``k % g**naxes``, so once the
+    cells ran out the grid re-proposed configurations it had already evaluated.  The
+    objective is deterministic given the configuration, so those evaluations bought
+    nothing: a 1000-evaluation run over 512 cells was charged 1000 reductions for 449
+    distinct configurations.  Exhausting a stage now doubles ``gpts``; because the cells
+    are centred, every node of stage ``s+1`` is new, so the budget always buys distinct
+    configurations.
+    """
 
     name = "grid"
 
     def __init__(self, space: SearchSpace, budget: int, axes: Optional[Sequence[str]] = None,
-                 base_vector: Optional[np.ndarray] = None, **kw):
+                 base_vector: Optional[np.ndarray] = None, gpts: Optional[int] = None, **kw):
         super().__init__(space, n_init=0, **kw)
         if axes is None:
             axes = [space.params[i].name for i in space.reduction_dims]
+            # Axis order is not cosmetic: the cell index is an odometer, so axis 0 cycles
+            # through all its values every g cells while the last axis only moves once the
+            # budget has covered g**(naxes-1) cells -- which a real budget never does.  A
+            # param carrying an explicit ``grid`` is one whose author wrote down the values
+            # worth scanning, so those go first and are the ones a truncated pass resolves.
+            # k_klip is the case that matters here: declared last, it took three values in a
+            # thousand evaluations while ``bin`` took six.
+            axes = ([n for n in axes if space[n].grid is not None]
+                    + [n for n in axes if space[n].grid is None])
         self.axes = list(axes)
         self.budget = int(budget)
         na = max(len(self.axes), 1)
-        self.gpts = max(int(round(max(self.budget, 1) ** (1.0 / na))), 2)
+        if gpts is None:
+            # floor: g**na must fit the budget, or the last cells of the pass wrap.
+            g = int(max(self.budget, 1) ** (1.0 / na) + 1e-9)
+            while g > 2 and g ** na > max(self.budget, 1):
+                g -= 1
+            self.gpts = max(g, 2)
+        else:
+            self.gpts = max(int(gpts), 2)
         self.base_vector = space.default_vector() if base_vector is None else np.asarray(base_vector, float)
+
+    # ---------------------------------------------------------------- geometry
+    def stage_of(self, k: int) -> Tuple[int, int, int]:
+        """``(gpts, cell_within_stage, stage)`` for the ``k``-th grid proposal.
+
+        Stage ``s`` has ``gpts * 2**s`` points per axis and ``(gpts * 2**s)**naxes``
+        cells.  Stages are walked in order, so a budget larger than one stage keeps
+        producing new configurations instead of repeating the first stage.
+        """
+        na = max(len(self.axes), 1)
+        g, s, k = self.gpts, 0, int(k)
+        while True:
+            n = g ** na
+            if k < n or s >= 24:                 # 24 doublings is past any real budget
+                return g, k % max(n, 1), s
+            k -= n
+            g *= 2
+            s += 1
 
     def cell(self, k: int) -> np.ndarray:
         x = self.base_vector.copy()
-        g = self.gpts
-        kk = k % (g ** len(self.axes))
+        g, kk, _ = self.stage_of(k)
         for a, name in enumerate(self.axes):
             i = (kk // (g ** a)) % g
             p = self.space[name]
+            frac = (i + 0.5) / g                 # cell centre, never a box face
             if p.grid is not None:
-                x[self.space.index(name)] = p.grid[int(round(i * (len(p.grid) - 1) / (g - 1)))]
+                x[self.space.index(name)] = p.grid[min(int(frac * len(p.grid)), len(p.grid) - 1)]
             else:
-                x[self.space.index(name)] = p.lo + p.span * i / (g - 1)
+                x[self.space.index(name)] = p.lo + p.span * frac
         return x
 
     def ask(self, history: History, rng: np.random.Generator, n: int = 1) -> List[Proposal]:
         ngrid = sum(1 for f in history.flags if f.get("phase") == "grid")
-        return [Proposal(self._finish(self.cell(ngrid + k)), {"phase": "grid", "cell": ngrid + k})
-                for k in range(n)]
+        out = []
+        for k in range(n):
+            g, cell, stage = self.stage_of(ngrid + k)
+            out.append(Proposal(self._finish(self.cell(ngrid + k)),
+                                {"phase": "grid", "cell": ngrid + k, "gpts": g, "stage": stage}))
+        return out
 
     def describe(self) -> Dict[str, Any]:
         d = super().describe()
-        d.update(axes=self.axes, gpts=self.gpts, budget=self.budget)
+        na = max(len(self.axes), 1)
+        d.update(axes=self.axes, gpts=self.gpts, budget=self.budget, cell_centred=True,
+                 n_cells_stage0=self.gpts ** na,
+                 stages=self.stage_of(max(self.budget - 1, 0))[2] + 1,
+                 # True when the budget cannot give even three levels per axis, so the
+                 # first pass only contrasts a low against a high value on each one.
+                 # Worth stating in a caption: it is the budget**(1/d) limit, not a bug.
+                 coarse_by_budget=self.gpts < 3)
         return d
 
 

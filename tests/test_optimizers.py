@@ -266,11 +266,11 @@ def test_grid_search_cells_cover_axes():
     g = GridSearch(sp, budget=27, axes=["a", "b"])
     assert g.gpts == 5
     cells = np.array([g.cell(k) for k in range(25)])
-    assert sorted(set(cells[:, 0])) == [-1.0, -0.5, 0.0, 0.5, 1.0]
-    assert sorted(set(cells[:, 1])) == [0.0, 2.5, 5.0, 7.5, 10.0]
+    # cell centres: (i + 0.5)/g of the span, not i/(g-1)
+    np.testing.assert_allclose(sorted(set(cells[:, 0])), [-0.8, -0.4, 0.0, 0.4, 0.8])
+    np.testing.assert_allclose(sorted(set(cells[:, 1])), [1.0, 3.0, 5.0, 7.0, 9.0])
     assert len({tuple(c[:2]) for c in cells}) == 25            # every cell distinct
     assert np.all(cells[:, 2] == sp["k"].default)               # unsearched axis at default
-    np.testing.assert_array_equal(g.cell(25), g.cell(0))         # wraps
     h = History(sp.ndim)
     rng = np.random.default_rng(0)
     p1 = g.ask(h, rng, 2)
@@ -280,12 +280,77 @@ def test_grid_search_cells_cover_axes():
     assert g.ask(h, rng)[0].flags["cell"] == 2
 
 
+def test_grid_search_never_evaluates_a_box_face():
+    """Both points of a two-point axis used to sit on ``lo`` and ``hi``.
+
+    In this problem the bounds are where the reduction degenerates -- ``corr_thresh = 1``
+    keeps no frames, the largest ``filter`` smooths the signal away -- so a nine-axis grid
+    at ``gpts = 2`` spent its whole budget on the corners of the box and never evaluated
+    one interior configuration.
+    """
+    sp = SearchSpace([Param(f"p{i}", 0, 1) for i in range(9)])
+    g = GridSearch(sp, budget=1000)
+    assert g.gpts == 2 and g.describe()["coarse_by_budget"] is True
+    cells = np.array([g.cell(k) for k in range(512)])
+    assert cells.min() > 0.0 and cells.max() < 1.0
+    for j in range(9):
+        assert sorted(set(cells[:, j])) == [0.25, 0.75]
+
+
+def test_grid_search_refines_rather_than_repeating_cells():
+    """A budget past the first pass must buy new configurations, not the same ones again.
+
+    The objective is deterministic given the configuration, so a wrapped cell bought
+    nothing: 1000 evaluations over 512 cells were charged 1000 reductions for 512
+    distinct configurations (449 after feasibility projection).
+    """
+    sp = SearchSpace([Param(f"p{i}", 0, 1) for i in range(9)])
+    g = GridSearch(sp, budget=999)
+    rows = {tuple(np.round(g.cell(k), 12)) for k in range(999)}
+    assert len(rows) == 999
+    assert g.stage_of(0)[2] == 0 and g.stage_of(512)[2] == 1     # second pass, finer
+    assert g.stage_of(512)[0] == 2 * g.gpts
+    assert g.describe()["stages"] == 2
+    # and the refined nodes are still interior
+    ref = np.array([g.cell(k) for k in range(512, 999)])
+    assert ref.min() > 0.0 and ref.max() < 1.0
+
+
+def test_grid_search_scans_the_declared_grid_axes_first():
+    """The cell index is an odometer, so the last axis is the one a budget never reaches.
+
+    In the benchmark space ``k_klip`` was declared last and took three values in a thousand
+    evaluations -- two of them the degenerate ends of its range -- while ``bin``, declared
+    first, took six.  A param carrying an explicit ``grid`` is one whose author wrote down
+    the values worth scanning, so it goes first.
+    """
+    sp = SearchSpace([Param("a", 0, 1), Param("b", 0, 1), Param("k", 1, 30, "int", grid=kgrid(30))])
+    g = GridSearch(sp, budget=64)
+    assert g.axes[0] == "k"
+    cells = np.array([g.cell(i) for i in range(64)])
+    ik = sp.index("k")
+    assert len(np.unique(cells[:, ik])) == g.gpts        # fully scanned inside the budget
+    # explicit axes are taken as given -- the caller has already chosen the order
+    assert GridSearch(sp, budget=64, axes=["a", "b", "k"]).axes == ["a", "b", "k"]
+
+
+def test_grid_search_gpts_fits_inside_the_budget():
+    """``round`` could exceed the budget; the overrun is what used to wrap."""
+    for nd, budget in ((2, 27), (2, 80), (3, 999), (9, 1000), (4, 255)):
+        sp = SearchSpace([Param(f"p{i}", 0, 1) for i in range(nd)])
+        g = GridSearch(sp, budget=budget)
+        assert g.gpts ** nd <= budget or g.gpts == 2, (nd, budget, g.gpts)
+
+
 def test_grid_search_grid_axis_uses_grid_entries():
     sp = SearchSpace([Param("k", 1, 30, "int", grid=kgrid(30))])
     g = GridSearch(sp, budget=4)
     vals = sorted(g.cell(i)[0] for i in range(g.gpts))
-    assert vals[0] == 1.0 and vals[-1] == 30.0
+    assert len(vals) == g.gpts == 4
     assert set(vals) <= set(kgrid(30).tolist())
+    # spread over the grid, and off its ends for the same reason as the box faces
+    assert vals[0] > 1.0 and vals[-1] < 30.0
+    assert vals == sorted(set(vals))
 
 
 def test_make_optimizer(simple_space):
