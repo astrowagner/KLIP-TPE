@@ -2372,6 +2372,7 @@ class Runner:
         # seam patching: pixels inside the searched span left NaN -> padded re-run of that annulus' winner
         seam = seam_pixels(st, edges[0], edges[-1])
         npatch = 0
+        t_seam = time.time()
         if seam.any():
             rr = np.hypot(*np.meshgrid(np.arange(st.shape[1]) - star_center(st.shape)[0],
                                        np.arange(st.shape[0]) - star_center(st.shape)[1]))
@@ -2392,7 +2393,13 @@ class Runner:
                 except Exception as exc:
                     self.log(f"  seam patch of annulus {r.annulus+1} failed: {exc!r}")
             self.ia = ia_keep
-            self.log(f"  seam patching: {int(seam.sum())} pixel(s), {npatch} filled")
+            # The cost is one full re-reduction per annulus that has ANY seam pixel, so it
+            # is set by the number of annuli, not by the number of pixels being filled --
+            # a one-pixel seam costs as much as a five-hundred-pixel one.  Cheap on a
+            # single annulus (0.1 s measured); worth seeing on a run with eight of them,
+            # where the same line would hide eight reductions.
+            self.log(f"  seam patching: {int(seam.sum())} pixel(s), {npatch} filled "
+                     f"({time.time() - t_seam:.1f} s; one re-reduction per annulus with a seam)")
         st_f = radprof(st)
         hist = ["per-annulus best (edges px | k bin nang filt angsep anglemax | SNR | partitions):"]
         for r, d in items:

@@ -187,6 +187,32 @@ def build(args):
     return red, r0, sci, ref, ang
 
 
+def apply_match_idl(space):
+    """Narrow ``space`` to the vector ``optimize_mwc_tpe.pro`` actually searched, IN PLACE.
+
+    The IDL put combtype [0, 2], klipfilter [5, 9], nkalt [0, 25], nkpsf [1, 25] and
+    k_klip [1, 50] in the search and held n_ang at 1.  Matching it means a difference in
+    the answer is a difference in the reference library rather than in what was searched.
+
+    In place, and that is the whole point of this being a function.  Rebuilding it as
+    ``SearchSpace(params)`` looks equivalent and is not: a ``SearchSpace`` also carries
+    ``partitions``, ``selection``, ``fixed`` and the projection, and a fresh one has none
+    of them.  ``decode()`` then returns an empty ``selected``, ``reduce_config`` maps over
+    zero partitions, and the run dies in ``np.stack`` with "need at least one array to
+    stack" -- nowhere near the cause.  It was inline in ``main`` when it broke, where
+    nothing could test it.
+    """
+    from klip_tpe import Param
+    space.params = [q for q in space.params if q.name not in ("n_ang", "filter")]
+    space.fixed = dict(space.fixed, n_ang=1)          # fixed, but still handed to the reducer
+    space.add(Param(name="filter", lo=5.0, hi=9.0, kind="int", default=5.0,
+                    role="reduction", doc="klipfilter, the IDL's [5, 9]"))
+    space.add(Param(name="comb_type", lo=0.0, hi=2.0, kind="categorical",
+                    choices=["nwadi", "mean", "median"], default=0.0, role="reduction",
+                    doc="combtype, the IDL's [0, 2]"))
+    return space
+
+
 def annulus_px(px):
     """The IDL's inrad/outrad, rescaled if the science grid ever changes."""
     lo, hi = ANNULUS_PX
@@ -243,21 +269,9 @@ def main():
     # the reference library rather than in what was searched.  optimize_mwc_tpe.pro put
     # combtype [0,2], klipfilter [5,9], nkalt [0,25], nkpsf [1,25] and k_klip [1,50] in the
     # search and held n_ang at 1; without --match-idl the package's own wider ranges stand.
-    from klip_tpe import Param
     space = generic.make_space(red, k_klip_max=50, search_angles=False, bin_range=(1, 1))
     if a.match_idl:
-        # Edit the space IN PLACE.  Rebuilding it as SearchSpace(params) looks equivalent
-        # and is not: a SearchSpace also carries `partitions`, `selection`, `fixed` and the
-        # projection, and a fresh one has none of them.  decode() then returns an empty
-        # `selected`, reduce_config maps over zero partitions, and the run dies in
-        # np.stack with "need at least one array to stack" -- nowhere near the cause.
-        space.params = [q for q in space.params if q.name not in ("n_ang", "filter")]
-        space.fixed = dict(space.fixed, n_ang=1)          # fixed, but still handed to the reducer
-        space.add(Param(name="filter", lo=5.0, hi=9.0, kind="int", default=5.0,
-                        role="reduction", doc="klipfilter, the IDL's [5, 9]"))
-        space.add(Param(name="comb_type", lo=0.0, hi=2.0, kind="categorical",
-                        choices=["nwadi", "mean", "median"], default=0.0, role="reduction",
-                        doc="combtype, the IDL's [0, 2]"))
+        apply_match_idl(space)
     space.project = generic.make_guard(red, n_min_ref=2, k_max=50)
     print(f"  searched dimensions ({space.ndim}): {[p.name for p in space.params]}")
     if a.match_idl:
