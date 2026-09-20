@@ -36,6 +36,7 @@ from klip_tpe import (CalibrationConfig, MawetPeakSNR, RunConfig, Runner, Source
                       ValidationConfig)
 from klip_tpe.instruments import generic
 from klip_tpe.reducer import Dataset, PartitionedReducer
+from klip_tpe.space import SearchSpace
 
 # ---------------------------------------------------------------- the data set
 DATA = os.path.expanduser("~/Data/JWST")
@@ -225,6 +226,8 @@ def main():
                     help="skip calibration and inject at this contrast (the IDL used 1e-4)")
     ap.add_argument("--idl-cc", action="store_true", help="use the IDL similarity matrix")
     ap.add_argument("--check", action="store_true", help="load and verify, run nothing")
+    ap.add_argument("--match-idl", action="store_true",
+                    help="search exactly the IDL's vector (adds comb_type, pins n_ang=1)")
     ap.add_argument("--n-iter", type=int, default=400)
     ap.add_argument("--n-init", type=int, default=80)
     ap.add_argument("--seed", type=int, default=21)
@@ -236,9 +239,24 @@ def main():
     print("MWC 758 F430M, searched reference library")
     red, r0, sci, ref, ang = build(a)
     check_geometry(red, sci, a._px, a._fwhm)
+    # Match the IDL's searched vector, so a difference in the answer is a difference in
+    # the reference library rather than in what was searched.  optimize_mwc_tpe.pro put
+    # combtype [0,2], klipfilter [5,9], nkalt [0,25], nkpsf [1,25] and k_klip [1,50] in the
+    # search and held n_ang at 1; without --match-idl the package's own wider ranges stand.
+    from klip_tpe import Param
     space = generic.make_space(red, k_klip_max=50, search_angles=False, bin_range=(1, 1))
+    if a.match_idl:
+        keep = [q for q in space.params if q.name not in ("n_ang", "filter")]
+        space = SearchSpace(keep)
+        space.add(Param(name="filter", lo=5.0, hi=9.0, kind="int", default=5.0,
+                        role="reduction", doc="klipfilter, the IDL's [5, 9]"))
+        space.add(Param(name="comb_type", lo=0.0, hi=2.0, kind="categorical",
+                        choices=["nwadi", "mean", "median"], default=0.0, role="reduction",
+                        doc="combtype, the IDL's [0, 2]"))
     space.project = generic.make_guard(red, n_min_ref=2, k_max=50)
     print(f"  searched dimensions ({space.ndim}): {[p.name for p in space.params]}")
+    if a.match_idl:
+        print("  (--match-idl: n_ang pinned to 1 as the IDL had it, comb_type searched)")
     if a.check:
         # one reduction at the default, so a signature or geometry error surfaces here
         # rather than forty minutes into a search
@@ -266,7 +284,8 @@ def main():
                     validation=ValidationConfig(n_top=3, n_valid=5),
                     calibration=cal,
                     defaults={"k_klip": 10, "bin": 1, "n_ang": 1, "filter": 5,
-                              "use_rdi": True, "nkeep_altroll": 25, "nkeep_hd36575": 25},
+                              "comb_type": "nwadi", "use_rdi": True,
+                              "nkeep_altroll": 25, "nkeep_hd36575": 25},
                     fm_curve=False, save_eval_images=False)
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "paper_runs", a.out)
     out = os.path.normpath(out)
