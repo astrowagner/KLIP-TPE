@@ -396,6 +396,19 @@ class KLIPReducer(Reducer):
             cube = np.stack([destripe(destripe(f, 90.0, clip), 0.0, clip) for f in cube])
         dth = self.dth_max_deg(outrad)
         bcube, bang, grp, bkeep = bin_frames(cube, angles, bin_, dth, return_groups=True)
+        if bcube.shape[0] == 0:
+            # bin_frames drops bins whose nansum is zero.  np.nansum of an ALL-NaN frame is
+            # 0.0, so a cube that is mostly NaN -- a subarray padded into a larger grid, say
+            # -- is wiped out entirely by the high-pass, which at nan_aware=False spreads NaN
+            # over the whole frame.  Every downstream shape then goes to zero and the failure
+            # surfaces somewhere far away and unrecognisable.
+            nan_frac = float(np.mean(~np.isfinite(np.asarray(cube, float))))
+            raise ValueError(
+                f"every frame was dropped as empty after filtering and binning "
+                f"(filter={filt}, bin={bin_}); {100 * nan_frac:.0f}% of the input pixels are "
+                f"NaN. A high-pass filter spreads NaN across the whole frame, so a padded or "
+                f"masked cube must be cropped to its finite region before it reaches the "
+                f"reducer.")
         if mcube is not None:
             mb = bin_by_groups(mcube, grp) if bin_ > 1 else np.asarray(mcube, np.float32)
             mcube = mb[bkeep]

@@ -288,3 +288,15 @@ def test_the_counts_reach_the_search_space_and_the_guard_clamps_k():
     z[idx["nkeep_altroll"]] = z[idx["nkeep_psfref"]] = 0.0
     w = guard(z, space, is_random=True)
     assert w[idx["nkeep_altroll"]] + w[idx["nkeep_psfref"]] >= 2
+
+
+def test_an_all_nan_cube_says_why_instead_of_vanishing():
+    """A subarray padded into a larger grid is mostly NaN; the high-pass spreads that over
+    the whole frame, nansum of an all-NaN frame is 0.0, bin_frames drops every zero-sum
+    bin, and the science cube reaches the library code with no frames.  The old failure was
+    'supplied similarity is (75, 50), expected (25, 0)' from three call levels away."""
+    from klip_tpe.reducer import ReductionRequest
+    red, _ = _reducer_with_two_rolls(nframes=8, size=48)
+    red.data.cube[:, :10, :] = np.nan            # enough NaN that the filter wipes the frame
+    with pytest.raises(ValueError, match="every frame was dropped as empty"):
+        red.reduce(ReductionRequest(_p(filter=5, nkeep_altroll=2, nkeep_psfref=2), None))

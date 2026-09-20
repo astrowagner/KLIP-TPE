@@ -48,12 +48,18 @@ PSF = f"{DATA}/MWC758_Cycle2/MWC758_PSFs_MASK335R_F430M_2024-03-02.fits"
 NROLL = 25                 # frames per science roll
 LAM, DIAM = 4.30e-6, 6.5   # F430M, JWST
 MWC758C = (0.607, 213.8)   # known companion: rho (arcsec), PA (deg), from the IDL setup
-#: The IDL run worked at detector sampling -- its run_setup records 0.0630 arcsec and a
-#: 2.23 px FWHM -- but the cubes on disk are the 640-pixel `_cen` ones, which the STPSF
-#: header marks OSAMP=2, PIXELSCL=0.0312.  Assuming 0.063 on those would put the companion
-#: at 9.6 px when it is really at 19.4, and the searched annulus would miss it entirely.
-#: So the scale is read from the PSF file rather than written down here.
-PXSCALE_FALLBACK = 0.031212
+#: Detector sampling, as the IDL run_setup records (0.0630 arcsec, FWHM 2.23 px; this
+#: filter and aperture give 1.025 lam/D = 2.22 px at that scale, which is the check).
+#:
+#: The trap: the 640-pixel ``_cen`` cubes are NOT oversampled.  They are the 320-pixel
+#: SUB320A335R subarray padded with NaN so the star lands on the frame centre -- only 25%
+#: of each frame is finite, in a 318 x 319 box.  The STPSF template beside them IS
+#: oversampled (642 px, PIXELSCL 0.0312, OSAMP 2), and taking ITS scale for the science
+#: data doubles every radius: the companion moves from 9.6 px to 19.4 and the annulus that
+#: should contain it is drawn somewhere else.  The PSF's scale describes the PSF.
+PXSCALE = 0.0630
+#: The IDL searched inrad/outrad 2-15 px at that scale.
+ANNULUS_PX = (2, 15)
 
 
 def load_angles(path):
@@ -74,12 +80,13 @@ def load_angles(path):
     raise FileNotFoundError(f"no angles beside {path}")
 
 
-def psf_and_scale(path, nx_science):
-    """The off-axis template and the pixel scale it was generated on.
+def load_psf(path, pxscale):
+    """The off-axis template, block-averaged onto the science pixel grid.
 
-    Returns ``(psf, pxscale)``.  The template is resampled-grid STPSF output; when its
-    grid matches the science cube the scale in its header is the science scale, which is
-    the only self-consistent way to get this right."""
+    STPSF writes an oversampled template and records its own scale in ``PIXELSCL``.  That
+    is the PSF's grid, not the data's -- see the note on ``PXSCALE`` above -- so the only
+    thing to do with it here is work out the integer factor by which the template has to be
+    binned down to match the science pixels."""
     if not os.path.exists(path):
         raise SystemExit(
             f"no PSF template at {path}.\n"
@@ -89,12 +96,51 @@ def psf_and_scale(path, nx_science):
     with fits.open(path) as hl:
         hdu = hl[0] if hl[0].data is not None else hl[1]
         psf = np.asarray(hdu.data, float)
-        px = float(hdu.header.get("PIXELSCL", PXSCALE_FALLBACK))
-    if psf.ndim == 3 and psf.shape[-1] != nx_science:
-        print(f"  PSF grid {psf.shape[-1]} != science grid {nx_science}; using the header "
-              f"scale {px} and letting the injector interpolate")
-    print(f"  PSF template {psf.shape} at {px:.6f}\"/px")
-    return psf, px
+        px_psf = float(hdu.header.get("PIXELSCL", pxscale))
+    n = max(int(round(pxscale / px_psf)), 1)
+    if n > 1:
+        cut = (psf.shape[-1] // n) * n
+        sl = psf[..., :cut, :cut]
+        sh = sl.shape[:-2] + (cut // n, n, cut // n, n)
+        psf = sl.reshape(sh).mean(axis=(-3, -1)) * (n * n)      # sum-preserving
+        print(f"  PSF template binned {n}x{n}: {px_psf:.6f}\"/px -> {px_psf * n:.6f}\"/px, "
+              f"{psf.shape[-1]} px (science grid is {pxscale:.4f}\"/px)")
+    else:
+        print(f"  PSF template {psf.shape} already on the science grid")
+    return psf
+
+
+def crop_to_finite(*cubes, center=None):
+    """Largest square crop, centred on the star, in which every frame of every cube is
+    finite.
+
+    The ``_cen`` cubes are a subarray padded into a bigger grid, so three quarters of each
+    frame is NaN.  A high-pass filter at ``nan_aware=False`` spreads that NaN over the whole
+    frame; ``np.nansum`` of an all-NaN frame is 0.0; ``bin_frames`` drops zero-sum bins; and
+    the science cube arrives at the reducer with no frames at all.  Cropping first is the
+    fix, and it has to be SYMMETRIC about the star, because the package puts the star at the
+    geometric centre of whatever array it is given."""
+    fin = np.ones(cubes[0].shape[-2:], bool)
+    for c in cubes:
+        fin &= np.isfinite(np.asarray(c)).all(axis=0)
+    ny, nx = fin.shape
+    cy, cx = ((ny - 1) / 2.0, (nx - 1) / 2.0) if center is None else center
+    ys, xs = np.where(fin)
+    if ys.size == 0:
+        raise SystemExit("no pixel is finite in every frame")
+    half = int(min(cx - xs.min(), xs.max() - cx, cy - ys.min(), ys.max() - cy))
+    if half < 20:
+        raise SystemExit(f"the finite region is only {2 * half + 1} px across; "
+                         f"is the star really at the frame centre?")
+    y0, y1 = int(round(cy - half)), int(round(cy + half)) + 1
+    x0, x1 = int(round(cx - half)), int(round(cx + half)) + 1
+    out = [np.ascontiguousarray(np.asarray(c)[..., y0:y1, x0:x1]) for c in cubes]
+    print(f"  cropped {ny}x{nx} -> {out[0].shape[-2]}x{out[0].shape[-1]} about the star "
+          f"(the padding is NaN and a high-pass would spread it over everything)")
+    for c in out:
+        if not np.isfinite(c).all():
+            raise SystemExit("the crop still contains NaN")
+    return out
 
 
 def build(args):
@@ -105,11 +151,12 @@ def build(args):
         raise SystemExit(f"{sci.shape[0]} science frames but {ang.size} angles")
     print(f"  science {sci.shape}  reference {ref.shape}  PA span {np.ptp(ang):.2f} deg")
 
-    psf, px = psf_and_scale(args.psf, sci.shape[-1])
-    if args.pxscale:
-        px = args.pxscale
+    sci, ref = crop_to_finite(sci, ref)
+    px = args.pxscale or PXSCALE
+    psf = load_psf(args.psf, px)
     fwhm_px = 1.025 * LAM / DIAM * 206265.0 / px
-    print(f"  pxscale {px:.6f}\"/px   FWHM {fwhm_px:.2f} px")
+    print(f"  pxscale {px:.6f}\"/px   FWHM {fwhm_px:.2f} px "
+          f"(the IDL run recorded 0.0630 and 2.23)")
 
     ds = Dataset(cube=sci, angles=ang, name="mwc758")
     ds.ref_cube = ref
@@ -140,9 +187,9 @@ def build(args):
 
 
 def annulus_px(px):
-    """The IDL searched 2-15 px at 0.063 arcsec, i.e. 0.126-0.945 arcsec.  Expressed in
-    arcseconds so the same region is searched whatever grid the cubes are on."""
-    return round(0.126 / px), round(0.945 / px)
+    """The IDL's inrad/outrad, rescaled if the science grid ever changes."""
+    lo, hi = ANNULUS_PX
+    return round(lo * PXSCALE / px), round(hi * PXSCALE / px)
 
 
 def check_geometry(red, sci, px, fwhm_px):
