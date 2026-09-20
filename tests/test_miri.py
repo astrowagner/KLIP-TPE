@@ -277,6 +277,132 @@ def test_load_miri_masks_the_dead_zones_with_nan_not_zero():
     assert ds.meta["image_mask"] == "FQPM1065"
 
 
+def test_forbidden_pa_marks_the_dead_zones_in_sky_angle():
+    """The dead zones are fixed to the detector; the sampler works in sky PA.
+
+    The two are related only through each frame's roll, so this has to be computed over
+    the whole sequence rather than for one angle.
+    """
+    g = synthetic_map()
+    out = miri.forbidden_pa([0.0], rho_as=1.0, filter="F1065C", g=g, log=lambda *_: None)
+    got = sorted(round(c) % 360 for c, _ in out)
+    assert got == [0, 90, 180, 270], got                 # boundaries, in sky PA at roll 0
+    assert all(w > 0 for _, w in out)
+    # a roll shifts them: at parang = 30 the same detector boundaries sit 30 deg round
+    out30 = miri.forbidden_pa([30.0], rho_as=1.0, filter="F1065C", g=g, log=lambda *_: None)
+    assert sorted(round(c) % 360 for c, _ in out30) == [30, 120, 210, 300]
+    # nothing is forbidden where the mask transmits
+    assert not any(abs(((c - 45 + 180) % 360) - 180) < w for c, w in out)
+
+
+def test_forbidden_pa_does_not_hinge_on_a_floating_point_tie_for_two_rolls():
+    """Two rolls is the usual JWST sequence, and a PA a boundary eats in one of them is
+    dead in exactly half the frames.  A ``> 0.5`` test forbids nothing there, on a tie."""
+    g = synthetic_map()
+    two = miri.forbidden_pa([0.0, 40.0], rho_as=1.0, filter="F1065C", g=g,
+                            log=lambda *_: None)
+    assert len(two) == 8, "both rolls' boundaries should be forbidden, not neither"
+    assert sorted(round(c) % 360 for c, _ in two) == [0, 40, 90, 130, 180, 220, 270, 310]
+    # and the strict-majority rule really would have dropped them
+    assert miri.forbidden_pa([0.0, 40.0], rho_as=1.0, filter="F1065C", g=g,
+                             dead_frac=0.5, log=lambda *_: None) == []
+
+
+def test_forbidden_pa_wraps_a_sector_across_zero():
+    """A sector centred on PA 0 spans 359-1 and must come back as one sector, not two."""
+    g = synthetic_map(width=20.0)
+    out = miri.forbidden_pa([0.0], rho_as=1.0, filter="F1065C", g=g, log=lambda *_: None)
+    assert len(out) == 4, [round(c) for c, _ in out]
+    c0 = [c for c, _ in out if min(c, 360 - c) < 5]
+    assert len(c0) == 1 and min(c0[0], 360 - c0[0]) < 2
+
+
+def test_forbidden_pa_with_no_frames_is_empty_not_everything():
+    g = synthetic_map()
+    assert miri.forbidden_pa([], rho_as=1.0, filter="F1065C", g=g, log=lambda *_: None) == []
+
+
+def test_apply_quadrant_mask_leaves_non_miri_datasets_alone():
+    """Safe on a mixed or NIRCam set: a filter that is not a MIRI coronagraphic one is
+    passed through untouched rather than masked with somebody else's geometry."""
+    from klip_tpe.reducer import Dataset
+    g = synthetic_map()
+    cube = np.ones((2, 81, 81), np.float32)
+    ang = np.array([0.0, 10.0])
+    mk = lambda f: Dataset(cube.copy(), ang, None, name="x",
+                           meta={"filter": f, "pxscale": 0.109655, "center": (40.0, 40.0)})
+    import klip_tpe.instruments.miri as M
+    real, M.throughput_map = M.throughput_map, lambda *a, **k: g
+    try:
+        out = miri.apply_quadrant_mask({"miri": mk("F1065C"), "nircam": mk("F444W"),
+                                        "blank": mk(None)}, log=lambda *_: None)
+    finally:
+        M.throughput_map = real
+    assert np.isnan(np.asarray(out["miri"].cube)).any()
+    assert out["miri"].meta["quadrant_masked_px"] > 0
+    assert np.isfinite(np.asarray(out["nircam"].cube)).all()
+    assert "quadrant_mask" not in (out["nircam"].meta or {})
+    assert np.isfinite(np.asarray(out["blank"].cube)).all()
+
+
+def test_model_for_datasets_routes_miri_to_the_two_dimensional_model():
+    """`psf='stpsf'` must not hand MIRI a radial throughput.
+
+    This is the path every driver takes, so if it returns a LibraryPSF the 2-D map is
+    never reached no matter how correct the map itself is.
+    """
+    from klip_tpe.reducer import Dataset
+    import klip_tpe.stpsf_psf as S
+
+    calls = {}
+
+    def fake_library(filter, star_flux=1.0, seps_as=None, log=print, **kw):
+        calls.update(filter=filter, star_flux=star_flux)
+        sl = np.zeros((2, 9, 9))
+        sl[:, 4, 4] = 1.0
+        return miri.MIRILibraryPSF(sl, [0.5, 1.5], center=(4.0, 4.0), ee_radius_px=3.0,
+                                   thru2d=miri.throughput_map_fn(synthetic_map()))
+
+    import klip_tpe.instruments.miri as M
+    real, M.library = M.library, fake_library
+    try:
+        ds = Dataset(np.zeros((2, 61, 61), np.float32), np.array([0.0, 10.0]), None, name="m",
+                     meta={"pxscale": 0.109655,
+                           "header": {"INSTRUME": "MIRI", "FILTER": "F1065C",
+                                      "CORONMSK": "4QPM_1065"}})
+        m = S.model_for_datasets([ds], star_flux=7.0, log=lambda *_: None)
+    finally:
+        M.library = real
+    assert calls == {"filter": "F1065C", "star_flux": 7.0}
+    assert isinstance(m, miri.MIRILibraryPSF) and m.azimuth_dependent
+
+
+def test_model_for_datasets_leaves_nircam_on_the_radial_path():
+    """The MIRI branch must key off the instrument, not fire on anything with a mask."""
+    from klip_tpe.reducer import Dataset
+    import klip_tpe.stpsf_psf as S
+    seen = {}
+
+    def fake_grid(**kw):
+        seen.update(kw)
+        return {"slices": np.zeros((2, 9, 9)), "seps": np.array([0.5, 1.5]),
+                "transmission": np.array([0.5, 0.9]), "center": (4.0, 4.0),
+                "ee_radius_px": 3.0}
+
+    real, S.offaxis_grid = S.offaxis_grid, fake_grid
+    try:
+        ds = Dataset(np.zeros((2, 61, 61), np.float32), np.array([0.0, 10.0]), None, name="n",
+                     meta={"pxscale": 0.063,
+                           "header": {"INSTRUME": "NIRCAM", "FILTER": "F444W",
+                                      "CORONMSK": "MASKA335R"}})
+        m = S.model_for_datasets([ds], seps_as=[0.5, 1.5], log=lambda *_: None)
+    finally:
+        S.offaxis_grid = real
+    assert seen.get("instrument") == "NIRCam"
+    assert not isinstance(m, miri.MIRILibraryPSF)
+    assert not getattr(m, "azimuth_dependent", False)
+
+
 def test_load_miri_needs_a_filter():
     cube = np.zeros((2, 21, 21), np.float32)
     with pytest.raises(ValueError, match="no MIRI filter"):

@@ -592,6 +592,21 @@ def model_for_datasets(dsets, star_flux: float = 1.0, seps_as: Optional[Sequence
     if not mode.get("filter"):
         raise ValueError("no FILTER in the dataset header; pass filter= explicitly")
     px = float(pxscale or meta.get("pxscale") or 0.0)
+    # MIRI's coronagraphs are four-quadrant phase masks (and one Lyot with a support bar),
+    # whose throughput depends on where a source is rather than how far out -- by a factor
+    # of two to four around a circle of constant separation.  offaxis_grid measures it
+    # radially, so on MIRI it returns an azimuthal average of two different things.  The
+    # MIRI module builds the same stamp library with a two-dimensional throughput map.
+    # Imported here, not at module scope: klip_tpe.instruments.miri imports from this one.
+    if str(mode.get("instrument", "")).upper() == "MIRI" and mode.get("image_mask"):
+        from .instruments.miri import MODES as MIRI_MODES, library as miri_library
+        if str(mode["filter"]).upper() in MIRI_MODES:
+            log(f"  stpsf: mode MIRI {mode['filter']} {mode.get('image_mask')} "
+                f"-- 2-D throughput (four-quadrant mask)")
+            return miri_library(filter=mode["filter"], star_flux=star_flux,
+                                seps_as=seps_as, log=log,
+                                **{k: v for k, v in kw.items()
+                                   if k in ("date", "stamp_px", "nlambda", "oversample")})
     if seps_as is None:
         ny = int(np.shape(getattr(d0, "cube"))[-1])
         rmax = float(rho_max_as) if rho_max_as else (0.45 * ny * px if px > 0 else 2.6)

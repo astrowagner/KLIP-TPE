@@ -81,7 +81,9 @@ from ..stpsf_psf import (_cache_path, _ee_radius, _instrument, _key, _odd, cache
 
 __all__ = ["MODES", "DIAMETER_M", "mode_for_filter", "pixelscale", "throughput_map",
            "default_azimuths", "default_separations", "locate_boundaries",
-           "throughput_map_fn", "quadrant_mask", "library", "load_miri", "MIRILibraryPSF"]
+           "throughput_map_fn", "quadrant_mask", "library", "load_miri", "apply_quadrant_mask",
+           "forbidden_pa",
+           "MIRILibraryPSF"]
 
 DIAMETER_M = 6.5
 
@@ -477,7 +479,102 @@ def library(filter: str = "F1065C", star_flux: float = 1.0,
                           thru2d=throughput_map_fn(tmap))
 
 
+def forbidden_pa(angles, rho_as: float, filter: str = "F1065C", truenorth: float = 0.0,
+                 g: Optional[Dict[str, Any]] = None, min_throughput: float = 0.30,
+                 dead_frac: float = 0.34, step_deg: float = 1.0,
+                 log: Callable[[str], None] = print):
+    """Sky position-angle sectors an injection must not be placed in, as
+    ``[(centre_deg, half_width_deg), ...]`` for
+    :class:`~klip_tpe.positions.PositionSampler`.
+
+    The dead zones are fixed to the DETECTOR and the sampler works in sky position angle,
+    so the two are only related through the roll of each frame:
+    ``az = theta - truenorth - 270 - parang``.  A sky PA that lands on a quadrant boundary
+    in one frame may clear it in another, which is why this takes the whole ``angles``
+    array rather than a single roll and forbids a PA only when it is suppressed in more
+    than ``dead_frac`` of the frames.
+
+    Without this the sampler happily injects into a dead zone, the reduction recovers
+    almost nothing there, and the search reads that as a property of the parameters it was
+    trying -- it is a property of the mask.  Worse than useless: it is a measurement of the
+    coronagraph presented as a measurement of the reduction.
+
+    ``dead_frac`` is 0.34 rather than a half on purpose.  A JWST coronagraphic sequence is
+    usually **two** rolls, so a PA that a boundary eats in one of them is dead in exactly
+    0.5 of the frames -- and a ``> 0.5`` test would then forbid nothing at all, for the
+    most common observation there is, on an exact floating-point tie.  Losing one of two
+    rolls to the mask costs about half the signal at that PA, which is more than enough to
+    make an injection there unrepresentative of the separation it is supposed to measure.
+    """
+    ang = np.asarray(angles, float).ravel()
+    if not ang.size:
+        return []
+    if g is None:
+        g = throughput_map(mode_for_filter(filter)["filter"], log=lambda *_: None)
+    f = throughput_map_fn(g)
+    pa = np.arange(0.0, 360.0, float(step_deg))
+    az = pa[:, None] - float(truenorth) - 270.0 - ang[None, :]         # (npa, nframe)
+    dead = f(np.full(az.shape, float(rho_as)), az) < float(min_throughput)
+    frac = dead.mean(axis=1)
+    bad = frac > float(dead_frac)
+    if not bad.any():
+        return []
+    # contiguous runs of forbidden PA, wrapped at 360
+    idx = np.flatnonzero(bad)
+    splits = np.flatnonzero(np.diff(idx) > 1) + 1
+    runs = np.split(idx, splits)
+    if len(runs) > 1 and bad[0] and bad[-1]:                            # joins across 0/360
+        runs[0] = np.concatenate([runs[-1] - pa.size, runs[0]])
+        runs.pop()
+    out = []
+    for r in runs:
+        lo, hi = pa[r[0] % pa.size], pa[r[0] % pa.size] + step_deg * (r.size - 1)
+        out.append((float((0.5 * (lo + hi)) % 360.0), float(0.5 * step_deg * r.size)))
+    log(f"  miri: {len(out)} forbidden PA sector(s) at rho={rho_as:.2f}\" covering "
+        f"{100.0 * bad.mean():.0f}% of the ring: "
+        + ", ".join(f"{c:.0f}+/-{w:.0f}" for c, w in out))
+    return out
+
+
 # ------------------------------------------------------------------------------ loading
+def apply_quadrant_mask(datasets, min_throughput: float = 0.30, filter: Optional[str] = None,
+                        log: Callable[[str], None] = print):
+    """NaN the dead zones of every MIRI dataset in ``{name: Dataset}``, in place-ish.
+
+    ``klip_tpe.backends.spaceklip.load_calints`` is instrument-agnostic and reads MIRI
+    ``calints`` correctly, but it knows nothing about quadrant boundaries -- so the
+    suppressed pixels arrive as ordinary data.  Left in, they enter the KLIP basis as a
+    bright fixed pattern and enter the noise statistics the objective is computed from,
+    where they depress the scatter in whichever annulus they cross and make that annulus
+    look quieter than it is.  The optimizer then has an incentive to choose parameters
+    that preserve them.
+
+    Returns a new dict; datasets whose filter is not a MIRI coronagraphic one are passed
+    through untouched, so this is safe to call on a mixed or NIRCam set.
+    """
+    out = {}
+    for pid, ds in datasets.items():
+        meta = dict(ds.meta or {})
+        hdr = meta.get("header") or {}
+        filt = filter or meta.get("filter") or (hdr.get("FILTER") if hasattr(hdr, "get") else None)
+        if not filt or str(filt).upper() not in MODES:
+            out[pid] = ds
+            continue
+        m = mode_for_filter(filt)
+        px = float(meta.get("pxscale") or pixelscale(m["filter"]))
+        c = meta.get("center") or ((ds.cube.shape[-1] - 1) / 2.0, (ds.cube.shape[-2] - 1) / 2.0)
+        bad = quadrant_mask(ds.cube.shape, c, px, m["filter"], min_throughput=min_throughput)
+        cube = np.asarray(ds.cube, np.float32).copy()
+        cube[:, bad] = np.nan
+        meta.update({"quadrant_mask": bad, "quadrant_masked_px": int(bad.sum()),
+                     "image_mask": m["image_mask"], "lam_m": m["lam_m"], "diam_m": DIAMETER_M})
+        out[pid] = ds.__class__(cube, ds.angles, ds.tags, texp=ds.texp, name=ds.name,
+                                meta=meta, ref_cube=ds.ref_cube)
+        log(f"  {pid}: {m['filter']} {m['image_mask']} -- masked {int(bad.sum())} dead-zone "
+            f"pixels ({100.0 * bad.mean():.1f}% of the frame)")
+    return out
+
+
 def load_miri(cube, angles, filter: Optional[str] = None, name: str = "miri",
               mask_quadrants: bool = True, min_throughput: float = 0.30,
               header=None, **kw):
