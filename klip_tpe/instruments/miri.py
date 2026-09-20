@@ -6,20 +6,27 @@ two perpendicular lines through the star rather than by blocking a disc.  Everyt
 downstream that assumes a round occulter is wrong here, and the one that matters most is
 the throughput model.
 
-Measured from STPSF for F1065C/FQPM1065 (:func:`throughput_map`), as a function of
-detector azimuth at each separation::
+Measured from STPSF for F1065C/FQPM1065 (:func:`throughput_map`), over the default grid --
+the extremes over azimuth at each separation::
 
-    rho\\az    0     30     60     90    120    150     range
-    0.4"    0.161  0.470  0.433  0.212  0.518  0.382     x3.2
-    0.8"    0.206  0.819  0.604  0.205  0.637  0.786     x4.0
-    1.2"    0.260  0.935  0.693  0.263  0.918  0.912     x3.6
-    1.6"    0.325  0.928  0.907  0.336  0.943  0.922     x2.9
-    2.0"    0.418  0.927  0.949  0.414  0.962  0.940     x2.3
-    2.4"    0.504  0.939  0.954  0.486  0.943  0.932     x2.0
+     rho      min    max   ratio
+    0.30"    0.176  0.421   x2.4
+    0.58"    0.142  0.593   x4.2
+    1.10"    0.159  1.007   x6.3
+    1.53"    0.156  1.003   x6.5
+    2.93"    0.170  0.998   x5.9
+    5.63"    0.233  0.999   x4.3
+   10.80"    0.406  0.991   x2.4
 
-The minima mark the quadrant boundaries and the map repeats under a 180 degree rotation
-to three decimals, which is the symmetry the mask actually has.  A factor of two to four
-at constant separation.
+A factor of up to **six and a half** at constant separation.  The plateau between the
+boundaries sits at 1.00 within half a per cent, which is what it should be: the unocculted
+reference carries the same Lyot stop, so far from a boundary the phase mask takes nothing.
+The dip does not deepen much with radius -- the minimum stays near 0.15 out to 5 arcsec --
+so the *ratio* falls only because the plateau is already at unity.
+
+The measured symmetry is the mask's own: at 2 arcsec, ``|T(az) - T(az+180)| <= 0.003``
+while ``|T(az) - T(az+90)|`` reaches 0.18.  Two-fold, not four-fold, which is why this map
+is measured over the whole circle rather than folded into one quadrant.
 
 ``klip_tpe.stpsf_psf.offaxis_grid`` returns ``transmission`` as a function of separation
 alone, and ``throughput_fn`` hands back ``f(rho)``.  On a 4QPM that model does not merely
@@ -32,9 +39,9 @@ So this module carries its own two-dimensional throughput map, sampled on an
 (separation, detector azimuth) grid and cached like the radial grids are.  Three further
 consequences follow from the same geometry and are handled here:
 
-* **The boundaries are not where they look.**  Scanning in 2 degree steps at 2 arcsec puts
-  the minimum at az = -4 on one axis and az = +86 on the other: the mask is rotated by
-  four to five degrees, the same on both, so this is its mounting angle and not noise.
+* **The boundaries are not where they look.**  :func:`locate_boundaries` measures them at
+  az = 356, 86, 176 and 266 -- four degrees off the detector axes, the same on all four,
+  so this is the mask's mounting angle and not noise.
   Masking the dead zone along detector rows and columns would be off by about 1.5 pixels
   at 2 arcsec -- leaving the real dead zone in the data and discarding good pixels beside
   it.  Nothing here assumes where the boundaries are: :func:`locate_boundaries` measures
@@ -483,12 +490,22 @@ class MIRILibraryPSF(LibraryPSF):
 def library(filter: str = "F1065C", star_flux: float = 1.0,
             seps_as: Optional[Sequence[float]] = None, date: Optional[str] = None,
             log: Callable[[str], None] = print, **kw) -> MIRILibraryPSF:
-    """Injection model for a MIRI coronagraphic mode: radial stamps, 2-D throughput."""
+    """Injection model for a MIRI coronagraphic mode: radial stamps, 2-D throughput.
+
+    ``seps_as`` is the ladder the STAMP library is built on.  The throughput map keeps its
+    own (:func:`default_separations`) rather than being forced onto the same one: the two
+    answer different questions -- where a stamp is wanted, against where the throughput is
+    changing -- and tying them together makes whichever ladder is chosen wrong for the
+    other.  Concretely, passing the stamps' separations through cut a map already computed
+    over 0.3 to 10.8 arcsec down to 0.2 to 3.0, discarded a 576-PSF cache on a key that no
+    longer matched, and recomputed a shorter map that then clamped across most of the field.
+    """
     m = mode_for_filter(filter)
-    seps = np.asarray(list(seps_as) if seps_as is not None else np.arange(0.2, 3.01, 0.2), float)
+    seps = np.asarray(list(seps_as) if seps_as is not None else
+                      default_separations(m["filter"]), float)
     grid = offaxis_grid(instrument="MIRI", filter=m["filter"], image_mask=m["image_mask"],
                         pupil_mask=m["pupil_mask"], seps_as=seps, date=date, log=log, **kw)
-    tmap = throughput_map(m["filter"], seps_as=seps, date=date, log=log)
+    tmap = throughput_map(m["filter"], date=date, log=log)
     sl = np.asarray(grid["slices"], float)
     c = tuple(grid.get("center") or ((sl.shape[-1] - 1) / 2.0, (sl.shape[-2] - 1) / 2.0))
     return MIRILibraryPSF(sl, grid["seps"], center=c,

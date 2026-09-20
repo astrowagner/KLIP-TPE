@@ -461,7 +461,13 @@ def test_the_real_map_is_a_four_quadrant_mask():
     g = miri.throughput_map("F1065C", seps_as=[1.0, 2.0],
                             az_deg=np.arange(0.0, 360.0, 30.0), log=lambda *_: None)
     t = g["trans"]
-    assert t.max() <= 1.0 + 1e-6, "throughput above 1 means the reference is misplaced"
+    # Not 1.0 exactly.  Both sides of the ratio are aperture sums on a sub-pixel-shifted
+    # PSF grid, so the plateau between boundaries lands within a per cent or so of unity
+    # (1.007 measured on F1065C at 1.1 arcsec) -- and the plateau SHOULD be near unity,
+    # because the unocculted reference carries the same Lyot stop.  The failure this
+    # catches is the gross one: with the source-offset convention mirrored, the aperture
+    # sits where the source is not and the ratio reached 1.54.
+    assert t.max() <= 1.05, "throughput well above 1 means the reference is misplaced"
     assert t.max() / t.min() > 2.0, "no azimuthal structure: is the offset convention right?"
     # 180 degree symmetry is a property of the mask; 90 degree symmetry is not exact
     half = g["az"].size // 2

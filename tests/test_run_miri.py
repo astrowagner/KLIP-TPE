@@ -139,6 +139,26 @@ def test_build_bars_injections_from_the_dead_sectors(tree, stub_stpsf):
         assert min(abs(((c - b + 180) % 360) - 180) for b in (0, 10, 90, 100, 180, 190, 270, 280)) < 6
 
 
+def test_library_lets_the_throughput_map_keep_its_own_separations(monkeypatch):
+    """The stamp ladder and the map ladder answer different questions.
+
+    Forcing the map onto the stamps' separations cut a map computed over 0.3-10.8 arcsec
+    down to 0.2-3.0, missed a 576-PSF cache on a key that no longer matched, and left a
+    map that clamped across most of the field.
+    """
+    seen = {}
+    monkeypatch.setattr(miri, "throughput_map",
+                        lambda *a, **k: (seen.update(k), synthetic_map())[1])
+    monkeypatch.setattr(miri, "offaxis_grid",
+                        lambda **k: (seen.update(stamp_seps=np.asarray(k["seps_as"])),
+                                     {"slices": np.zeros((len(k["seps_as"]), 9, 9)),
+                                      "seps": np.asarray(k["seps_as"]),
+                                      "center": (4.0, 4.0), "ee_radius_px": 3.0})[1])
+    miri.library("F1065C", seps_as=[0.5, 1.0, 1.5], log=lambda *_: None)
+    assert "seps_as" not in seen, "the map was forced onto the stamps' separations"
+    np.testing.assert_allclose(seen["stamp_seps"], [0.5, 1.0, 1.5])
+
+
 def test_a_nircam_sequence_is_refused_rather_than_reduced_as_miri(tmp_path, stub_stpsf):
     """This driver applies MIRI mask geometry; pointing it at NIRCam would mask the wrong
     pixels and say nothing about it."""
