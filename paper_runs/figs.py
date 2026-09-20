@@ -67,8 +67,13 @@ def default_image(which, ia, rin, rout):
     return np.asarray(img, float)
 
 
-def snr_map(img, fwhm):
-    """Per-pixel matched-filter S/N (radial-profile flattened, azimuthal sigma)."""
+def snr_map(img, fwhm, known=None, px=None, excl_fwhm=1.5):
+    """Per-pixel matched-filter S/N (radial-profile flattened, azimuthal sigma).
+
+    ``known`` = [(rho_as, pa_deg), ...] is kept out of the per-ring median and scatter, as
+    the per-source metric keeps it out of its noise apertures: a companion left in its own
+    ring inflates sigma there and suppresses the map exactly where the reader is looking
+    (Section "Known sources distort ..." measures 73% on HD 95086)."""
     from scipy import ndimage
     from klip_tpe.metrics import gaussian_kernel, radprof
     a = ndimage.convolve(np.where(np.isfinite(radprof(img)), radprof(img), 0.0),
@@ -77,16 +82,47 @@ def snr_map(img, fwhm):
     cx, cy = star_center(img.shape)
     yy, xx = np.mgrid[0:ny, 0:nx]
     rr = np.hypot(xx - cx, yy - cy)
+    stat = np.isfinite(a)
+    for k in (known or ()):
+        if px:
+            kx, ky = source_xy([k[0]], [k[1]], px, cx, cy)
+            stat &= np.hypot(xx - kx[0], yy - ky[0]) > excl_fwhm * fwhm
     out = np.full_like(a, np.nan)
     for r0 in range(int(rr.max()) + 1):
-        m = (rr >= r0 - 0.5) & (rr < r0 + 0.5) & np.isfinite(a)
-        if m.sum() < 6:
+        ring = (rr >= r0 - 0.5) & (rr < r0 + 0.5)
+        m = ring & np.isfinite(a)
+        ref = ring & stat
+        if m.sum() < 6 or ref.sum() < 6:
             continue
-        v = a[m]
-        s = 1.4826 * np.median(np.abs(v - np.median(v)))
-        if s > 0:
-            out[m] = (v - np.median(v)) / s
+        v = a[ref]
+        med = np.median(v)
+        sg = 1.4826 * np.median(np.abs(v - med))
+        if sg > 0:
+            out[m] = (a[m] - med) / sg
     return out
+
+
+#: the companion marker, dark enough to read on a white background
+PLANET_EC = "#0b5394"
+
+
+def _img_kw(lo, hi, snr=False):
+    """Colour mapping for an image panel, on a WHITE background.
+
+    A printed page should not be a field of black ink, and a reader should be able to see
+    where the data are zero.  Intensity panels therefore use a sequential white-to-black
+    map; signed panels (matched-filter S/N, the parameter-verification maps) use a
+    diverging map centred on zero, so that zero is white, sources are red and
+    over-subtraction is blue.  ``NaN`` outside the optimized annulus stays the axes'
+    white."""
+    from matplotlib.colors import Normalize, TwoSlopeNorm
+    if snr:
+        if lo < 0 < hi:
+            return dict(cmap="RdBu_r", norm=TwoSlopeNorm(vcenter=0.0, vmin=lo, vmax=hi))
+        if hi <= 0:
+            return dict(cmap="Blues_r", norm=Normalize(vmin=lo, vmax=hi))
+        return dict(cmap="Reds", norm=Normalize(vmin=max(lo, 0.0), vmax=hi))
+    return dict(cmap="Greys", norm=Normalize(vmin=lo, vmax=hi))
 
 
 def _show(ax, img, px, planet, title, vlim=None, box_as=None, snr=False):
@@ -95,9 +131,10 @@ def _show(ax, img, px, planet, title, vlim=None, box_as=None, snr=False):
     ext = [(-0.5 - cx) * px, (nx - 0.5 - cx) * px, (-0.5 - cy) * px, (ny - 0.5 - cy) * px]
     v = img[np.isfinite(img)]
     lo, hi = vlim or np.nanpercentile(v, [1.0, 99.6])
-    ax.imshow(img, origin="lower", extent=ext, cmap="inferno", vmin=lo, vmax=hi)
+    ax.set_facecolor("white")
+    ax.imshow(img, origin="lower", extent=ext, **_img_kw(lo, hi, snr))
     xs, ys = source_xy([planet[0]], [planet[1]], 1.0, 0.0, 0.0)
-    ax.add_patch(Circle((xs[0], ys[0]), 0.12, fill=False, ec="c", lw=0.9))
+    ax.add_patch(Circle((xs[0], ys[0]), 0.12, fill=False, ec=PLANET_EC, lw=1.0))
     # x = cx + r cos(PA+90) in this codebase, so East is -x: plotted with x increasing
     # rightward the frame is ALREADY North up, East left.  Do not flip it again.
     if box_as:
@@ -108,11 +145,11 @@ def _show(ax, img, px, planet, title, vlim=None, box_as=None, snr=False):
     return lo, hi
 
 
-def compass(ax, frac=0.16, color="w", lw=1.0):
+def compass(ax, frac=0.16, color="0.15", lw=1.0):
     """N/E arrows in the corner -- North is +y, East is -x (see _show).  Drawn in axes
-    fractions with a dark stroke so they read on both bright and dark backgrounds."""
+    fractions with a white stroke so they read on both bright and dark backgrounds."""
     import matplotlib.patheffects as pe
-    stroke = [pe.withStroke(linewidth=1.8, foreground="0.1")]
+    stroke = [pe.withStroke(linewidth=1.8, foreground="w")]
     ox, oy = 0.30, 0.10
     for dx, dy, lab in ((0.0, frac, "N"), (-frac, 0.0, "E")):
         ar = ax.annotate("", xy=(ox + dx, oy + dy), xytext=(ox, oy), xycoords="axes fraction",
@@ -144,11 +181,11 @@ def fig_gallery(s):
               f"default   S/N {a['planet_snr_default']:.1f}", box_as=box)
         _show(axes[row, 1], img1, px, planet,
               f"optimized   S/N {a['planet_snr_optimized']:.1f}", box_as=box)
-        m = snr_map(img1, r["fwhm_px"])
-        _show(axes[row, 2], m, px, planet, "optimized S/N map", vlim=(-4, 6), box_as=box)
+        m = snr_map(img1, r["fwhm_px"], known=[planet], px=px)
+        _show(axes[row, 2], m, px, planet, "optimized S/N map", vlim=(-4, 6), box_as=box, snr=True)
         axes[row, 0].set_ylabel(NICE[t], fontsize=7.5)
         axes[row, 0].text(0.03, 0.92, f"{a['inrad_as']:.2f}--{a['outrad_as']:.2f}\"",
-                          transform=axes[row, 0].transAxes, color="w", fontsize=6.5)
+                          transform=axes[row, 0].transAxes, color="0.15", fontsize=6.5)
         for c in range(3):
             compass(axes[row, c])
     fig.tight_layout()
@@ -301,7 +338,7 @@ def fig_paramverify(s, key="A2"):
     fig, axes = plt.subplots(1, len(have), figsize=(1.85 * len(have), 2.1))
     for ax, (f, t) in zip(np.atleast_1d(axes), have):
         img = np.asarray(fits.getdata(os.path.join(run, f)), float)
-        _show(ax, img, px, planet, t)
+        _show(ax, img, px, planet, t, snr=True)
     fig.tight_layout()
     fig.savefig(os.path.join(FIG, "f8_paramverify.pdf"))
     plt.close(fig)
@@ -309,6 +346,26 @@ def fig_paramverify(s, key="A2"):
 
 
 # --------------------------------------------------------------------- copies
+def rebuild_books(run, ia0):
+    """Re-render the corner and parameter-history books from the run's records.
+
+    Both are written by the live display as the annulus finishes, so a copy in
+    ``figs/`` is only as current as the last run -- and books written while the live
+    panel was drawing inherited its dark theme (fixed in klip_tpe.display, but the
+    products on disk keep whatever they were written with).  ``annulus_from_run``
+    rebuilds them from ``results.jsonl`` in a few seconds and needs no reduction, so
+    the paper figures are always rendered by the installed display code."""
+    from klip_tpe.display import annulus_from_run, render_corner, render_parhist_book
+    d = os.path.join(run, f"annulus{ia0 + 1:02d}")
+    try:
+        ad = annulus_from_run(run, ia0)
+    except Exception as e:                      # a partial run still gets the old copy
+        print(f"  (books not rebuilt: {type(e).__name__}: {e})")
+        return
+    render_corner(ad, os.path.join(d, "corner.pdf"))
+    render_parhist_book(ad, os.path.join(d, "parhist.pdf"))
+
+
 def copies(s):
     def grab(src, dst):
         if os.path.exists(src):
@@ -317,7 +374,9 @@ def copies(s):
     prim = "B2" if "B2" in s else PRIMARY["betapic"]
     if prim in s:
         run = os.path.join(OUT, s[prim]["run"])
-        ia = s[prim]["annuli"][0]["annulus"] + 1
+        ia0 = s[prim]["annuli"][0]["annulus"]
+        ia = ia0 + 1
+        rebuild_books(run, ia0)
         grab(os.path.join(run, f"annulus{ia:02d}", "step_display_white.png"), "f1_display.png")
         grab(os.path.join(run, f"annulus{ia:02d}", "corner.pdf"), "f3_landscape.pdf")
         grab(os.path.join(run, f"annulus{ia:02d}", "parhist.pdf"), "f10_parhist.pdf")
@@ -331,7 +390,14 @@ def fig_stitch(s, key="A2"):
     run = os.path.join(OUT, r["run"])
     img = np.asarray(fits.getdata(os.path.join(run, "klip_stitched.fits")), float)
     px, planet = r["pxscale"], r["planet"]
-    m = snr_map(img, r["fwhm_px"])
+    # Blank the region inside the first annulus: nothing there was optimized, and the raw
+    # core residual is orders of magnitude brighter than the searched field, so left in it
+    # saturates the stretch and hides everything the figure is about.
+    ny0, nx0 = img.shape
+    cx0, cy0 = star_center(img.shape)
+    yy0, xx0 = np.mgrid[0:ny0, 0:nx0]
+    img = np.where(np.hypot(xx0 - cx0, yy0 - cy0) * px < r["annuli"][0]["inrad_as"], np.nan, img)
+    m = snr_map(img, r["fwhm_px"], known=[planet], px=px)
     fig, ax = plt.subplots(2, 1, figsize=(3.4, 6.4))
     box = 1.05 * r["annuli"][-1]["outrad_as"]
     # the inner annulus carries far more residual power than the outer ones, so the
@@ -344,19 +410,20 @@ def fig_stitch(s, key="A2"):
     sg = 1.4826 * np.nanmedian(np.abs(img[out & np.isfinite(img)] -
                                       np.nanmedian(img[out & np.isfinite(img)])))
     ext = [(-0.5 - cx) * px, (nx - 0.5 - cx) * px, (-0.5 - cy) * px, (ny - 0.5 - cy) * px]
-    ax[0].imshow(img, origin="lower", extent=ext, cmap="inferno",
+    ax[0].set_facecolor("white")
+    ax[0].imshow(img, origin="lower", extent=ext, cmap="Greys",
                  norm=SymLogNorm(linthresh=3 * sg, vmin=-6 * sg, vmax=120 * sg, base=10))
     xs, ys = source_xy([planet[0]], [planet[1]], 1.0, 0.0, 0.0)
-    ax[0].add_patch(Circle((xs[0], ys[0]), 0.12, fill=False, ec="c", lw=0.9))
+    ax[0].add_patch(Circle((xs[0], ys[0]), 0.12, fill=False, ec=PLANET_EC, lw=1.0))
     ax[0].set_xlim(-box, box); ax[0].set_ylim(-box, box)
     ax[0].set_title("optimized stitched reduction", fontsize=7.5)
     ax[0].set_xticks([]); ax[0].set_yticks([])
-    _show(ax[1], m, px, planet, r"per-pixel S/N", vlim=(-4, 6), box_as=box)
+    _show(ax[1], m, px, planet, r"per-pixel S/N", vlim=(-4, 6), box_as=box, snr=True)
     for a_ in ax:
         compass(a_)
     for a in r["annuli"][1:]:
         for axx in ax:
-            axx.add_patch(Circle((0, 0), a["inrad_as"], fill=False, ec="w", lw=0.4, ls=":"))
+            axx.add_patch(Circle((0, 0), a["inrad_as"], fill=False, ec="0.45", lw=0.5, ls=":"))
     fig.tight_layout()
     fig.savefig(os.path.join(FIG, "f9_stitch.pdf"))
     plt.close(fig)
@@ -408,7 +475,7 @@ def fig_paramcompare(s, key="A2"):
     if key not in s:
         return
     r = s[key]
-    red, space, _, _ = C.build(key)
+    red, space, obj, _ = C.build(key)
     a = r["annuli"][min(1, len(r["annuli"]) - 1)]
     run = os.path.join(OUT, r["run"])
     recs = [json.loads(l) for l in open(os.path.join(run, "results.jsonl"))
@@ -420,30 +487,68 @@ def fig_paramcompare(s, key="A2"):
             ("the validated optimum", a["winner_params"])]
     c = float(a["contrast"])
     rho = 0.5 * (a["inrad_as"] + a["outrad_as"])
-    srcs = [Source(rho, th, c) for th in (35.0, 215.0)]
-    fig, axes = plt.subplots(2, 3, figsize=(6.6, 4.5))
+    # The positions come from the framework's own sampler, with the real companion (and,
+    # for beta Pic, the disk sectors) declared -- so the two injections keep the 1.5-FWHM
+    # distance from the companion that every scored evaluation keeps.  Hard-wired azimuths
+    # did not: 215 deg put one source 0.5 FWHM from beta Pic b, i.e. on top of the planet,
+    # which is exactly the contamination Section "Known sources distort ..." measures.
+    from klip_tpe.metrics import MawetPeakSNR
+    from klip_tpe.positions import PositionSampler
+    fpa = R.bp_disk(red)[0] if key in ("A", "A2", "B", "B2") else ()
+    samp = PositionSampler(fwhm_as=red.fwhm * red.pxscale, known=[tuple(r["planet"])],
+                           forbidden_pa=list(fpa))
+    # One draw of two positions is not representative: the same configuration scores a
+    # factor ~1.4 differently between draws, so a single pair could make all three panels
+    # look better or worse than they typically are.  Draw eight admissible pairs, score the
+    # SEEDED DEFAULT on each, and keep the pair that lands at the median of those eight --
+    # a typical realization of this geometry rather than a lucky or an unlucky one.  The
+    # choice is made on the default alone; the other two configurations then see exactly the
+    # same positions.  (Both sources sit at the annulus' mid-radius so that the three panels
+    # are comparable, which is a slightly harder place than the band-averaged draws the
+    # search itself scores on, so these numbers run a little below Table 2's.)
+    _mm = obj.metric          # the run's own metric: the companion is out of its noise ring
+    _p0 = dict(a["default_params"], inrad=a["inrad_px"], outrad=a["outrad_px"])
+    _p0.pop("width", None)
+    cands = [samp.sample(2, rho, rho, np.random.default_rng(seed), c) for seed in range(8)]
+    meds = []
+    for cand in cands:
+        im = red.reduce(ReductionRequest(params=_p0, injections=cand)).image
+        meds.append(float(np.nanmedian(_mm.per_source(np.asarray(im, float), None,
+                                                      [x.rho for x in cand], [x.theta for x in cand]))))
+    srcs = cands[int(np.argsort(meds)[len(meds) // 2])]
+    print(f"    (f12: default recovery over 8 admissible pairs "
+          f"{np.min(meds):.1f}-{np.max(meds):.1f}, median {np.median(meds):.1f}; "
+          f"using PAs " + ", ".join(f"{x.theta:.0f}" for x in srcs) + " deg)")
+    fig, axes = plt.subplots(2, 3, figsize=(7.1, 4.8))
     for j, (lab, prm) in enumerate(cfgs):
         prm = dict(prm, inrad=a["inrad_px"], outrad=a["outrad_px"])
         prm.pop("width", None)
         img = red.reduce(ReductionRequest(params=prm, injections=srcs)).image
         v = img[np.isfinite(img)]
         sg = 1.4826 * np.median(np.abs(v - np.median(v)))
-        axes[0, j].imshow(img, origin="lower", cmap="inferno", vmin=-2 * sg, vmax=6 * sg)
+        axes[0, j].set_facecolor("white")
+        axes[0, j].imshow(img, origin="lower", **_img_kw(-2 * sg, 6 * sg))
         axes[0, j].set_title(f"{lab}\n$k$={prm.get('k_klip')}, $b$={prm.get('bin')}, "
                              f"$f$={prm.get('filter')}", fontsize=6.5)
-        m = snr_map(img, red.fwhm)
-        axes[1, j].imshow(m, origin="lower", cmap="inferno", vmin=-3, vmax=8)
+        m = snr_map(img, red.fwhm, known=[tuple(r["planet"])], px=red.pxscale)
+        axes[1, j].set_facecolor("white")
+        axes[1, j].imshow(m, origin="lower", **_img_kw(-3, 8, snr=True))
         from klip_tpe.metrics import source_xy, star_center
         cx, cy = star_center(img.shape)
         xs, ys = source_xy([s_.rho for s_ in srcs], [s_.theta for s_ in srcs],
                            red.pxscale, cx, cy)
-        from klip_tpe.metrics import MawetPeakSNR
-        mm = MawetPeakSNR(pxscale=red.pxscale, fwhm=red.fwhm, kernel_fn=red.matched_filter_kernel)
-        sn = mm.per_source(img, None, [s_.rho for s_ in srcs], [s_.theta for s_ in srcs])
+        px_, py_ = source_xy([r["planet"][0]], [r["planet"][1]], red.pxscale, cx, cy)
+        sn = _mm.per_source(img, None, [s_.rho for s_ in srcs], [s_.theta for s_ in srcs])
         for x, y, v_ in zip(xs, ys, sn):
-            axes[1, j].add_patch(Circle((x, y), 1.6 * red.fwhm, fill=False, ec="lime", lw=0.8))
-            axes[1, j].text(x, y + 2.2 * red.fwhm, f"{v_:.1f}", color="lime", fontsize=6.5,
+            axes[1, j].add_patch(Circle((x, y), 1.6 * red.fwhm, fill=False, ec="#0b8043", lw=0.9))
+            axes[1, j].text(x, y + 2.2 * red.fwhm, f"{v_:.1f}", color="#0b8043", fontsize=6.5,
                             ha="center")
+        # the real companion, marked but never injected on and never scored
+        for ax_ in (axes[0, j], axes[1, j]):
+            ax_.add_patch(Circle((px_[0], py_[0]), 1.6 * red.fwhm, fill=False, ec=PLANET_EC,
+                                 lw=0.9, ls=(0, (3, 2))))
+        axes[0, j].text(px_[0], py_[0] + 2.2 * red.fwhm, "b", color=PLANET_EC, fontsize=6.5,
+                        ha="center")
         c0 = (img.shape[1] - 1) / 2.0
         h = 1.12 * a["outrad_px"]
         for ax in (axes[0, j], axes[1, j]):

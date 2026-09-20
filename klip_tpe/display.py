@@ -97,7 +97,18 @@ _RC = {"axes.spines.top": True, "axes.spines.right": True, "axes.grid": False,
        "grid.linewidth": 0.5, "font.size": 8, "axes.titlesize": 8.5, "axes.labelsize": 8,
        "xtick.labelsize": 7, "ytick.labelsize": 7, "legend.fontsize": 7, "legend.frameon": False,
        "axes.titlepad": 3, "axes.labelpad": 2, "xtick.major.pad": 2, "ytick.major.pad": 2,
-       "figure.facecolor": "white",
+       # Every colour _RC_DARK touches is pinned light here, so the package style is a
+       # complete theme rather than a patch on whatever is in rcParams.  The live panel
+       # renders its frames on a worker thread inside _rc(idl=True, dark=True), and
+       # matplotlib's rc_context mutates the one process-global rcParams dict: while that
+       # frame is drawing, a book written from the main thread used to pick up the panel's
+       # savefig.facecolor and come out black-on-black (corner.pdf and parhist.pdf, at
+       # random, depending on which thread won).  Pinning the light values makes _rc()
+       # immune to that -- the dark context still wins for the panel, because _RC_DARK is
+       # applied after _RC.
+       "figure.facecolor": "white", "axes.facecolor": "white", "savefig.facecolor": "white",
+       "text.color": "black", "axes.labelcolor": "black", "axes.edgecolor": "black",
+       "xtick.color": "black", "ytick.color": "black", "grid.color": "#b0b0b0",
        # TrueType (Type 42) font embedding in the PDFs, not the default Type 3.  Type 3
        # embedding builds a 256-entry cp1252 width table and asks FreeType for the five
        # undefined cp1252 slots, which decode to U+FFFE; matplotlib silences the resulting
@@ -1686,37 +1697,60 @@ def render_landscapes(ad: AnnulusData, out_pdf: str) -> str:
 # ----------------------------------------------------------------------------
 # parameter-histogram book, EDF, nightmap, k-book
 # ----------------------------------------------------------------------------
+def _parhist_blocks(d: int) -> Tuple[int, int]:
+    """Column blocks (each a history / distribution / score triplet) and rows per block
+    for ``d`` parameters.  One row per parameter stacked in a single block makes a page
+    taller than it is wide as soon as d > 4 -- a nine-parameter annulus came out 8 x 18
+    inches, which is unreadable once it is scaled to a journal text width.  Two or three
+    blocks side by side keep the page close to landscape."""
+    nblk = 1 if d <= 4 else (2 if d <= 10 else 3)
+    return nblk, int(np.ceil(d / nblk))
+
+
+def parhist_figsize(d: int) -> Tuple[float, float]:
+    """Page size for :func:`_parhist_page` -- landscape-ish, so the book is legible at
+    one column or one text width rather than a strip eighteen inches tall."""
+    nblk, nrow = _parhist_blocks(max(d, 1))
+    return 4.35 * nblk + 0.5, max(3.6, 1.50 * nrow + 0.85)
+
+
 def _parhist_page(fig, ad: AnnulusData, cs: Dict[str, Any], title: str, current: Optional[int] = None):
     """near2m_parhist_page: one row per parameter -- history (value vs eval), distribution,
-    score vs value; best value red, current dashed grey."""
+    score vs value; best value red, current dashed grey.  Parameters run down a block and
+    then into the next block to the right, so the page stays roughly landscape."""
     names, lo, hi, X, y, ev = cs["names"], cs["lo"], cs["hi"], cs["X"], cs["y"], cs["eval"]
     lo, hi = _widen_flat(lo, hi)          # pinned dimensions: no "identical xlims" warnings
     d = len(names)
     if d == 0 or X.shape[0] == 0:
         fig.text(0.5, 0.5, "collecting...", ha="center", va="center")
         return
-    gs = GridSpec(d, 3, left=0.08, right=0.98, bottom=0.05, top=0.93, hspace=0.6, wspace=0.3, figure=fig)
+    nblk, nrow = _parhist_blocks(d)
+    outer = GridSpec(1, nblk, left=0.055, right=0.985, bottom=0.055, top=0.905, wspace=0.30, figure=fig)
+    inner = [GridSpecFromSubplotSpec(nrow, 3, subplot_spec=outer[0, b], hspace=0.68, wspace=0.42)
+             for b in range(nblk)]
     bp = _best_pt(ad, cs, None if not cs["pid"] or cs["pid"][0] is None else cs["pid"][0])
     cp = None if current is None else ad.eval_point(current, cs)
     rnd = np.array([_is_random_phase(ad.phases[e]) for e in ev])
-    fig.text(0.01, 0.975, title, fontsize=9)
+    fig.text(0.008, 0.978, title, fontsize=9)
+    fig.text(0.008, 0.952, "red = best value, dashed = current; open grey = warm-up, filled = guided", fontsize=7.5)
     for k in range(d):
+        gs, r = inner[k // nrow], k % nrow
         v = X[:, k]
-        a1 = fig.add_subplot(gs[k, 0])
+        a1 = fig.add_subplot(gs[r, 0])
         a1.scatter(ev[rnd] + 1, v[rnd], s=8, facecolor="none", edgecolor="#999999", lw=0.7)
         a1.scatter(ev[~rnd] + 1, v[~rnd], s=8, color="#333333")
         a1.set_ylim(lo[k], hi[k])
         a1.set_xlim(0.5, ad.n + 0.5)
         a1.set_ylabel(names[k])
         a1.set_xlabel("evaluation")
-        a2 = fig.add_subplot(gs[k, 1])
+        a2 = fig.add_subplot(gs[r, 1])
         g = np.isfinite(v)
         if g.sum() >= 2:
             a2.hist(v[g], bins=np.linspace(lo[k], hi[k], 13), color="#555555")
         a2.set_xlim(lo[k], hi[k])
         a2.set_xlabel(names[k])
         a2.set_ylabel("N evals")
-        a3 = fig.add_subplot(gs[k, 2])
+        a3 = fig.add_subplot(gs[r, 2])
         a3.scatter(v[rnd], y[rnd], s=8, facecolor="none", edgecolor="#999999", lw=0.7)
         a3.scatter(v[~rnd], y[~rnd], s=8, color=PHASE_COLORS["tpe"])
         a3.set_xlim(lo[k], hi[k])
@@ -1727,10 +1761,10 @@ def _parhist_page(fig, ad: AnnulusData, cs: Dict[str, Any], title: str, current:
                 (ax_.axhline if hv == "h" else ax_.axvline)(bp[k], color="#d62728", lw=1.1)
             if cp is not None and np.isfinite(cp[k]):
                 (ax_.axhline if hv == "h" else ax_.axvline)(cp[k], color=CUR_COLOR, lw=0.9, ls="--")
-        if k == 0:
+        if r == 0:
             a1.set_title("history")
             a2.set_title("distribution")
-            a3.set_title("score vs value (red = best, dashed = current)")
+            a3.set_title("score vs value")
 
 
 def render_parhist_book(ad: AnnulusData, out_pdf: str, current: Optional[int] = None) -> str:
@@ -1738,7 +1772,7 @@ def render_parhist_book(ad: AnnulusData, out_pdf: str, current: Optional[int] = 
         pages = [(pid, f"partition {pid}") for pid in ad.partitions] if ad.replicated else [(None, "all parameters")]
         for pid, lab in pages:
             cs = ad.corner(pid)
-            fig = Figure(figsize=(8.0, max(4.0, 1.9 * len(cs["names"]) + 0.8)))
+            fig = Figure(figsize=parhist_figsize(len(cs["names"])))
             FigureCanvasAgg(fig)
             _parhist_page(fig, ad, cs, f"{ad.run_name} annulus {ad.annulus + 1}: parameter histories -- {lab}", current)
             pdf.savefig(fig)
