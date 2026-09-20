@@ -174,7 +174,7 @@ def default_separations(filter: str = "F1065C") -> np.ndarray:
 
 
 def locate_boundaries(inst, rho_as: float, fov: float, oversample: int, nlambda: int,
-                      rap_px: float, coarse_step: float = 15.0,
+                      rap_px: float, step: float = 2.0, window: float = 14.0,
                       log: Callable[[str], None] = print) -> np.ndarray:
     """Where the four suppression lines actually are, in detector azimuth.
 
@@ -182,24 +182,42 @@ def locate_boundaries(inst, rho_as: float, fov: float, oversample: int, nlambda:
     only right if the mask is square to the detector, and it is not: the minima sit four
     to five degrees off, the same on both axes.  A dense grid centred 4.5 degrees away
     from the feature it is meant to resolve is dense in the wrong place, and the dead-zone
-    mask that comes out of it is offset by the same amount -- about 1.5 pixels at 2 arcsec,
-    which leaves the real dead zone unmasked and throws away good pixels beside it.
+    mask built from it is offset by the same amount -- about 1.5 pixels at 2 arcsec, which
+    leaves the real dead zone unmasked and throws away good pixels beside it.
 
-    So the boundaries are measured first, with one coarse scan at a single separation, and
-    the dense grid is built around what that finds.  Returns four angles in [0, 360).
+    The scan therefore has to resolve the offset it is looking for.  A first version swept
+    the whole circle in 15 degree steps, which cannot: it reported all four boundaries
+    exactly on the detector axes, the answer it would have given if they were, and the
+    2 degree scan that had already measured -4 and +86 was the only reason anyone noticed.
+    It also spent 21 of its 24 PSFs on azimuths it then discarded.  This scans
+    ``+/- window`` about each nominal axis at ``step``, which is both finer and cheaper.
+
+    ``window`` bounds how far the mask may be rotated.  A minimum at the edge of it means
+    the premise is wrong rather than the mask, so the window widens once and says so.
+    Returns four angles in [0, 360).
     """
-    az = np.arange(0.0, 360.0, float(coarse_step))
-    t = np.array([_offset_sum(inst, rho_as, float(a), fov, oversample, nlambda, rap_px)
-                  for a in az])
+    nominal = np.array([0.0, 90.0, 180.0, 270.0])
     out = []
-    for b in (0.0, 90.0, 180.0, 270.0):                  # one minimum per nominal axis
-        d = np.abs(((az - b + 180.0) % 360.0) - 180.0)
-        near = d <= 1.5 * coarse_step
-        out.append(float(az[near][int(np.argmin(t[near]))]))
+    for b in nominal:
+        w = float(window)
+        for attempt in (0, 1):
+            a = b + np.arange(-w, w + 1e-9, float(step))
+            t = np.array([_offset_sum(inst, rho_as, float(v), fov, oversample, nlambda, rap_px)
+                          for v in a])
+            i = int(np.argmin(t))
+            if i not in (0, t.size - 1) or attempt:
+                break
+            log(f"    boundary near az={b:.0f} minimises at the edge of +/-{w:.0f} deg -- "
+                f"widening once; a mask rotated this far is not what this scan assumes")
+            w *= 2.5
+        out.append(float(a[i] % 360.0))
     out = np.array(out, float)
-    off = ((out - np.array([0.0, 90.0, 180.0, 270.0]) + 180.0) % 360.0) - 180.0
+    off = ((out - nominal + 180.0) % 360.0) - 180.0
     log(f"    quadrant boundaries at az = {np.round(out, 1).tolist()} deg "
         f"(offset from the detector axes: {np.round(off, 1).tolist()})")
+    if np.ptp(off) > 4.0:
+        log(f"    note: the four offsets disagree by {np.ptp(off):.1f} deg; a mounting "
+            f"angle should be the same on all four")
     return out
 
 

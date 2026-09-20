@@ -75,6 +75,51 @@ def test_default_azimuths_follow_the_boundaries_they_are_given():
     assert on_axis.min() > 1.0, "the grid is still pinned to the detector axis"
 
 
+def _boundary_probe(monkeypatch, truth=(-4.5, 85.5, 175.5, 265.5), width=8.0):
+    """Stand in for STPSF: a throughput dip at each ``truth`` angle, counting the calls."""
+    calls = []
+
+    def fake(inst, rho_as, az_deg, fov, oversample, nlambda, rap_px):
+        calls.append(float(az_deg))
+        d = min(abs(((az_deg - b + 180.0) % 360.0) - 180.0) for b in truth)
+        return 0.15 + 0.80 * min(d / width, 1.0)
+    monkeypatch.setattr(miri, "_offset_sum", fake)
+    return calls
+
+
+def test_locate_boundaries_resolves_the_mask_rotation(monkeypatch):
+    """The scan has to resolve the offset it is looking for.
+
+    A first version swept the circle in 15 degree steps and reported all four boundaries
+    exactly on the detector axes -- the answer it would give if they were there, which is
+    why it looked right.  The real ones are 4 to 5 degrees off.
+    """
+    calls = _boundary_probe(monkeypatch)
+    got = miri.locate_boundaries(None, 2.0, 6.0, 2, 1, 4.0, log=lambda *_: None)
+    np.testing.assert_allclose(sorted(got), [85.5, 175.5, 265.5, 355.5], atol=1.01)
+    # and none of them landed on a detector axis, which is the failure it is guarding
+    assert all(min(abs(((g - b + 180) % 360) - 180) for b in (0, 90, 180, 270)) > 2.0
+               for g in got)
+
+
+def test_locate_boundaries_does_not_sweep_the_whole_circle(monkeypatch):
+    """The old scan spent 21 of its 24 PSFs on azimuths it then discarded."""
+    calls = _boundary_probe(monkeypatch)
+    miri.locate_boundaries(None, 2.0, 6.0, 2, 1, 4.0, log=lambda *_: None)
+    assert len(calls) <= 80, len(calls)
+    for a in calls:
+        assert min(abs(((a - b + 180) % 360) - 180) for b in (0, 90, 180, 270)) <= 15.0
+
+
+def test_locate_boundaries_widens_once_when_the_minimum_is_at_the_edge(monkeypatch):
+    """A minimum at the edge of the window means the premise is wrong, not the mask."""
+    calls = _boundary_probe(monkeypatch, truth=(-25.0, 65.0, 155.0, 245.0), width=8.0)
+    msgs = []
+    got = miri.locate_boundaries(None, 2.0, 6.0, 2, 1, 4.0, log=msgs.append)
+    assert any("widening once" in m for m in msgs)
+    np.testing.assert_allclose(sorted(got), [65.0, 155.0, 245.0, 335.0], atol=1.01)
+
+
 def test_default_separations_reach_the_edge_of_the_field():
     """A grid that stops short is worse than a coarse one: the interpolator clamps, so a
     map sampled to 3 arcsec reports the 3 arcsec throughput across a 24 arcsec field."""
