@@ -241,35 +241,47 @@ def fetch(name, outdir, download=False, products=("CALINTS", "ASN"), target_only
         return
     Observations = _obs()
 
-    # get_product_list in one call returned nothing for this 16-observation programme, and
-    # said so as a warning rather than an error -- so the run reported "downloading 0
-    # products" and exited successfully with an empty directory.  Per observation instead:
-    # a batch that comes back empty is then attributable to the row it came from rather
-    # than to the whole query, and one bad row cannot silence the rest.
-    tables, empty = [], []
-    for row in t:
-        try:
-            p = Observations.get_product_list(row)
-        except Exception as exc:
-            empty.append((str(row["obs_id"]), f"{type(exc).__name__}: {exc}"))
-            continue
-        (tables.append(p) if len(p) else empty.append((str(row["obs_id"]), "no products")))
-    if empty:
-        print(f"  {len(empty)} of {len(t)} observations returned no product list:")
-        for oid, why in empty[:6]:
-            print(f"    {oid}: {why}")
-    if not tables:
-        raise SystemExit(
-            "  no products for any observation in this set. That is not the same as "
-            "'nothing to download' -- the observations exist, so either MAST is refusing "
-            "the product query or these rows carry no retrievable products. Check one by "
-            "hand:\n"
-            "    from astroquery.mast import Observations\n"
-            f"    t = Observations.query_criteria(obs_collection='JWST', proposal_id='{pid}')\n"
-            "    p = Observations.get_product_list(t[0]); print(len(p)); print(p.colnames)")
+    # One call for the whole table: it is a single round trip, and MAST product queries
+    # are slow enough that sixteen of them in a row look like a hang.
+    print(f"  asking MAST for the product list of {len(t)} observations...", flush=True)
+    prod = Observations.get_product_list(t)
 
-    from astropy.table import vstack
-    prod = vstack(tables)
+    if not len(prod):
+        # Empty is reported as a warning, not an error, so it used to read as "nothing to
+        # download" and exit zero with an empty directory.  Now find out WHICH rows are
+        # empty -- one round trip each, so say which one is in flight.
+        print("  the bulk query returned nothing; checking each observation "
+              "(one MAST query each, slow)", flush=True)
+        tables, empty = [], []
+        for i, row in enumerate(t, 1):
+            oid = str(row["obs_id"])
+            print(f"    [{i}/{len(t)}] {oid[:44]:44s} ", end="", flush=True)
+            try:
+                p = Observations.get_product_list(row)
+            except Exception as exc:
+                print(f"{type(exc).__name__}")
+                empty.append((oid, f"{type(exc).__name__}: {exc}"))
+                continue
+            print(f"{len(p)} product(s)")
+            (tables.append(p) if len(p) else empty.append((oid, "no products")))
+        if not tables:
+            lvl = sorted({str(r["calib_level"]) for r in t}) if "calib_level" in t.colnames else "?"
+            raise SystemExit(
+                f"  no products for any of the {len(t)} observations (calib_level {lvl}).\n"
+                f"  The observations exist and are marked public, so this is MAST declining "
+                f"the product query rather than an empty programme.\n"
+                f"  Check whether the download path works at all on an older programme:\n"
+                f"    python3 {os.path.basename(__file__)} --targets mwc758 --download\n"
+                f"  and look at one row by hand:\n"
+                f"    from astroquery.mast import Observations\n"
+                f"    t = Observations.query_criteria(obs_collection='JWST', proposal_id='{pid}')\n"
+                f"    print(len(t), t['obs_id','calib_level','dataRights','t_obs_release'][:3])\n"
+                f"    print(len(Observations.get_product_list(t[0])))")
+        if empty:
+            print(f"  {len(empty)} of {len(t)} observations had no products; continuing with "
+                  f"the other {len(tables)}")
+        from astropy.table import vstack
+        prod = vstack(tables)
     # Say what is actually on offer before filtering it away.  Asking for a subgroup that
     # is not there looks exactly like asking for one that is and finding nothing.
     if "productSubGroupDescription" in prod.colnames:
