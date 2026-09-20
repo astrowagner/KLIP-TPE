@@ -54,6 +54,12 @@ TARGETS = {
     # AF Lep b -- GO 4558, the only public program with coronagraphy of it: NIRCam
     # F200W + F356W + F444W behind MASKRND (confirmed with --find "AF Lep", 2026-09-20).
     "aflep":   dict(proposal_id="4558", target_name="AF*LEP*"),
+    # AU Mic -- GO 11225, MIRI F1140C.  The programme carries AU_Mic, AU_Mic_psf_reference
+    # and BKG- pointings for both, so RDI and background subtraction are both possible.
+    # An edge-on debris disk is the geometry where a position-dependent throughput shows
+    # itself: the disk sweeps through every azimuth at once, so a radial correction leaves
+    # a four-fold modulation in the surface-brightness profile, fixed to the detector.
+    "aumic":   dict(proposal_id="11225", target_name="AU*Mic*"),
     # already on disk, here for completeness / re-fetch
     "mwc758":  dict(proposal_id="4014"),
 }
@@ -194,16 +200,42 @@ def find(name, public_only=True):
     return rows
 
 
-def fetch(name, outdir, download=False, products=("CALINTS", "ASN")):
+def fetch(name, outdir, download=False, products=("CALINTS", "ASN"), target_only=False):
+    """Download a target's coronagraphy -- and, by default, its whole programme.
+
+    The science target on its own is not a reduction.  The PSF-reference pointing IS the
+    RDI library, and on MIRI the thermal background is strong and structured enough that
+    the background pointings are not optional either.  Fetching ``target_name`` alone
+    leaves ``load_calints`` with no reference files, so it builds datasets with
+    ``ref_cube=None`` and ``make_reducer`` quietly drops from ADI+RDI to ADI -- a worse
+    reduction, reported only as one word in a log line.
+
+    So the query widens to ``proposal_id`` whenever the spec carries one; ``target_only``
+    restores the narrow behaviour.  The roles that came back are counted, and a programme
+    with no reference pointing is called out before anything is downloaded rather than
+    after.
+    """
     spec = dict(TARGETS[name])
-    print(f"\n=== {name}: {spec}")
-    t = _coron(**spec)
+    pid = spec.get("proposal_id")
+    crit = ({"proposal_id": pid} if (pid and not target_only) else spec)
+    print(f"\n=== {name}: {crit}"
+          + ("" if target_only or not pid else "   (whole programme: science + reference + background)"))
+    t = _coron(**crit)
     if not len(t):
         print("  no matches -- try --find with part of the name, or drop target_name and "
               "keep proposal_id")
         return
-    for p, tgt, filt, inst in _rows(t):
-        print(f"  {p:>6}  {tgt[:26]:26s} {filt[:12]:12s} {inst}")
+    rows = _rows(t)
+    roles = {r: _role(r[1]) for r in rows}
+    for r in rows:
+        p, tgt, filt, inst = r
+        print(f"  {p:>6}  {roles[r]:4s} {tgt[:26]:26s} {filt.split(';')[0][:12]:12s} {inst}")
+    n = {k: sum(1 for v in roles.values() if v == k) for k in ("sci", "ref", "bkg")}
+    print(f"  {n['sci']} science, {n['ref']} reference, {n['bkg']} background")
+    if not n["ref"]:
+        print("  WARNING: no PSF-reference pointing in this set. load_calints will build "
+              "datasets with no RDI library and the reduction will be ADI only -- which it "
+              "reports as one word in a log line, so check it.")
     if not download:
         print("  (--download to pull the products)")
         return
@@ -230,6 +262,10 @@ def main():
     ap.add_argument("--find", metavar="NAME", help="which programs observed this target")
     ap.add_argument("--targets", nargs="*", default=[], choices=sorted(TARGETS))
     ap.add_argument("--download", action="store_true")
+    ap.add_argument("--target-only", action="store_true",
+                    help="fetch just the named target, without its programme's reference "
+                         "and background pointings. The reference pointing is the RDI "
+                         "library, so this gives an ADI-only reduction")
     ap.add_argument("--all-rights", action="store_true",
                     help="include proprietary data in the census (default: public only)")
     ap.add_argument("--outdir", default=os.path.expanduser("~/Data/JWST"))
@@ -246,7 +282,7 @@ def main():
         print(f"\nCoronagraphy of {a.find!r}:")
         find(a.find, public_only=pub)
     for name in a.targets:
-        fetch(name, a.outdir, a.download)
+        fetch(name, a.outdir, a.download, target_only=a.target_only)
     if not (a.count or a.miri or a.find or a.targets):
         ap.print_help()
 

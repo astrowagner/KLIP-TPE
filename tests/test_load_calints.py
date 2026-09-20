@@ -100,6 +100,66 @@ def test_the_science_target_selects_by_targprop_not_by_order(two_rolls):
     assert ds["sci"].ref_cube.shape[0] == 4               # HIP65426 becomes the library
 
 
+def test_background_pointings_are_kept_out_of_the_rdi_library(tmp_path):
+    """The split is "science, everything else is the library", so a background pointing
+    lands in the RDI basis: blank sky used to model the star's diffraction.
+
+    It contributes nothing to subtract with and dilutes the frames that do.  On MIRI
+    programme 11225 the background pointings outnumber the real references.
+    """
+    f = [write(tmp_path / "s_calints.fits", "AU_MIC", roll=0.0, seed=1),
+         write(tmp_path / "r_calints.fits", "AU_MIC_PSF_REFERENCE", roll=0.0, seed=2),
+         write(tmp_path / "b1_calints.fits", "BKG-AU_MIC", roll=0.0, seed=3),
+         write(tmp_path / "b2_calints.fits", "BKG-AU_MIC_PSF_REFERENCE", roll=0.0, seed=4),
+         write(tmp_path / "b3_calints.fits", "AU_MIC-BACKGROUND", roll=0.0, seed=5)]
+    msgs = []
+    ds, info = load_calints(f, science_target="AU_MIC", half_px=20, align=False,
+                            partition="all", log=msgs.append)
+    assert ds["sci"].cube.shape[0] == 2                   # the one science file
+    assert ds["sci"].ref_cube.shape[0] == 2               # the one reference, not the three bkg
+    assert info["n_ref"] == 2
+    assert any("background pointing" in m for m in msgs)
+
+
+def test_a_reference_named_after_its_target_stays_in_the_library(tmp_path):
+    """The science match is ``startswith``, so "HIP65426" finds "HIP-65426".
+
+    A programme that names its reference after its target defeats that:
+    ``AU_Mic_psf_reference`` normalises to AUMICPSFREFERENCE and starts with AUMIC, so it
+    was classified as SCIENCE -- its frames derotated and stacked with the target's, and
+    the RDI library empty.  Silently, since the only symptom is a science frame count
+    nobody checks against the programme.
+    """
+    f = [write(tmp_path / "s_calints.fits", "AU_Mic", roll=0.0, seed=1),
+         write(tmp_path / "r_calints.fits", "AU_Mic_psf_reference", roll=0.0, seed=2)]
+    msgs = []
+    ds, info = load_calints(f, science_target="AU_Mic", half_px=20, align=False,
+                            partition="all", log=msgs.append)
+    assert info["n_sci"] == 2 and info["n_ref"] == 2
+    assert ds["sci"].ref_cube is not None and ds["sci"].ref_cube.shape[0] == 2
+    assert any("named" in m and "PSF reference" in m for m in msgs)
+
+
+def test_the_reference_can_still_be_asked_for_as_the_science_target(tmp_path):
+    """Reducing the reference star to check it is a fair thing to want."""
+    f = [write(tmp_path / "s_calints.fits", "AU_Mic", roll=0.0, seed=1),
+         write(tmp_path / "r_calints.fits", "AU_Mic_psf_reference", roll=0.0, seed=2)]
+    ds, info = load_calints(f, science_target="AU_Mic_psf_reference", half_px=20,
+                            align=False, partition="all", log=lambda *_: None)
+    assert info["n_sci"] == 2 and info["n_ref"] == 2
+
+
+def test_a_set_with_no_reference_says_the_reduction_will_be_adi(tmp_path):
+    """make_reducer drops from ADI+RDI to ADI on a dataset with no ref_cube, and reports
+    it as one word in a log line.  Say it plainly at the point it becomes true."""
+    f = [write(tmp_path / "only_calints.fits", "TARG", roll=0.0)]
+    msgs = []
+    ds, info = load_calints(f, science_target="TARG", half_px=20, align=False,
+                            partition="all", log=msgs.append)
+    assert ds["sci"].ref_cube is None and info["n_ref"] == 0
+    assert any("ADI only" in m for m in msgs)
+
+
 def test_an_unmatched_science_target_says_so(two_rolls):
     with pytest.raises(ValueError, match="no science files matching"):
         load_calints(two_rolls, science_target="NOTHERE", half_px=20, align=False,

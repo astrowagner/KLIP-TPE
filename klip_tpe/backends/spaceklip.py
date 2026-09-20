@@ -309,11 +309,56 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
     def targ(f):
         return str(fits.getheader(f).get("TARGPROP", "")).replace("-", "").replace("_", "").upper()
 
+    def is_background(f):
+        """A dedicated background pointing, by TARGPROP.
+
+        These are offset exposures of blank sky -- essential for MIRI, where the thermal
+        background is strong and structured, but they are not PSF references.  The split
+        below is "science, and everything else is the library", so without this they end
+        up IN the RDI basis: empty-sky frames used to model the star's diffraction.  They
+        contribute nothing to subtract with, they dilute the frames that do, and on MIRI
+        programme 11225 they outnumber the real references.
+        """
+        t = str(fits.getheader(f).get("TARGPROP", "")).upper()
+        return "BKG" in t or "BACKGROUND" in t
+
+    def is_reference(f):
+        """A pointing the programme named as a PSF reference.
+
+        The science match is ``startswith``, so that "HIP65426" finds "HIP-65426".  But a
+        programme that names its reference after its target defeats it: AU Mic's is
+        ``AU_Mic_psf_reference``, which normalises to AUMICPSFREFERENCE and starts with
+        AUMIC -- so the reference was classified as SCIENCE, its frames derotated and
+        stacked with the target's, and the RDI library came out empty.  Silently: the
+        loader would report more science frames than the programme has, which is not an
+        obvious enough number to catch.  An explicit name wins over a prefix match.
+        """
+        t = str(fits.getheader(f).get("TARGPROP", "")).upper()
+        return ("PSF_REFERENCE" in t or "PSFREF" in t or "PSF-REF" in t
+                or "REFERENCE" in t or t.endswith("-REF") or t.endswith("_REF"))
+
     want = (science_target or targ(files[0])).replace("-", "").replace("_", "").upper()
-    sci = [f for f in files if targ(f).startswith(want)]
-    ref = [f for f in files if f not in sci]
+    bkg = [f for f in files if is_background(f)]
+    rest = [f for f in files if f not in bkg]
+    # ...unless the caller asked for the reference itself as the science target, which is
+    # a fair thing to want (reducing the reference star to check it).
+    want_is_ref = any(k in want for k in ("PSFREFERENCE", "PSFREF", "REFERENCE"))
+    named_ref = [] if want_is_ref else [f for f in rest if is_reference(f)]
+    sci = [f for f in rest if f not in named_ref and targ(f).startswith(want)]
+    ref = [f for f in rest if f not in sci]
+    stolen = [f for f in named_ref if targ(f).startswith(want)]
+    if stolen:
+        log(f"  calints: {len(stolen)} file(s) whose TARGPROP starts with {want!r} are named "
+            f"as PSF references and were kept in the library, not the science set "
+            f"(e.g. {os.path.basename(stolen[0])})")
+    if bkg:
+        log(f"  calints: {len(bkg)} background pointing(s) held out of the RDI library "
+            f"(blank sky is not a PSF reference); this loader does not background-subtract")
     if not sci:
         raise ValueError(f"no science files matching TARGPROP {want!r} among {len(files)} files")
+    if not ref:
+        log(f"  calints: no PSF-reference files among the {len(files)} given -- the "
+            f"datasets will carry no RDI library and the reduction will be ADI only")
 
     def read(fs, role):
         ims, pas, prov = [], [], []
