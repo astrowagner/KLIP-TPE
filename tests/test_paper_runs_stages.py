@@ -95,9 +95,15 @@ def test_collect_and_figs_know_where_the_new_benches_land():
 
 
 def test_the_bench_figure_orders_its_rows_by_dimension():
-    """The ladder only reads as a ladder if the rows are in order: 9, 11, 20, 38."""
+    """The ladder only reads as a ladder if the rows are in order: 5, 9, 20, 38.
+
+    It used to say 9, 11, 20, 38, with the JWST problem second.  That was wrong twice
+    over: HIP 65426 searches five dimensions, not eleven (bin, n_ang, filter, k_klip and
+    the categorical subtraction mode -- the angular-selection parameters are dropped in
+    single-basis mode), so it is the *smallest* problem and belongs first.  The figure was
+    fixed and this test was not, which is how it went red."""
     fig = _text("figs.py")
-    order = [fig.index(d) for d in ("E2_bench", "H2_bench_jwst", "G2_bench_sphere", "F2_bench_highdim")]
+    order = [fig.index(d) for d in ("H2_bench_jwst", "E2_bench", "G2_bench_sphere", "F2_bench_highdim")]
     assert order == sorted(order), order
 
 

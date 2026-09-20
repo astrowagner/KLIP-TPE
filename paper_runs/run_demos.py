@@ -7,9 +7,12 @@
     python run_demos.py D      # HIP 65426 NIRCam F444W (RDI, searched mode)
     python run_demos.py E      # benchmark: TPE / random / grid at matched budget (beta Pic)
     python run_demos.py G2     # the same benchmark on HD 95086  (SPHERE K1+K2, 20-D)
-    python run_demos.py H2     # the same benchmark on HIP 65426 (JWST 2 rolls,  11-D)
+    python run_demos.py H2     # the same benchmark on HIP 65426 (JWST 2 rolls,   5-D)
 
 ``WORKERS=6 python run_demos.py G2`` caps the core budget; the default is every core.
+``NITER=1000 python run_demos.py A2`` raises every annulus to at least that many
+evaluations (``BENCH_NITER`` for the benchmark stages, ``ITER_SCALE`` to multiply each
+stage's own budget); see :func:`budget`.  ``long_run.sh`` drives all of them at once.
 
 Everything lands in ``/home/claude/paper_runs/<name>/``.
 """
@@ -81,6 +84,43 @@ def _display(d, **kw):
     return LiveDisplay(d, pdf_every=0, movie=False, dpi=100, show=show_mode(), **kw)
 
 
+def budget(n_iter, n_init, bench=False):
+    """Evaluation budget for a stage, with the environment allowed to raise it.
+
+    The budgets written into the stages below are the ones the 2026-09 paper draft used,
+    and on the convergence traces (Figures~5 and~12) the running best is still climbing at
+    the end of several of them -- a search reported at a budget it has not converged at
+    understates every strategy, and understates the guided one most, since that is the one
+    still finding things.  Rather than edit the numbers in place and lose the record of
+    what the draft ran, the stages ask here and the environment decides:
+
+      ``NITER``        per-annulus floor for the science stages (``BENCH_NITER`` for the
+                       four benchmark stages); the stage runs at least this many.
+      ``ITER_SCALE``   multiply each stage's own budget (so the relative weighting of a
+                       wide outer annulus against a narrow inner one is preserved).
+
+    Both may be set; the larger wins per annulus.  ``n_init`` follows at each annulus'
+    own warm-up fraction -- a longer search with the original 80 random draws would spend
+    a smaller fraction of its budget on the warm-up and change what is being compared.
+    Unset, everything returns exactly what the stage asked for, so a plain
+    ``python3 run_demos.py A2`` still reproduces the draft.
+    """
+    scale = float(os.environ.get("ITER_SCALE", "1") or 1)
+    floor = int(os.environ.get("BENCH_NITER" if bench else "NITER", "0") or 0)
+    scalar = not isinstance(n_iter, (list, tuple))
+    its = [n_iter] if scalar else list(n_iter)
+    ins = [n_init] * len(its) if not isinstance(n_init, (list, tuple)) else list(n_init)
+    out_it, out_in = [], []
+    for it, ini in zip(its, ins):
+        new = max(floor, int(round(it * scale)))
+        out_it.append(new)
+        out_in.append(max(20, int(round(ini * new / float(it)))))
+    if (out_it != its or out_in != ins):
+        log(f"  budget: n_iter {its} -> {out_it}, n_init {ins} -> {out_in}"
+            f"  (ITER_SCALE={scale}, {'BENCH_NITER' if bench else 'NITER'}={floor})")
+    return (out_it[0], out_in[0]) if scalar else (out_it, out_in)
+
+
 def workers():
     """The core budget for this stage, from ``$WORKERS`` (``rerun_paper.sh`` exports it).
 
@@ -130,7 +170,8 @@ def run_A():
     space.project = generic.make_guard(red, k_max=30)
     fpa, pmask = bp_disk(red)
     obj, samp = generic.default_config(red, known=[BP], forbidden_pa=fpa, pixel_mask=pmask)
-    cfg = RunConfig(ann_edges=[8, 16, 26, 40], n_iter=[400, 300, 300], n_init=[80, 60, 60], seed=11,
+    n_iter, n_init = budget([400, 300, 300], [80, 60, 60])
+    cfg = RunConfig(ann_edges=[8, 16, 26, 40], n_iter=n_iter, n_init=n_init, seed=11,
                     validation=ValidationConfig(n_top=3, n_valid=5), n_sources=3,
                     calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=3),
                     defaults={"k_klip": 10}, fm_curve=True, verify=True, param_verify=True,
@@ -149,7 +190,8 @@ def run_A2():
     space.project = generic.make_guard(red, k_max=30)
     fpa, pmask = bp_disk(red)
     obj, samp = generic.default_config(red, known=[BP], forbidden_pa=fpa, pixel_mask=pmask)
-    cfg = RunConfig(ann_edges=[6, 12, 24, 40], n_iter=[400, 300, 300], n_init=[80, 60, 60], seed=11,
+    n_iter, n_init = budget([400, 300, 300], [80, 60, 60])
+    cfg = RunConfig(ann_edges=[6, 12, 24, 40], n_iter=n_iter, n_init=n_init, seed=11,
                     validation=ValidationConfig(n_top=3, n_valid=5), n_sources=3,
                     calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=3),
                     defaults={"k_klip": 10}, fm_curve=True, verify=True, param_verify=True,
@@ -167,7 +209,8 @@ def run_B():
     space.project = generic.make_guard(red, k_max=12, n_min_ref=5)
     fpa, pmask = bp_disk(red)
     obj, samp = generic.default_config(red, known=[BP], forbidden_pa=fpa, pixel_mask=pmask)
-    cfg = RunConfig(ann_edges=[8, 22], n_iter=400, n_init=80, seed=12, n_sources=3,
+    n_iter, n_init = budget(400, 80)
+    cfg = RunConfig(ann_edges=[8, 22], n_iter=n_iter, n_init=n_init, seed=12, n_sources=3,
                     validation=ValidationConfig(n_top=3, n_valid=5),
                     calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=3),
                     defaults={"k_klip": 5}, fm_curve=True, save_eval_images=False)
@@ -203,7 +246,8 @@ def run_C():
     space = generic.make_space(red, k_klip_max=30)
     space.project = generic.make_guard(red, k_max=30)
     obj, samp = generic.default_config(red, known=[HD])
-    cfg = RunConfig(ann_edges=[20, 45, 75], n_iter=[350, 300], n_init=[70, 60], seed=13, n_sources=3,
+    n_iter, n_init = budget([350, 300], [70, 60])
+    cfg = RunConfig(ann_edges=[20, 45, 75], n_iter=n_iter, n_init=n_init, seed=13, n_sources=3,
                     validation=ValidationConfig(n_top=3, n_valid=5),
                     calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=3),
                     defaults={"k_klip": 10}, fm_curve=True, verify=True, save_eval_images=False)
@@ -276,7 +320,8 @@ def run_D():
                     doc="pyKLIP PSF-subtraction mode"))
     space.project = generic.make_guard(red, k_max=18, n_min_ref=4)
     obj, samp = generic.default_config(red, known=[HIP])
-    cfg = RunConfig(ann_edges=[6, 20, 45], n_iter=[200, 150], n_init=[40, 30], seed=14, n_sources=4,
+    n_iter, n_init = budget([200, 150], [40, 30])
+    cfg = RunConfig(ann_edges=[6, 20, 45], n_iter=n_iter, n_init=n_init, seed=14, n_sources=4,
                     validation=ValidationConfig(n_top=3, n_valid=5),
                     calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=3),
                     defaults={"k_klip": 10}, fm_curve=False, save_eval_images=False)
@@ -369,6 +414,7 @@ def _bench_hi(tag, groups, modes, k_max, max_drop, defaults, forced, ann_edges, 
             dsets, sf, inst = betapic_dataset(groups)
             return generic.make_reducer(dsets, star_flux=sf, max_workers=workers(), log=lambda s: None,
                                         partition_label="group" if groups > 1 else "dataset", **inst)
+    n_iter, n_init = budget(n_iter, n_init, bench=True)
     red = make_red()
     kn = list(known if known is not None else [BP])
     fpa, pmask = bp_disk(red) if kn == [BP] else ((), None)     # only beta Pic has the disk

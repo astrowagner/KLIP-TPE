@@ -45,7 +45,7 @@
 # or, inside a benchmark, whichever slot -- is running.
 #
 # The four benchmark stages are the same protocol on four problems -- beta Pic 9-D (E2) and
-# 38-D (F2), HD 95086 20-D (G2), HIP 65426 11-D (H2) -- so the TPE-vs-random question is
+# 38-D (F2), HD 95086 20-D (G2), HIP 65426 5-D (H2) -- so the TPE-vs-random question is
 # answered as a trend across dimension and instrument rather than on one target.  E2 and F2
 # search an annulus that beta Pic's debris disk runs through; G2 and H2 do not.
 #
