@@ -61,6 +61,34 @@ def test_role_separates_science_from_its_supporting_pointings():
     assert F._role("REFSTAR") == "sci"                       # a name, not a role
 
 
+@pytest.mark.parametrize("name", [
+    "FOMALHAUT-PSF-MIRI-CORON-BACK", "FOMALHAUT-F1550C-BACK",   # GO 1193
+    "51-ERI-BCKG", "BETA-PIC-BCKGR", "REF-51-ERI--BCKGR", "REF2-BETA-PIC--BCKGR",  # GO 1241
+    "HD-95086-BACKGOUND",                                        # GO 1277, typo and all
+    "CVZ-NORTH-BGND", "6-26_CRT_REF.BG", "TW-HYA.BG", "BG-NEAR-DI-TUC", "HD148427_BG",
+])
+def test_every_spelling_of_background_in_the_public_listing(name):
+    """Matching only "bkg" and "background" left these classified as science, on a column
+    offered as "where RDI is possible"."""
+    assert F._role(name) == "bkg", name
+
+
+@pytest.mark.parametrize("name", ["PSF-HD21997", "AU_Mic_psf_reference", "HD-4907-reference"])
+def test_every_spelling_of_reference_in_the_public_listing(name):
+    assert F._role(name) == "ref", name
+
+
+@pytest.mark.parametrize("name", [
+    "AU_Mic", "HIP-65426", "HR8799", "BETA-PIC", "51-ERI", "HD-95086", "P330-E",
+    "ALPHACENOFFSET-5ARCSECBIN", "Acen-Ofset--Star-G3", "V-TW-HYA.CORO", "BD+60-1753",
+    "2MASS-J05215224-6930510", "LMC-MIRI-A-IMAGERFOV", "GJ179-F1550C", "REFSTAR",
+])
+def test_real_targets_are_not_swept_up_as_support(name):
+    """A looser matcher is only useful if it does not eat the science targets: BIN, CORO,
+    FOV, G3 and a bare REFSTAR all sit close to the tokens being matched."""
+    assert F._role(name) == "sci", name
+
+
 def test_programmes_sort_numerically():
     """proposal_id is a string, so the default sort put 10758 between 1046 and 1193 and a
     programme's rows were not contiguous."""

@@ -161,6 +161,16 @@ def _planned(obs_id: str, instrument: str = "") -> bool:
     return len(parts) >= 4 and parts[-1] in ("miri", "nircam", "niriss", "nirspec")
 
 
+# Every spelling of "background" and "reference" that appears in the public MIRI
+# coronagraphy target list, which is more than anyone would guess: BKG, BCKG, BCKGR, BGND,
+# BG, BACK, and BACKGOUND (a typo in GO 1277 that MAST serves as written).  Matching only
+# "bkg" and "background" left GO 1241's REF-51-ERI--BCKGR and GO 2538's PSF-HD21997
+# classified as science -- so the listing reported three programmes with a PSF reference
+# when several more have one, on a column offered as "where RDI is possible".
+_BKG = {"bkg", "bg", "bgnd", "bckg", "bckgr", "bcgr", "back", "background", "backgound"}
+_REF = {"ref", "ref2", "psf", "psfref", "reference", "psfreference"}
+
+
 def _role(target: str) -> str:
     """``sci``, or what kind of supporting pointing this is.
 
@@ -168,11 +178,18 @@ def _role(target: str) -> str:
     them -- the reference pointing IS the RDI library -- but they are not things to point
     a search at, and undifferentiated they bury the science targets: of the first sixty
     rows of public MIRI coronagraphy, thirty-one were background or reference pointings.
+
+    A name heuristic, and target names are free text, so it is a guide to reading the
+    listing rather than an authority.  What a programme actually contains is settled by
+    downloading it and seeing what ``load_calints`` finds.  Background wins over
+    reference, because the background OF a reference pointing is still blank sky.
     """
-    t = target.lower()
-    if "bkg" in t or "background" in t:
+    import re
+    t = str(target).lower()
+    toks = {p for p in re.split(r"[-_.\s]+", t) if p}
+    if toks & _BKG or "background" in t or "backgound" in t or "bckgr" in t:
         return "bkg"
-    if "reference" in t or "psfref" in t or t.endswith("-ref"):
+    if toks & _REF or "reference" in t:
         return "ref"
     return "sci"
 
