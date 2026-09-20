@@ -71,12 +71,27 @@ _THETA_PLUS_X = 270.0
 
 
 def have_stpsf() -> bool:
-    """True when ``stpsf`` imports *and* its data files are reachable."""
+    """True when ``stpsf`` imports *and* its data files are reachable.
+
+    Ask STPSF where its data is rather than reading ``STPSF_PATH`` out of the environment.
+    The environment variable is only one of the ways STPSF finds its data -- a conda
+    install or an ``~/.stpsf`` config file sets it up without ever exporting one -- so
+    testing the variable reports "no STPSF" on a machine where STPSF works perfectly well,
+    and the caller then falls back to a documented constant or refuses to start.  The
+    variables stay as the fallback for an older STPSF without the accessor.
+    """
     try:
-        import stpsf  # noqa: F401
+        import stpsf
     except Exception:
         return False
-    return bool(os.environ.get("STPSF_PATH") or os.environ.get("WEBBPSF_PATH"))
+    try:
+        p = stpsf.utils.get_stpsf_data_path()
+        if p and os.path.isdir(p):
+            return True
+    except Exception:
+        pass
+    p = os.environ.get("STPSF_PATH") or os.environ.get("WEBBPSF_PATH")
+    return bool(p and os.path.isdir(p))
 
 
 def cache_dir() -> str:
