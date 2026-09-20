@@ -120,23 +120,63 @@ def census(public_only=True):
     return progs, len(t)
 
 
+def _role(target: str) -> str:
+    """``sci``, or what kind of supporting pointing this is.
+
+    Background and PSF-reference exposures are real observations and a reduction needs
+    them -- the reference pointing IS the RDI library -- but they are not things to point
+    a search at, and undifferentiated they bury the science targets: of the first sixty
+    rows of public MIRI coronagraphy, thirty-one were background or reference pointings.
+    """
+    t = target.lower()
+    if "bkg" in t or "background" in t:
+        return "bkg"
+    if "reference" in t or "psfref" in t or t.endswith("-ref"):
+        return "ref"
+    return "sci"
+
+
 def _rows(t):
-    """(program, target, filter, instrument) tuples, de-duplicated, sorted."""
+    """(program, target, filter, instrument) tuples, de-duplicated.
+
+    Sorted by programme NUMERICALLY.  ``proposal_id`` is a string, so the default sort put
+    programme 10758 between 1046 and 1193 -- which looks like a listing bug and makes a
+    programme's rows non-contiguous.
+    """
     keys = ("proposal_id", "target_name", "filters", "instrument_name")
     out = {tuple(str(r[k]) for k in keys) for r in t}
-    return sorted(out)
+    return sorted(out, key=lambda r: (int(r[0]) if r[0].isdigit() else 1 << 30, r[1], r[2]))
 
 
-def miri_list(public_only=True, limit=60):
-    """Public MIRI coronagraphy to pick a pilot target from."""
+def miri_list(public_only=True, limit=60, filt_only=None, science_only=False):
+    """Public MIRI coronagraphy to pick a pilot target from.
+
+    ``science_only`` drops background and PSF-reference pointings from the listing; the
+    count of each is still reported, because a target with no reference pointing in its
+    programme has no RDI library and that is worth knowing before choosing it.
+    """
     t = _coron(public_only=public_only)
     t = t[[str(v).upper().startswith(MIRI_PREFIX) for v in t["instrument_name"]]]
     rows = _rows(t)
-    print(f"{'program':>8}  {'target':28s} {'filter':12s} instrument")
-    for p, tgt, filt, inst in rows[:limit]:
-        print(f"{p:>8}  {tgt[:28]:28s} {filt[:12]:12s} {inst}")
-    print(f"\n{len(rows)} distinct (program, target, filter) combinations; "
-          f"showing {min(limit, len(rows))}")
+    if filt_only:
+        want = {f.upper() for f in filt_only}
+        rows = [r for r in rows if any(w in r[2].upper() for w in want)]
+    roles = {r: _role(r[1]) for r in rows}
+    n_ref = sum(1 for v in roles.values() if v == "ref")
+    n_bkg = sum(1 for v in roles.values() if v == "bkg")
+    shown = [r for r in rows if roles[r] == "sci"] if science_only else rows
+    # which programmes have a reference pointing at all -- i.e. where RDI is possible
+    with_ref = {r[0] for r in rows if roles[r] == "ref"}
+    print(f"{'program':>8}  {'role':4s} {'target':30s} {'filter':14s} RDI")
+    for r in shown[:limit]:
+        p, tgt, f, _ = r
+        print(f"{p:>8}  {roles[r]:4s} {tgt[:30]:30s} {f.split(';')[0][:14]:14s} "
+              f"{'yes' if p in with_ref else '--'}")
+    print(f"\n{len(rows)} distinct (program, target, filter) combinations "
+          f"({n_ref} reference, {n_bkg} background, {len(rows) - n_ref - n_bkg} science); "
+          f"showing {min(limit, len(shown))}")
+    print(f"{len(with_ref)} programmes include a PSF-reference pointing, so RDI is possible "
+          f"in those; elsewhere the search has ADI only.")
     return rows
 
 
@@ -181,6 +221,12 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--count", action="store_true", help="archive census for the proposal")
     ap.add_argument("--miri", action="store_true", help="list public MIRI coronagraphy")
+    ap.add_argument("--limit", type=int, default=60, metavar="N",
+                    help="rows to print (default 60; 0 for all)")
+    ap.add_argument("--filters", nargs="*", default=None, metavar="F",
+                    help="narrow the listing to these filters, e.g. --filters F1140C F1550C")
+    ap.add_argument("--science-only", action="store_true",
+                    help="hide background and PSF-reference pointings")
     ap.add_argument("--find", metavar="NAME", help="which programs observed this target")
     ap.add_argument("--targets", nargs="*", default=[], choices=sorted(TARGETS))
     ap.add_argument("--download", action="store_true")
@@ -194,7 +240,8 @@ def main():
         census(public_only=pub)
     if a.miri:
         print(f"\n{'Public' if pub else 'All'} MIRI coronagraphy:")
-        miri_list(public_only=pub)
+        miri_list(public_only=pub, limit=a.limit or 10 ** 9, filt_only=a.filters,
+                  science_only=a.science_only)
     if a.find:
         print(f"\nCoronagraphy of {a.find!r}:")
         find(a.find, public_only=pub)
