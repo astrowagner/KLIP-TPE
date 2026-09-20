@@ -246,8 +246,13 @@ def main():
     from klip_tpe import Param
     space = generic.make_space(red, k_klip_max=50, search_angles=False, bin_range=(1, 1))
     if a.match_idl:
-        keep = [q for q in space.params if q.name not in ("n_ang", "filter")]
-        space = SearchSpace(keep)
+        # Edit the space IN PLACE.  Rebuilding it as SearchSpace(params) looks equivalent
+        # and is not: a SearchSpace also carries `partitions`, `selection`, `fixed` and the
+        # projection, and a fresh one has none of them.  decode() then returns an empty
+        # `selected`, reduce_config maps over zero partitions, and the run dies in
+        # np.stack with "need at least one array to stack" -- nowhere near the cause.
+        space.params = [q for q in space.params if q.name not in ("n_ang", "filter")]
+        space.fixed = dict(space.fixed, n_ang=1)          # fixed, but still handed to the reducer
         space.add(Param(name="filter", lo=5.0, hi=9.0, kind="int", default=5.0,
                         role="reduction", doc="klipfilter, the IDL's [5, 9]"))
         space.add(Param(name="comb_type", lo=0.0, hi=2.0, kind="categorical",
@@ -260,16 +265,25 @@ def main():
     if a.check:
         # one reduction at the default, so a signature or geometry error surfaces here
         # rather than forty minutes into a search
-        from klip_tpe.reducer import ReductionRequest
+        # Through reduce_config, which is what the runner calls -- NOT a single reducer.
+        # Reducing one partition directly skips partition selection entirely, so a space
+        # that decodes to zero selected partitions passes the check and fails the run.
         x0 = np.array([q.default if q.default is not None else q.lo
                        for q in space.params], float)
         dec = space.decode(space.project(x0, space) if space.project else x0)
-        p0 = dict(dec.per_partition.get("mwc758", dec.params))
-        p0.update(inrad=annulus_px(a._px)[0], outrad=annulus_px(a._px)[1], use_rdi=True)
-        res = red.reducers["mwc758"].reduce(ReductionRequest(p0, None))
-        print(f"  default reduction ok: image {res.image.shape}, "
-              f"ref_keep {res.meta.get('ref_keep')}, nref_used "
-              f"{np.unique(res.meta.get('nref_used', [0]))[:4]}")
+        print(f"  decoded selection: {list(dec.selected)}")
+        if not list(dec.selected):
+            raise SystemExit("the space decodes to NO selected partitions; reduce_config "
+                             "would map over an empty list")
+        lo, hi = annulus_px(a._px)
+        dec = space.decode(x0)
+        for pid in dec.selected:
+            dec.params_for(pid).update(inrad=lo, outrad=hi, use_rdi=True)
+        ev = red.reduce_config(dec, None, tag="check")
+        meta = next(iter(ev.meta.values()))
+        print(f"  default reduction ok: image {ev.image.shape}, partitions {list(ev.meta)}, "
+              f"ref_keep {meta.get('ref_keep')}, nref_used "
+              f"{np.unique(meta.get('nref_used', [0]))[:4]}")
         print("\n--check: nothing searched.  Drop it to start the search.")
         return
 
