@@ -19,6 +19,8 @@ except Exception:                                                         # prag
     pass
 
 from .space import Param, SearchSpace, Config, kgrid                     # noqa: E402,F401
+from .reflib import (ReferenceGroup, ReferenceLibrary,                   # noqa: E402,F401
+                     science_and_reference_library, similarity_matrix)
 from .optimizers import TPE, RandomSearch, GridSearch, History           # noqa: E402,F401
 from .metrics import (MawetPeakSNR, InjectionDifferenceSNR, Objective,    # noqa: E402,F401
                       Source, mawet_peak_snr, radprof)

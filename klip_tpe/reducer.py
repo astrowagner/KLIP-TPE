@@ -167,6 +167,11 @@ class KLIPReducer(Reducer):
         self.defaults.update(defaults or {})
         self._inj_cache: Dict[Tuple, np.ndarray] = {}
         self._fm_cache: Dict[Tuple, np.ndarray] = {}
+        #: optional searched reference library (:mod:`klip_tpe.reflib`).  Set through
+        #: :meth:`set_reference_library`; when it is None every RDI/ARDI reduction uses
+        #: the whole reference cube as one shared basis, which is the previous behaviour.
+        self._reflib_spec: Optional[Dict[str, Any]] = None
+        self._reflib_cache: Dict[Tuple, Any] = {}
 
     # -- helpers -------------------------------------------------------------
     def partitions(self) -> List[Any]:
@@ -217,6 +222,109 @@ class KLIPReducer(Reducer):
                               angle_convention=self.angle_convention, copy=False)
         self._fm_cache = {key: cube}
         return cube
+
+    def set_reference_library(self, *, partition, groups=None, metric: str = "cc",
+                             shift_px: int = 1, n_min_ref: int = 2,
+                             min_keep: Optional[Dict[str, int]] = None,
+                             ref_group: str = "psfref") -> None:
+        """Make the reference library a searched object rather than a fixed basis.
+
+        ``partition`` is one label per *unbinned* science frame -- the roll, night or
+        channel a frame belongs to.  A target never draws references sharing its label, so
+        this is what stops a roll subtracting its own companion.  ``groups`` optionally
+        splits ``data.ref_cube`` into several named external pools (name -> row indices);
+        the default makes it one pool called ``psfref``.
+
+        The similarity matrix depends on the binned cube, the high-pass width and the
+        annulus, all of which the search can move, so it is built lazily and cached per
+        distinct combination.  With ``bin`` fixed -- which is how the MWC 758 run was
+        configured -- that is exactly one matrix for the whole search.
+        """
+        self._reflib_spec = {"partition": np.asarray(list(partition)), "groups": groups,
+                             "metric": metric, "shift_px": int(shift_px),
+                             "n_min_ref": int(n_min_ref), "min_keep": dict(min_keep or {}),
+                             "ref_group": ref_group}
+        self._reflib_cache.clear()
+
+    def reference_params(self):
+        """The searched counts this reducer's library contributes to the space."""
+        if self._reflib_spec is None:
+            return []
+        return self._reflib_stub().params()
+
+    def _reflib_stub(self):
+        """A library over the UNBINNED geometry, for building the search space before any
+        reduction has run.  Only the group sizes matter here, so the similarity is a
+        placeholder of the right shape."""
+        from .reflib import ReferenceGroup, ReferenceLibrary
+        spec = self._reflib_spec
+        n_sci = int(self.data.cube.shape[0])
+        ref = self.data.ref_cube
+        n_ref = 0 if ref is None else int(np.asarray(ref).shape[0])
+        groups = [ReferenceGroup("altroll", np.arange(n_sci), partition=spec["partition"],
+                                 min_keep=spec["min_keep"].get("altroll", 0))]
+        for name, rows in (spec["groups"] or {spec["ref_group"]: np.arange(n_ref)}).items():
+            rows = np.asarray(rows, int)
+            if rows.size:
+                groups.append(ReferenceGroup(name, n_sci + rows,
+                                             min_keep=spec["min_keep"].get(name, 0)))
+        return ReferenceLibrary(groups, np.zeros((n_sci + n_ref, n_sci)),
+                                target_partition=spec["partition"], metric=spec["metric"],
+                                n_min_ref=spec["n_min_ref"])
+
+    def _reflib(self, bcube, ref, bkeep_partition, filt, inrad, outrad):
+        """The library for this evaluation's binned cube, built once per distinct
+        (n_binned, filter, annulus) and reused."""
+        from .reflib import ReferenceGroup, ReferenceLibrary, similarity_matrix
+        spec = self._reflib_spec
+        key = (int(bcube.shape[0]), int(filt), round(float(inrad), 3), round(float(outrad), 3),
+               spec["metric"], spec["shift_px"])
+        hit = self._reflib_cache.get(key)
+        if hit is not None:
+            return hit
+        n_sci = int(bcube.shape[0])
+        n_ref = 0 if ref is None else int(ref.shape[0])
+        library = bcube if ref is None else np.concatenate([bcube, ref], axis=0)
+        groups = [ReferenceGroup("altroll", np.arange(n_sci), partition=bkeep_partition,
+                                 min_keep=spec["min_keep"].get("altroll", 0))]
+        for name, rows in (spec["groups"] or {spec["ref_group"]: np.arange(n_ref)}).items():
+            rows = np.asarray(rows, int)
+            if rows.size:
+                groups.append(ReferenceGroup(name, n_sci + rows,
+                                             min_keep=spec["min_keep"].get(name, 0)))
+        sim = similarity_matrix(bcube, library, inrad=inrad, outrad=outrad, filt=0.0,
+                                metric=spec["metric"], shift_px=spec["shift_px"])
+        lib = ReferenceLibrary(groups, sim, target_partition=bkeep_partition,
+                               metric=spec["metric"], n_min_ref=spec["n_min_ref"])
+        self._reflib_cache[key] = (lib, library)
+        return self._reflib_cache[key]
+
+    def _binned_partition(self, keep, grp, bkeep):
+        """Partition label per surviving BINNED frame.
+
+        Three maskings compose here and getting any of them wrong silently mislabels a
+        roll -- which would let a target draw references from its own roll, exactly the
+        failure the exclusion exists to prevent.  ``keep`` is the frame-selection mask over
+        the raw frames; ``grp`` is the bin index of each SELECTED frame; ``bkeep`` drops
+        all-zero bins.  A bin takes the label of its first frame, and binning never spans
+        partitions because the frames of a roll are contiguous.
+        """
+        lab = np.asarray(self._reflib_spec["partition"])
+        if lab.size != int(np.asarray(keep).size):
+            raise ValueError(f"reference library has {lab.size} partition labels for "
+                             f"{np.asarray(keep).size} science frames")
+        lab = lab[np.asarray(keep, bool)]
+        grp = np.asarray(grp, int)
+        ng = int(grp.max()) + 1 if grp.size else 0
+        first = np.full(ng, -1, int)
+        for i in range(grp.size - 1, -1, -1):          # last write wins -> the first frame
+            first[grp[i]] = i
+        out = lab[first]
+        mixed = [b for b in range(ng) if len(set(lab[grp == b].tolist())) > 1]
+        if mixed:
+            raise ValueError(f"bins {mixed[:4]} mix partitions; bin within a partition or "
+                             f"fix bin so the exclusion stays meaningful")
+        return out[np.asarray(bkeep, bool)]
 
     def _reference_cube(self, filt: int, meta: Dict[str, Any]) -> Optional[np.ndarray]:
         """RDI reference frames: centre-cropped to the science FOV and given the
@@ -280,10 +388,25 @@ class KLIPReducer(Reducer):
             mcube = mb[bkeep]
 
         ref_basis = fm_ref = None
+        ref_lib = ref_keep = None
         rdi_mode = str(p["rdi_mode"]).lower()
         if p["use_rdi"]:
             ref = self._reference_cube(filt, meta)
-            if ref is not None:
+            if self._reflib_spec is not None:
+                # Searched library: the basis cube is [science | references] in that order,
+                # because the group row indices the library hands back address it that way,
+                # and every target picks its own rows out of it.  ARDI and RDI stop being
+                # separate modes here -- an all-zero altroll count IS pure RDI, and the
+                # optimizer can elect it rather than being told.
+                bpart = self._binned_partition(keep, grp, bkeep)
+                ref_lib, ref_basis = self._reflib(bcube, ref, bpart, filt, inrad, outrad)
+                ref_keep = ref_lib.keep_from_config(p)
+                if mcube is not None:
+                    fm_ref = np.concatenate(
+                        [mcube] + ([np.zeros_like(ref)] if ref is not None else []), axis=0)
+                meta.update(rdi_mode="searched", n_ref_frames=0 if ref is None else int(ref.shape[0]),
+                            ref_keep=dict(ref_keep), ref_metric=ref_lib.metric)
+            elif ref is not None:
                 if rdi_mode == "rdi":
                     ref_basis = ref
                     fm_ref = np.zeros_like(ref) if mcube is not None else None
@@ -296,7 +419,8 @@ class KLIPReducer(Reducer):
                         fast=bool(p["fast"]), angsep=float(p["angsep"]), anglemax=float(p["anglemax"]),
                         n_min_ref=int(p["n_min_ref"]), spat_mean=bool(p["spat_mean"]),
                         temp_mean=bool(p["temp_mean"]), k_scan=bool(req.k_scan),
-                        threads=int(max(getattr(req, "threads", 1), 1)))
+                        threads=int(max(getattr(req, "threads", 1), 1)),
+                        ref_lib=ref_lib, ref_keep=ref_keep)
         fm_img = nosub = cadi = None
         with np.errstate(all="ignore"), warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)          # nanmedian of all-NaN corners

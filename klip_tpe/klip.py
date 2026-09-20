@@ -11,7 +11,7 @@ in the ``(x, y)`` frame (IDL ``rot(img, a)`` is clockwise by ``a``, so IDL
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy import ndimage
@@ -390,6 +390,11 @@ class KLIPParams:
     k_scan: bool = False
     zone_center: Optional[Tuple[float, float]] = None
     threads: int = 1             # per-target work of the slow path spread over this many threads
+    #: searched reference library (:mod:`klip_tpe.reflib`).  With one, ``ref_cube`` is a
+    #: POOL rather than a fixed basis: every target frame gets its own best-matched subset
+    #: of it, so RDI runs per target instead of from one shared basis.
+    ref_lib: Optional[Any] = None
+    ref_keep: Optional[Dict[str, int]] = None
 
 
 _FM_TOL = 1e-6                   # eigenvalue tolerance of get_klip_basis_new / the FM block
@@ -498,13 +503,21 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
     if do_fm and fm_cube.shape != cube.shape:
         raise ValueError("fm_cube must be frame-aligned with cube")
     rdi = ref_cube is not None
+    use_lib = rdi and p.ref_lib is not None
     if rdi:
         if ref_cube.shape[1:] != (ny, nx):
             raise ValueError("ref_cube must have the science frame size")
-        fast = True
+        # A fixed reference cube is one basis for every target (refsel=0 + /fast in the
+        # IDL).  A searched library is not: each target keeps its own best-matched subset,
+        # so the basis changes frame to frame and the per-target path has to run.
+        fast = not use_lib
     paspan = float(angles.max() - angles.min()) if n >= 2 else 0.0
     auto_fast = False
-    if not fast and p.angsep <= 0 and p.anglemax >= paspan:
+    # The auto-fast shortcut says: with no angular exclusion asked for, a per-target basis
+    # would be the same frames for every target, so build it once.  That reasoning fails
+    # the moment a searched library is in play -- there the per-target basis differs by
+    # construction -- so the shortcut has to stand down.
+    if not fast and not use_lib and p.angsep <= 0 and p.anglemax >= paspan:
         fast, auto_fast = True, True
     arc = arcdist_deg(p.inrad, p.outrad, lam_over_d_px)
     angsep_deg = p.angsep * abs(arc)
@@ -602,7 +615,16 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
         return (out, info, fm_out) if do_fm else (out, info)
 
     # ---- per-target (slow) path -------------------------------------------
-    nref = np.array([reference_mask(angles, t, angsep_deg, p.anglemax).sum() for t in range(n)])
+    keep = dict(p.ref_keep or {}) if use_lib else {}
+    if use_lib:
+        if p.ref_lib.n_target != n:
+            raise ValueError(f"reference library was built for {p.ref_lib.n_target} target "
+                             f"frames, this cube has {n}")
+        nref = np.array([p.ref_lib.select(t, keep).size for t in range(n)])
+        info["ref_keep"] = {g.name: int(keep.get(g.name, g.max_keep)) for g in p.ref_lib.groups}
+        info["ref_metric"] = p.ref_lib.metric
+    else:
+        nref = np.array([reference_mask(angles, t, angsep_deg, p.anglemax).sum() for t in range(n)])
     nstarv = int((nref < p.n_min_ref).sum())
     do_drop = (n - nstarv) >= max(p.n_min_ref, int(np.ceil(0.25 * n)))
     info["n_starved"] = nstarv
@@ -611,18 +633,32 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
     nref_used = nref.copy()
     dropped = np.zeros(n, bool)
     zone_data = [flat[:, idx].astype(np.float64) for idx in zones]
+    #: where the BASIS rows come from -- the library pool under a searched library, the
+    #: science cube itself otherwise.  ``refs`` indexes whichever of the two it is.
+    basis_flat = ref_flat if use_lib else flat
+    basis_zone = [basis_flat[:, idx].astype(np.float64) for idx in zones] if use_lib else zone_data
+    n_basis = basis_flat.shape[0]
 
     def _target(t):
         if do_drop and nref[t] < p.n_min_ref:
             dropped[t] = True
             return                        # frame stays NaN
-        refs = reference_mask(angles, t, angsep_deg, p.anglemax)
-        if refs.sum() < 4:
-            refs = np.ones(n, bool)
-            refs[t] = False
+        if use_lib:
+            refs = p.ref_lib.mask(t, keep, n_basis)
+            if refs.sum() < 2:
+                # every eligible frame, rather than a basis of one: the counts came from
+                # the optimizer and a starved draw should score badly, not crash
+                refs = np.zeros(n_basis, bool)
+                for g in p.ref_lib.groups:
+                    refs[p.ref_lib.eligible(t, g)] = True
+        else:
+            refs = reference_mask(angles, t, angsep_deg, p.anglemax)
+            if refs.sum() < 4:
+                refs = np.ones(n, bool)
+                refs[t] = False
         nref_used[t] = int(refs.sum())
-        for idx, D in zip(zones, zone_data):
-            R = _zero_nan(D[refs])
+        for idx, D, BD in zip(zones, zone_data, basis_zone):
+            R = _zero_nan(BD[refs])
             Z = _basis(R)
             T = _zero_nan(D[t:t + 1].copy())
             Star = T.copy()               # raw target (the FM uses the un-adjusted stellar frame, L493)
@@ -639,7 +675,11 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
             else:
                 out[t].reshape(-1)[idx] = _project(T, Z, kk_max)[0]
             if do_fm:
-                Mref = _zero_nan(fm_flat[refs][:, idx].astype(np.float64))
+                mflat = fmref_flat if (use_lib and fmref_flat is not None) else fm_flat
+                if use_lib and fmref_flat is None:
+                    Mref = None            # library RDI with no model in the references
+                else:
+                    Mref = _zero_nan(mflat[refs][:, idx].astype(np.float64))
                 Mtar = _zero_nan(fm_flat[t:t + 1, idx].astype(np.float64))
                 fm_out[t].reshape(-1)[idx] = klip_fm_zone(R, Mref, Star, Mtar, k, fm_selfsub)[0]
 
