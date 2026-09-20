@@ -448,13 +448,28 @@ class SearchSpace:
     def distinct(self, xa: np.ndarray, xb: np.ndarray, tol: float = 1e-4) -> bool:
         return float(np.sum(np.abs(np.asarray(xa) - np.asarray(xb)))) >= tol
 
-    def distance_to_bounds(self, x: np.ndarray) -> Dict[str, float]:
+    def distance_to_bounds(self, x: np.ndarray) -> Dict[str, Optional[float]]:
         """Normalised distance of each coordinate to its nearest bound (health check:
-        a winner pinned at 0 for many dims suggests the bounds are too tight)."""
-        out = {}
+        a winner at 0 for many dims suggests the bounds are too tight).
+
+        ``None`` for dimensions where the question does not apply, rather than 0.0:
+
+        * **Categoricals.**  A category is an index into a list, so "near an edge" means
+          nothing -- picking the last of three combination rules is not evidence that a
+          fourth would have been better.  Reporting 0.0 said "widen this" about a
+          parameter with nothing to widen.
+        * **Pinned dimensions** (``span <= 0``).  A parameter held at one value is not
+          at a bound, it is not being searched, and the two want opposite responses.
+
+        This check exists to raise alarms, so a false one costs more than a missing
+        number: on the MWC 758 run three of six entries read 0.0 and only one of them was
+        a real edge -- and that one sat at the number of reference frames that exist,
+        which is not a bound anybody can loosen either.
+        """
+        out: Dict[str, Optional[float]] = {}
         for i, p in enumerate(self.params):
-            if p.span <= 0:
-                out[p.name] = 0.0
+            if p.kind == "categorical" or p.span <= 0:
+                out[p.name] = None
             else:
                 out[p.name] = float(min(x[i] - p.lo, p.hi - x[i]) / p.span)
         return out

@@ -242,6 +242,24 @@ def test_distinct_and_distance_to_bounds(simple_space):
     assert d["a"] == pytest.approx(0.5) and d["b"] == pytest.approx(0.5)
 
 
+def test_distance_to_bounds_is_none_where_the_question_does_not_apply():
+    """The check exists to raise alarms, so a false one costs more than a gap.
+
+    A category is an index into a list -- picking the last of three combination rules is
+    not evidence a fourth would have been better -- and a pinned dimension is not at a
+    bound, it is not being searched.  Both used to report 0.0, i.e. "widen this", about
+    parameters with nothing to widen.
+    """
+    sp = SearchSpace([Param("k", 1, 10, "int"),
+                      Param("comb", 0, 2, "categorical", choices=["a", "b", "c"], default=2),
+                      Param("pinned", 3, 3, "int", default=3)])
+    d = sp.distance_to_bounds(np.array([10.0, 2.0, 3.0]))
+    assert d["k"] == pytest.approx(0.0)          # genuinely at its upper bound
+    assert d["comb"] is None
+    assert d["pinned"] is None
+    assert set(d) == set(sp.names)               # every dimension still reported
+
+
 # ----------------------------------------------------------------------------
 # serialisation
 # ----------------------------------------------------------------------------
