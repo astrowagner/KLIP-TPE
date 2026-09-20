@@ -301,21 +301,45 @@ def throughput_map(filter: str = "F1065C", seps_as: Optional[Sequence[float]] = 
     # a fixed aperture than a polychromatic one, so mixing the two inflates every ratio.
     ref_sum = _offset_sum(ref_inst, seps[0], 0.0, fov, oversample, nlambda, rap)
 
-    bounds = None
+    # A full map is 576 PSFs, twenty-five minutes, and an all-or-nothing loop: a process
+    # killed at PSF 570 leaves nothing behind.  That happened twice here on a machine that
+    # does not keep long jobs alive, each time discarding most of a map.  So each
+    # separation row is written as it completes and a restart picks up from the first row
+    # not yet done.  Partial, because a half-finished map must never be loadable as a
+    # finished one -- it is a separate file that only this function knows how to read.
+    part = os.path.join(cache_dir(), _map_cache_name(meta)[:-4] + ".partial.npz")
+    bounds, trans, done = None, None, 0
+    if cache and os.path.exists(part):
+        try:
+            z = np.load(part, allow_pickle=False)
+            if str(z["key"]) == _key(meta) and int(z["done"]) < seps.size:
+                az, trans, done = z["az"], z["trans"], int(z["done"])
+                bounds = z["boundaries"] if "boundaries" in z.files else None
+                log(f"  miri: resuming a partial map at separation {done + 1}/{seps.size}")
+        except Exception as exc:                       # a corrupt partial is not fatal
+            log(f"  miri: ignoring an unreadable partial map ({exc!r})")
     if az is None:
         log(f"  miri: locating the quadrant boundaries for {m['filter']}/{m['image_mask']}")
         bounds = locate_boundaries(inst, float(np.median(seps)), fov, oversample, nlambda,
                                    rap, log=log)
         az = default_azimuths(bounds)
-    log(f"  miri: computing {seps.size} x {az.size} = {seps.size * az.size} off-axis PSFs "
-        f"(cached afterwards)")
-    trans = np.zeros((seps.size, az.size), float)
+    if trans is None:
+        trans = np.zeros((seps.size, np.asarray(az).size), float)
+    log(f"  miri: computing {seps.size - done} x {np.asarray(az).size} = "
+        f"{(seps.size - done) * np.asarray(az).size} off-axis PSFs (cached afterwards)")
     for i, r in enumerate(seps):
+        if i < done:
+            continue
         for j, a in enumerate(az):
             trans[i, j] = _offset_sum(inst, float(r), float(a), fov, oversample, nlambda,
                                       rap) / max(ref_sum, 1e-30)
         log(f"    rho={r:.2f}\"  throughput {trans[i].min():.3f}-{trans[i].max():.3f} "
             f"(x{trans[i].max() / max(trans[i].min(), 1e-6):.1f} across azimuth)")
+        if cache:
+            os.makedirs(cache_dir(), exist_ok=True)
+            np.savez_compressed(part, seps=seps, az=az, trans=trans, done=i + 1,
+                                key=_key(meta),
+                                **({} if bounds is None else {"boundaries": bounds}))
     out = {"seps": seps, "az": az, "trans": trans, "boundaries": bounds, "pxscale": px,
            "fwhm_px": fwhm_px, "ee_radius_px": rap, "meta": meta, "path": path}
     if cache:
@@ -324,6 +348,12 @@ def throughput_map(filter: str = "F1065C", seps_as: Optional[Sequence[float]] = 
                             seps=seps, az=az, trans=trans, pxscale=px, fwhm_px=fwhm_px,
                             ee_radius_px=rap, key=_key(meta), meta=json.dumps(meta),
                             **({} if bounds is None else {"boundaries": bounds}))
+        # The finished map exists now, so the partial is only a way to load a half-built
+        # one by mistake.
+        try:
+            os.remove(part)
+        except OSError:
+            pass
     return out
 
 
