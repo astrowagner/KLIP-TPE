@@ -129,9 +129,18 @@ class ReferenceGroup:
             if self.partition.shape != self.rows.shape:
                 raise ValueError(f"group {self.name!r}: {self.partition.size} labels for "
                                  f"{self.rows.size} frames")
+        # The reachable size of a partitioned pool is not its row count: a target only ever
+        # sees the rows carrying a DIFFERENT label, so for two 25-frame rolls the ceiling is
+        # 25, not 50.  Bounding at 50 would leave half the searched range describing
+        # configurations identical to "keep everything eligible", which the optimizer would
+        # have to spend evaluations discovering are ties.
+        reach = int(self.rows.size)
+        if self.partition is not None and self.partition.size:
+            vals, counts = np.unique(self.partition, return_counts=True)
+            reach = int(counts.sum() - counts.min()) if vals.size > 1 else 0
         if self.max_keep is None:
-            self.max_keep = int(self.rows.size)
-        self.max_keep = int(min(self.max_keep, self.rows.size))
+            self.max_keep = reach
+        self.max_keep = int(min(self.max_keep, reach))
         self.min_keep = int(np.clip(self.min_keep, 0, self.max_keep))
 
     @property

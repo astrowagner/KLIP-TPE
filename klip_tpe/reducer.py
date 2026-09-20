@@ -226,7 +226,8 @@ class KLIPReducer(Reducer):
     def set_reference_library(self, *, partition, groups=None, metric: str = "cc",
                              shift_px: int = 1, n_min_ref: int = 2,
                              min_keep: Optional[Dict[str, int]] = None,
-                             ref_group: str = "psfref") -> None:
+                             ref_group: str = "psfref",
+                             similarity: Optional[np.ndarray] = None) -> None:
         """Make the reference library a searched object rather than a fixed basis.
 
         ``partition`` is one label per *unbinned* science frame -- the roll, night or
@@ -239,11 +240,17 @@ class KLIPReducer(Reducer):
         annulus, all of which the search can move, so it is built lazily and cached per
         distinct combination.  With ``bin`` fixed -- which is how the MWC 758 run was
         configured -- that is exactly one matrix for the whole search.
+
+        ``similarity`` supplies a ``(n_library, n_target)`` matrix instead of computing
+        one.  That is how a port is checked against the thing it was ported from: hand it
+        the IDL's own ``F430M_refmetrics_cc.fits`` and any difference in the result is a
+        difference in the SELECTION, not in how two languages measure correlation.
         """
         self._reflib_spec = {"partition": np.asarray(list(partition)), "groups": groups,
                              "metric": metric, "shift_px": int(shift_px),
                              "n_min_ref": int(n_min_ref), "min_keep": dict(min_keep or {}),
-                             "ref_group": ref_group}
+                             "ref_group": ref_group,
+                             "similarity": None if similarity is None else np.asarray(similarity, float)}
         self._reflib_cache.clear()
 
     def reference_params(self):
@@ -292,8 +299,14 @@ class KLIPReducer(Reducer):
             if rows.size:
                 groups.append(ReferenceGroup(name, n_sci + rows,
                                              min_keep=spec["min_keep"].get(name, 0)))
-        sim = similarity_matrix(bcube, library, inrad=inrad, outrad=outrad, filt=0.0,
-                                metric=spec["metric"], shift_px=spec["shift_px"])
+        if spec.get("similarity") is not None:
+            sim = spec["similarity"]
+            if sim.shape != (library.shape[0], n_sci):
+                raise ValueError(f"supplied similarity is {sim.shape}, expected "
+                                 f"{(library.shape[0], n_sci)} (library x target)")
+        else:
+            sim = similarity_matrix(bcube, library, inrad=inrad, outrad=outrad, filt=0.0,
+                                    metric=spec["metric"], shift_px=spec["shift_px"])
         lib = ReferenceLibrary(groups, sim, target_partition=bkeep_partition,
                                metric=spec["metric"], n_min_ref=spec["n_min_ref"])
         self._reflib_cache[key] = (lib, library)

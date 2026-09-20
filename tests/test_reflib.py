@@ -103,7 +103,9 @@ def test_params_expose_one_searched_count_per_group():
                                            inrad=3, outrad=14, min_keep={"hd": 1})
     ps = {p.name: p for p in lib.params()}
     assert set(ps) == {"nkeep_altroll", "nkeep_hd"}
-    assert (ps["nkeep_altroll"].lo, ps["nkeep_altroll"].hi) == (0.0, 4.0)
+    # four science frames in two rolls of two: a target can reach the other roll only, so
+    # the ceiling is 2, not 4.  Bounding at 4 would make half the range a tie.
+    assert (ps["nkeep_altroll"].lo, ps["nkeep_altroll"].hi) == (0.0, 2.0)
     assert (ps["nkeep_hd"].lo, ps["nkeep_hd"].hi) == (1.0, 9.0), "min_keep must reach the bound"
     assert all(p.kind == "int" for p in ps.values())
 
@@ -257,3 +259,32 @@ def test_frame_selection_and_binning_compose_into_the_right_labels():
     grp = np.array([0, 0, 0, 1, 2, 2, 2])
     lab = red._binned_partition(keep, grp, np.array([True, False, True]))
     assert list(lab) == ["rollA", "rollB"], lab            # middle bin dropped as empty
+
+
+# ---------------------------------------------------------------- space + guard
+def test_the_counts_reach_the_search_space_and_the_guard_clamps_k():
+    from klip_tpe.feasibility import ReferenceLibraryGuard
+    from klip_tpe.instruments import generic
+    from klip_tpe.reducer import PartitionedReducer
+    red, _ = _reducer_with_two_rolls()
+    pr = PartitionedReducer({"sci": red})
+    space = generic.make_space(pr, k_klip_max=40)
+    names = {p.name for p in space.params}
+    assert {"nkeep_altroll", "nkeep_psfref"} <= names, sorted(names)
+
+    guard = generic.make_guard(pr, n_min_ref=2, k_max=40)
+    idx = {p.name: i for i, p in enumerate(space.params)}
+    x = np.array([p.default if p.default is not None else p.lo for p in space.params], float)
+    x[idx["nkeep_altroll"]], x[idx["nkeep_psfref"]] = 2.0, 3.0
+    kx = [i for i, p in enumerate(space.params) if p.base == "k_klip" or p.name == "k_klip"]
+    for i in kx:
+        x[i] = 40.0
+    y = guard(x, space, is_random=False)
+    for i in kx:
+        assert y[i] <= 5.0, (y[i], "k_klip must not exceed the frames actually retained")
+
+    # and a zero-everywhere draw is rescued rather than evaluated
+    z = x.copy()
+    z[idx["nkeep_altroll"]] = z[idx["nkeep_psfref"]] = 0.0
+    w = guard(z, space, is_random=True)
+    assert w[idx["nkeep_altroll"]] + w[idx["nkeep_psfref"]] >= 2

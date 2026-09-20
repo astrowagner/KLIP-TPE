@@ -21,7 +21,7 @@ from .klip import arcdist_deg, bin_angles, frame_selection_mask
 from .space import SearchSpace
 
 __all__ = ["ref_fraction", "max_feasible_angsep", "min_feasible_anglemax", "ReferenceCountGuard",
-           "FrameSelectionGuard", "MinBinGuard", "compose"]
+           "FrameSelectionGuard", "MinBinGuard", "compose", "ReferenceLibraryGuard"]
 
 
 def ref_fraction(bangles: np.ndarray, angsep: float, anglemax: float, arcdist: float, nminref: int) -> float:
@@ -269,6 +269,58 @@ class MinBinGuard:
 
     def describe(self) -> Dict[str, Any]:
         return {"name": "min_bin_guard", "bin_min": self.bin_min}
+
+
+class ReferenceLibraryGuard:
+    """Keep the searched reference counts buildable, and ``k_klip`` no larger than them.
+
+    The counts (``nkeep_<pool>``, :mod:`klip_tpe.reflib`) say how many frames each
+    reference pool contributes to every target's basis, so their sum IS the basis size.
+    Asking for 30 KL modes from a 12-frame library is not a worse configuration, it is not
+    a configuration: ``klip_basis`` silently clamps, several distinct draws collapse onto
+    the same reduction, and the search spends evaluations learning that they tie.  This is
+    the ``nref_eff = ((nkalt < 25) + (nkpsf < 25)) > 2`` clamp of ``optimize_mwc_tpe.pro``,
+    applied before the reduction rather than inside it.
+
+    Order matters against :class:`ReferenceCountGuard`, which caps ``k_klip`` by the
+    ANGULAR reference census.  A searched library does not use that census -- its basis
+    comes from the pools -- so this runs last and its cap wins.
+    """
+
+    def __init__(self, n_min_ref: int = 2, k_max: int = 100):
+        self.n_min_ref = int(max(n_min_ref, 1))
+        self.k_max = int(k_max)
+        self.last_clamped = 0
+
+    def __call__(self, x: np.ndarray, space: "SearchSpace", **_) -> np.ndarray:
+        keep_i = [i for i, p in enumerate(space.params) if p.name.startswith("nkeep_")]
+        if not keep_i:
+            return x
+        x = np.asarray(x, float).copy()
+        hi = {i: float(space.params[i].hi) for i in keep_i}
+        for i in keep_i:                                  # integers, inside their bounds
+            x[i] = float(np.clip(round(x[i]), space.params[i].lo, hi[i]))
+        total = int(sum(x[i] for i in keep_i))
+        if total < self.n_min_ref:                        # raise from the largest pool first
+            for i in sorted(keep_i, key=lambda j: -hi[j]):
+                add = min(hi[i] - x[i], self.n_min_ref - total)
+                x[i] += add
+                total += int(add)
+                if total >= self.n_min_ref:
+                    break
+        n = 0
+        for i, p in enumerate(space.params):
+            if p.base != "k_klip" and p.name != "k_klip":
+                continue
+            cap = float(min(total, self.k_max, p.hi))
+            if x[i] > cap:
+                x[i] = max(cap, p.lo)
+                n += 1
+        self.last_clamped = n
+        return x
+
+    def describe(self) -> Dict[str, Any]:
+        return {"name": "reference_library_guard", "n_min_ref": self.n_min_ref, "k_max": self.k_max}
 
 
 def compose(*projections):

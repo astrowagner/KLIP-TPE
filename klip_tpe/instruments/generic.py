@@ -40,7 +40,7 @@ from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-from ..feasibility import FrameSelectionGuard, MinBinGuard, ReferenceCountGuard, compose
+from ..feasibility import ReferenceLibraryGuard, FrameSelectionGuard, MinBinGuard, ReferenceCountGuard, compose
 from ..injection import GaussianPSF, InjectionModel, TemplatePSF
 from ..metrics import MawetPeakSNR, Objective
 from ..positions import PositionSampler
@@ -317,7 +317,16 @@ def make_space(reducer: PartitionedReducer, min_bins: int = 8, **kw) -> SearchSp
     if "bin_range" not in kw:
         nf = min(r.data.nframes for r in reducer.reducers.values())
         kw["bin_range"] = (1, max(int(nf // max(min_bins, 2)), 1))
-    return _near.make_space(reducer, **kw)
+    space = _near.make_space(reducer, **kw)
+    # A reducer carrying a searched reference library contributes one count per pool.
+    # These are global dimensions, not per-partition ones: a pool is a pool whichever
+    # partition is being reduced, and replicating them would let two partitions disagree
+    # about how much of the same reference star exists.
+    for r in reducer.reducers.values():
+        for pr in getattr(r, "reference_params", lambda: [])():
+            if pr.name not in {q.name for q in space.params}:
+                space.add(pr)
+    return space
 
 
 def make_guard(reducer: PartitionedReducer, n_min_ref: int = 10, ref_frac: float = 0.95, k_max: int = 100,
@@ -341,7 +350,13 @@ def make_guard(reducer: PartitionedReducer, n_min_ref: int = 10, ref_frac: float
     if frame_selection:
         fs = FrameSelectionGuard(tags_fn=reducer.frame_tags,
                                  nframes_fn=lambda pid: reducer.reducers[pid].data.nframes)
-    steps = [p for p in (mb, fs, ref) if p is not None]
+    lib = None
+    for r in reducer.reducers.values():
+        spec = getattr(r, "_reflib_spec", None)
+        if spec is not None:
+            lib = ReferenceLibraryGuard(n_min_ref=int(spec.get("n_min_ref", 2)), k_max=k_max)
+            break
+    steps = [p for p in (mb, fs, ref, lib) if p is not None]
     return steps[0] if len(steps) == 1 else compose(*steps)
 
 
