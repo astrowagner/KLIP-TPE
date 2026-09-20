@@ -114,16 +114,51 @@ def census(public_only=True):
                          f"check the spelling against Observations.get_metadata('observations')")
     inst = [str(v) for v in t["instrument_name"]]
     prog = [str(v) for v in t["proposal_id"]]
+    # MAST lists approved-but-undelivered observations in CAOM with dataRights already set
+    # from the planned release date.  Counting them as archive holdings overstates what is
+    # there to re-reduce -- which is the whole point of this number.
+    live = [k for k in range(len(t)) if not _planned(t["obs_id"][k])]
+    n_planned = len(t) - len(live)
     print(f"  matched instrument_name values: {sorted(set(inst))}")
     for label, pref in (("nircam", NIRCAM_PREFIX), ("miri", MIRI_PREFIX)):
-        rows = [k for k, v in enumerate(inst) if v.upper().startswith(pref)]
+        rows = [k for k in live if inst[k].upper().startswith(pref)]
         ids = {prog[k] for k in rows}
         print(f"  {label:7s} {len(rows):5d} observations  {len(ids):3d} programs")
-    progs = sorted(set(prog))
-    print(f"\nTOTAL public coronagraphy: {len(t)} observations across {len(progs)} programs")
+    progs = sorted({prog[k] for k in live})
+    if n_planned:
+        planned_progs = sorted({prog[k] for k in range(len(t)) if k not in set(live)})
+        print(f"  excluded {n_planned} PLANNED observations in {len(planned_progs)} "
+              f"programme(s) -- listed in CAOM, no products behind them "
+              f"(e.g. {planned_progs[:4]})")
+    print(f"\nTOTAL public coronagraphy: {len(live)} delivered observations "
+          f"across {len(progs)} programs")
     print(f"  \\newcommand{{\\nProgs}}{{{len(progs)}}}")
-    print(f"  \\newcommand{{\\nDatasets}}{{{len(t)}}}")
-    return progs, len(t)
+    print(f"  \\newcommand{{\\nDatasets}}{{{len(live)}}}")
+    return progs, len(live)
+
+
+def _planned(obs_id: str, instrument: str = "") -> bool:
+    """True when this row is a PLANNED observation rather than delivered data.
+
+    MAST publishes approved-but-not-yet-delivered observations in CAOM alongside real
+    ones, with ``dataRights`` already set from the planned release.  They have no products
+    behind them, so a download of one succeeds, downloads nothing, and leaves an empty
+    directory -- which is how GO 11225 (AU Mic) looked like a broken script for an hour.
+
+    Two signals, both visible in ``obs_id``.  A delivered exposure carries a visit group in
+    the second field (``jw01386001001_04101_00001_nrcalong``); a planned one carries the
+    literal placeholder ``xx`` (``jw11225001001_xx101_00001_miri``).  And the last field is
+    the detector on a delivered row (``mirimage``, ``nrcalong``) but the bare instrument
+    name on a planned one.  Either is enough; both together are unambiguous.
+
+    A heuristic on a format MAST does not document, so it only ever *warns* -- the
+    zero-product result is what proves it, and the two are reported together.
+    """
+    o = str(obs_id).lower()
+    parts = o.split("_")
+    if len(parts) >= 2 and parts[1].startswith("xx"):
+        return True
+    return len(parts) >= 4 and parts[-1] in ("miri", "nircam", "niriss", "nirspec")
 
 
 def _role(target: str) -> str:
@@ -236,6 +271,21 @@ def fetch(name, outdir, download=False, products=("CALINTS", "ASN"), target_only
         print("  WARNING: no PSF-reference pointing in this set. load_calints will build "
               "datasets with no RDI library and the reduction will be ADI only -- which it "
               "reports as one word in a log line, so check it.")
+    # Before any product query: a set that is entirely planned observations has nothing
+    # behind it, and finding that out costs one slow MAST call per row.
+    planned = [str(r["obs_id"]) for r in t if _planned(r["obs_id"])]
+    if planned:
+        print(f"  {len(planned)} of {len(t)} observations look PLANNED rather than "
+              f"delivered (e.g. {planned[0]})")
+    if len(planned) == len(t):
+        raise SystemExit(
+            f"  every observation in programme {pid} is a planned one: the obs_id carries "
+            f"the 'xx' visit placeholder and the bare instrument name instead of a\n"
+            f"  detector. MAST lists these in CAOM with dataRights already set from the\n"
+            f"  planned release date, but there are no products behind them -- so this\n"
+            f"  would download nothing and leave an empty directory.\n"
+            f"  Nothing to fix here; the data does not exist yet. Pick another programme:\n"
+            f"    python3 {os.path.basename(__file__)} --miri --science-only --limit 0")
     if not download:
         print("  (--download to pull the products)")
         return
