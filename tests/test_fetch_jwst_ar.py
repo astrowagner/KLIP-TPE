@@ -100,3 +100,39 @@ def test_programmes_sort_numerically():
 def test_rows_are_deduplicated():
     rows = _table([("1193", "VEGA", "F1550C", "MIRI/CORON")] * 3)
     assert len(F._rows(rows)) == 1
+
+
+def _crit_for(name, target_only=False):
+    """The criteria fetch() would query with, without touching the network."""
+    spec = dict(F.TARGETS[name])
+    pid = spec.get("proposal_id")
+    crit = dict(spec)
+    if pid and not target_only:
+        crit.pop("target_name", None)
+    return crit
+
+
+def test_widening_to_the_programme_drops_the_target_not_everything_else():
+    """"The whole programme" means stop restricting to one TARGET.
+
+    Rebuilding the criteria as {"proposal_id": pid} also discarded instrument_name, so
+    hip65426_miri would have pulled the entire ERS -- NIRCam included -- to get its MIRI
+    half.
+    """
+    c = _crit_for("hip65426_miri")
+    assert c == {"proposal_id": "1386", "instrument_name": "MIRI/CORON"}
+    c = _crit_for("rxj0534")
+    assert "target_name" not in c and c["proposal_id"] == "6122"
+
+
+def test_target_only_keeps_the_target_restriction():
+    c = _crit_for("rxj0534", target_only=True)
+    assert c["target_name"] == "RX*J0534*"
+
+
+def test_coron_lets_a_target_override_the_default_instrument():
+    """A mixed programme needs one instrument of it; the default must not collide."""
+    import inspect
+    src = inspect.getsource(F._coron)
+    assert "crit.update(extra)" in src, "extra must override, not be passed alongside"
+    assert "crit.setdefault(" in src, "public_only must not clobber an explicit dataRights"

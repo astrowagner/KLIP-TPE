@@ -54,11 +54,21 @@ TARGETS = {
     # AF Lep b -- GO 4558, the only public program with coronagraphy of it: NIRCam
     # F200W + F356W + F444W behind MASKRND (confirmed with --find "AF Lep", 2026-09-20).
     "aflep":   dict(proposal_id="4558", target_name="AF*LEP*"),
-    # AU Mic -- GO 11225, MIRI F1140C.  The programme carries AU_Mic, AU_Mic_psf_reference
-    # and BKG- pointings for both, so RDI and background subtraction are both possible.
-    # An edge-on debris disk is the geometry where a position-dependent throughput shows
-    # itself: the disk sweeps through every azimuth at once, so a radial correction leaves
-    # a four-fold modulation in the surface-brightness profile, fixed to the detector.
+    # HIP 65426 in the MIRI half of the ERS (GO 1386), whose NIRCam half is already run D
+    # of the method paper.  The same target through the same pipeline on two instruments,
+    # with a known companion and a published contrast to check against -- and a point
+    # source, so no extended emission in the search annulus.  1386's MIRI set has no
+    # dedicated PSF reference; HD 141569A is the other MIRI target in it, and load_calints
+    # makes whatever is not the science target into the library.
+    "hip65426_miri": dict(proposal_id="1386", instrument_name="MIRI/CORON"),
+    # HR 8799 (GO 1194), MIRI F1065C + F1140C + F1550C.  Four companions from about 0.4 to
+    # 1.7 arcsec: a position-dependent throughput has to be right over a range of
+    # separations and position angles at once, which one companion cannot test.
+    "hr8799":  dict(proposal_id="1194"),
+    # AU Mic -- GO 11225. LISTED PUBLIC BUT NOT DELIVERED: every obs_id carries the 'xx'
+    # visit placeholder and the bare instrument name, and no observation has any products
+    # (checked 2026-09-20).  Kept so the next person asking sees why rather than repeating
+    # the download; fetch() refuses it with an explanation.
     "aumic":   dict(proposal_id="11225", target_name="AU*Mic*"),
     # already on disk, here for completeness / re-fetch
     "mwc758":  dict(proposal_id="4014"),
@@ -91,11 +101,18 @@ def _check_fields(**criteria):
 
 
 def _coron(public_only=True, **extra):
-    """Every public JWST coronagraphic observation, optionally narrowed by ``extra``."""
+    """Every public JWST coronagraphic observation, optionally narrowed by ``extra``.
+
+    ``extra`` overrides the defaults rather than colliding with them, so a target can ask
+    for one instrument of a mixed programme -- GO 1386 is the ERS and holds both NIRCam and
+    MIRI coronagraphy of HIP 65426, and pulling the whole thing to get the MIRI half is a
+    large download of mostly the wrong data.
+    """
     Observations = _obs()
-    crit = dict(obs_collection="JWST", instrument_name=CORON_INSTRUMENT, **extra)
+    crit = dict(obs_collection="JWST", instrument_name=CORON_INSTRUMENT)
+    crit.update(extra)
     if public_only:
-        crit["dataRights"] = "PUBLIC"
+        crit.setdefault("dataRights", "PUBLIC")
     _check_fields(**crit)
     with warnings.catch_warnings():
         warnings.simplefilter("error", category=UserWarning)   # a skipped filter is a failure
@@ -269,7 +286,13 @@ def fetch(name, outdir, download=False, products=("CALINTS", "ASN"), target_only
     """
     spec = dict(TARGETS[name])
     pid = spec.get("proposal_id")
-    crit = ({"proposal_id": pid} if (pid and not target_only) else spec)
+    # Widening to the programme means dropping the TARGET restriction -- the thing that
+    # excludes the references and backgrounds -- not dropping every other constraint.
+    # Rebuilding the criteria as {"proposal_id": pid} also threw away instrument_name, so
+    # hip65426_miri would have pulled the whole ERS, NIRCam included, to get its MIRI half.
+    crit = dict(spec)
+    if pid and not target_only:
+        crit.pop("target_name", None)
     print(f"\n=== {name}: {crit}"
           + ("" if target_only or not pid else "   (whole programme: science + reference + background)"))
     t = _coron(**crit)
