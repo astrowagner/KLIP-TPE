@@ -240,11 +240,54 @@ def fetch(name, outdir, download=False, products=("CALINTS", "ASN"), target_only
         print("  (--download to pull the products)")
         return
     Observations = _obs()
-    prod = Observations.get_product_list(t)
+
+    # get_product_list in one call returned nothing for this 16-observation programme, and
+    # said so as a warning rather than an error -- so the run reported "downloading 0
+    # products" and exited successfully with an empty directory.  Per observation instead:
+    # a batch that comes back empty is then attributable to the row it came from rather
+    # than to the whole query, and one bad row cannot silence the rest.
+    tables, empty = [], []
+    for row in t:
+        try:
+            p = Observations.get_product_list(row)
+        except Exception as exc:
+            empty.append((str(row["obs_id"]), f"{type(exc).__name__}: {exc}"))
+            continue
+        (tables.append(p) if len(p) else empty.append((str(row["obs_id"]), "no products")))
+    if empty:
+        print(f"  {len(empty)} of {len(t)} observations returned no product list:")
+        for oid, why in empty[:6]:
+            print(f"    {oid}: {why}")
+    if not tables:
+        raise SystemExit(
+            "  no products for any observation in this set. That is not the same as "
+            "'nothing to download' -- the observations exist, so either MAST is refusing "
+            "the product query or these rows carry no retrievable products. Check one by "
+            "hand:\n"
+            "    from astroquery.mast import Observations\n"
+            f"    t = Observations.query_criteria(obs_collection='JWST', proposal_id='{pid}')\n"
+            "    p = Observations.get_product_list(t[0]); print(len(p)); print(p.colnames)")
+
+    from astropy.table import vstack
+    prod = vstack(tables)
+    # Say what is actually on offer before filtering it away.  Asking for a subgroup that
+    # is not there looks exactly like asking for one that is and finding nothing.
+    if "productSubGroupDescription" in prod.colnames:
+        from collections import Counter
+        have = Counter(str(v) for v in prod["productSubGroupDescription"])
+        print(f"  {len(prod)} products; subgroups available: "
+              + ", ".join(f"{k}({v})" for k, v in sorted(have.items())))
+        missing = [p for p in products if p not in have]
+        if missing:
+            print(f"  NOTE: asked for {missing}, which this programme does not have. "
+                  f"Override with --products, e.g. --products {' '.join(sorted(have)[:3])}")
     keep = Observations.filter_products(prod, productSubGroupDescription=list(products))
+    if not len(keep):
+        raise SystemExit(f"  {len(prod)} products exist but none match {list(products)} -- "
+                         f"choose from the subgroups listed above with --products")
     dest = os.path.join(outdir, name)
     os.makedirs(dest, exist_ok=True)
-    print(f"  downloading {len(keep)} products -> {dest}")
+    print(f"  downloading {len(keep)} of {len(prod)} products -> {dest}")
     Observations.download_products(keep, download_dir=dest, cache=True)
 
 
@@ -262,6 +305,9 @@ def main():
     ap.add_argument("--find", metavar="NAME", help="which programs observed this target")
     ap.add_argument("--targets", nargs="*", default=[], choices=sorted(TARGETS))
     ap.add_argument("--download", action="store_true")
+    ap.add_argument("--products", nargs="*", default=["CALINTS", "ASN"], metavar="G",
+                    help="productSubGroupDescription values to pull (default CALINTS ASN); "
+                         "the download lists what the programme actually has")
     ap.add_argument("--target-only", action="store_true",
                     help="fetch just the named target, without its programme's reference "
                          "and background pointings. The reference pointing is the RDI "
@@ -282,7 +328,8 @@ def main():
         print(f"\nCoronagraphy of {a.find!r}:")
         find(a.find, public_only=pub)
     for name in a.targets:
-        fetch(name, a.outdir, a.download, target_only=a.target_only)
+        fetch(name, a.outdir, a.download, products=tuple(a.products),
+              target_only=a.target_only)
     if not (a.count or a.miri or a.find or a.targets):
         ap.print_help()
 
