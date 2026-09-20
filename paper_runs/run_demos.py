@@ -348,7 +348,7 @@ def run_E():
                         write_setup_files=False)
         return Runner(red, space, obj, samp, cfg, run_dir, log=lambda s: None)
 
-    run_benchmark(make_runner, modes=("tpe", "random", "grid"), seeds=(0, 1, 2, 3, 4),
+    run_benchmark(make_runner, modes=bench_modes(("tpe", "random", "grid")), seeds=(0, 1, 2, 3, 4),
                   n_iter=300, n_init=60, out_dir=os.path.join(OUT, "E_bench"), log=log)
 
 
@@ -373,7 +373,7 @@ def run_F():
                         save_eval_images=False, write_setup_files=False)
         return Runner(red, space, obj, samp, cfg, run_dir, log=lambda s: None)
 
-    run_benchmark(make_runner, modes=("tpe", "random"), seeds=(0, 1, 2, 3, 4),
+    run_benchmark(make_runner, modes=bench_modes(("tpe", "random")), seeds=(0, 1, 2, 3, 4),
                   n_iter=300, n_init=60, out_dir=os.path.join(OUT, "F_bench_highdim"), log=log)
 
 
@@ -387,6 +387,25 @@ def _forced_list(forced, ann_edges):
     if len(vals) != nann:
         raise ValueError(f"{len(vals)} forced contrast(s) for {nann} annuli: give one each")
     return vals
+
+
+def bench_modes(default):
+    """The benchmark arms to run, overridable with ``$BENCH_MODES``.
+
+    One arm at a time is what a re-run needs.  ``run_benchmark`` skips finished slots and
+    resumes check-pointed ones -- right for relaunching after an interruption, and exactly
+    wrong when one arm has to be recomputed because its sampler changed.  Retire that arm
+    first (``scripts/supersede_bench_mode.py``), then name it here, and the other arms keep
+    their tag and stay comparable instead of being recomputed for nothing.
+    """
+    env = os.environ.get("BENCH_MODES", "").replace(",", " ").split()
+    if not env:
+        return tuple(default)
+    bad = [m for m in env if m not in default]
+    if bad:
+        raise SystemExit(f"BENCH_MODES={bad} not in this stage's arms {tuple(default)}")
+    print(f"  (BENCH_MODES={' '.join(env)}: running {len(env)} of {len(default)} arms)")
+    return tuple(env)
 
 
 def _bench_hi(tag, groups, modes, k_max, max_drop, defaults, forced, ann_edges, out, seeds=range(8),
@@ -445,7 +464,7 @@ def _bench_hi(tag, groups, modes, k_max, max_drop, defaults, forced, ann_edges, 
     tag = open(tag_file).read().strip() if os.path.exists(tag_file) else None
     if tag:
         log(f"resuming batch {tag} in {out}")
-    run_benchmark(make_runner, modes=modes, seeds=tuple(seeds), n_iter=n_iter, n_init=n_init,
+    run_benchmark(make_runner, modes=bench_modes(modes), seeds=tuple(seeds), n_iter=n_iter, n_init=n_init,
                   bench_tag=tag, out_dir=d, log=log)
 
 
