@@ -75,6 +75,18 @@ def test_default_azimuths_follow_the_boundaries_they_are_given():
     assert on_axis.min() > 1.0, "the grid is still pinned to the detector axis"
 
 
+def test_default_separations_reach_the_edge_of_the_field():
+    """A grid that stops short is worse than a coarse one: the interpolator clamps, so a
+    map sampled to 3 arcsec reports the 3 arcsec throughput across a 24 arcsec field."""
+    for f in ("F1065C", "F1140C", "F1550C"):
+        s = miri.default_separations(f)
+        assert s[0] <= 0.35 and s[-1] >= 10.0
+        assert np.all(np.diff(s) > 0)
+        # geometric: fine where the throughput climbs, coarse on the plateau
+        assert np.diff(s)[0] < 0.2 and np.diff(s)[-1] > 1.5
+    assert miri.default_separations("F2300C")[-1] > miri.default_separations("F1065C")[-1]
+
+
 def test_throughput_interpolates_and_wraps_across_the_seam():
     g = synthetic_map()
     f = miri.throughput_map_fn(g)

@@ -21,25 +21,25 @@ The minima mark the quadrant boundaries and the map repeats under a 180 degree r
 to three decimals, which is the symmetry the mask actually has.  A factor of two to four
 at constant separation.
 
-The boundaries are NOT on the detector axes.  Scanning 2 degree steps at 2 arcsec puts
-the minimum at az = -4 on one axis and az = +86 on the other -- the mask is rotated by
-four to five degrees, the same amount on both, so this is the mask's mounting angle and
-not noise.  Masking the dead zone by assuming it runs along detector rows and columns
-would therefore mask the wrong pixels: at 2 arcsec a 4.5 degree error is about 1.5
-pixels, enough to leave the true dead zone in the data and throw away good pixels beside
-it.  Nothing here assumes where the boundaries are; :func:`quadrant_mask` thresholds the
-measured map, so it finds whatever rotation the instrument model carries.
-
-``klip_tpe.stpsf_psf.offaxis_grid`` returns
-``transmission`` as a function of separation alone, and ``throughput_fn`` hands back
-``f(rho)``; on a 4QPM that model does not merely lose precision, it is systematically
-wrong in a way that tracks position angle -- a companion sitting near a quadrant boundary
-is reported up to three times fainter than it is, and one sitting between boundaries too
-bright.  A contrast curve built that way is an azimuthal average of two different things.
+``klip_tpe.stpsf_psf.offaxis_grid`` returns ``transmission`` as a function of separation
+alone, and ``throughput_fn`` hands back ``f(rho)``.  On a 4QPM that model does not merely
+lose precision, it is systematically wrong in a way that tracks position angle -- a
+companion sitting near a quadrant boundary is reported up to three times fainter than it
+is, and one sitting between boundaries too bright.  A contrast curve built that way is an
+azimuthal average of two different things.
 
 So this module carries its own two-dimensional throughput map, sampled on an
-(separation, detector azimuth) grid and cached like the radial grids are.  Two further
+(separation, detector azimuth) grid and cached like the radial grids are.  Three further
 consequences follow from the same geometry and are handled here:
+
+* **The boundaries are not where they look.**  Scanning in 2 degree steps at 2 arcsec puts
+  the minimum at az = -4 on one axis and az = +86 on the other: the mask is rotated by
+  four to five degrees, the same on both, so this is its mounting angle and not noise.
+  Masking the dead zone along detector rows and columns would be off by about 1.5 pixels
+  at 2 arcsec -- leaving the real dead zone in the data and discarding good pixels beside
+  it.  Nothing here assumes where the boundaries are: :func:`locate_boundaries` measures
+  them and :func:`quadrant_mask` thresholds the measured map, so both follow whatever
+  rotation the instrument model carries.
 
 * **The boundaries are not usable.**  Where the mask has taken most of the flux the
   photometry is unreliable and the stamp is distorted, not merely attenuated.
@@ -80,6 +80,7 @@ from ..stpsf_psf import (_cache_path, _ee_radius, _instrument, _key, _odd, cache
                          have_stpsf, offaxis_grid)
 
 __all__ = ["MODES", "DIAMETER_M", "mode_for_filter", "pixelscale", "throughput_map",
+           "default_azimuths", "default_separations", "locate_boundaries",
            "throughput_map_fn", "quadrant_mask", "library", "load_miri", "MIRILibraryPSF"]
 
 DIAMETER_M = 6.5
@@ -153,6 +154,23 @@ def default_azimuths(boundaries: Sequence[float] = (0.0, 90.0, 180.0, 270.0)) ->
     return np.array(sorted(az), float)
 
 
+def default_separations(filter: str = "F1065C") -> np.ndarray:
+    """Separations for :func:`throughput_map`, out to the edge of the coronagraphic field.
+
+    Geometric rather than uniform.  The throughput climbs steeply over the first arcsecond
+    and is flat past a few, and the field is 24 arcsec across for the 4QPMs and 30 for the
+    Lyot -- so a uniform ladder fine enough for the inner region costs hundreds of PSFs to
+    describe a plateau.  A grid that stops short is worse than a coarse one: the
+    interpolator clamps outside its range, so a map sampled to 3 arcsec silently reports
+    the 3 arcsec throughput for every source beyond it, across a field that goes four times
+    further.
+    """
+    m = mode_for_filter(filter)
+    r_max = 0.45 * float(m["fov_as"])                     # corner-to-corner is further
+    n = 12
+    return np.round(np.geomspace(0.3, r_max, n), 3)
+
+
 def locate_boundaries(inst, rho_as: float, fov: float, oversample: int, nlambda: int,
                       rap_px: float, coarse_step: float = 15.0,
                       log: Callable[[str], None] = print) -> np.ndarray:
@@ -213,7 +231,7 @@ def throughput_map(filter: str = "F1065C", seps_as: Optional[Sequence[float]] = 
     """
     m = mode_for_filter(filter)
     seps = np.asarray(list(seps_as) if seps_as is not None else
-                      np.arange(0.2, 3.01, 0.2), float)
+                      default_separations(m["filter"]), float)
     seps = np.sort(seps[np.isfinite(seps) & (seps > 0)])
     if seps.size < 2:
         raise ValueError("throughput_map needs at least two separations")
