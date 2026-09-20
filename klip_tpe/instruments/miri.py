@@ -413,11 +413,15 @@ class MIRILibraryPSF(LibraryPSF):
     """
 
     name = "miri_library"
+    azimuth_dependent = True            # inject_sources evaluates throughput per frame
     _warned = False
 
     def __init__(self, *a, thru2d: Optional[Callable[[Any, Any], Any]] = None, **kw):
         super().__init__(*a, **kw)
         self._thru2d = thru2d
+        # A map is what makes this model position-dependent; without one it is an ordinary
+        # radial library and should not pay for the per-frame path.
+        self.azimuth_dependent = thru2d is not None
 
     def throughput(self, rho_as: float, az_deg: Optional[float] = None) -> float:
         if self._thru2d is None:
@@ -431,9 +435,21 @@ class MIRILibraryPSF(LibraryPSF):
                     "the azimuthal median returned here is not a substitute for the real "
                     "value. Pass the source's detector azimuth.", RuntimeWarning, stacklevel=2)
                 MIRILibraryPSF._warned = True
-            az = np.asarray(self._az_grid, float)
-            return float(np.median(self._thru2d(np.full(az.shape, float(rho_as)), az)))
+            return self.typical_throughput(rho_as)
         return float(self._thru2d(float(rho_as), float(az_deg)))
+
+    def typical_throughput(self, rho_as: float) -> float:
+        """The azimuthal median, without the warning.
+
+        For callers that need a scale rather than a value -- the float32 headroom check
+        wants to know whether an injection will survive being added to the cube, which is
+        an order-of-magnitude question.  Making that check warn on every injection would
+        train the warning out of anyone's attention, which is the opposite of the point.
+        """
+        if self._thru2d is None:
+            return float(super().throughput(rho_as))
+        az = np.asarray(self._az_grid, float)
+        return float(np.median(self._thru2d(np.full(az.shape, float(rho_as)), az)))
 
     @property
     def _az_grid(self) -> np.ndarray:

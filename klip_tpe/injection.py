@@ -24,7 +24,25 @@ from scipy import ndimage
 from .metrics import Source
 
 __all__ = ["InjectionModel", "GaussianPSF", "TemplatePSF", "AiryPSF", "FramePSF", "LibraryPSF", "inject_sources",
-           "shift_bilinear", "add_stamp"]
+           "shift_bilinear", "add_stamp", "takes_azimuth"]
+
+
+def takes_azimuth(model) -> bool:
+    """True when this model's throughput depends on azimuth as well as separation.
+
+    Read from the class attribute ``azimuth_dependent`` rather than inferred from the
+    signature of ``throughput``.  Every model in this package accepts the ``az_deg``
+    argument, because a uniform signature is worth having, but almost none of them look
+    at it -- so a signature test answers "does this model tolerate an azimuth", which is
+    true everywhere and therefore useless, rather than "does this model need one".
+
+    A model written outside this package that overrides ``throughput`` to use an azimuth
+    must set ``azimuth_dependent = True`` to be called with one.  That is the safe
+    default: a position-dependent model treated as radial is a visible factor-of-a-few
+    error in its own contrast curve, while a radial model driven down the per-frame path
+    would silently pay for it on every injection of every evaluation.
+    """
+    return bool(getattr(model, "azimuth_dependent", False))
 
 
 def shift_bilinear(img: np.ndarray, dx: float, dy: float) -> np.ndarray:
@@ -68,6 +86,7 @@ class InjectionModel:
     flux_unit: float = 1.0
     refpa_deg: Optional[float] = None
     per_frame: bool = False          # True -> inject_sources calls frame_stamp(j, rho) for every frame j
+    azimuth_dependent: bool = False  # True -> throughput() is evaluated per frame, with that frame's azimuth
     name = "injection_model"
 
     def stamp(self, rho_as: float):  # pragma: no cover
@@ -79,8 +98,23 @@ class InjectionModel:
         normalisation (so contrast tracks transparency / Strehl frame by frame)."""
         raise NotImplementedError
 
-    def throughput(self, rho_as: float) -> float:
+    def throughput(self, rho_as: float, az_deg: Optional[float] = None) -> float:
+        """Fraction of a point source's flux that survives the coronagraph at ``rho_as``.
+
+        ``az_deg`` is the source's azimuth in the DETECTOR frame.  Most coronagraphs are
+        round and ignore it; a four-quadrant phase mask does not, and on MIRI the
+        throughput varies by a factor of two to four around a circle of constant
+        separation (see :mod:`klip_tpe.instruments.miri`).  A model that uses it declares
+        so by accepting the argument, which :func:`takes_azimuth` detects, so a model
+        written before this argument existed is still called the old way.
+        """
         return 1.0
+
+    def typical_throughput(self, rho_as: float) -> float:
+        """A representative throughput at ``rho_as``, for diagnostics that need a scale
+        rather than a value -- and that must not warn about the azimuth they cannot
+        supply.  Position-dependent models override this with an azimuthal average."""
+        return float(self.throughput(rho_as))
 
     def matched_filter_kernel(self, rho_as: float, fwhm: float):
         """Optional measured matched filter for :class:`~klip_tpe.metrics.MawetPeakSNR`;
@@ -142,7 +176,7 @@ class TemplatePSF(InjectionModel):
     def stamp(self, rho_as: float):
         return self._stamp, self._center, True
 
-    def throughput(self, rho_as: float) -> float:
+    def throughput(self, rho_as: float, az_deg: Optional[float] = None) -> float:
         return 1.0 if self._thru is None else float(self._thru(rho_as))
 
 
@@ -294,7 +328,7 @@ class FramePSF(InjectionModel):
             return self._stamps[j], self._center, float(self.frame_flux[j])
         return self._median_stamp, self._center, float(self.flux_unit)
 
-    def throughput(self, rho_as: float) -> float:
+    def throughput(self, rho_as: float, az_deg: Optional[float] = None) -> float:
         return 1.0 if self._thru is None else float(self._thru(rho_as))
 
     def matched_filter_kernel(self, rho_as: float, fwhm: float):
@@ -343,7 +377,7 @@ class LibraryPSF(InjectionModel):
             st = st / s
         return st, self.center, True
 
-    def throughput(self, rho_as: float) -> float:
+    def throughput(self, rho_as: float, az_deg: Optional[float] = None) -> float:
         return 1.0 if self._thru is None else float(self._thru(rho_as))
 
     def matched_filter_kernel(self, rho_as: float, fwhm: float):
@@ -388,7 +422,7 @@ def _check_float32_headroom(cube: np.ndarray, sources: Sequence[Source], model: 
                 continue
         except Exception:                                  # the real error comes later
             continue
-        amp = abs(s.contrast) * m.flux_unit * model.throughput(s.rho) * float(np.nanmax(st))
+        amp = abs(s.contrast) * m.flux_unit * model.typical_throughput(s.rho) * float(np.nanmax(st))
         if amp < 32 * quantum:
             warnings.warn(
                 f"injection at rho={s.rho:.3f}\" contrast={s.contrast:.3e} peaks at "
@@ -414,6 +448,12 @@ def inject_sources(cube: np.ndarray, angles: np.ndarray, sources: Sequence[Sourc
     parang`` (``angle_convention='pa'``) or ``az = theta - parang`` (``'math'``).
     Anisotropic models (``refpa_deg`` set) have their stamp rotated CCW by
     ``az - refpa`` first.
+
+    When the model's throughput depends on azimuth as well as separation
+    (:func:`takes_azimuth`), it is evaluated per frame at that frame's ``az``, because the
+    mask is fixed to the detector while the field rotates past it: a companion at one sky
+    position angle is attenuated differently in every frame of a roll sequence.  For a
+    round occulter the throughput is constant and is computed once.
     """
     out = np.array(cube, dtype=np.float32, copy=copy)
     n, ny, nx = out.shape
@@ -435,11 +475,16 @@ def inject_sources(cube: np.ndarray, angles: np.ndarray, sources: Sequence[Sourc
                     "annulus, not just the known companion -- or pass fallback=.")
             st, sc, ok = fallback.stamp(s.rho)
             m = fallback
-        amp = s.contrast * m.flux_unit * model.throughput(s.rho)
-        base = np.asarray(st, float) * amp
+        st = np.asarray(st, float)
         r_px = s.rho / pxscale
         per_frame = bool(getattr(model, "per_frame", False)) and ok
-        thru = model.throughput(s.rho)
+        # A position-dependent coronagraph attenuates a source by a different factor in
+        # every frame: the mask is fixed to the detector and the field rotates past it, so
+        # a companion at one sky PA crosses the quadrant boundaries as the telescope rolls.
+        # Hoisting the throughput out of this loop is only correct for a round occulter.
+        az_aware = takes_azimuth(model)
+        thru = None if az_aware else float(model.throughput(s.rho))
+        base = None if (az_aware or per_frame) else st * (s.contrast * m.flux_unit * thru)
         for j in range(n):
             if angle_convention == "pa":
                 az = s.theta - truenorth - 270.0 - angles[j]
@@ -447,12 +492,16 @@ def inject_sources(cube: np.ndarray, angles: np.ndarray, sources: Sequence[Sourc
                 az = s.theta - angles[j]
             azr = np.deg2rad(az)
             xs, ys = center[0] + r_px * np.cos(azr), center[1] + r_px * np.sin(azr)
+            t_j = float(model.throughput(s.rho, az)) if az_aware else thru
             if per_frame:
                 stj, sc, fu_j = model.frame_stamp(j, s.rho)
-                base = np.asarray(stj, float) * (s.contrast * fu_j * thru)
-            stamp = base
+                stamp = np.asarray(stj, float) * (s.contrast * fu_j * t_j)
+            elif az_aware:
+                stamp = st * (s.contrast * m.flux_unit * t_j)
+            else:
+                stamp = base
             if m.refpa_deg is not None:
                 from .klip import rotate_ccw
-                stamp = rotate_ccw(base, az - m.refpa_deg, cval=0.0)
+                stamp = rotate_ccw(stamp, az - m.refpa_deg, cval=0.0)
             add_stamp(out[j], stamp, sc, xs, ys)
     return out

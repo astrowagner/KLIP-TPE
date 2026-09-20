@@ -184,6 +184,76 @@ def test_library_psf_without_a_map_behaves_like_the_base_class():
     assert m.throughput(0.7) == 1.0 and m.throughput(0.7, 12.0) == 1.0
 
 
+def test_the_injector_attenuates_each_frame_by_its_own_throughput():
+    """The mask is fixed to the detector and the field rotates past it.
+
+    A companion at one sky position angle therefore crosses the quadrant boundaries as the
+    telescope rolls, so its attenuation differs frame to frame.  Hoisting the throughput
+    out of the frame loop -- which is what the injector did before the azimuth existed --
+    injects a source of constant brightness through a mask that is not, and the search
+    then measures a throughput correction that no real companion experiences.
+    """
+    from klip_tpe.injection import Source, inject_sources, takes_azimuth
+    g = synthetic_map(width=25.0)                       # wide boundary: rolls stay inside it
+    sl = np.zeros((3, 11, 11))
+    sl[:, 5, 5] = 1.0
+    m = miri.MIRILibraryPSF(sl, [0.5, 1.0, 1.5], center=(5.0, 5.0), ee_radius_px=3.0,
+                            flux_unit=1.0, thru2d=miri.throughput_map_fn(g))
+    assert takes_azimuth(m), "the injector will not pass an azimuth to this model"
+    cube = np.zeros((3, 61, 61), np.float32)
+    # three rolls 20 degrees apart: the source sweeps from a boundary into a quadrant
+    angles = np.array([0.0, 20.0, 40.0])
+    out = inject_sources(cube, angles, [Source(rho=1.0, theta=270.0, contrast=1.0)], m,
+                         pxscale=0.109655, truenorth=0.0)
+    # the SUM, not the peak: add_stamp places the stamp with a bilinear sub-pixel shift,
+    # which spreads a delta differently at every azimuth, so the peak is not proportional
+    # to the injected amplitude and the sum is
+    flux = np.array([float(f.sum()) for f in out])
+    assert np.all(flux > 0), "nothing was injected"
+    assert flux.max() / flux.min() > 1.5, (
+        f"every frame got the same amplitude {flux} -- the azimuth is not reaching the "
+        f"throughput, so the 2-D map is decorative")
+    # and the frame-by-frame amplitudes are the map's own values at those azimuths
+    az = 270.0 - 0.0 - 270.0 - angles
+    np.testing.assert_allclose(flux / flux[0],
+                               [m.throughput(1.0, a) / m.throughput(1.0, az[0]) for a in az],
+                               rtol=2e-3)
+
+
+def test_a_round_occulter_still_gets_one_throughput_for_the_sequence():
+    """The per-frame path must not change what a radial model does."""
+    from klip_tpe.injection import LibraryPSF, Source, inject_sources, takes_azimuth
+    sl = np.zeros((2, 11, 11))
+    sl[:, 5, 5] = 1.0
+    m = LibraryPSF(sl, [0.5, 1.5], center=(5.0, 5.0), ee_radius_px=3.0,
+                   throughput_fn=lambda r: 0.5, flux_unit=1.0)
+    assert not takes_azimuth(m)
+    out = inject_sources(np.zeros((3, 61, 61), np.float32), np.array([0.0, 20.0, 40.0]),
+                         [Source(rho=1.0, theta=270.0, contrast=1.0)], m, pxscale=0.109655)
+    flux = np.array([float(f.sum()) for f in out])
+    np.testing.assert_allclose(flux, flux[0], rtol=1e-6)
+    # and a MIRI model built without a map is a radial model, so it takes the same path
+    assert not takes_azimuth(miri.MIRILibraryPSF(sl, [0.5, 1.5], center=(5.0, 5.0),
+                                                 ee_radius_px=3.0))
+
+
+def test_typical_throughput_does_not_warn():
+    """The float32 headroom check runs on every injection and needs a scale, not a value.
+    Making it warn each time would train the warning out of anyone's attention."""
+    import warnings
+    g = synthetic_map()
+    sl = np.zeros((2, 9, 9))
+    sl[:, 4, 4] = 1.0
+    m = miri.MIRILibraryPSF(sl, [0.5, 1.5], center=(4.0, 4.0), ee_radius_px=3.0,
+                            thru2d=miri.throughput_map_fn(g))
+    miri.MIRILibraryPSF._warned = False
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        t = m.typical_throughput(1.0)
+    assert 0.15 <= t <= 0.95
+    assert not miri.MIRILibraryPSF._warned
+
+
 def test_load_miri_masks_the_dead_zones_with_nan_not_zero():
     """Zero is a measurement of zero and pulls every statistic over the annulus towards
     it; the KLIP engine already treats NaN as missing."""

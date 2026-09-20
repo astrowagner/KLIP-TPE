@@ -51,8 +51,9 @@ TARGETS = {
     # on disk from the same program, so the program ID is the safe way in if the name
     # resolver disagrees about this one.
     "rxj0534": dict(proposal_id="6122", target_name="RX*J0534*"),
-    # AF Lep b -- run --find "AF Lep" first; several programs have observed it.
-    "aflep":   dict(target_name="AF*LEP*"),
+    # AF Lep b -- GO 4558, the only public program with coronagraphy of it: NIRCam
+    # F200W + F356W + F444W behind MASKRND (confirmed with --find "AF Lep", 2026-09-20).
+    "aflep":   dict(proposal_id="4558", target_name="AF*LEP*"),
     # already on disk, here for completeness / re-fetch
     "mwc758":  dict(proposal_id="4014"),
 }
