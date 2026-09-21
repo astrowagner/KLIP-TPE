@@ -1,15 +1,57 @@
 # Changelog
 
+## Unreleased — 2026-09-21 (later)
+- **`load_calints` returned a cube that was 100% NaN, and said nothing.**  This is what actually
+  killed the HIP 65426 F1140C run (GO 1386).  A MIRI MASK1140 subarray is 27.6% DQ `DO_NOT_USE`
+  — the unilluminated border outside the coronagraph field — and that region is far too wide for
+  `fill_dq_neighbours` to close from its rim, so 13.3% of each frame is still NaN when the
+  alignment runs.  Both sub-pixel resamplings in `load_calints` (the cross-correlation shift and
+  the crop's fractional offset) went through `ndimage.shift(..., order=3)`, whose spline
+  prefilter is a *recursive* IIR filter: a single non-finite pixel propagates to every pixel of
+  the output.  Measured on a real frame: 13.3% NaN in, **99.2%** NaN out (`order=1` gives 13.3%).
+  Two such calls took the returned cube to 100% NaN, and the failure surfaced two steps
+  downstream in the reducer as "every frame was dropped as empty" — which reads like a masking
+  problem and is not one.  New `shift_keeping_gaps` zero-fills the gaps for the interpolation and
+  runs the same interpolator over the finite-ness mask, which is a partition of unity: pixels
+  where it does not come back at exactly 1 are the ones that would be carrying invented values,
+  and those come back NaN.  The mask is extended with `mode='nearest'` so the frame border — a
+  boundary condition, not a gap — is not flagged, and a frame with no gaps returns
+  `ndimage.shift` unchanged, so NIRCam results are bit-for-bit as before.  The crop then closes
+  what the two splines widened.  Verified end to end on the real data: cube 0.00% non-finite,
+  reduced image 100% finite inside the search annulus.
+- **The frame registration reported the corner of its search box as a measurement.**  `_xs` took
+  `np.fft.rfft2` of a frame that could contain NaN — which makes the whole transform NaN, and
+  `np.argmax` of an all-NaN array returns 0, decoding to a confident `(-6, -6)` px shift for
+  every frame of every MIRI cube.  Even with the gaps zero-filled, `argmax` returns *something*
+  when there is no peak inside the box, and on HIP 65426 F1140C the peak sits 100+ px away with
+  zero lag a local *minimum*: the 41 integrations of one exposure have no relative offset to
+  measure.  `_xs` now subtracts the median and zero-fills before the FFT, and returns
+  `(0, 0, ok=False)` when the peak is on the box boundary or not positive; those frames are left
+  **unshifted** rather than moved by the highest corner, and the count is logged.  On the real
+  cube 37 of 41 frames register (interior, positive) and 4 do not.
+- **The DQ-fraction warning counted the wrong pixels.**  It reported the flagged fraction of the
+  whole subarray — 27% for MIRI — when the returned stamp is 81×81 and 44 of its 6,561 pixels
+  (0.7%) were flagged.  Alarming about pixels nothing downstream sees sent one debugging session
+  after the wrong thing entirely.  The log now gives both, the warning keys off the stamp, and
+  `info` gains `repaired_fraction_crop` and `nonfinite_fraction`.
+- **`run_miri.py --check`**: the cube's non-finite fraction and the filter width are now printed
+  *before* the reduction rather than after it (a diagnostic printed after the step that fails
+  never prints — that is why this took two runs to see), a non-finite cube plus a high-pass is
+  refused with the reason, and the check no longer passes a reduction whose search annulus is
+  empty.  It measures finite pixels *inside the annulus*, not over the frame: with one roll and
+  no references the old check reported "finite 0.0%" and then said "check passed".
+
 ## Unreleased — 2026-09-21
-- **The MIRI driver killed its own data.**  `run_miri.py` NaN'd the 4QPM dead zones into the
-  science cube (`miri.apply_quadrant_mask`) before the reducer.  The reducer high-passes at
-  `nan_aware=False`, which is `ndimage.uniform_filter` — a running-sum filter, so a NaN poisons
-  everything *downstream of it along each axis*, not a box the filter's width: one NaN near the
-  corner of an 81×81 frame takes 73% of it, and the MIRI dead zones are lines through the star
-  reaching all four frame edges, so they took 100%.  `np.nansum` of an all-NaN frame is 0.0,
-  `bin_frames` drops zero-sum bins, and the first real F1140C run (GO 1386, 2 science + 16
-  reference files) died at its first evaluation.  No crop fixes it — the dead zones cross the
-  middle of the array.  The pixels are attenuated measurements, not missing ones, so they now
+- **The MIRI driver NaN'd the dead zones into the cube it was about to high-pass.**  Found while
+  chasing the F1140C crash below, and it was *not* the cause of it — but it is the same mistake
+  and would have caused it on its own.  `run_miri.py` set the 4QPM dead zones to NaN
+  (`miri.apply_quadrant_mask`) before the reducer, which high-passes at `nan_aware=False`; that
+  is `ndimage.uniform_filter`, a running-sum filter, so a NaN poisons everything *downstream of
+  it along each axis* rather than a box the filter's width — one NaN near the corner of an 81×81
+  frame takes 73% of it, and the dead zones are lines through the star reaching all four frame
+  edges.  `np.nansum` of an all-NaN frame is 0.0, `bin_frames` drops zero-sum bins, and the
+  reduction is left with no frames.  No crop fixes it — the dead zones cross the middle of the
+  array.  The pixels are attenuated measurements, not missing ones, so they now
   stay in the cube and in the KLIP basis and are excluded from the *statistic* instead:
   `miri.dead_zone_pixel_mask` carries the detector geometry through every roll into the
   de-rotated frame and goes in as `MawetPeakSNR.pixel_mask`, paired with the `forbidden_pa`

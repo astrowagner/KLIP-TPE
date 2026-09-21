@@ -33,9 +33,38 @@ from ..reducer import Dataset, PartitionedReducer
 from .pyklip import PyKLIPReducer, dataset_from_pyklip
 
 __all__ = ["load_spaceklip", "load_calints", "make_reducer", "read_jwst_files", "JWST_DIAM",
-           "fill_dq_neighbours", "sigma_clip_repair"]
+           "fill_dq_neighbours", "sigma_clip_repair", "shift_keeping_gaps"]
 
 JWST_DIAM = 6.5   # m (effective; lambda/D for the angsep unit and the default FWHM)
+
+
+def shift_keeping_gaps(im: np.ndarray, shift, order: int = 3) -> np.ndarray:
+    """``ndimage.shift`` that one NaN cannot take the whole array from.
+
+    At ``order >= 2`` ``ndimage.shift`` prefilters with a *recursive* (IIR) spline filter, so
+    a single non-finite pixel propagates to every pixel of the output -- not to a
+    neighbourhood, to all of it.  Measured on a MIRI MASK1140 ``calints`` frame, whose
+    unilluminated border is legitimately 13% NaN after bad-pixel repair: ``order=3`` returns
+    **99.2%** NaN, ``order=1`` returns 13.3%.  That took the whole HIP 65426 F1140C cube to
+    100% NaN inside ``load_calints``, and the failure surfaced two steps downstream as "every
+    frame was dropped as empty" in the reducer.
+
+    Here the gaps are zero-filled for the interpolation and the same interpolator is run over
+    the finite-ness mask, which is a partition of unity: it comes back at exactly 1 wherever
+    the spline's support lay entirely in good data, and away from 1 exactly where the output
+    would be carrying invented values.  Those come back NaN.  The mask is extended with
+    ``mode='nearest'`` so the *frame border* -- which is a boundary condition, not a gap --
+    is not flagged, and a frame with no gaps at all returns ``ndimage.shift`` unchanged.
+    """
+    from scipy import ndimage
+    im = np.asarray(im, float)
+    bad = ~np.isfinite(im)
+    if not bad.any():
+        return ndimage.shift(im, shift, order=order)
+    out = ndimage.shift(np.where(bad, 0.0, im), shift, order=order)
+    w = ndimage.shift((~bad).astype(float), shift, order=order, mode="nearest")
+    out[np.abs(w - 1.0) > 1e-3] = np.nan
+    return out
 
 
 def fill_dq_neighbours(im: np.ndarray, maxit: int = 20) -> Tuple[np.ndarray, int]:
@@ -300,7 +329,6 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
     programme, which is why it is off by default.
     """
     from astropy.io import fits
-    from scipy import ndimage
 
     files = sorted(files)
     if not files:
@@ -444,17 +472,35 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
         return out
 
     def _xs(im, ref_, search=6):
-        cc = np.fft.fftshift(np.fft.irfft2(np.fft.rfft2(im) * np.conj(np.fft.rfft2(ref_)), s=im.shape))
+        """Sub-pixel offset of ``im`` from ``ref_``, as ``(dx, dy, ok)``.
+
+        ``ok=False`` means *no offset was measured* and the caller must not shift.  Two ways
+        this used to return a confident wrong number instead:
+
+        * ``np.fft.rfft2`` of an array holding one NaN is entirely NaN and ``np.argmax`` of an
+          all-NaN array returns 0, so every frame of a MIRI cube came back as a clean
+          ``(-search, -search)`` -- a six-pixel shift measured from nothing.  Fixed by
+          removing the median and zero-filling the gaps, which then contribute no correlation.
+        * when the correlation has no peak inside the box, ``argmax`` still returns something,
+          and it is whichever corner is highest.  On HIP 65426 F1140C the peak sits 100+ px
+          away and zero lag is a *minimum*: the 41 integrations of one exposure have nothing
+          to register against each other, and the answer was six pixels in a corner.  A real
+          peak is interior and positive, so anything else is now reported as unmeasured.
+        """
+        a = np.nan_to_num(np.asarray(im, float) - np.nanmedian(im))
+        b = np.nan_to_num(np.asarray(ref_, float) - np.nanmedian(ref_))
+        cc = np.fft.fftshift(np.fft.irfft2(np.fft.rfft2(a) * np.conj(np.fft.rfft2(b)), s=a.shape))
         c = np.array(im.shape) // 2
         sub = cc[c[0] - search:c[0] + search + 1, c[1] - search:c[1] + search + 1]
         k = np.unravel_index(np.argmax(sub), sub.shape)
+        edge = k[0] in (0, sub.shape[0] - 1) or k[1] in (0, sub.shape[1] - 1)
+        if edge or not np.isfinite(sub[k]) or sub[k] <= 0:
+            return 0.0, 0.0, False
         dy, dx = k[0] - search, k[1] - search
         p = lambda a, b, c_: 0.0 if (a - 2 * b + c_) == 0 else 0.5 * (a - c_) / (a - 2 * b + c_)
-        if 0 < k[0] < sub.shape[0] - 1:
-            dy += p(sub[k[0] - 1, k[1]], sub[k[0], k[1]], sub[k[0] + 1, k[1]])
-        if 0 < k[1] < sub.shape[1] - 1:
-            dx += p(sub[k[0], k[1] - 1], sub[k[0], k[1]], sub[k[0], k[1] + 1])
-        return dx, dy
+        dy += p(sub[k[0] - 1, k[1]], sub[k[0], k[1]], sub[k[0] + 1, k[1]])
+        dx += p(sub[k[0], k[1] - 1], sub[k[0], k[1]], sub[k[0], k[1] + 1])
+        return dx, dy, True
 
     S, pas, prov_s = read(sci, "SCI")
     if ref:
@@ -463,6 +509,12 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
         R, prov_r = np.zeros((0,) + S.shape[1:]), []
     raw_s = np.array(S, np.float32) if keep_frames else None
     raw_r = np.array(R, np.float32) if keep_frames else None
+    # Where the gaps were BEFORE any repair, so the log can say how many of them are in the
+    # region actually returned.  A MIRI coronagraphic subarray is a quarter unilluminated and
+    # flagged; counting that against the 81x81 stamp around the star reports 27% where the
+    # stamp's own figure is under one per cent, which is alarm about the wrong pixels.
+    gaps0_s = ~np.isfinite(S)
+    gaps0_r = ~np.isfinite(R) if R.size else None
     if rmode != "none":
         S = _repair(S, prov_s)
         R = _repair(R, prov_r) if R.size else R
@@ -471,20 +523,39 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
             f"pixels per frame on top of the DQ ones -- that is the PSF being median-filtered, star and "
             f"companion alike (HIP 65426 b peaks at 7 instead of 19 MJy/sr).  Use repair='dq'.")
     if align:
-        a0 = np.median(S, axis=0)
+        with np.errstate(all="ignore"):
+            import warnings as _w
+            with _w.catch_warnings():
+                _w.simplefilter("ignore", RuntimeWarning)
+                a0 = np.nanmedian(S, axis=0)   # np.median over a cube with gaps is all-NaN
+        n_unmeasured = [0]
 
         def _shift_all(cube, prov):
             out = []
             for i, im in enumerate(cube):
-                dx, dy = _xs(im, a0)
+                dx, dy, ok = _xs(im, a0)
                 if prov is not None:
-                    prov[i]["dx"], prov[i]["dy"] = float(dx), float(dy)
-                out.append(ndimage.shift(im, (-dy, -dx), order=3))
+                    prov[i]["dx"], prov[i]["dy"], prov[i]["registered"] = \
+                        float(dx), float(dy), bool(ok)
+                if not ok:
+                    n_unmeasured[0] += 1
+                    out.append(np.asarray(im, float))      # unshifted, not shifted by junk
+                else:
+                    out.append(shift_keeping_gaps(im, (-dy, -dx), order=3))
             return np.array(out)
 
         S = _shift_all(S, prov_s)
         if R.size:
             R = _shift_all(R, prov_r)
+        nf = int(S.shape[0] + (R.shape[0] if R.size else 0))
+        if n_unmeasured[0]:
+            log(f"  calints: no cross-correlation offset could be measured for "
+                f"{n_unmeasured[0]} of {nf} frame(s) -- the peak was outside the +/-6 px "
+                f"search box or not a maximum -- and those frames were left UNSHIFTED rather "
+                f"than moved by the highest corner of the box. Integrations of a single "
+                f"exposure at a fixed pointing have no offset to measure, so this is expected "
+                f"for them; if you expected a dither, pass align=False and centre on "
+                f"star_center= instead of trusting this.")
 
     hdr = fits.getheader(sci[0], "SCI")
     px = float(np.sqrt(hdr["PIXAR_A2"]))
@@ -502,8 +573,16 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
             return cube
         fx, fy = cx - round(cx), cy - round(cy)
         x0, y0 = int(round(cx)) - H, int(round(cy)) - H
-        return np.array([ndimage.shift(im, (-fy, -fx), order=3)[y0:y0 + n, x0:x0 + n]
-                         for im in cube], np.float32)
+        out = np.array([shift_keeping_gaps(im, (-fy, -fx), order=3)[y0:y0 + n, x0:x0 + n]
+                        for im in cube], np.float32)
+        # Close what the interpolation invalidated.  Two sub-pixel splines have widened each
+        # gap by their own support, and the cube is the reducer's input: its high-pass runs
+        # at nan_aware=False over a running sum, so a NaN anywhere costs everything after it.
+        # The gaps that survive here are inside the crop and isolated, which is what
+        # fill_dq_neighbours exists for -- unlike the unilluminated border it could not close.
+        if rmode != "none":
+            out = np.array([fill_dq_neighbours(im)[0] for im in out], np.float32)
+        return out
 
     Sx, Rx = crop(S), crop(R)
     meta = {"pxscale": px, "wavelength_m": _wavelength_m(fits.getheader(sci[0])),
@@ -532,23 +611,40 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
     nrep = [p.get("n_repaired", 0) for p in prov_s + prov_r]
     npix = int(np.prod(S.shape[-2:])) if S.size else 0
     frac = (float(np.median(nrep)) / npix) if (nrep and npix) else 0.0
+    # The same census over the region that is actually returned.  This is the number that
+    # bears on the reduction: everything outside the stamp is thrown away a line later.
+    x0, y0 = int(round(cx)) - H, int(round(cy)) - H
+    gwin = [g[:, y0:y0 + n, x0:x0 + n] for g in (gaps0_s, gaps0_r) if g is not None and g.size]
+    ncrop = np.concatenate([g.sum(axis=(1, 2)) for g in gwin]) if gwin else np.zeros(0)
+    fcrop = float(np.median(ncrop)) / float(n * n) if ncrop.size else 0.0
+    left = float(np.mean(~np.isfinite(np.concatenate([c for c in (Sx, Rx) if c.size]))) ) \
+        if (Sx.size or Rx.size) else 0.0
     log(f"  calints: {len(sci)} science / {len(ref)} reference files -> {S.shape[0]} + "
         f"{R.shape[0]} frames, {n}x{n} px at {px*1e3:.2f} mas, rolls {info['rolls']}, "
         f"{info['bunit']!r}; repair={rmode!r}"
-        + (f" ({int(np.median(nrep))} px/frame, {100 * frac:.0f}% of the array)"
-           if nrep and rmode != "none" else ""))
-    # A quarter of a MIRI 4QPM subarray comes back DQ-flagged: HIP 65426 in MASK1140 is
-    # 17,729 of 64,512 pixels per frame.  Filling that from neighbours is not a small
-    # correction -- it is a large amount of smooth interpolated data entering the KLIP
-    # basis, where smooth and large is exactly what the leading components are made of.
-    # The number was already printed; what was missing was any sense of whether it is a
-    # lot, which needs the array size beside it.
-    if frac > 0.10 and rmode != "none":
-        log(f"  calints: that is {100 * frac:.0f}% of every frame replaced by an "
+        + (f" ({int(np.median(ncrop))} px/frame flagged inside the {n}x{n} stamp, "
+           f"{100 * fcrop:.1f}%; {int(np.median(nrep))} px/frame, {100 * frac:.0f}% over the "
+           f"whole subarray)" if nrep and rmode != "none" else ""))
+    # Two different numbers, and only the first bears on the reduction.  A quarter of a MIRI
+    # 4QPM subarray comes back DQ-flagged -- HIP 65426 in MASK1140 is 17,790 of 64,512 pixels
+    # per frame -- but that is the unilluminated border outside the coronagraph field, and 44
+    # of the 6,561 pixels of the returned stamp were flagged.  Warning on the subarray figure
+    # points at pixels nothing downstream ever sees.
+    if fcrop > 0.05 and rmode != "none":
+        log(f"  calints: that is {100 * fcrop:.0f}% of every returned frame replaced by an "
             f"interpolation of its neighbours. Those pixels carry no independent "
             f"information but do enter the KLIP basis; consider repair=False (the built-in "
             f"reducers treat NaN as missing) and check the result against this one.")
+    if left > 0:
+        why = ("you asked for repair='none'" if rmode == "none" else
+               "gaps too wide for fill_dq_neighbours to close -- the stamp may be running "
+               "off the illuminated area, so try a smaller half_px or pass star_center=")
+        log(f"  calints: {100 * left:.1f}% of the returned cube is non-finite ({why}). The "
+            f"reducers' high-pass runs over a running sum, so one gap costs every pixel "
+            f"after it along both axes and whole frames are then dropped as empty.")
     info["repaired_fraction"] = frac
+    info["repaired_fraction_crop"] = fcrop
+    info["nonfinite_fraction"] = left
     return dsets, info
 
 

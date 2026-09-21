@@ -199,11 +199,48 @@ def main(argv=None):
         if not list(dec.selected):
             raise SystemExit("the space decodes to NO selected partitions; reduce_config "
                              "would map over an empty list")
-        log(f"default high-pass filter width: {dec.params.get('filter', '?')} px")
+        # Everything that describes the INPUT goes before the reduction, because the
+        # reduction is what fails, and a diagnostic printed after it never prints.  That is
+        # how a 100%-NaN cube read as a masking bug for two runs.
+        filt = dec.params.get("filter", "?")
+        nan_frac = float(np.mean(~np.isfinite(np.asarray(list(dsets.values())[0].cube, float))))
+        log(f"default high-pass filter width: {filt} px")
+        log(f"non-finite pixels in the first partition's cube: {100 * nan_frac:.2f}%")
+        pm = getattr(obj.metric, "pixel_mask", None)
+        log("dead zones excluded from the noise estimate: "
+            + (f"{int(np.count_nonzero(pm))} px ({100 * np.mean(pm):.1f}% of the frame)"
+               if pm is not None else "NONE"))
+        if nan_frac > 0 and isinstance(filt, (int, float)) and filt > 1:
+            raise SystemExit(
+                f"{100 * nan_frac:.2f}% of the cube is non-finite and the default high-pass "
+                f"width is {filt} px. That filter runs over a running sum, so ONE gap costs "
+                f"every pixel after it along both axes -- one gap near a corner of an 81x81 "
+                f"frame takes three quarters of it -- and every frame is then dropped as "
+                f"empty. Fix the cube, not the filter: the loader's own log says how many "
+                f"pixels it could not close and why.")
         ev = red.reduce_config(dec, None, tag="check")
         img = np.asarray(ev.image if hasattr(ev, "image") else ev, float)
         model = red.reducers[list(dec.selected)[0]].model
-        log(f"default reduction ok: image {img.shape}, finite {100 * np.isfinite(img).mean():.1f}%")
+        # Finite WHERE IT MATTERS.  Most of the frame is outside the reduced zones and comes
+        # back NaN by design, so the whole-frame fraction says little; the objective is
+        # measured in the annulus, and a reduction that returns nothing there returns nothing.
+        ny, nx = img.shape[-2:]
+        yy, xx = np.mgrid[0:ny, 0:nx]
+        rr = np.hypot(xx - (nx - 1) / 2.0, yy - (ny - 1) / 2.0)
+        inann = (rr >= ann[0]) & (rr <= ann[1])
+        fin_ann = float(np.isfinite(img[inann]).mean())
+        log(f"default reduction: image {img.shape}, finite {100 * np.isfinite(img).mean():.1f}% "
+            f"of the frame, {100 * fin_ann:.1f}% inside the search annulus")
+        if fin_ann < 0.5:
+            raise SystemExit(
+                f"only {100 * fin_ann:.1f}% of the search annulus is finite after the default "
+                f"reduction, so the objective has almost nothing to measure. The usual cause "
+                f"is a partition with no usable references: KLIP needs frames separated by "
+                f"more than angsep at the outer radius, and a single roll reduced ADI-only "
+                f"has none. Check the '{len(dsets)} partition(s)' and mode lines above -- "
+                f"'pyklip ADI' where you expected 'ADI+RDI' means the reference files were "
+                f"not recognised (--target selects the science TARGPROP; everything else "
+                f"becomes the library).")
         log(f"injection model: {model.name}  azimuth_dependent="
             f"{getattr(model, 'azimuth_dependent', False)}")
         if m["kind"] == "4qpm" and not getattr(model, "azimuth_dependent", False):
@@ -211,16 +248,6 @@ def main(argv=None):
                 f"the injection model is {model.name!r} with a radial throughput, on a "
                 f"four-quadrant mask. Every contrast this run reports would be an azimuthal "
                 f"average of values differing by a factor of two to four.")
-        nan_frac = float(np.mean(~np.isfinite(np.asarray(list(dsets.values())[0].cube, float))))
-        log(f"non-finite pixels in the first partition's cube: {100 * nan_frac:.1f}%")
-        pm = getattr(obj.metric, "pixel_mask", None)
-        log("dead zones excluded from the noise estimate: "
-            + (f"{int(np.count_nonzero(pm))} px ({100 * np.mean(pm):.1f}% of the frame)"
-               if pm is not None else "NONE"))
-        if nan_frac > 0.25:
-            log(f"WARNING: {100 * nan_frac:.0f}% of the cube is NaN. A high-pass filter "
-                f"spreads NaN by its own width, so a search over filter widths will lose "
-                f"whole frames -- do not NaN the dead zones into the cube")
         log("check passed")
         return 0
 

@@ -278,14 +278,9 @@ def test_a_single_filter_set_still_needs_no_argument(tmp_path):
 
 
 def test_a_large_dq_fraction_is_called_out_not_just_counted(tmp_path):
-    """A quarter of a MIRI 4QPM subarray comes back DQ-flagged: HIP 65426 in MASK1140 is
-    17,729 of 64,512 pixels per frame.
-
-    The count was already printed; what was missing was any sense of whether it is a lot,
-    which needs the array size beside it.  Those pixels are a smooth interpolation of
-    their neighbours and carry no independent information, but they do enter the KLIP
-    basis -- where smooth and large is what the leading components are made of.
-    """
+    """Flagged pixels inside the returned stamp are a smooth interpolation of their
+    neighbours: no independent information, but they do enter the KLIP basis, where smooth
+    and large is what the leading components are made of."""
     ny = nx = 60
     many = tuple((y, x) for y in range(10, 40) for x in range(10, 40))   # 900 of 3600 = 25%
     f = [write(tmp_path / "s_calints.fits", "T", roll=0.0, ny=ny, nx=nx, dq_px=many, seed=1)]
@@ -293,8 +288,32 @@ def test_a_large_dq_fraction_is_called_out_not_just_counted(tmp_path):
     ds, info = load_calints(f, science_target="T", half_px=20, align=False,
                             partition="all", log=msgs.append)
     assert info["repaired_fraction"] == pytest.approx(0.25, abs=0.01)
-    assert any("% of the array" in m for m in msgs)
+    assert info["repaired_fraction_crop"] > 0.25            # the block is centred on the star
+    assert any("over the whole subarray" in m for m in msgs)
     assert any("no independent information" in m for m in msgs)
+
+
+def test_the_dq_warning_counts_the_stamp_not_the_subarray(tmp_path):
+    """The number that bears on the reduction is the one inside the stamp.
+
+    A MIRI coronagraphic subarray is about a quarter unilluminated and DQ-flagged, but that
+    is the region outside the coronagraph field: of HIP 65426 F1140C's 17,790 flagged pixels
+    per frame, 44 are inside the 81x81 stamp (0.7%).  Warning on the subarray figure -- 27%
+    of every frame replaced by an interpolation! -- points at pixels nothing downstream ever
+    sees, and it sent one real debugging session after the wrong thing entirely.
+    """
+    ny = nx = 60
+    rim = tuple((y, x) for y in range(ny) for x in range(nx)
+                if not (14 <= y < 46 and 14 <= x < 46))      # flagged OUTSIDE the stamp
+    f = [write(tmp_path / "s_calints.fits", "T", roll=0.0, ny=ny, nx=nx, dq_px=rim, seed=1)]
+    msgs = []
+    ds, info = load_calints(f, science_target="T", half_px=12, align=False,
+                            partition="all", log=msgs.append)
+    assert info["repaired_fraction"] > 0.20, "the subarray really is a quarter flagged"
+    assert info["repaired_fraction_crop"] == 0.0, "and none of it is in the stamp"
+    assert not any("no independent information" in m for m in msgs), \
+        "warned about pixels that are not in the returned data"
+    assert np.isfinite(np.asarray(ds["sci"].cube, float)).all()
 
 
 def test_a_small_dq_fraction_says_nothing_extra(tmp_path):
@@ -305,3 +324,76 @@ def test_a_small_dq_fraction_says_nothing_extra(tmp_path):
                             partition="all", log=msgs.append)
     assert info["repaired_fraction"] < 0.01
     assert not any("no independent information" in m for m in msgs)
+
+
+# ------------------------------------------------- the two bugs that killed a real MIRI run
+
+def test_a_gap_the_repair_cannot_close_does_not_take_the_whole_frame(tmp_path):
+    """The bug that killed the first HIP 65426 F1140C run, and it was nowhere near the
+    coronagraph.
+
+    A MIRI MASK1140 subarray is ~28% DQ-flagged -- the unilluminated border outside the
+    coronagraph field -- and that region is far too wide for ``fill_dq_neighbours`` to close
+    from its rim, so 13% of the frame is still NaN when the alignment runs.  ``ndimage.shift``
+    at ``order=3`` prefilters with a *recursive* spline filter, so those NaNs propagate to
+    **every** pixel: the frame went in 13% NaN and came out 99.2% NaN, ``load_calints``
+    returned a cube that was 100% NaN, and the run died two steps later in the reducer with
+    "every frame was dropped as empty".  Nothing in between said a word.
+    """
+    ny = nx = 60
+    rim = tuple((y, x) for y in range(ny) for x in range(nx)
+                if x < 14 or x >= 46)                        # a 14-px-wide unfillable border
+    f = [write(tmp_path / "s_calints.fits", "T", roll=0.0, ny=ny, nx=nx, dq_px=rim, seed=1)]
+    ds, info = load_calints(f, science_target="T", half_px=12, align=True, partition="all",
+                            log=lambda *_: None)
+    cube = np.asarray(ds["sci"].cube, float)
+    assert np.isfinite(cube).all(), \
+        f"{100 * np.mean(~np.isfinite(cube)):.0f}% of the returned cube is NaN"
+    assert info["nonfinite_fraction"] == 0.0
+    # and the frame is still the star, not a shifted smear of nothing
+    assert np.unravel_index(np.nanargmax(np.nanmedian(cube, axis=0)), cube.shape[-2:]) == (12, 12)
+
+
+def test_shift_keeping_gaps_marks_what_the_spline_touched_and_nothing_else():
+    """``shift_keeping_gaps`` has to do two opposite things: not let a gap spread, and not
+    invent a gap where there was none.  A frame with no gaps must be untouched."""
+    from scipy import ndimage
+    from klip_tpe.backends.spaceklip import shift_keeping_gaps
+    rng = np.random.default_rng(0)
+    im = rng.normal(10.0, 1.0, (40, 40))
+    np.testing.assert_array_equal(shift_keeping_gaps(im, (-0.3, 0.4)),
+                                  ndimage.shift(im, (-0.3, 0.4), order=3))
+    g = im.copy()
+    g[20, 20] = np.nan
+    out = shift_keeping_gaps(g, (-0.3, 0.4))
+    bad = ~np.isfinite(out)
+    assert bad.any(), "the gap has to survive as a gap"
+    assert bad.sum() < 60, f"one gap became {int(bad.sum())} px -- the spline was let loose"
+    assert not bad[:6].any() and not bad[-6:].any(), "the frame border is not a gap"
+    assert np.isfinite(ndimage.shift(np.where(bad, 0.0, out), (0, 0))).all()
+    # the naive call is the thing being avoided
+    assert np.mean(~np.isfinite(ndimage.shift(g, (-0.3, 0.4), order=3))) > 0.9
+
+
+def test_an_unmeasurable_offset_is_reported_not_guessed(tmp_path):
+    """``_xs`` used to return the highest corner of its search box when there was no peak in
+    it.  On HIP 65426 F1140C that was a confident six-pixel shift for every frame: the 41
+    integrations of one exposure have no offset to register against each other, and
+    ``np.argmax`` of an all-NaN correlation returns 0, which decodes to ``(-6, -6)``.
+    """
+    ny = nx = 60
+    # flat frames: no structure to register, so no peak should be found
+    f = [write(tmp_path / "s_calints.fits", "T", roll=0.0, ny=ny, nx=nx, seed=1)]
+    import astropy.io.fits as _f
+    with _f.open(f[0], mode="update") as h:
+        rng = np.random.default_rng(3)
+        h["SCI"].data = np.asarray(rng.normal(0.0, 1.0, h["SCI"].data.shape), np.float32)
+    msgs = []
+    ds, info = load_calints(f, science_target="T", half_px=12, align=True, partition="all",
+                            log=msgs.append)
+    off = [(p.get("dx"), p.get("dy")) for p in info["frames"]]
+    assert all(abs(dx) < 6 and abs(dy) < 6 for dx, dy in off), \
+        f"a corner of the search box was returned as a measurement: {off}"
+    if any(not p.get("registered", True) for p in info["frames"]):
+        assert any("left UNSHIFTED" in m for m in msgs), "an unmeasured offset must be said"
+    assert np.isfinite(np.asarray(ds["sci"].cube, float)).all()
