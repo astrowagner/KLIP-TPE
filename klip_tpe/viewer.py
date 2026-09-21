@@ -209,7 +209,20 @@ def view(run_dir: Optional[str] = None, root: Optional[str] = None, interval: fl
                 txt.set_text(status_line(d, prev))
                 last_status = now
             fig.canvas.draw_idle()
-            plt.pause(interval)                 # <- the whole point: the event loop always runs
+            # NOT plt.pause().  On macOS it raises and focuses the window on every call, so a
+            # one-second refresh takes the foreground once a second and the terminal running
+            # the optimizer underneath is unusable -- which defeats the point of watching from
+            # a second shell.  draw_idle + flush_events services the same event loop and
+            # leaves the stacking order alone; it is the idiom LiveDisplay's own live window
+            # already uses, for the same reason.  The sleep is chopped up so the window stays
+            # responsive between refreshes rather than ignoring clicks for `interval` seconds.
+            t_end = time.time() + interval
+            while plt.fignum_exists(fig.number):
+                fig.canvas.flush_events()
+                left = t_end - time.time()
+                if left <= 0:
+                    break
+                time.sleep(min(left, 0.05))
     except KeyboardInterrupt:
         log("\nklip-tpe view: interrupted")
     finally:

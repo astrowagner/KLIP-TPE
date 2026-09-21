@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — 2026-09-21 (display)
+- **`run_miri.py` wrote no panels unless a window was open.**  It built its `LiveDisplay` only
+  under `--show`, so a run started without it produced no panel PNGs at all — and then
+  `klip-tpe view --run-dir`, which the script itself prints as the way to watch a run, had
+  nothing to watch, for the whole run, with no way to attach later.  The advice and the
+  behaviour contradicted each other.  `klip_tpe.cli` has always kept the two apart, and this now
+  does too: `--display` (default on) writes, `--show` opens a window, plus `--no-display`,
+  `--display-every` (10) and `--pdf-every` (0).
+- **`klip-tpe view` stole the foreground once a second.**  Its refresh loop ended in
+  `plt.pause(interval)`, which raises *and focuses* the window on every call — on macOS that
+  makes the terminal running the optimizer unusable, which defeats the point of watching from a
+  second shell.  It now uses `draw_idle()` + `flush_events()`, the idiom
+  `display.LiveDisplay`'s own live window already used with the comment "no show()/pause -> the
+  window is never raised" on the line.  The wait between refreshes is chopped into 50 ms pieces
+  so the window still answers clicks and resizes.  New `tests/test_viewer.py` pins both, and
+  pins the two modules to keep agreeing.
+- `run_miri.py --star-center X Y`, because `load_calints` logs "pass star_center= if you have
+  one" on every MIRI run and the driver could not.  Measured on GO 1386 F1140C: the most
+  point-symmetric centre is 0.39 px (45 mas, 0.12 FWHM) from CRPIX with the two rolls agreeing
+  to 0.05 px, so CRPIX is adequate there.  Measure it by point symmetry, not with a flux
+  centroid — on a four-quadrant residual the centroid is biased by the pattern and lands 0.4 px
+  on the *opposite* side, varying by 0.4 px with the aperture radius.
+
 ## Unreleased — 2026-09-21 (later)
 - **`load_calints` returned a cube that was 100% NaN, and said nothing.**  This is what actually
   killed the HIP 65426 F1140C run (GO 1386).  A MIRI MASK1140 subarray is 27.6% DQ `DO_NOT_USE`
