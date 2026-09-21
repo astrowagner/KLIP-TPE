@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased — 2026-09-21 (the flux unit)
+- **The MIRI search spent two hours ranking noise, because `star_flux` defaulted to 1.0.**
+  `make_reducer(star_flux=None)` becomes `star_flux or 1.0`, and 1.0 is not a neutral default
+  — it makes one unit of *contrast* worth one count, against a MIRI cube whose pixels reach
+  several hundred MJy/sr.  For HIP 65426 in F1140C the right value is **1.1238e5**, so every
+  injected source was 1.1e5 times too faint.  The evidence is unmistakable once looked at: the
+  calibration walked its entire ladder — 3e-5, 3e-4, 3e-3, 3e-2, 1e-1 — and got median S/N of
+  −0.11, 0.00, −0.02, −0.31, −0.04.  A response flat over four orders of magnitude is not a
+  faint source, it is an inert one.  The run then reported "could NOT be calibrated", blamed
+  the injected sources limiting each other, pinned the contrast at the 1e-1 cap and searched
+  on for 300 evaluations.  `reducer.py`'s existing `flux_unit is 1` warning did not fire: it
+  tests whether the injection is *representable* in float32, not whether it is detectable, and
+  at 1e-1 it was representable.  `scripts/run_miri.py` now derives the flux unit or refuses to
+  start — `--star-flux`, `--flux-density-jy` (converted with the frames' own `PIXAR_SR` and the
+  injection library's own EE radius, via the new `miri.star_flux_from_flux_density`), or
+  `datasets.PHOTOMETRY['<target>_<filter>']`.  `--star-flux 1` still works, because a raw-units
+  run is legitimate — but it has to be asked for.
+- `datasets.PHOTOMETRY` gains `hip65426_f1065c` / `_f1140c` / `_f1550c` (0.07813 / 0.06899 /
+  0.03739 Jy).  Same star and same method as the F444W entry, and deliberately **ratio-anchored**
+  to it rather than computed from scratch: the Planck-through-the-bandpass recipe reproduces
+  0.40259 Jy to −3.3% (photon-weighted), inside its own ±3%, and the residual is the 2MASS
+  zero-point convention, which the ratio cancels.  Teff = 8600 K is Carter et al. (2023)'s own
+  PHOENIX fit, so both rest on one model.  The photosphere is the right thing to use: the only
+  excess those authors report is 3.5σ at 24 µm with T_dust ≈ 300 K, negligible at 11 µm.
+  Independent check — at S = 0.0690 Jy the paper's ~2.7 µJy F1140C sensitivity is a 3.9e-5
+  contrast floor against their ~2e-4 for the companion; the two hang together, and would not if
+  S were wrong by a factor.
+
 ## Unreleased — 2026-09-21 (display)
 - **`run_miri.py` wrote no panels unless a window was open.**  It built its `LiveDisplay` only
   under `--show`, so a run started without it produced no panel PNGs at all — and then

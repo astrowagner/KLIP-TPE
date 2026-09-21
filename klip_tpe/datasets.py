@@ -149,6 +149,33 @@ PHOTOMETRY = {
         "star_center": (149.65, 172.96), "star_center_source": "solved from both rolls (agree to 0.12 px)",
         "check": "HIP 65426 b -> dF444W vs 8.703 +/- 0.055 (Carter et al. 2023, ApJL 951, L20, Table 3)",
     },
+    # ---- the same star through MIRI's three 4QPM filters (ERS 1386, obs 4/5 at F1140C).
+    # Same star, same method, and deliberately anchored to the F444W entry above rather
+    # than computed from scratch: the Planck-through-the-bandpass recipe reproduces that
+    # value to -3.3% (photon-weighted) / -2.4% (energy-weighted), which is inside its own
+    # +/-3%, and the residual is the 2MASS zero-point and effective-wavelength convention.
+    # Taking the RATIO to F444W cancels that convention and leaves only the model's shape
+    # between 4.4 and 11.3 um -- a Rayleigh-Jeans tail, where Planck and a real atmosphere
+    # differ by a per cent or two.  Teff = 8600 K is Carter et al. (2023)'s own PHOENIX fit
+    # (8600 +/- 200 K, L = 16 +/- 1 Lsun), so both entries rest on the same model.
+    #
+    # The photosphere is the right thing to use here: the only excess these authors find is
+    # 3.5 sigma at 24 um (Chen et al. 2012) fitted with T_dust ~ 300 K, which contributes
+    # far less at 11 um than at 24 and is marginal even there.
+    #
+    # Cross-check, independent of the recipe: at S = 0.0690 Jy the paper's quoted F1140C
+    # sensitivity of ~2.7 uJy is a contrast floor of 3.9e-5, and the companion's ~2e-4 is
+    # 13.8 uJy -- the two hang together, and would not if S were wrong by a factor.
+    **{f"hip65426_{f.lower()}": {
+        "flux_density_jy": s, "flux_density_err_frac": 0.05, "filter": f,
+        "ref": "synthetic photometry: Planck(Teff=8600 K, Carter et al. 2023 PHOENIX fit) "
+               "through the STPSF bandpass, normalised to 2MASS Ks = 6.771, ratio-anchored "
+               "to the F444W entry above",
+        "optics_transmission": 1.0,
+        "optics_transmission_source": "PHOTMJSR of the coronagraphic mode already carries its optics",
+        "check": "Carter et al. (2023, ApJL 951, L20): ~2.7 uJy F1140C sensitivity -> a 3.9e-5 "
+                 "contrast floor, against their ~2e-4 for the companion",
+    } for f, s in (("F1065C", 0.07813), ("F1140C", 0.06899), ("F1550C", 0.03739))},
 }
 
 

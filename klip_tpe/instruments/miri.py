@@ -93,7 +93,7 @@ from ..stpsf_psf import (_cache_path, _ee_radius, _instrument, _key, _odd, cache
 __all__ = ["MODES", "DIAMETER_M", "mode_for_filter", "pixelscale", "throughput_map",
            "default_azimuths", "default_separations", "locate_boundaries",
            "throughput_map_fn", "quadrant_mask", "library", "load_miri", "apply_quadrant_mask",
-           "forbidden_pa", "dead_zone_pixel_mask",
+           "forbidden_pa", "dead_zone_pixel_mask", "star_flux_from_flux_density",
            "MIRILibraryPSF"]
 
 DIAMETER_M = 6.5
@@ -546,6 +546,36 @@ def library(filter: str = "F1065C", star_flux: float = 1.0,
                           ee_radius_px=float(grid.get("ee_radius_px") or 3.0),
                           refpa_deg=0.0, flux_unit=float(star_flux),
                           thru2d=throughput_map_fn(tmap))
+
+
+def star_flux_from_flux_density(filter: str, flux_density_jy: float, pixar_sr: float,
+                                bunit: str = "MJy/sr", date: Optional[str] = None,
+                                seps_as: Optional[Sequence[float]] = None,
+                                optics_transmission: float = 1.0,
+                                log: Callable[[str], None] = print) -> float:
+    """``star_flux`` for :func:`library` from the star's flux density in this filter [Jy].
+
+    The number :func:`library` calls ``flux_unit``: what one unit of *contrast* is worth in
+    the science frames' own units.  Without it the default is 1.0 -- a source of one count
+    against a MIRI cube whose pixels reach several hundred MJy/sr, which is **1.1e5 times
+    too faint** for HIP 65426 in F1140C.  Injections then do nothing at any contrast: the
+    calibration walks its whole ladder from 3e-5 to the 1e-1 cap with the S/N flat at zero,
+    reports that it could not calibrate, and the search runs for hours ranking noise.  Which
+    is exactly what happened, so :mod:`scripts.run_miri` now refuses to start at 1.0.
+
+    This wraps :func:`klip_tpe.stpsf_psf.star_flux_from_flux_density` on the grid
+    :func:`library` builds, so the encircled-energy radius the flux is normalised to is the
+    one the stamps are normalised by.  Computing it against a differently-parameterised grid
+    is a quiet way to be wrong by the ratio of two EEs.
+    """
+    from ..stpsf_psf import star_flux_from_flux_density as _sf
+    m = mode_for_filter(filter)
+    seps = np.asarray(list(seps_as) if seps_as is not None else
+                      default_separations(m["filter"]), float)
+    grid = offaxis_grid(instrument="MIRI", filter=m["filter"], image_mask=m["image_mask"],
+                        pupil_mask=m["pupil_mask"], seps_as=seps, date=date, log=log)
+    return _sf(grid, float(flux_density_jy), float(pixar_sr), bunit=bunit,
+               optics_transmission=float(optics_transmission), log=log)
 
 
 def forbidden_pa(angles, rho_as: float, filter: str = "F1065C", truenorth: float = 0.0,

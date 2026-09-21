@@ -94,11 +94,11 @@ def stub_stpsf(monkeypatch):
 def _args(**kw):
     import run_miri
     base = dict(data=None, target="TARG", filter=None, partition="roll", crop=40, ann=None,
-                known=None, star_flux=None, mode="ADI+RDI", min_throughput=0.30,
+                known=None, star_flux=1.0, mode="ADI+RDI", min_throughput=0.30,
                 dead_zones=True, nan_dead_zones=False, n_iter=10, n_init=2, k_max=4,
                 max_drop=0, out=None, seed=1, workers=1, check=True, default_only=False,
                 fresh=False, show=False, star_center=None, display=True, display_every=10,
-                pdf_every=0)
+                pdf_every=0, flux_density_jy=None)
     base.update(kw)
     return run_miri, type("A", (), base)()
 
@@ -290,7 +290,7 @@ def test_check_refuses_a_radial_model_on_a_four_quadrant_mask(tree, stub_stpsf, 
     run_miri, a = _args(data=str(tree), out=str(tmp_path / "o"))
     with pytest.raises(SystemExit, match="azimuthal average"):
         run_miri.main([f"--data={tree}", "--target=TARG", "--check", "--crop=40",
-                       f"--out={tmp_path / 'o'}", "--k-max=4", "--workers=1"])
+                       f"--out={tmp_path / 'o'}", "--k-max=4", "--workers=1", "--star-flux=1"])
 
 
 def test_check_runs_the_whole_path_and_passes(tree, stub_stpsf, tmp_path):
@@ -298,7 +298,7 @@ def test_check_runs_the_whole_path_and_passes(tree, stub_stpsf, tmp_path):
     rc = None
     import run_miri
     rc = run_miri.main([f"--data={tree}", "--target=TARG", "--check", "--crop=40",
-                        f"--out={out}", "--k-max=4", "--workers=1"])
+                        f"--out={out}", "--k-max=4", "--workers=1", "--star-flux=1"])
     assert rc == 0
     log = (out / "run.log").read_text()
     assert "miri_library" in log
@@ -341,7 +341,7 @@ def test_panels_are_written_without_a_live_window(tree, stub_stpsf, tmp_path, mo
     monkeypatch.setattr("klip_tpe.display.LiveDisplay", FakeDisplay)
     out = tmp_path / "o"
     run_miri.main([f"--data={tree}", "--target=TARG", "--crop=40", f"--out={out}",
-                   "--k-max=4", "--workers=1", "--n-iter=1", "--default-only"])
+                   "--k-max=4", "--workers=1", "--star-flux=1", "--n-iter=1", "--default-only"])
     assert made, "no display was created without --show, so no panels are written"
     assert made["show"] is False and made["run_dir"] == str(out)
     assert "klip-tpe view --run-dir" in (out / "run.log").read_text()
@@ -354,5 +354,58 @@ def test_no_display_really_turns_the_panels_off(tree, stub_stpsf, tmp_path, monk
                         lambda *a, **k: made.append(k) or object())
     out = tmp_path / "o2"
     run_miri.main([f"--data={tree}", "--target=TARG", "--crop=40", f"--out={out}",
-                   "--k-max=4", "--workers=1", "--n-iter=1", "--default-only", "--no-display"])
+                   "--k-max=4", "--workers=1", "--star-flux=1", "--n-iter=1", "--default-only", "--no-display"])
     assert made == []
+
+
+# ------------------------------------------------- the flux unit, which 1.0 is not a default for
+
+def test_a_run_with_no_stellar_flux_refuses_to_start(tree, stub_stpsf):
+    """The two hours this cost, and nothing in the run said a word.
+
+    ``star_flux or 1.0`` looks like a harmless default and is not: one count against a MIRI
+    cube whose pixels reach several hundred MJy/sr.  For HIP 65426 F1140C the right number
+    is 1.12e5, so every injection was 1.1e5 times too faint -- the calibration walked its
+    whole ladder from 3e-5 to the 1e-1 cap with the median S/N flat at zero, said it could
+    not calibrate, and the search ranked noise for 300 evaluations.
+    """
+    run_miri, a = _args(data=str(tree), star_flux=None)
+    with pytest.raises(SystemExit, match="not a neutral default"):
+        run_miri.build(a, log=lambda *_: None)
+
+
+def test_raw_units_are_allowed_but_have_to_be_asked_for(tree, stub_stpsf):
+    run_miri, a = _args(data=str(tree), star_flux=1.0)
+    _, _, red, _, _, _, _, _ = run_miri.build(a, log=lambda *_: None)
+    assert red.reducers[list(red.reducers)[0]].model.flux_unit == 1.0
+
+
+def test_a_recorded_flux_density_is_found_and_converted(tree, stub_stpsf, monkeypatch):
+    """``--target HIP-65426 --filter F1140C`` should need no flux flag at all: the pair is in
+    datasets.PHOTOMETRY, and the conversion uses the frames' own PIXAR_SR."""
+    from klip_tpe import datasets
+    from klip_tpe.instruments import miri as M
+    seen = {}
+    monkeypatch.setitem(datasets.PHOTOMETRY, "targ_f1065c",
+                        {"flux_density_jy": 0.25, "filter": "F1065C", "ref": "test"})
+    monkeypatch.setattr(M, "star_flux_from_flux_density",
+                        lambda *a, **k: seen.update(S=a[1], pixar=a[2]) or 4242.0)
+    run_miri, a = _args(data=str(tree), star_flux=None)
+    _, _, red, _, _, _, _, _ = run_miri.build(a, log=lambda *_: None)
+    assert seen["S"] == 0.25
+    assert red.reducers[list(red.reducers)[0]].model.flux_unit == 4242.0
+
+
+def test_the_hip65426_miri_entries_are_anchored_to_the_f444w_one():
+    """They are the same star by the same method, so their ratios are the model's shape and
+    nothing else.  A Rayleigh-Jeans tail falls as lambda^-2, so each longer filter must be
+    fainter, and F1140C must sit near (4.401/11.304)^2 of F444W."""
+    from klip_tpe import datasets
+    P = datasets.PHOTOMETRY
+    f444 = P["hip65426_f444w"]["flux_density_jy"]
+    s = {k: P[f"hip65426_{k.lower()}"]["flux_density_jy"] for k in ("F1065C", "F1140C", "F1550C")}
+    assert f444 > s["F1065C"] > s["F1140C"] > s["F1550C"] > 0
+    rj = (4.401 / 11.304) ** 2                       # pivot wavelengths of the two bandpasses
+    assert s["F1140C"] / f444 == pytest.approx(rj, rel=0.15), "not a Rayleigh-Jeans tail"
+    for k in ("F1065C", "F1140C", "F1550C"):
+        assert "Carter" in P[f"hip65426_{k.lower()}"]["ref"]

@@ -54,6 +54,55 @@ from klip_tpe.runner import (CalibrationConfig, RunConfig, Runner,  # noqa: E402
                              ValidationConfig)
 
 
+def resolve_star_flux(a, info, m, log):
+    """``flux_unit`` for the injection model, or refuse to run.
+
+    What one unit of *contrast* is worth in the frames' own units.  The default everywhere
+    below this is ``star_flux or 1.0``, and 1.0 is not a neutral choice -- it is a source of
+    one count against a MIRI cube whose pixels reach several hundred MJy/sr.  For HIP 65426
+    in F1140C the right value is 1.12e5, so every injection was 1.1e5 times too faint: the
+    calibration walked its entire ladder from 3e-5 to the 1e-1 cap with the median S/N flat
+    at zero (-0.11, 0.00, -0.02, -0.31, -0.04), reported that it could not calibrate, and
+    the search ran for two hours ranking noise.  Nothing else in the run said anything.
+
+    So: derive it, or stop.  In order -- ``--star-flux`` (the raw number),
+    ``--flux-density-jy`` (the star's flux density in this filter, converted with the data's
+    own ``PIXAR_SR`` and the injection library's own EE radius), or
+    ``datasets.PHOTOMETRY['<target>_<filter>']`` if the pair is recorded there.  ``--star-flux
+    1`` is still accepted, because a deliberate raw-units run is a legitimate thing to ask
+    for -- but it has to be asked for.
+    """
+    from klip_tpe import datasets
+    if a.star_flux is not None:
+        log(f"  flux: star_flux = {a.star_flux:.4e} (given)")
+        return float(a.star_flux)
+    S, src = a.flux_density_jy, "--flux-density-jy"
+    if S is None:
+        key = f"{a.target or ''}_{m['filter']}".lower().replace("-", "").replace(" ", "")
+        phot = datasets.PHOTOMETRY.get(key)
+        if phot and phot.get("flux_density_jy"):
+            S, src = float(phot["flux_density_jy"]), f"datasets.PHOTOMETRY[{key!r}]"
+            log(f"  flux: {src} -> S = {S:.5f} Jy ({phot.get('ref', '')})")
+    if S is None:
+        raise SystemExit(
+            f"no stellar flux for {a.target!r} in {m['filter']}, and the fallback is 1.0 -- "
+            f"which is not a neutral default but a source of one count against a cube whose "
+            f"pixels reach hundreds of MJy/sr. Every injection would be ~1e5 times too faint, "
+            f"the calibration would fail at its contrast cap, and the search would spend "
+            f"hours ranking noise (this happened). Give it one of:\n"
+            f"  --flux-density-jy S   the star's flux density in this filter [Jy]\n"
+            f"  --star-flux F         the flux unit directly, if you have computed it\n"
+            f"  --star-flux 1         deliberately raw units, no contrast axis\n"
+            f"or add '{a.target or '<target>'}_{m['filter']}'.lower() to "
+            f"klip_tpe.datasets.PHOTOMETRY with its provenance.")
+    pixar_sr = float(info.get("pixar_sr") or float("nan"))
+    if not np.isfinite(pixar_sr):
+        raise SystemExit("the frames carry no PIXAR_SR, so a flux density cannot be put on "
+                         "their scale; pass --star-flux instead")
+    return miri.star_flux_from_flux_density(m["filter"], S, pixar_sr,
+                                            bunit=info.get("bunit") or "MJy/sr", log=log)
+
+
 def build(a, log):
     """Everything up to the Runner: datasets, reducer, space, objective, sampler."""
     files = sorted(glob.glob(os.path.join(os.path.expanduser(a.data), "**", "jw*_calints.fits"),
@@ -90,8 +139,9 @@ def build(a, log):
             "stay in the noise statistics, where they depress sigma and inflate S/N, and "
             "injections may land in them")
 
+    star_flux = resolve_star_flux(a, info, m, log)
     red = sk.make_reducer(dsets, pxscale=px, wavelength_m=m["lam_m"], diam_m=miri.DIAMETER_M,
-                          psf="stpsf", star_flux=a.star_flux, max_workers=a.workers,
+                          psf="stpsf", star_flux=star_flux, max_workers=a.workers,
                           mode=a.mode, log=log)
     lod = (m["lam_m"] / miri.DIAMETER_M) * 206265.0 / px
     log(f"lambda/D = {lod:.2f} px, FWHM = {red.fwhm:.2f} px")
@@ -151,7 +201,16 @@ def main(argv=None):
     ap.add_argument("--ann", type=float, nargs=2, default=None, metavar=("IN", "OUT"))
     ap.add_argument("--known", type=float, nargs=2, action="append", metavar=("RHO", "PA"),
                     help="a real companion (arcsec, deg) injections keep clear of; repeatable")
-    ap.add_argument("--star-flux", type=float, default=None)
+    ap.add_argument("--star-flux", type=float, default=None,
+                    help="the injection model's flux unit: what one unit of CONTRAST is "
+                         "worth in the frames' own units. Without it (or --flux-density-jy, "
+                         "or a PHOTOMETRY entry) the run refuses to start, because the "
+                         "fallback of 1.0 makes every injection ~1e5x too faint and the "
+                         "search then ranks noise for hours without complaining")
+    ap.add_argument("--flux-density-jy", type=float, default=None, metavar="S",
+                    help="the star's flux density in THIS filter [Jy]; converted to a flux "
+                         "unit with the frames' PIXAR_SR and the injection library's own EE "
+                         "radius. Preferred over --star-flux: it is a number you can cite")
     ap.add_argument("--mode", default="ADI+RDI")
     ap.add_argument("--min-throughput", type=float, default=0.30,
                     help="pixels transmitting less than this are dead zones (default 0.30)")
