@@ -50,10 +50,14 @@ consequences follow from the same geometry and are handled here:
 
 * **The boundaries are not usable.**  Where the mask has taken most of the flux the
   photometry is unreliable and the stamp is distorted, not merely attenuated.
-  :func:`quadrant_mask` marks those pixels so they stay out of the KLIP basis, out of the
-  noise statistics the objective is computed from, and out of the set of positions the
-  sampler is allowed to inject into.  Injecting into a dead zone and then "recovering"
-  nothing is not a measurement of contrast, it is a measurement of the mask.
+  :func:`quadrant_mask` marks those pixels on the detector; :func:`dead_zone_pixel_mask`
+  carries them through the rolls into the de-rotated frame, where they are excluded from the
+  noise statistics the objective is computed from, and :func:`forbidden_pa` keeps the
+  sampler from injecting into them.  Injecting into a dead zone and then "recovering"
+  nothing is not a measurement of contrast, it is a measurement of the mask.  They stay *in*
+  the cube and in the KLIP basis: they are attenuated measurements, not missing ones, and
+  NaN-ing them ahead of a high-pass filter destroys the whole frame (see
+  :func:`apply_quadrant_mask`).
 
 * **Throughput is a per-frame quantity.**  The quadrant boundaries are fixed to the
   detector, so as the telescope rolls, a companion at a fixed sky position angle moves
@@ -89,7 +93,7 @@ from ..stpsf_psf import (_cache_path, _ee_radius, _instrument, _key, _odd, cache
 __all__ = ["MODES", "DIAMETER_M", "mode_for_filter", "pixelscale", "throughput_map",
            "default_azimuths", "default_separations", "locate_boundaries",
            "throughput_map_fn", "quadrant_mask", "library", "load_miri", "apply_quadrant_mask",
-           "forbidden_pa",
+           "forbidden_pa", "dead_zone_pixel_mask",
            "MIRILibraryPSF"]
 
 DIAMETER_M = 6.5
@@ -601,18 +605,90 @@ def forbidden_pa(angles, rho_as: float, filter: str = "F1065C", truenorth: float
     return out
 
 
+def dead_zone_pixel_mask(shape: Tuple[int, int], pxscale: float, angles,
+                         filter: str = "F1065C", truenorth: float = 0.0,
+                         g: Optional[Dict[str, Any]] = None, min_throughput: float = 0.30,
+                         dead_frac: float = 0.34, center: Optional[Tuple[float, float]] = None,
+                         log: Callable[[str], None] = print) -> np.ndarray:
+    """``True`` where the *de-rotated* image must stay out of the noise estimate, for
+    :class:`~klip_tpe.metrics.MawetPeakSNR`'s ``pixel_mask``.
+
+    This is the pixel-space twin of :func:`forbidden_pa` -- same geometry, same rolls, same
+    ``min_throughput`` and ``dead_frac``, evaluated per pixel instead of per position angle
+    at one separation -- and the two are meant to be passed together, as
+    ``default_config(red, forbidden_pa=fpa, pixel_mask=pmask)``.  Doing only one of them is
+    worse than doing neither: injections that avoid the dead zones while the dead zones are
+    still in the ring sigma are scored against a noise level nothing is measuring them at.
+
+    It exists because the obvious alternative -- NaN the dead zones into the science cube,
+    which is what :func:`apply_quadrant_mask` does -- cannot work in this pipeline.  The
+    reducer high-passes each frame at ``nan_aware=False``, which spreads every NaN over a
+    box the width of the filter; the 4QPM dead zones are lines through the star reaching the
+    frame edges, so a width-12 filter dilates 5% of the frame into 100% of it, ``np.nansum``
+    of an all-NaN frame is 0.0, ``bin_frames`` drops zero-sum bins, and the reduction is left
+    with no frames.  There is no crop that fixes it either: the dead zones cross the middle
+    of the array, so no rectangle excludes them.  The pixels are attenuated measurements,
+    not missing ones, so they stay in the cube and in the KLIP basis; what they must stay
+    out of is the *statistic*.
+
+    Note which way this biases the answer.  Where the phase mask has taken the starlight it
+    has also taken the speckles, so a dead-zone pixel is *quieter* than the ring it sits in.
+    Leaving it in depresses sigma, inflates every S/N, and gives the optimizer an incentive
+    to choose parameters that preserve the dead zones; taking it out raises sigma and lowers
+    the reported contrast.  The conservative direction, and -- unlike a cut made because a
+    region looked bright -- one justified by the mask design before anyone looks at the
+    image.
+
+    ``shape`` and ``center`` are the *reduced image's*, not the detector's: derotation puts
+    the star at ``((nx-1)/2, (ny-1)/2)``, which is where the metric looks for it and the
+    default here.  ``angles`` is every frame's parallactic angle, because a sky position
+    that one roll puts on a boundary another roll may clear.
+    """
+    ang = np.asarray(angles, float).ravel()
+    ny, nx = int(shape[-2]), int(shape[-1])
+    cx, cy = ((nx - 1) / 2.0, (ny - 1) / 2.0) if center is None else (float(center[0]),
+                                                                     float(center[1]))
+    if g is None:
+        g = throughput_map(mode_for_filter(filter)["filter"], log=lambda *_: None)
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    dx, dy = xx - cx, yy - cy
+    rho = np.hypot(dx, dy) * float(pxscale)
+    # the same pixel -> position-angle convention as klip_tpe.metrics.pa_wedge_mask, then
+    # the same PA -> detector-azimuth map as forbidden_pa.  Composing the two is what keeps
+    # this mask and those sectors describing one geometry instead of two.
+    pa = np.degrees(np.arctan2(dy, dx)) - 90.0
+    f = throughput_map_fn(g)
+    hit = np.zeros((ny, nx), float)
+    if ang.size:
+        uang, cnt = np.unique(np.round(ang, 6), return_counts=True)
+        for a, n in zip(uang, cnt):
+            hit += float(n) * (f(rho, pa - float(truenorth) - 270.0 - float(a))
+                               < float(min_throughput))
+        hit /= float(ang.size)
+    bad = hit > float(dead_frac)
+    # inside the innermost sampled separation the map has nothing to say: the star is there
+    bad |= rho < float(np.asarray(g["seps"], float)[0])
+    log(f"  miri: dead zones cover {int(bad.sum())} px of the de-rotated frame "
+        f"({100.0 * bad.mean():.1f}%) over {ang.size} frame(s); excluded from the noise "
+        f"estimate, kept in the cube")
+    return bad
+
+
 # ------------------------------------------------------------------------------ loading
 def apply_quadrant_mask(datasets, min_throughput: float = 0.30, filter: Optional[str] = None,
                         log: Callable[[str], None] = print):
     """NaN the dead zones of every MIRI dataset in ``{name: Dataset}``, in place-ish.
 
-    ``klip_tpe.backends.spaceklip.load_calints`` is instrument-agnostic and reads MIRI
-    ``calints`` correctly, but it knows nothing about quadrant boundaries -- so the
-    suppressed pixels arrive as ordinary data.  Left in, they enter the KLIP basis as a
-    bright fixed pattern and enter the noise statistics the objective is computed from,
-    where they depress the scatter in whichever annulus they cross and make that annulus
-    look quieter than it is.  The optimizer then has an incentive to choose parameters
-    that preserve them.
+    **Do not put this in front of the reducer.**  It is kept for reductions that run with no
+    high-pass filter at all (``filter <= 1``) and for inspecting the mask geometry; the
+    driver does not call it.  The reducer high-passes at ``nan_aware=False``, which spreads
+    each NaN over a box the width of the filter, and the 4QPM dead zones are lines through
+    the star reaching the frame edges -- so at the default width of 12 px, 5% of the frame
+    becomes 100% of it, ``np.nansum`` of an all-NaN frame is 0.0, ``bin_frames`` drops
+    zero-sum bins, and every frame is dropped as empty.  No crop rescues it: the dead zones
+    cross the middle of the array.  Use :func:`dead_zone_pixel_mask` instead, which keeps
+    the attenuated pixels in the cube and out of the noise statistic, where the problem
+    actually is.
 
     Returns a new dict; datasets whose filter is not a MIRI coronagraphic one are passed
     through untouched, so this is safe to call on a mixed or NIRCam set.

@@ -367,6 +367,56 @@ def test_forbidden_pa_with_no_frames_is_empty_not_everything():
     assert miri.forbidden_pa([], rho_as=1.0, filter="F1065C", g=g, log=lambda *_: None) == []
 
 
+def test_the_pixel_mask_is_the_same_geometry_as_the_forbidden_sectors():
+    """``dead_zone_pixel_mask`` and ``forbidden_pa`` must describe one mask, not two.
+
+    They are passed together -- sectors keep the injections out, the pixel mask keeps the
+    same zones out of the ring sigma -- and a sign error in either composition (pixel to PA,
+    PA to detector azimuth) would silently score injections on one side of a boundary
+    against noise measured on the other.  So compare them where both are defined: a thin
+    ring at the separation the sectors were computed for.
+    """
+    from klip_tpe.metrics import pa_wedge_mask
+    g = synthetic_map(width=30.0)
+    px, shp, rho = 0.1, (101, 101), 2.0
+    ang = [0.0, 40.0]
+    pm = miri.dead_zone_pixel_mask(shp, px, ang, filter="F1065C", g=g, log=lambda *_: None)
+    fpa = miri.forbidden_pa(ang, rho_as=rho, filter="F1065C", g=g, log=lambda *_: None)
+    sect = pa_wedge_mask(shp, fpa)
+    yy, xx = np.mgrid[0:shp[0], 0:shp[1]]
+    r = np.hypot(xx - 50.0, yy - 50.0)
+    ring = np.abs(r * px - rho) <= 0.5 * px
+    assert ring.sum() > 50
+    assert (pm == sect)[ring].mean() > 0.95, "pixel mask and sectors are different geometries"
+
+
+def test_the_pixel_mask_follows_the_roll_and_leaves_the_plateau_alone():
+    g = synthetic_map()
+    kw = dict(filter="F1065C", g=g, log=lambda *_: None)
+    a0 = miri.dead_zone_pixel_mask((101, 101), 0.1, [0.0], **kw)
+    a40 = miri.dead_zone_pixel_mask((101, 101), 0.1, [40.0], **kw)
+    # no count comparison between the two: wedges this thin are pixelization-limited, and a
+    # wedge along a row covers one pixel per column where a diagonal covers about root two
+    assert 0.0 < a0.mean() < 0.5 and 0.0 < a40.mean() < 0.5
+    assert not np.array_equal(a0, a40), "a roll must move the dead zones in the sky frame"
+    # both rolls' zones are excluded, neither's alone
+    both = miri.dead_zone_pixel_mask((101, 101), 0.1, [0.0, 40.0], **kw)
+    assert both.sum() > a0.sum() and np.all(both | ~a0) and np.all(both | ~a40)
+    # a pixel between boundaries in every frame is never masked
+    assert not both[50 - 20, 50 + 20] or not both[50 + 20, 50 + 20]
+
+
+def test_the_pixel_mask_with_no_frames_masks_only_the_unsampled_core():
+    """No angles is not a licence to mask the whole frame: outside the core the map has
+    said nothing about any roll, so nothing is excluded."""
+    g = synthetic_map()
+    pm = miri.dead_zone_pixel_mask((101, 101), 0.1, [], filter="F1065C", g=g,
+                                   log=lambda *_: None)
+    yy, xx = np.mgrid[0:101, 0:101]
+    rr = np.hypot(xx - 50.0, yy - 50.0) * 0.1
+    assert np.array_equal(pm, rr < float(np.asarray(g["seps"], float)[0]))
+
+
 def test_apply_quadrant_mask_leaves_non_miri_datasets_alone():
     """Safe on a mixed or NIRCam set: a filter that is not a MIRI coronagraphic one is
     passed through untouched rather than masked with somebody else's geometry."""

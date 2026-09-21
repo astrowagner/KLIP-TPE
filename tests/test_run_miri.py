@@ -70,12 +70,7 @@ def tree(tmp_path):
     return d
 
 
-@pytest.fixture
-def stub_stpsf(monkeypatch):
-    """A MIRI library without STPSF: right class, right flag, cheap stamps."""
-    g = synthetic_map()
-    monkeypatch.setattr(miri, "throughput_map", lambda *a, **k: g)
-
+def _stub_library(g):
     def fake_library(filter="F1065C", star_flux=1.0, seps_as=None, date=None, log=print, **kw):
         seps = np.asarray(seps_as if seps_as is not None else np.geomspace(0.3, 8.0, 10), float)
         sl = np.zeros((seps.size, 15, 15))
@@ -83,8 +78,15 @@ def stub_stpsf(monkeypatch):
         return miri.MIRILibraryPSF(sl, seps, center=(7.0, 7.0), ee_radius_px=3.0,
                                    refpa_deg=0.0, flux_unit=float(star_flux or 1.0),
                                    thru2d=miri.throughput_map_fn(g))
+    return fake_library
 
-    monkeypatch.setattr(miri, "library", fake_library)
+
+@pytest.fixture
+def stub_stpsf(monkeypatch):
+    """A MIRI library without STPSF: right class, right flag, cheap stamps."""
+    g = synthetic_map()
+    monkeypatch.setattr(miri, "throughput_map", lambda *a, **k: g)
+    monkeypatch.setattr(miri, "library", _stub_library(g))
     monkeypatch.setattr(miri, "pixelscale", lambda *a, **k: 0.109655)
     return g
 
@@ -93,8 +95,9 @@ def _args(**kw):
     import run_miri
     base = dict(data=None, target="TARG", filter=None, partition="roll", crop=40, ann=None,
                 known=None, star_flux=None, mode="ADI+RDI", min_throughput=0.30,
-                mask_quadrants=True, n_iter=10, n_init=2, k_max=4, max_drop=0, out=None,
-                seed=1, workers=1, check=True, default_only=False, fresh=False, show=False)
+                dead_zones=True, nan_dead_zones=False, n_iter=10, n_init=2, k_max=4,
+                max_drop=0, out=None, seed=1, workers=1, check=True, default_only=False,
+                fresh=False, show=False)
     base.update(kw)
     return run_miri, type("A", (), base)()
 
@@ -111,20 +114,110 @@ def test_build_wires_the_two_dimensional_model_into_the_reducer(tree, stub_stpsf
     assert px == pytest.approx(0.109655, abs=1e-5)
 
 
-def test_build_masks_the_dead_zones_out_of_the_cubes(tree, stub_stpsf):
+def test_the_dead_zones_leave_the_noise_estimate_and_stay_in_the_cube(tree, stub_stpsf):
+    """The regression this file exists for now.
+
+    The first version NaN'd the dead zones into the cube.  The reducer high-passes at
+    ``nan_aware=False``, which spreads each NaN over a box the filter's width, and the 4QPM
+    dead zones are lines through the star reaching the frame edges -- so at the default
+    width of 12 px every frame was dropped as empty and the run died before its first
+    evaluation.  The pixels are attenuated measurements, not missing ones: they belong in
+    the cube and out of the statistic.
+    """
     run_miri, a = _args(data=str(tree))
-    dsets, *_ = run_miri.build(a, log=lambda *_: None)
+    dsets, _, _, _, obj, _, _, _ = run_miri.build(a, log=lambda *_: None)
     for pid, ds in dsets.items():
-        assert ds.meta.get("quadrant_masked_px", 0) > 0, f"{pid} was not masked"
-        assert np.isnan(np.asarray(ds.cube)).any()
+        assert np.isfinite(np.asarray(ds.cube, float)).all(), f"{pid} has NaNs in the cube"
+    pm = obj.metric.pixel_mask
+    assert pm is not None and pm.sum() > 0, "the dead zones are still in the noise estimate"
+    assert obj.metric.describe()["pixel_mask_px"] == int(pm.sum())
 
 
-def test_no_mask_quadrants_leaves_the_pixels_in(tree, stub_stpsf):
-    run_miri, a = _args(data=str(tree), mask_quadrants=False)
-    dsets, _, _, _, _, samp, _, _ = run_miri.build(a, log=lambda *_: None)
+def test_the_pixel_mask_and_the_forbidden_sectors_are_one_geometry(tree, stub_stpsf):
+    """Doing only one of the two is worse than doing neither: injections avoiding sectors
+    that still inflate the ring sigma are scored against a noise level nothing is measuring
+    them at.  So the mask has to agree with the sectors where they are both defined."""
+    from klip_tpe.metrics import pa_wedge_mask
+    run_miri, a = _args(data=str(tree))
+    dsets, _, red, ann, obj, samp, m, px = run_miri.build(a, log=lambda *_: None)
+    pm = obj.metric.pixel_mask
+    mid = 0.5 * (ann[0] + ann[1])
+    ny, nx = pm.shape
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    r = np.hypot(xx - (nx - 1) / 2.0, yy - (ny - 1) / 2.0)
+    ring = np.abs(r - mid) <= 1.0                                 # where fpa was evaluated
+    sect = pa_wedge_mask(pm.shape, list(samp.forbidden_pa))
+    agree = (pm == sect)[ring].mean()
+    assert agree > 0.9, f"mask and sectors disagree on {100 * (1 - agree):.0f}% of the ring"
+
+
+def test_no_dead_zones_puts_them_back_in(tree, stub_stpsf):
+    run_miri, a = _args(data=str(tree), dead_zones=False)
+    _, _, _, _, obj, samp, _, _ = run_miri.build(a, log=lambda *_: None)
+    assert obj.metric.pixel_mask is None
+    assert list(samp.forbidden_pa) == [], "sectors were forbidden with the exclusion off"
+
+
+def test_nan_dead_zones_is_opt_in_and_says_what_it_breaks(tree, stub_stpsf):
+    """Kept for a no-filter reduction, and only that.  A cube carrying NaN dead zones plus
+    the default high-pass is the failure above, so --check must not let it pass quietly."""
+    run_miri, a = _args(data=str(tree), nan_dead_zones=True)
+    dsets, *_ = run_miri.build(a, log=lambda *_: None)
+    assert any(np.isnan(np.asarray(ds.cube, float)).any() for ds in dsets.values())
     for ds in dsets.values():
-        assert "quadrant_mask" not in (ds.meta or {})
-    assert list(samp.forbidden_pa) == [], "sectors were forbidden with masking off"
+        assert ds.meta.get("quadrant_masked_px", 0) > 0
+
+
+def test_one_nan_pixel_is_enough_to_lose_most_of_the_frame():
+    """The mechanism behind all of the above, and it is worse than "spreads by the filter
+    width".
+
+    ``highpass(nan_aware=False)`` is ``ndimage.uniform_filter``, whose running-sum
+    implementation poisons everything downstream of the first NaN along each axis -- not a
+    13x13 box.  One NaN in the corner of an 81x81 frame takes three quarters of it; the MIRI
+    dead zones reach the frame edges along all four axes, so they take all of it.  Nothing
+    in the pipeline notices: ``np.nansum`` of an all-NaN frame is 0.0 and ``bin_frames``
+    drops zero-sum bins.
+    """
+    from klip_tpe.klip import highpass
+    img = np.ones((81, 81))
+    img[3, 3] = np.nan
+    assert np.mean(~np.isfinite(highpass(img, 12, nan_aware=False))) > 0.70
+    # nan_aware=True is the contrast: only the input pixel stays NaN.  The reducer does not
+    # use it on the science cube, which is why the cube must arrive finite.
+    assert np.count_nonzero(~np.isfinite(highpass(img, 12, nan_aware=True))) == 1
+
+
+def test_nan_dead_zones_costs_most_of_the_frame_at_the_default_filter(tree, monkeypatch):
+    """Why ``--nan-dead-zones`` is opt-in and not what the driver does.
+
+    The cube it produces is not merely missing its dead zones; after the default width-12
+    high-pass most of the frame is gone.  On the real F1140C mask it is all of it, and the
+    reducer raises -- the guard below is what keeps that failure legible.
+    """
+    from klip_tpe.klip import highpass
+    g = synthetic_map(width=60.0)                     # T < 0.3 within ~11 deg of an axis
+    monkeypatch.setattr(miri, "throughput_map", lambda *a, **k: g)
+    monkeypatch.setattr(miri, "pixelscale", lambda *a, **k: 0.109655)
+    monkeypatch.setattr(miri, "library", _stub_library(g))
+    run_miri, a = _args(data=str(tree), nan_dead_zones=True)
+    dsets, *_ = run_miri.build(a, log=lambda *_: None)
+    cube = np.asarray(next(iter(dsets.values())).cube, float)
+    assert np.mean(~np.isfinite(cube)) < 0.25, "the mask itself takes only a fifth"
+    assert np.mean(~np.isfinite(highpass(cube[0], 12))) > 0.60, "the filter takes the rest"
+
+
+def test_the_reducer_still_refuses_an_all_nan_cube(tree, stub_stpsf):
+    """The guard that made this diagnosable.  Without it every downstream shape goes to
+    zero and the run fails somewhere far away and unrecognisable."""
+    from klip_tpe.instruments import generic
+    run_miri, a = _args(data=str(tree))
+    dsets, _, red, *_ = run_miri.build(a, log=lambda *_: None)
+    for r in red.reducers.values():
+        r.data.cube[:] = np.nan
+    space = generic.make_space(red, k_klip_max=4)
+    with pytest.raises(ValueError, match="dropped as empty"):
+        red.reduce_config(space.decode(space.default_vector({"filter": 12})), None, tag="boom")
 
 
 def test_build_bars_injections_from_the_dead_sectors(tree, stub_stpsf):

@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased — 2026-09-21
+- **The MIRI driver killed its own data.**  `run_miri.py` NaN'd the 4QPM dead zones into the
+  science cube (`miri.apply_quadrant_mask`) before the reducer.  The reducer high-passes at
+  `nan_aware=False`, which is `ndimage.uniform_filter` — a running-sum filter, so a NaN poisons
+  everything *downstream of it along each axis*, not a box the filter's width: one NaN near the
+  corner of an 81×81 frame takes 73% of it, and the MIRI dead zones are lines through the star
+  reaching all four frame edges, so they took 100%.  `np.nansum` of an all-NaN frame is 0.0,
+  `bin_frames` drops zero-sum bins, and the first real F1140C run (GO 1386, 2 science + 16
+  reference files) died at its first evaluation.  No crop fixes it — the dead zones cross the
+  middle of the array.  The pixels are attenuated measurements, not missing ones, so they now
+  stay in the cube and in the KLIP basis and are excluded from the *statistic* instead:
+  `miri.dead_zone_pixel_mask` carries the detector geometry through every roll into the
+  de-rotated frame and goes in as `MawetPeakSNR.pixel_mask`, paired with the `forbidden_pa`
+  sectors it agrees with by construction (100% agreement on the ring `forbidden_pa` is evaluated
+  on, measured against the real F1140C map: 8 sectors of ±2° at PA 5/85/95/175/185/265/275/355
+  for a two-roll sequence, 11.4% of the search annulus excluded).  Note the sign of the bias
+  this fixes: where the phase mask takes the starlight it takes the speckles too, so a dead-zone
+  pixel is *quieter* than its ring — leaving it in depressed σ, inflated every S/N, and gave the
+  optimizer an incentive to choose parameters that preserved the dead zones.  Taking it out
+  raises σ and lowers the reported contrast.  `apply_quadrant_mask` survives for a reduction with
+  no high-pass at all, behind `--nan-dead-zones`, with what it breaks written on it;
+  `--no-mask-quadrants` is now `--no-dead-zones` (old spelling still accepted).
+  `tests/test_run_miri.py` (the one-NaN propagation measurement, the cube arriving finite, the
+  mask agreeing with the sectors, `--nan-dead-zones` costing most of the frame, and the reducer's
+  guard) and `tests/test_miri.py` (`dead_zone_pixel_mask` geometry, rolls, and the empty-angles
+  case masking only the unsampled core).
+
 ## Unreleased — 2026-09-17
 - **The calibration k-scan was choosing the seed's k by noise.**  `Runner.calibrate` scanned k once
   at the *starting* contrast (`contrast0`, 3e-5) and only then walked the contrast into the S/N 4–6

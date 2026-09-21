@@ -14,11 +14,15 @@ answer quietly rather than a crash (see :mod:`klip_tpe.instruments.miri`):
    rather than the radial grid; the run log prints which model was built, and it should
    say ``miri_library``.
 
-2. *The dead zones are not data.*  Pixels the mask has taken are NaN'd out before the
-   search (:func:`~klip_tpe.instruments.miri.apply_quadrant_mask`), so they are not in the
-   KLIP basis and not in the noise statistics the objective is computed from.  Left in,
-   they depress the scatter in whichever annulus they cross, and the optimizer then has an
-   incentive to choose parameters that preserve them.
+2. *The dead zones must not reach the noise estimate.*  Where the phase mask has taken the
+   starlight it has taken the speckles too, so a dead-zone pixel is quieter than the ring it
+   sits in: left in, it depresses sigma, inflates every S/N, and gives the optimizer an
+   incentive to choose parameters that preserve the dead zones.  They are excluded from the
+   statistic (:func:`~klip_tpe.instruments.miri.dead_zone_pixel_mask` as ``pixel_mask``) and
+   kept in the cube.  Not the other way round: NaN-ing them into the cube, which is what an
+   earlier version of this script did, is destroyed by the high-pass filter -- it runs at
+   ``nan_aware=False`` and spreads each NaN over a box its own width, so 5% of the frame
+   becomes 100% of it and every frame is dropped as empty.
 
 3. *Injections must not land in a dead zone.*  The boundaries are fixed to the detector
    and the sampler works in sky position angle, so the forbidden sectors depend on the
@@ -72,11 +76,17 @@ def build(a, log):
     log(f"{m['filter']} / {m['image_mask']} ({m['kind']}), {px:.6f}\"/px, "
         f"lambda = {m['lam_m'] * 1e6:.3f} um")
 
-    if a.mask_quadrants:
+    if a.nan_dead_zones:
+        # Only honest with no high-pass at all.  Kept because a no-filter reduction is a
+        # legitimate thing to ask for and there the NaNs do stay where they are put.
+        log("  --nan-dead-zones: setting the suppressed pixels to NaN IN THE CUBE. This is "
+            "destroyed by any high-pass filter (nan_aware=False spreads NaN by the filter "
+            "width); only use it with the filter pinned to 1")
         dsets = miri.apply_quadrant_mask(dsets, min_throughput=a.min_throughput, log=log)
-    else:
-        log("  NOT masking the quadrant dead zones (--no-mask-quadrants): suppressed pixels "
-            "stay in the KLIP basis and in the noise statistics")
+    if not a.dead_zones:
+        log("  NOT excluding the quadrant dead zones (--no-dead-zones): suppressed pixels "
+            "stay in the noise statistics, where they depress sigma and inflate S/N, and "
+            "injections may land in them")
 
     red = sk.make_reducer(dsets, pxscale=px, wavelength_m=m["lam_m"], diam_m=miri.DIAMETER_M,
                           psf="stpsf", star_flux=a.star_flux, max_workers=a.workers,
@@ -94,10 +104,19 @@ def build(a, log):
     # from THESE rolls: the dead zones are fixed to the detector, so which sky angles they
     # eat depends on how the telescope was pointed.
     angles = np.concatenate([np.asarray(d.angles, float).ravel() for d in dsets.values()])
-    fpa = miri.forbidden_pa(angles, rho_as=mid_as, filter=m["filter"],
-                            truenorth=getattr(red, "truenorth", 0.0),
-                            min_throughput=a.min_throughput, log=log) if a.mask_quadrants else []
-    obj, samp = generic.default_config(red, known=known, forbidden_pa=fpa)
+    tn = float(getattr(red, "truenorth", 0.0))
+    fpa, pmask = [], None
+    if a.dead_zones:
+        fpa = miri.forbidden_pa(angles, rho_as=mid_as, filter=m["filter"], truenorth=tn,
+                                min_throughput=a.min_throughput, log=log)
+        # The same geometry as fpa, per pixel rather than per PA at one separation, in the
+        # de-rotated frame the metric works in.  The two go together: injections avoiding
+        # sectors that still inflate the ring sigma are scored against a noise level nothing
+        # is measuring them at.
+        shp = np.asarray(next(iter(dsets.values())).cube).shape[-2:]
+        pmask = miri.dead_zone_pixel_mask(shp, px, angles, filter=m["filter"], truenorth=tn,
+                                          min_throughput=a.min_throughput, log=log)
+    obj, samp = generic.default_config(red, known=known, forbidden_pa=fpa, pixel_mask=pmask)
     if fpa:
         blocked = sum(2 * w for _, w in fpa)
         log(f"  injections barred from {blocked:.0f} deg of the ring ({100 * blocked / 360:.0f}%)")
@@ -127,9 +146,14 @@ def main(argv=None):
     ap.add_argument("--mode", default="ADI+RDI")
     ap.add_argument("--min-throughput", type=float, default=0.30,
                     help="pixels transmitting less than this are dead zones (default 0.30)")
-    ap.add_argument("--no-mask-quadrants", dest="mask_quadrants", action="store_false",
-                    help="leave the suppressed pixels in. Only to reproduce a reduction "
-                         "that did not mask them")
+    ap.add_argument("--no-dead-zones", "--no-mask-quadrants", dest="dead_zones",
+                    action="store_false",
+                    help="stop excluding the dead zones from the noise estimate and from the "
+                         "injection positions. Only to reproduce a reduction that did not")
+    ap.add_argument("--nan-dead-zones", action="store_true",
+                    help="ALSO set the suppressed pixels to NaN in the cube. Incompatible "
+                         "with a high-pass filter of any width (it spreads NaN over the "
+                         "whole frame and every frame is then dropped as empty)")
     ap.add_argument("--n-iter", type=int, default=1000)
     ap.add_argument("--n-init", type=int, default=None)
     ap.add_argument("--k-max", type=int, default=20)
@@ -175,6 +199,7 @@ def main(argv=None):
         if not list(dec.selected):
             raise SystemExit("the space decodes to NO selected partitions; reduce_config "
                              "would map over an empty list")
+        log(f"default high-pass filter width: {dec.params.get('filter', '?')} px")
         ev = red.reduce_config(dec, None, tag="check")
         img = np.asarray(ev.image if hasattr(ev, "image") else ev, float)
         model = red.reducers[list(dec.selected)[0]].model
@@ -187,7 +212,15 @@ def main(argv=None):
                 f"four-quadrant mask. Every contrast this run reports would be an azimuthal "
                 f"average of values differing by a factor of two to four.")
         nan_frac = float(np.mean(~np.isfinite(np.asarray(list(dsets.values())[0].cube, float))))
-        log(f"masked + non-finite pixels in the first partition: {100 * nan_frac:.1f}%")
+        log(f"non-finite pixels in the first partition's cube: {100 * nan_frac:.1f}%")
+        pm = getattr(obj.metric, "pixel_mask", None)
+        log("dead zones excluded from the noise estimate: "
+            + (f"{int(np.count_nonzero(pm))} px ({100 * np.mean(pm):.1f}% of the frame)"
+               if pm is not None else "NONE"))
+        if nan_frac > 0.25:
+            log(f"WARNING: {100 * nan_frac:.0f}% of the cube is NaN. A high-pass filter "
+                f"spreads NaN by its own width, so a search over filter widths will lose "
+                f"whole frames -- do not NaN the dead zones into the cube")
         log("check passed")
         return 0
 
