@@ -64,8 +64,10 @@ def build(a, log):
     log(f"{len(files)} calints under {a.data}")
     # --filter SELECTS files, it does not just relabel them.  A programme downloaded whole
     # holds several filters in one directory and a dataset has one wavelength and one mask.
+    sc = tuple(a.star_center) if getattr(a, "star_center", None) else None
     dsets, info = sk.load_calints(files, science_target=a.target, half_px=a.crop,
-                                  partition=a.partition, filter=a.filter, log=log)
+                                  partition=a.partition, filter=a.filter, star_center=sc,
+                                  log=log)
     filt = a.filter or info.get("FILTER") or info.get("filter")
     if not filt or str(filt).upper() not in miri.MODES:
         raise SystemExit(
@@ -139,6 +141,13 @@ def main(argv=None):
     ap.add_argument("--partition", default="roll", choices=["roll", "all"])
     ap.add_argument("--crop", type=int, default=80, metavar="HALF",
                     help="crop to 2*HALF+1 px about the star (default 80 = 17.5 arcsec)")
+    ap.add_argument("--star-center", type=float, nargs=2, default=None, metavar=("X", "Y"),
+                    help="measured star position in the SUBARRAY, 0-based, instead of CRPIX "
+                         "(which is the aperture reference point). Measure it by maximising "
+                         "the point symmetry of the stacked frame -- a flux centroid is "
+                         "biased by the four-quadrant residual and comes out on the wrong "
+                         "side. On GO 1386 F1140C, CRPIX is good to 0.39 px (45 mas), both "
+                         "rolls agreeing to 0.05 px, so this is not usually needed")
     ap.add_argument("--ann", type=float, nargs=2, default=None, metavar=("IN", "OUT"))
     ap.add_argument("--known", type=float, nargs=2, action="append", metavar=("RHO", "PA"),
                     help="a real companion (arcsec, deg) injections keep clear of; repeatable")

@@ -97,7 +97,7 @@ def _args(**kw):
                 known=None, star_flux=None, mode="ADI+RDI", min_throughput=0.30,
                 dead_zones=True, nan_dead_zones=False, n_iter=10, n_init=2, k_max=4,
                 max_drop=0, out=None, seed=1, workers=1, check=True, default_only=False,
-                fresh=False, show=False)
+                fresh=False, show=False, star_center=None)
     base.update(kw)
     return run_miri, type("A", (), base)()
 
@@ -303,3 +303,20 @@ def test_check_runs_the_whole_path_and_passes(tree, stub_stpsf, tmp_path):
     assert "miri_library" in log
     assert "azimuth_dependent=True" in log
     assert "check passed" in log
+
+
+def test_star_center_overrides_crpix_and_moves_the_stamp(tree, stub_stpsf):
+    """The loader tells you to pass a measured centre; the driver has to be able to.
+
+    CRPIX is the aperture reference point, not where the star is, and on MIRI the two differ
+    by a fraction of a pixel.  Nothing here asserts which is right -- only that the flag
+    reaches the loader, so that the log's own advice is actionable.
+    """
+    run_miri, a = _args(data=str(tree))
+    base, *_ = run_miri.build(a, log=lambda *_: None)
+    run_miri, a2 = _args(data=str(tree), star_center=[57.0, 62.0])
+    moved, _, _, _, _, _, _, _ = run_miri.build(a2, log=lambda *_: None)
+    b = np.asarray(next(iter(base.values())).cube, float)
+    m = np.asarray(next(iter(moved.values())).cube, float)
+    assert b.shape == m.shape
+    assert not np.allclose(np.nan_to_num(b), np.nan_to_num(m)), "star_center was ignored"
