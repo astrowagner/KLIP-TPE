@@ -275,3 +275,33 @@ def test_a_single_filter_set_still_needs_no_argument(tmp_path):
     ds, info = load_calints(f, science_target="T", half_px=20, align=False, partition="all",
                             log=lambda *_: None)
     assert info["filter"] == "F1140C"
+
+
+def test_a_large_dq_fraction_is_called_out_not_just_counted(tmp_path):
+    """A quarter of a MIRI 4QPM subarray comes back DQ-flagged: HIP 65426 in MASK1140 is
+    17,729 of 64,512 pixels per frame.
+
+    The count was already printed; what was missing was any sense of whether it is a lot,
+    which needs the array size beside it.  Those pixels are a smooth interpolation of
+    their neighbours and carry no independent information, but they do enter the KLIP
+    basis -- where smooth and large is what the leading components are made of.
+    """
+    ny = nx = 60
+    many = tuple((y, x) for y in range(10, 40) for x in range(10, 40))   # 900 of 3600 = 25%
+    f = [write(tmp_path / "s_calints.fits", "T", roll=0.0, ny=ny, nx=nx, dq_px=many, seed=1)]
+    msgs = []
+    ds, info = load_calints(f, science_target="T", half_px=20, align=False,
+                            partition="all", log=msgs.append)
+    assert info["repaired_fraction"] == pytest.approx(0.25, abs=0.01)
+    assert any("% of the array" in m for m in msgs)
+    assert any("no independent information" in m for m in msgs)
+
+
+def test_a_small_dq_fraction_says_nothing_extra(tmp_path):
+    """The warning is only worth having if a normal frame does not trigger it."""
+    f = [write(tmp_path / "s_calints.fits", "T", roll=0.0, dq_px=((5, 5), (6, 6)), seed=1)]
+    msgs = []
+    ds, info = load_calints(f, science_target="T", half_px=20, align=False,
+                            partition="all", log=msgs.append)
+    assert info["repaired_fraction"] < 0.01
+    assert not any("no independent information" in m for m in msgs)

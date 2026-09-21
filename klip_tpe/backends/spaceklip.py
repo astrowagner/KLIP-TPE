@@ -530,10 +530,25 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
                     aligned_sci=np.asarray(S, np.float32), aligned_ref=np.asarray(R, np.float32),
                     crop_sci=Sx, crop_ref=Rx)
     nrep = [p.get("n_repaired", 0) for p in prov_s + prov_r]
+    npix = int(np.prod(S.shape[-2:])) if S.size else 0
+    frac = (float(np.median(nrep)) / npix) if (nrep and npix) else 0.0
     log(f"  calints: {len(sci)} science / {len(ref)} reference files -> {S.shape[0]} + "
         f"{R.shape[0]} frames, {n}x{n} px at {px*1e3:.2f} mas, rolls {info['rolls']}, "
         f"{info['bunit']!r}; repair={rmode!r}"
-        + (f" ({int(np.median(nrep))} px/frame)" if nrep and rmode != "none" else ""))
+        + (f" ({int(np.median(nrep))} px/frame, {100 * frac:.0f}% of the array)"
+           if nrep and rmode != "none" else ""))
+    # A quarter of a MIRI 4QPM subarray comes back DQ-flagged: HIP 65426 in MASK1140 is
+    # 17,729 of 64,512 pixels per frame.  Filling that from neighbours is not a small
+    # correction -- it is a large amount of smooth interpolated data entering the KLIP
+    # basis, where smooth and large is exactly what the leading components are made of.
+    # The number was already printed; what was missing was any sense of whether it is a
+    # lot, which needs the array size beside it.
+    if frac > 0.10 and rmode != "none":
+        log(f"  calints: that is {100 * frac:.0f}% of every frame replaced by an "
+            f"interpolation of its neighbours. Those pixels carry no independent "
+            f"information but do enter the KLIP basis; consider repair=False (the built-in "
+            f"reducers treat NaN as missing) and check the result against this one.")
+    info["repaired_fraction"] = frac
     return dsets, info
 
 
