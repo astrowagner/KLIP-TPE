@@ -20,6 +20,13 @@ paper_runs/*
 !paper_runs/*.sh
 !paper_runs/*.md
 
+# The instrument drivers default --out to the working directory, so a run started from the
+# repo root leaves its products here (two F1140C runs: 18 MB, and they grow with --pdf-every
+# and --movie).  Same policy as paper_runs/ above: outputs, not source.  Anchored to the root
+# so nothing nested can match by accident.
+/miri_*/
+/M_*/
+
 # archives of run outputs
 *.tgz
 *.tar.gz
