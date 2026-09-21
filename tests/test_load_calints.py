@@ -234,3 +234,44 @@ def test_info_carries_the_scale_and_filter_the_rest_of_the_run_needs(two_rolls):
 def test_no_files_is_an_error_not_an_empty_run():
     with pytest.raises(ValueError, match="no files"):
         load_calints([], log=lambda *_: None)
+
+
+def test_a_mixed_filter_set_is_refused_rather_than_stacked(tmp_path):
+    """The wavelength and pixel scale came from the FIRST file and were applied to every
+    frame, so a directory holding more than one filter was stacked into a single dataset
+    at a single lambda -- different masks, different lambda/D, no error.
+
+    A whole programme downloaded at once is exactly that: GO 1386 holds HIP 65426 in
+    F1140C and F1550C and HD 141569A in all three, together.
+    """
+    f = [write(tmp_path / "a_calints.fits", "T", roll=0.0, filt="F1140C", seed=1),
+         write(tmp_path / "b_calints.fits", "T", roll=0.0, filt="F1550C", seed=2)]
+    with pytest.raises(ValueError, match="span 2 filters"):
+        load_calints(f, science_target="T", half_px=20, align=False, log=lambda *_: None)
+
+
+def test_filter_selects_the_files_it_names(tmp_path):
+    f = [write(tmp_path / "a_calints.fits", "T", roll=0.0, filt="F1140C", seed=1),
+         write(tmp_path / "b_calints.fits", "T", roll=0.0, filt="F1550C", seed=2),
+         write(tmp_path / "c_calints.fits", "R", roll=0.0, filt="F1140C", seed=3)]
+    ds, info = load_calints(f, science_target="T", half_px=20, align=False, filter="F1140C",
+                            partition="all", log=lambda *_: None)
+    assert info["filter"] == "F1140C"
+    assert ds["sci"].cube.shape[0] == 2            # the one F1140C science file
+    assert ds["sci"].ref_cube.shape[0] == 2        # its F1140C reference, not the F1550C
+
+
+def test_a_filter_that_is_not_there_is_named(tmp_path):
+    f = [write(tmp_path / "a_calints.fits", "T", roll=0.0, filt="F1140C")]
+    with pytest.raises(ValueError, match="no files with FILTER='F2300C'"):
+        load_calints(f, science_target="T", half_px=20, align=False, filter="F2300C",
+                     log=lambda *_: None)
+
+
+def test_a_single_filter_set_still_needs_no_argument(tmp_path):
+    """The refusal must only fire when there is a real ambiguity."""
+    f = [write(tmp_path / "a_calints.fits", "T", roll=0.0, filt="F1140C", seed=1),
+         write(tmp_path / "b_calints.fits", "R", roll=0.0, filt="F1140C", seed=2)]
+    ds, info = load_calints(f, science_target="T", half_px=20, align=False, partition="all",
+                            log=lambda *_: None)
+    assert info["filter"] == "F1140C"

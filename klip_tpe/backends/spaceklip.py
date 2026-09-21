@@ -242,7 +242,7 @@ def load_spaceklip(database=None, key: Optional[str] = None, sci_files: Optional
 def load_calints(files: Sequence[str], science_target: Optional[str] = None, half_px: int = 55,
                  align: bool = True, repair: Union[bool, str] = True,
                  star_center: Optional[Tuple[float, float]] = None, keep_frames: bool = False,
-                 partition: str = "roll",
+                 partition: str = "roll", filter: Optional[str] = None,
                  log: Callable[[str], None] = print) -> Tuple[Dict[str, Dataset], Dict[str, Any]]:
     """Stage-2 ``*_calints.fits`` straight into ``{name: Dataset}``, without spaceKLIP.
 
@@ -305,6 +305,27 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
     files = sorted(files)
     if not files:
         raise ValueError("load_calints got no files")
+
+    # One filter, always.  The wavelength and the pixel scale were taken from the FIRST
+    # file and applied to every frame, so a directory holding more than one filter was
+    # stacked into a single dataset at a single lambda -- different masks, different
+    # lambda/D, no error.  A whole programme downloaded at once is exactly that: the ERS
+    # (GO 1386) has HIP 65426 in F1140C and F1550C and HD 141569A in all three, together.
+    def _filt(f):
+        return str(fits.getheader(f).get("FILTER", "")).strip().upper()
+
+    present = sorted({_filt(f) for f in files} - {""})
+    if filter:
+        want_f = str(filter).strip().upper()
+        if want_f not in present:
+            raise ValueError(f"no files with FILTER={want_f!r}; this set has {present}")
+        files = [f for f in files if _filt(f) == want_f]
+        log(f"  calints: {len(files)} file(s) in {want_f} (of {present})")
+    elif len(present) > 1:
+        raise ValueError(
+            f"these {len(files)} files span {len(present)} filters {present}, and a "
+            f"dataset has one wavelength and one mask. Pass filter= to choose; loading "
+            f"them together would stack every filter at the first file's lambda.")
 
     def targ(f):
         return str(fits.getheader(f).get("TARGPROP", "")).replace("-", "").replace("_", "").upper()

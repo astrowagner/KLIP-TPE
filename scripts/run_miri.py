@@ -58,8 +58,10 @@ def build(a, log):
         raise SystemExit(f"no jw*_calints.fits under {a.data} -- "
                          f"fetch them with scripts/fetch_jwst_ar.py")
     log(f"{len(files)} calints under {a.data}")
+    # --filter SELECTS files, it does not just relabel them.  A programme downloaded whole
+    # holds several filters in one directory and a dataset has one wavelength and one mask.
     dsets, info = sk.load_calints(files, science_target=a.target, half_px=a.crop,
-                                  partition=a.partition, log=log)
+                                  partition=a.partition, filter=a.filter, log=log)
     filt = a.filter or info.get("FILTER") or info.get("filter")
     if not filt or str(filt).upper() not in miri.MODES:
         raise SystemExit(
@@ -111,7 +113,10 @@ def main(argv=None):
     ap.add_argument("--data", required=True, help="directory holding jw*_calints.fits")
     ap.add_argument("--target", default=None, help="TARGPROP of the science target; the "
                                                    "other targets become the RDI library")
-    ap.add_argument("--filter", default=None, help="override the header FILTER")
+    ap.add_argument("--filter", default=None,
+                    help="SELECT the files of this filter (not just relabel them). A "
+                         "programme downloaded whole holds several; a dataset has one "
+                         "wavelength and one mask, so loading them together is wrong")
     ap.add_argument("--partition", default="roll", choices=["roll", "all"])
     ap.add_argument("--crop", type=int, default=80, metavar="HALF",
                     help="crop to 2*HALF+1 px about the star (default 80 = 17.5 arcsec)")
