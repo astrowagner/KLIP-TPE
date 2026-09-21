@@ -97,7 +97,8 @@ def _args(**kw):
                 known=None, star_flux=None, mode="ADI+RDI", min_throughput=0.30,
                 dead_zones=True, nan_dead_zones=False, n_iter=10, n_init=2, k_max=4,
                 max_drop=0, out=None, seed=1, workers=1, check=True, default_only=False,
-                fresh=False, show=False, star_center=None)
+                fresh=False, show=False, star_center=None, display=True, display_every=10,
+                pdf_every=0)
     base.update(kw)
     return run_miri, type("A", (), base)()
 
@@ -320,3 +321,38 @@ def test_star_center_overrides_crpix_and_moves_the_stamp(tree, stub_stpsf):
     m = np.asarray(next(iter(moved.values())).cube, float)
     assert b.shape == m.shape
     assert not np.allclose(np.nan_to_num(b), np.nan_to_num(m)), "star_center was ignored"
+
+
+def test_panels_are_written_without_a_live_window(tree, stub_stpsf, tmp_path, monkeypatch):
+    """Writing the panels and putting them on screen are two different things.
+
+    They used to be one: no ``--show`` meant no ``LiveDisplay`` at all, so a run started
+    without it wrote no panels, and ``klip-tpe view --run-dir`` -- which this script prints
+    as the way to watch a run -- had nothing to watch, for the whole run, with no way to
+    attach later.  ``klip_tpe.cli`` has always kept the two separate.
+    """
+    import run_miri
+    made = {}
+
+    class FakeDisplay:
+        def __init__(self, run_dir, **kw):
+            made.update(kw, run_dir=run_dir)
+
+    monkeypatch.setattr("klip_tpe.display.LiveDisplay", FakeDisplay)
+    out = tmp_path / "o"
+    run_miri.main([f"--data={tree}", "--target=TARG", "--crop=40", f"--out={out}",
+                   "--k-max=4", "--workers=1", "--n-iter=1", "--default-only"])
+    assert made, "no display was created without --show, so no panels are written"
+    assert made["show"] is False and made["run_dir"] == str(out)
+    assert "klip-tpe view --run-dir" in (out / "run.log").read_text()
+
+
+def test_no_display_really_turns_the_panels_off(tree, stub_stpsf, tmp_path, monkeypatch):
+    import run_miri
+    made = []
+    monkeypatch.setattr("klip_tpe.display.LiveDisplay",
+                        lambda *a, **k: made.append(k) or object())
+    out = tmp_path / "o2"
+    run_miri.main([f"--data={tree}", "--target=TARG", "--crop=40", f"--out={out}",
+                   "--k-max=4", "--workers=1", "--n-iter=1", "--default-only", "--no-display"])
+    assert made == []

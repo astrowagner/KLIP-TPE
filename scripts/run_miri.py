@@ -174,7 +174,18 @@ def main(argv=None):
                     help="build everything and reduce once at the default, then stop")
     ap.add_argument("--default-only", action="store_true")
     ap.add_argument("--fresh", action="store_true")
-    ap.add_argument("--show", nargs="?", const="window", default=False, metavar="MODE")
+    ap.add_argument("--show", nargs="?", const="window", default=False, metavar="MODE",
+                    help="also open a live window in THIS process ('window' or 'inline'). "
+                         "Panels are written either way -- prefer watching them with "
+                         "'klip-tpe view --run-dir <out>' from a second shell, which is a "
+                         "separate process and so cannot be starved by the optimizer")
+    ap.add_argument("--no-display", dest="display", action="store_false",
+                    help="do not write panel PNGs at all (nothing to watch, live or later)")
+    ap.add_argument("--display-every", type=int, default=10, metavar="N",
+                    help="render a panel every N evaluations (default 10; a new best and the "
+                         "last evaluation of an annulus always render)")
+    ap.add_argument("--pdf-every", type=int, default=0, metavar="N",
+                    help="also write a PDF panel every N evaluations (default 0 = never)")
     a = ap.parse_args(argv)
 
     out = a.out or os.path.join(os.getcwd(), f"miri_{a.target or 'run'}")
@@ -260,12 +271,19 @@ def main(argv=None):
         log("check passed")
         return 0
 
+    # Writing the panels and putting them on screen are two different things, as they are in
+    # klip_tpe.cli: --display writes, --show opens a window.  Tying them together (which this
+    # script used to do) means a run started without --show writes no panels, and then the
+    # separate viewer this very line advertises has nothing to watch -- for the whole run,
+    # with no way to attach later.
     callbacks, disp = [], None
-    if a.show:
+    if a.display:
         from klip_tpe.display import LiveDisplay
-        disp = LiveDisplay(out, every=10, pdf_every=0, movie=False, dpi=100, show=a.show)
+        disp = LiveDisplay(out, every=a.display_every, pdf_every=a.pdf_every, movie=False,
+                           dpi=100, show=a.show)
         callbacks = [disp]
-        log(f"live window: {a.show}  (also: klip-tpe view --run-dir {out})")
+        log(f"panels every {a.display_every} eval(s) -> {out}/  (live window: "
+            f"{a.show or 'off'}; from another shell: klip-tpe view --run-dir {out})")
 
     runner = Runner(red, space, obj, samp, cfg, out, log=log, callbacks=callbacks,
                     resume="never" if a.fresh else "auto")
