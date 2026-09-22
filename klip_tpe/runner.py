@@ -45,7 +45,8 @@ import numpy as np
 
 from . import __version__
 from .heartbeat import Heartbeat
-from .metrics import Objective, Source, nanmedian_even, radprof, source_xy, star_center
+from .metrics import (Objective, Source, mawet_peak_snr, nanmedian_even, radprof, source_xy,
+                      star_center)
 from .optimizers import GridSearch, History, Optimizer, RandomSearch, TPE
 from .positions import PositionSampler, n_sources_rule
 from .reducer import EvalImages, PartitionedReducer, Reducer, ReductionRequest
@@ -459,6 +460,7 @@ class Runner:
         self._recal_done = 0
         self._best_images: Dict[str, Any] = {}
         self._nsrc_warned: Dict[int, int] = {}     # annulus -> count already reported
+        self._nsrc_cache: Dict[int, int] = {}      # annulus -> resolved count (the probe is not free)
         self._calib_images: Optional[Dict[str, Any]] = None
         self._k_default = int(self.cfg.defaults.get("k_klip", 10) or 10)
         self._resumed = False
@@ -555,11 +557,16 @@ class Runner:
     def _band(self, ia: int, cfg: Optional[Config] = None) -> Tuple[float, float]:
         """Injection band (arcsec), inset by ``inject_inset_fwhm`` FWHM from each edge
         (opt_width: both bounds at the zone mid-radius, A §3.1)."""
+        return self._band_for(ia, self._nsrc(ia), cfg)
+
+    def _band_for(self, ia: int, n: int, cfg: Optional[Config] = None) -> Tuple[float, float]:
+        """:meth:`_band` for an explicit source count, so the packing check can ask what a
+        candidate ``n`` would place without calling back into :meth:`_nsrc`."""
         a_in, a_out = self._zone(ia, cfg)
         if self.cfg.opt_width:
             rmid = 0.5 * (a_in + a_out)
             return rmid * self.pxscale, rmid * self.pxscale
-        if self.cfg.pair_area_midpoint and self._nsrc(ia) == 2:
+        if self.cfg.pair_area_midpoint and int(n) == 2:
             # addendum 2 §2b: a pair sits at the annulus' area-weighted mid radius (half the
             # annulus area inside, half outside), 180 deg apart; the band collapses to that
             # radius BEFORE the placement routine, whose 1.5-FWHM IWA clamp still applies.
@@ -586,35 +593,72 @@ class Runner:
             # hands that annulus back to the rule
             v = ns[min(ia, len(ns) - 1)] if len(ns) else None
             ns = None if v is None else int(v)
-        # The radius the count has to hold at is where the INNERMOST source lands, not the
-        # annulus mid-radius: apertures scale with r, so that is where the noise ring
-        # starves first.  Computed inline rather than via _band(), which calls back into
-        # this method for the pair_area_midpoint case.
+        if ia in self._nsrc_cache:
+            return self._nsrc_cache[ia]
         a_in, a_out = self._zone(ia, None)
-        if self.cfg.opt_width:
-            r_px = 0.5 * (a_in + a_out)
-        else:
-            r_px = a_in + self.cfg.inject_inset_fwhm * self.fwhm
-            if r_px >= a_out - self.cfg.inject_inset_fwhm * self.fwhm:
-                r_px = 0.5 * (a_in + a_out)
-        m = getattr(self.objective, "metric", None)
-        try:
-            fp = getattr(self.sampler, "forbidden_pa", ()) or ()
-            blocked = min(0.9, sum(2.0 * float(hw) for _, hw in fp) / 360.0)
-        except Exception:
-            blocked = 0.0
-        n = n_sources_rule(ia, a_out * self.pxscale, ns, inner_px=r_px, fwhm=self.fwhm,
-                           excl_fwhm=float(getattr(m, "excl_fwhm", 1.5) or 1.5),
-                           min_ring=int(getattr(m, "min_ring", 6) or 6),
-                           n_known=len(self._known()), blocked_fraction=blocked)
-        asked = ns if ns is not None else None
-        if asked is not None and n < asked and self._nsrc_warned.get(ia) != n:
+        asked = int(ns) if ns is not None else n_sources_rule(ia, a_out * self.pxscale, None)
+        n = asked
+        for cand in range(asked, 0, -1):
+            if self._ring_survives(ia, cand):
+                n = cand
+                break
+        if n < asked and self._nsrc_warned.get(ia) != n:
             self._nsrc_warned[ia] = n
-            self.log(f"  annulus {ia+1}: {asked} sources requested, {n} used -- at r={r_px:.1f} px "
-                     f"({r_px * self.pxscale:.2f}\") more would leave the Mawet ring fewer than "
-                     f"{int(getattr(m, 'min_ring', 6) or 6)} clean apertures, and it would fall back "
-                     f"to the radial band for every separation")
+            mr = int(getattr(getattr(self.objective, "metric", None), "min_ring", 6) or 6)
+            self.log(f"  annulus {ia+1}: {asked} sources requested, {n} used -- more would leave "
+                     f"some separation's Mawet ring fewer than {mr} clean apertures, and it would "
+                     f"fall back to the radial band there")
+        self._nsrc_cache[ia] = n
         return n
+
+    def _ring_survives(self, ia: int, n: int) -> bool:
+        """Would ``n`` sources leave every one of their rings ``min_ring`` clean apertures?
+
+        Asked of the REAL geometry -- the sampler's own placement, scored by
+        :func:`mawet_peak_snr` itself -- rather than a closed form.  A closed form has to
+        assume the sources share one ring, and the default sampler does not place them that
+        way: ``rho[i]`` steps across the injection band, so sources sit at different radii
+        and mostly stay out of each other's exclusion zones.  Assuming co-radial sources
+        understates what a wide annulus holds by a wide margin -- on MIRI's 6.7-36 px band
+        it says 2 where the measured answer is past 14.
+
+        The co-radial cases are the ones where it really does bite (``fixed_pa``,
+        ``opt_width``, and the ``pair_area_midpoint`` pair), and they are covered here too
+        because ``_band_for`` collapses the band for them.
+        """
+        m = getattr(self.objective, "metric", None)
+        mr = int(getattr(m, "min_ring", 6) or 6)
+        if n <= 1:
+            return True
+        try:
+            lo, hi = self._band_for(ia, n, None)
+            shape = self._probe_shape()
+            if shape is None:
+                return True
+            probe = np.zeros(shape, float)
+            worst = mr
+            for seed in (0x5E3D, 0xC0FFEE):
+                src = self.sampler.sample(n, lo, hi, np.random.default_rng([int(self.cfg.seed or 0),
+                                                                            int(ia), int(n), seed]))
+                _, det = mawet_peak_snr(probe, [s.rho for s in src], [s.theta for s in src],
+                                        self.pxscale, self.fwhm, known=self._known(),
+                                        excl_fwhm=float(getattr(m, "excl_fwhm", 1.5) or 1.5),
+                                        pixel_mask=getattr(m, "pixel_mask", None),
+                                        angle_convention=getattr(self.reducer, "angle_convention", "pa"),
+                                        min_ring=mr, return_details=True)
+                worst = min([worst] + [int(d.get("nclean", 0)) for d in det])
+            return worst >= mr
+        except Exception:
+            return True          # a guard that cannot measure must not veto the run
+
+    def _probe_shape(self) -> Optional[Tuple[int, int]]:
+        """Frame shape for the packing probe, from whichever reducer holds data."""
+        for r in [self.reducer] + list(getattr(self.reducer, "reducers", {}).values() or []):
+            c = getattr(getattr(r, "data", None), "cube", None)
+            if c is not None and np.ndim(c) == 3:
+                return tuple(int(v) for v in np.shape(c)[1:])
+        pm = getattr(getattr(self.objective, "metric", None), "pixel_mask", None)
+        return None if pm is None else tuple(int(v) for v in np.shape(pm))
 
     def search_sources(self, ia: int, contrast: float) -> List[Source]:
         """One frozen set of injected sources for annulus ``ia``.

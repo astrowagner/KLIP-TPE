@@ -409,3 +409,82 @@ def test_the_hip65426_miri_entries_are_anchored_to_the_f444w_one():
     assert s["F1140C"] / f444 == pytest.approx(rj, rel=0.15), "not a Rayleigh-Jeans tail"
     for k in ("F1065C", "F1140C", "F1550C"):
         assert "Carter" in P[f"hip65426_{k.lower()}"]["ref"]
+
+
+# ----------------------------------------------------------------------------
+# the default annulus split
+# ----------------------------------------------------------------------------
+def _run_miri_mod():
+    import importlib.util
+    import os
+    p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "run_miri.py")
+    spec = importlib.util.spec_from_file_location("run_miri_mod", p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def test_default_annuli_splits_the_miri_field_and_shrinks_the_first_zone():
+    """One annulus over 2-11 FWHM averages the inner working distance together with the
+    background-limited outside.  The first zone ends at 6 FWHM, which is measured, not
+    picked: at 5 FWHM the inner noise ring only holds 2 injected sources."""
+    da = _run_miri_mod().default_annuli
+    fwhm = 3.341203665511095                     # F1140C
+    e = da(fwhm, 40)
+    assert len(e) == 4, f"expected three annuli, got {len(e) - 1}: {e}"
+    assert list(e) == sorted(e)
+    assert abs(e[0] - 2.0 * fwhm) < 1e-6, "inner edge is the usual 2 FWHM"
+    assert abs(e[1] / fwhm - 6.0) < 0.01, "the first annulus must end at 6 FWHM"
+    assert abs(e[-1] - 36.0) < 1e-6
+    # the two outer zones are comparable in log radius, not one huge and one thin
+    assert abs(np.log(e[2] / e[1]) - np.log(e[3] / e[2])) < 0.05
+
+
+def test_default_annuli_merges_zones_too_thin_to_mean_anything():
+    """F1550C's FWHM is large enough that the geometric split leaves sub-FWHM zones.  A
+    zone narrower than 1.5 FWHM cannot carry its own KLIP parameters and its injection band
+    collapses to one radius, so the edge is dropped rather than kept for show."""
+    da = _run_miri_mod().default_annuli
+    e = da(4.5, 40)
+    assert len(e) == 3, f"F1550C should merge to two annuli, got {e}"
+    assert all((e[i + 1] - e[i]) >= 1.5 * 4.5 - 1e-9 for i in range(len(e) - 1))
+    for fwhm, crop in ((3.34, 15), (3.34, 25), (6.0, 40)):
+        ee = da(fwhm, crop)
+        assert len(ee) >= 2 and list(ee) == sorted(ee)
+        assert all((ee[i + 1] - ee[i]) >= 1.5 * fwhm - 1e-9 for i in range(len(ee) - 1))
+
+
+def test_the_default_miri_annuli_leave_every_ring_its_noise_apertures():
+    """The whole point of ending the first annulus at 6 FWHM.  Checked against the real
+    estimator with MIRI's dead zones and HIP 65426 b on the ring, at the counts
+    ``n_sources_rule`` will actually ask for (4 innermost, 6 outside)."""
+    from klip_tpe.metrics import mawet_peak_snr, star_center
+    from klip_tpe.positions import PositionSampler, n_sources_rule
+
+    PX, FWHM, N = 0.11032674199848376, 3.341203665511095, 81
+    known = [(0.826, 150.2)]
+    fpa = [(13, 2), (22, 3), (103, 2), (112, 3), (193, 2), (203, 2), (283, 2), (292, 3)]
+    probe = np.zeros((N, N))
+    cx, cy = star_center(probe.shape)
+    yy, xx = np.mgrid[0:N, 0:N]
+    pa = np.degrees(np.arctan2(yy - cy, xx - cx)) % 360
+    mask = np.zeros((N, N), bool)
+    for c, hw in fpa:
+        mask |= np.abs((pa - c + 180) % 360 - 180) < hw
+    samp = PositionSampler(fwhm_as=FWHM * PX, excl_fwhm=1.5, known=known, forbidden_pa=fpa)
+
+    edges = _run_miri_mod().default_annuli(FWHM, 40)
+    for ia in range(len(edges) - 1):
+        a_in, a_out = edges[ia], edges[ia + 1]
+        n = n_sources_rule(ia, a_out * PX, None)
+        assert n > 2, f"annulus {ia + 1} asks for only {n} sources"
+        lo, hi = a_in + FWHM, a_out - FWHM
+        if hi <= lo:
+            lo = hi = 0.5 * (a_in + a_out)
+        for seed in (1, 7, 21, 99):
+            src = samp.sample(n, lo * PX, hi * PX, np.random.default_rng(seed))
+            _, det = mawet_peak_snr(probe, [s.rho for s in src], [s.theta for s in src], PX, FWHM,
+                                    known=known, pixel_mask=mask, return_details=True)
+            worst = min(int(d.get("nclean", 0)) for d in det)
+            assert worst >= 6, (f"annulus {ia + 1} [{a_in:.1f},{a_out:.1f}] with {n} sources "
+                                f"leaves only {worst} clean apertures (seed {seed})")

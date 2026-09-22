@@ -54,6 +54,51 @@ from klip_tpe.runner import (CalibrationConfig, RunConfig, Runner,  # noqa: E402
                              ValidationConfig)
 
 
+def default_annuli(fwhm_px, crop_half, first_fwhm=6.0, inner_fwhm=2.0, max_px=40.0):
+    """Default MIRI annulus edges: a short inner annulus, then two wider ones.
+
+    The MIRI coronagraphic field spans 2 to ~11 FWHM, over which the contrast and the
+    best KLIP parameters both change a great deal, so one annulus over the whole range
+    averages the inner working distance together with the background-limited outside.
+
+    The inner edge is the usual 2 FWHM.  The first annulus ENDS at ``first_fwhm`` FWHM
+    (~20 px on F1140C), and that number is measured rather than chosen: with the 4QPM dead
+    zones eating ~10% of the ring and one known companion on it, ending the first annulus
+    at 6 FWHM leaves 8 clean Mawet apertures for 3 injected sources and 7 for 4, while
+    ending it at 5 FWHM leaves room for only 2.  Since the count comes from
+    ``n_sources_rule`` as 4 for the innermost annulus, 6 FWHM is where a shrunk inner
+    annulus and a usable noise ring meet.
+
+    The remaining span is split at its geometric mean, which keeps the two outer annuli
+    comparable in log-radius rather than handing the outermost most of the field.  Falls
+    back to fewer annuli when the crop leaves no room to split.
+    """
+    lo = max(inner_fwhm * float(fwhm_px), 3.0)
+    hi = min(0.45 * float(crop_half) * 2.0, float(max_px))
+    e1 = first_fwhm * float(fwhm_px)
+    if hi <= 1.5 * lo:
+        return (lo, hi)
+    if hi <= 1.3 * e1 or e1 <= 1.2 * lo:
+        return (lo, hi)
+    e2 = float(np.sqrt(e1 * hi))
+    edges = [lo, e1, e2, hi]
+    # Drop interior edges that would leave an annulus too thin to mean anything radially.
+    # A zone narrower than ~1.5 FWHM cannot hold a distinct set of KLIP parameters, and its
+    # injection band collapses to a single radius anyway; on F1550C the geometric split does
+    # exactly this.  Dropping the edge merges the pair instead of keeping a slice that only
+    # looks like a separate annulus in the setup file.
+    wmin = 1.5 * float(fwhm_px)
+    changed = True
+    while changed and len(edges) > 2:
+        changed = False
+        for i in range(len(edges) - 1):
+            if edges[i + 1] - edges[i] < wmin:
+                edges.pop(i + 1 if i + 1 < len(edges) - 1 else i)
+                changed = True
+                break
+    return tuple(edges)
+
+
 def resolve_star_flux(a, info, m, log):
     """``flux_unit`` for the injection model, or refuse to run.
 
@@ -146,10 +191,19 @@ def build(a, log):
     lod = (m["lam_m"] / miri.DIAMETER_M) * 206265.0 / px
     log(f"lambda/D = {lod:.2f} px, FWHM = {red.fwhm:.2f} px")
 
-    ann = tuple(a.ann) if a.ann else (max(2.0 * red.fwhm, 3.0), min(0.45 * a.crop * 2, 40.0))
+    ann = tuple(a.ann) if a.ann else default_annuli(red.fwhm, a.crop)
+    if len(ann) < 2 or any(b <= c for c, b in zip(ann, ann[1:])):
+        raise SystemExit(f"--ann needs 2 or more increasing edges in pixels; got {list(ann)}")
+    # The forbidden sectors are computed at ONE radius but the injections now span several
+    # annuli, and a dead zone of fixed physical width subtends a LARGER angle the closer in
+    # you look.  So use the innermost annulus' mid-radius: that over-masks the outer rings
+    # slightly, where there is aperture budget to spare, rather than under-masking the inner
+    # one, where there is not.
     mid_as = 0.5 * (ann[0] + ann[1]) * px
-    log(f"annulus {ann[0]:.1f}-{ann[1]:.1f} px ({ann[0] * px:.2f}-{ann[1] * px:.2f}\"), "
-        f"mid-radius {mid_as:.2f}\"")
+    log(f"{len(ann) - 1} annulus/annuli at "
+        + ", ".join(f"{lo:.1f}-{hi:.1f} px ({lo * px:.2f}-{hi * px:.2f}\")"
+                    for lo, hi in zip(ann, ann[1:]))
+        + f"; forbidden sectors computed at the innermost mid-radius {mid_as:.2f}\"")
 
     known = [tuple(k) for k in (a.known or [])]
     # The forbidden sectors are computed on the ring the injections actually land on and
@@ -198,7 +252,9 @@ def main(argv=None):
                          "biased by the four-quadrant residual and comes out on the wrong "
                          "side. On GO 1386 F1140C, CRPIX is good to 0.39 px (45 mas), both "
                          "rolls agreeing to 0.05 px, so this is not usually needed")
-    ap.add_argument("--ann", type=float, nargs=2, default=None, metavar=("IN", "OUT"))
+    ap.add_argument("--ann", type=float, nargs="+", default=None, metavar="EDGE",
+                    help="annulus edges in pixels, 2 or more, increasing (2 edges = one "
+                         "annulus). Default: three annuli, see default_annuli()")
     ap.add_argument("--known", type=float, nargs=2, action="append", metavar=("RHO", "PA"),
                     help="a real companion (arcsec, deg) injections keep clear of; repeatable")
     ap.add_argument("--star-flux", type=float, default=None,
@@ -268,7 +324,7 @@ def main(argv=None):
 
     n_init = a.n_init or min(max(int(0.15 * a.n_iter), 40), 400)
     n_iter, n_init = (1, 1) if (a.default_only or a.check) else (a.n_iter, n_init)
-    cfg = RunConfig(ann_edges=[ann[0], ann[1]], n_iter=n_iter, n_init=n_init, seed=a.seed,
+    cfg = RunConfig(ann_edges=[float(v) for v in ann], n_iter=n_iter, n_init=n_init, seed=a.seed,
                     validation=ValidationConfig(n_top=1 if n_iter == 1 else 6, n_valid=10),
                     calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=3),
                     verify=n_iter > 1, save_eval_images=False)

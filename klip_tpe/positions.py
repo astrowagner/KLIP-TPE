@@ -112,8 +112,19 @@ class PositionSampler:
 def max_sources_for_noise(inner_px: float, fwhm: float, *, excl_fwhm: float = 1.5,
                           min_ring: int = 6, n_known: int = 0,
                           blocked_fraction: float = 0.0) -> int:
-    """How many sources can be injected on a ring and still leave ``min_ring`` clean
+    """How many **co-radial** sources a ring can hold and still leave ``min_ring`` clean
     noise apertures for the Mawet S/N.
+
+    .. warning::
+       This assumes every source sits on the SAME ring, which is only how
+       :meth:`PositionSampler.sample` places them for ``fixed_pa``, for a collapsed band
+       (``opt_width``), and for the ``pair_area_midpoint`` pair.  The default strategy steps
+       ``rho`` across the injection band, so sources sit at different radii and mostly stay
+       out of each other's exclusion zones -- and then this bound is far too pessimistic:
+       on MIRI's 6.7-36 px annulus it returns 2 where the measured answer is past 14.
+       ``Runner._ring_survives`` therefore does the real thing, sampling actual positions
+       and scoring them with :func:`~klip_tpe.metrics.mawet_peak_snr`.  Use this only as a
+       cheap bound when there is no sampler to ask.
 
     The geometry is :func:`klip_tpe.metrics.mawet_peak_snr`'s, not an approximation of
     it: that estimator lays ``nap = floor(2*pi*r/fwhm)`` apertures round the ring, walks

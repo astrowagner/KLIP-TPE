@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased — 2026-09-22 (three MIRI annuli, and the packing cap measured properly)
+- **The packing cap was testing a geometry the sampler never produces.**  My own bug, from
+  the commit before this one: `max_sources_for_noise` assumes every source sits on the
+  same ring.  `PositionSampler.sample`'s default strategy steps `rho` ACROSS the injection
+  band, so sources sit at different radii and mostly stay out of each other's exclusion
+  zones.  Measured with the real sampler and the real estimator, MIRI's 6.7–36 px annulus
+  holds **8 sources with 10 clean apertures on the worst ring, and still passes at 14** —
+  where the co-radial formula said 2.  `Runner._ring_survives` now samples actual positions
+  and scores them with `mawet_peak_snr` itself, so it cannot drift from the estimator it is
+  protecting; `max_sources_for_noise` stays as a cheap bound for callers with no sampler,
+  documented as co-radial-only.  `_band` gained `_band_for(ia, n)` so the check can ask what
+  a candidate count would place without recursing.
+- **The ring criterion is almost never the binding constraint** once sources spread in
+  radius — NIRCam passes at 8 too (14 apertures).  It bites only in the co-radial cases:
+  `fixed_pa`, a collapsed band (`opt_width`), and the `pair_area_midpoint` pair.  So
+  NIRCam's 2 rests entirely on mutual contamination, as Kevin said, and not on the ring.
+- **MIRI now runs three annuli instead of one** (`run_miri.default_annuli`, `--ann` takes
+  any number of increasing edges).  F1140C goes from `[6.68, 36]` to
+  `[6.68, 20.05, 26.86, 36.00]`, i.e. 4.0 / 2.0 / 2.7 FWHM wide, with `n_sources_rule`
+  supplying **4 / 6 / 6** — so more than two everywhere, which was the ask.  One annulus
+  over 2–11 FWHM averages the inner working distance together with the background-limited
+  outside, and the best KLIP parameters are not the same at both ends.
+- **The first annulus ends at 6 FWHM because that is where the measurement puts it**, not
+  by taste.  With the 4QPM dead zones eating ~10% of the ring and HIP 65426 b sitting on
+  it, an inner zone ending at 6 FWHM leaves 8 clean apertures for 3 sources and 7 for 4;
+  ending it at 5 FWHM leaves room for **2**, and at 4.5 FWHM the 1-FWHM inset collapses the
+  band entirely.  Shrinking it further and keeping more than two sources are in direct
+  tension, and 6 FWHM is where they meet.
+- The two outer zones split at the geometric mean, so they are comparable in log radius
+  rather than one thin and one huge; any zone under 1.5 FWHM wide is merged away, which is
+  what takes **F1550C** to two annuli (its FWHM is 4.5 px, so the three-way split would
+  leave sub-FWHM slices that cannot carry their own parameters).
+- The forbidden sectors are now computed at the **innermost** annulus' mid-radius.  A dead
+  zone of fixed physical width subtends a larger angle closer in, so one radius has to be
+  chosen; over-masking the outer rings, which have aperture budget to spare, is the safe
+  direction.
+
 ## Unreleased — 2026-09-22 (MIRI destriping, source packing, the display's model orientation)
 - **The display's injected-PSF model was built at the wrong roll.**  Spotted by Kevin:
   the matched-PSF panel's lobes pointed the wrong way.  `injected_model_image` injected
