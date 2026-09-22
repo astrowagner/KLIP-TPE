@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — 2026-09-22 (the cache, on a machine without STPSF)
+- **A missing cache file failed as `ModuleNotFoundError: stpsf`, six frames down.**  The cache
+  exists precisely so a machine without STPSF can run from a copied one — the Mac this is
+  developed against runs Python 3.9, which STPSF will never install on — so a cache miss there
+  means "you are missing one file", not "install STPSF", and the error has to say *which* file.
+  `throughput_map` already did this; `unocculted_ee` and `offaxis_grid` did not, and the new
+  automatic flux route reaches `unocculted_ee`, so the F1140C run died on a bare ImportError
+  after loading 26 files.  Both now check `have_stpsf()` before touching STPSF and name the
+  exact cache filename and directory to copy it into.
+- Shipped `eeunocc_MIRI_F1140C_…` and `eeunocc_MIRI_F1065C_…` to the cache, so both filters'
+  flux units resolve offline (F1065C: S = 0.0781 Jy, EE(4.50 px) = 0.4753, star_flux = 1.2981e5).
+  F1550C still needs its throughput map computed before that filter can run at all.
+
 ## Unreleased — 2026-09-22
 - **The RDI library mixed background-subtracted and unsubtracted frames.**  A programme's
   *science* targets get dedicated background pointings and Image2 subtracts them

@@ -522,3 +522,41 @@ def test_the_real_map_is_a_four_quadrant_mask():
     # 180 degree symmetry is a property of the mask; 90 degree symmetry is not exact
     half = g["az"].size // 2
     np.testing.assert_allclose(t[:, :half], t[:, half:], atol=0.02)
+
+
+# ------------------------------ a cache miss on a machine that will never have STPSF
+
+def test_a_cache_miss_without_stpsf_names_the_file_to_copy(monkeypatch, tmp_path):
+    """The cache exists so a machine without STPSF can run from a copied one.
+
+    The Mac this is developed against runs Python 3.9, which STPSF will never install on, so
+    every PSF and throughput map is computed elsewhere and shipped.  A missing file there is
+    not "install STPSF", it is "you are missing one file" -- and the error has to say which.
+    It did not: ``star_flux_from_flux_density`` reached ``unocculted_ee``, whose cache file
+    had never been shipped, and the run died on a bare ImportError six frames down after
+    having already loaded 26 files.
+    """
+    import klip_tpe.stpsf_psf as S
+    # miri imports have_stpsf by name, so patching it on stpsf_psf alone leaves miri's own
+    # reference bound to the real one -- and the third case below then goes off and actually
+    # computes a Lyot throughput map instead of failing fast.
+    monkeypatch.setattr(S, "have_stpsf", lambda: False)
+    monkeypatch.setattr(miri, "have_stpsf", lambda: False)
+    monkeypatch.setenv("KLIP_TPE_DATA", str(tmp_path))
+    with pytest.raises(RuntimeError, match=r"eeunocc_MIRI_F2300C_\w+\.fits"):
+        S.unocculted_ee(4.5, instrument="MIRI", filter="F2300C", pupil_mask="MASKLYOT",
+                        log=lambda *_: None)
+    with pytest.raises(RuntimeError, match=r"stpsf_MIRI_F2300C_LYOT2300_\w+\.fits"):
+        S.offaxis_grid(instrument="MIRI", filter="F2300C", image_mask="LYOT2300",
+                       pupil_mask="MASKLYOT", seps_as=[1.0, 2.0], log=lambda *_: None)
+    # and the throughput map already did this, which is where the wording comes from
+    with pytest.raises(RuntimeError, match="not in the cache"):
+        miri.throughput_map("F2300C", log=lambda *_: None)
+
+
+def test_every_miri_filter_the_photometry_covers_has_a_star_flux_route():
+    """A PHOTOMETRY entry with no way to convert it is a run that stops at the flux step."""
+    from klip_tpe import datasets
+    for f in ("F1065C", "F1140C", "F1550C"):
+        assert datasets.PHOTOMETRY[f"hip65426_{f.lower()}"]["flux_density_jy"] > 0
+        assert miri.mode_for_filter(f)["kind"] == "4qpm"

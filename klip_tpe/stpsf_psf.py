@@ -292,6 +292,16 @@ def offaxis_grid(instrument: str = "NIRCam", filter: str = "F444W",
         except Exception as exc:                                # pragma: no cover - corrupt cache
             log(f"  stpsf: ignoring unreadable cache {os.path.basename(path)} ({exc})")
 
+    if not have_stpsf():
+        # The whole point of the cache is that a machine without STPSF can still run from a
+        # copied one -- the Mac this is developed against has Python 3.9, which STPSF will
+        # never install on.  So a cache miss there is not "install STPSF", it is "you are
+        # missing one file", and the error has to say WHICH.  Without this the failure was a
+        # bare ImportError six frames down, on a run that had already loaded 26 files.
+        raise RuntimeError(
+            f"{f'the {instrument} {filter} off-axis PSF grid'} is not in the cache and STPSF is not installed to compute it. Copy "
+            f"{os.path.basename(path)} into {cache_dir()} from a machine that has STPSF "
+            f"(Python >= 3.10), or install STPSF and its data files (STPSF_PATH).")
     inst = _instrument(instrument, filter, image_mask, pupil_mask, aperture, detector_position, date)
     pxscale = float(getattr(inst, "pixelscale", 0.0)) or float("nan")
     if not np.isfinite(pxscale) or pxscale <= 0:                # pragma: no cover - defensive
@@ -467,6 +477,16 @@ def unocculted_ee(radius_px: float, instrument: str = "NIRCam", filter: str = "F
         except Exception as exc:                                # pragma: no cover - corrupt cache
             log(f"  stpsf: ignoring unreadable EE cache {os.path.basename(path)} ({exc})")
 
+    if not have_stpsf():
+        # The whole point of the cache is that a machine without STPSF can still run from a
+        # copied one -- the Mac this is developed against has Python 3.9, which STPSF will
+        # never install on.  So a cache miss there is not "install STPSF", it is "you are
+        # missing one file", and the error has to say WHICH.  Without this the failure was a
+        # bare ImportError six frames down, on a run that had already loaded 26 files.
+        raise RuntimeError(
+            f"{f'the {instrument} {filter} unocculted PSF (for the encircled energy)'} is not in the cache and STPSF is not installed to compute it. Copy "
+            f"{os.path.basename(path)} into {cache_dir()} from a machine that has STPSF "
+            f"(Python >= 3.10), or install STPSF and its data files (STPSF_PATH).")
     inst = _instrument(instrument, filter, None, pupil_mask, aperture, detector_position, date)
     inst.image_mask = None                                      # the occulter, and only it, comes out
     p = inst.calc_psf(fov_arcsec=float(fov_arcsec), oversample=int(oversample), nlambda=int(nlambda))
