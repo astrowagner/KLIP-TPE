@@ -114,13 +114,20 @@ def destripe_detector(cube: np.ndarray, center: Optional[Tuple[float, float]] = 
     81x81 crop the reducer works with, every row passes through the coronagraphic PSF
     and the row median IS the PSF.  Destriping the crop would subtract the target.
 
-    Measured on a real F1140C integration: the per-row offset has a scatter of 3.1-3.7
-    MJy/sr against a pixel-to-pixel scatter of 3.0-3.7, i.e. the striping is as large as
-    the read noise, and removing it drops the sky noise by **1.65-1.85x**.  Columns carry
-    only ~0.3x and are worth a little more.  The row pattern correlates at +0.997 between
-    integrations of one exposure, so it is a static detector pattern rather than random
-    1/f -- which is why it survives into the KLIP residual as a fixed shape that
-    derotation then smears round the field instead of cancelling.
+    Two numbers, and it matters which one is quoted.  On a RAW F1140C integration the
+    per-row offset has a scatter of 3.1-3.7 MJy/sr against a pixel-to-pixel scatter of
+    3.0-3.7 -- the striping is as large as the read noise -- and destriping drops the sky
+    scatter by 1.63-1.77x.  But in the pipeline this runs AFTER the blank-sky background
+    subtraction, and the gain measured there is **1.28x** (per-row sigma 1.05, per-column
+    0.327, frame scatter 1.27 -> 0.991, on HIP 65426 F1140C).
+
+    The two are consistent, and the reconciliation is the thing worth knowing about this
+    artefact: the row pattern correlates at **+0.997** between integrations of one exposure,
+    so it is a STATIC detector pattern, not random 1/f per frame.  Being static makes it
+    largely common-mode, so the blank-sky median already carries most of it away and what
+    is left here is the part that differs between the science and background pointings.
+    Being static is also why that remainder survives into the KLIP residual as a fixed
+    shape which derotation smears round the field instead of cancelling.
 
     The mask is what makes it safe: ``star_radius_px`` around ``center`` takes out the
     PSF and its halo, ``boundary_px`` takes out the 4QPM boundaries and the glow sticks

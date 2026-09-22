@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — 2026-09-22 (correction: what destriping is actually worth)
+- **The destriping gain below is overstated, and this is the number to use: 1.28x, not
+  1.63–1.77x.**  Measured in the running pipeline on HIP 65426 F1140C — per-row sigma 1.05,
+  per-column 0.327, frame scatter 1.27 → 0.991.  The 1.63–1.77x was measured on a *raw*
+  calints integration, and in the pipeline the destriper runs **after** the blank-sky
+  background subtraction, which has already removed most of the pattern.
+- The two are consistent, and the reconciliation is the interesting part.  The row pattern
+  correlates at +0.997 between integrations, i.e. it is static; being static makes it
+  largely common-mode, so subtracting a blank-sky median takes most of it away on its own.
+  What destriping removes is the part that differs between the science and background
+  pointings.  Still worth having — 28% in noise — but it is not the 1.7x the earlier entry
+  claims, and the earlier claim was never measured anywhere the pipeline actually runs.
+
 ## Unreleased — 2026-09-22 (three MIRI annuli, and the packing cap measured properly)
 - **The packing cap was testing a geometry the sampler never produces.**  My own bug, from
   the commit before this one: `max_sources_for_noise` assumes every source sits on the
