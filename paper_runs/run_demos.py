@@ -321,7 +321,11 @@ def run_D():
     space.project = generic.make_guard(red, k_max=18, n_min_ref=4)
     obj, samp = generic.default_config(red, known=[HIP])
     n_iter, n_init = budget([200, 150], [40, 30])
-    cfg = RunConfig(ann_edges=[6, 20, 45], n_iter=n_iter, n_init=n_init, seed=14, n_sources=4,
+    # 2, not 4: NIRCam's coronagraphic field is small enough that four sources at one
+    # contrast perturb the KLIP basis each other sees.  The Mawet ring still holds 9 clean
+    # apertures at 4 (measured on this run's own stitch), so it is mutual contamination
+    # that sets this, not ring starvation -- n_sources_rule's packing cap would allow 4.
+    cfg = RunConfig(ann_edges=[6, 20, 45], n_iter=n_iter, n_init=n_init, seed=14, n_sources=2,
                     validation=ValidationConfig(n_top=3, n_valid=5),
                     calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=3),
                     defaults={"k_klip": 10}, fm_curve=False, save_eval_images=False)
@@ -571,7 +575,7 @@ def run_H2():
     # existed to hide that; and before it a forced 5.270e1 -- a "contrast" of 52.7, the
     # raw-detector-units axis of flux_unit = 1.0.  See docs/FLUX_CALIBRATION.md.
     _bench_hi("H2", 1, ("tpe", "random"), 18, None, {"k_klip": 10}, 2.022e-04, [6, 20], "H2_bench_jwst",
-              make_red=hip65426_objects, known=[HIP], n_sources=4, search_angles=False, n_min_ref=4,
+              make_red=hip65426_objects, known=[HIP], n_sources=2, search_angles=False, n_min_ref=4,
               add_params=[lambda: Param("mode", 0, 2, "categorical", choices=["ADI", "RDI", "ADI+RDI"],
                                         default="RDI", doc="pyKLIP PSF-subtraction mode")])
 

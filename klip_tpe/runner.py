@@ -458,6 +458,7 @@ class Runner:
         self.wall_prev = 0.0
         self._recal_done = 0
         self._best_images: Dict[str, Any] = {}
+        self._nsrc_warned: Dict[int, int] = {}     # annulus -> count already reported
         self._calib_images: Optional[Dict[str, Any]] = None
         self._k_default = int(self.cfg.defaults.get("k_klip", 10) or 10)
         self._resumed = False
@@ -585,7 +586,35 @@ class Runner:
             # hands that annulus back to the rule
             v = ns[min(ia, len(ns) - 1)] if len(ns) else None
             ns = None if v is None else int(v)
-        return n_sources_rule(ia, self._annulus(ia)[1] * self.pxscale, ns)
+        # The radius the count has to hold at is where the INNERMOST source lands, not the
+        # annulus mid-radius: apertures scale with r, so that is where the noise ring
+        # starves first.  Computed inline rather than via _band(), which calls back into
+        # this method for the pair_area_midpoint case.
+        a_in, a_out = self._zone(ia, None)
+        if self.cfg.opt_width:
+            r_px = 0.5 * (a_in + a_out)
+        else:
+            r_px = a_in + self.cfg.inject_inset_fwhm * self.fwhm
+            if r_px >= a_out - self.cfg.inject_inset_fwhm * self.fwhm:
+                r_px = 0.5 * (a_in + a_out)
+        m = getattr(self.objective, "metric", None)
+        try:
+            fp = getattr(self.sampler, "forbidden_pa", ()) or ()
+            blocked = min(0.9, sum(2.0 * float(hw) for _, hw in fp) / 360.0)
+        except Exception:
+            blocked = 0.0
+        n = n_sources_rule(ia, a_out * self.pxscale, ns, inner_px=r_px, fwhm=self.fwhm,
+                           excl_fwhm=float(getattr(m, "excl_fwhm", 1.5) or 1.5),
+                           min_ring=int(getattr(m, "min_ring", 6) or 6),
+                           n_known=len(self._known()), blocked_fraction=blocked)
+        asked = ns if ns is not None else None
+        if asked is not None and n < asked and self._nsrc_warned.get(ia) != n:
+            self._nsrc_warned[ia] = n
+            self.log(f"  annulus {ia+1}: {asked} sources requested, {n} used -- at r={r_px:.1f} px "
+                     f"({r_px * self.pxscale:.2f}\") more would leave the Mawet ring fewer than "
+                     f"{int(getattr(m, 'min_ring', 6) or 6)} clean apertures, and it would fall back "
+                     f"to the radial band for every separation")
+        return n
 
     def search_sources(self, ia: int, contrast: float) -> List[Source]:
         """One frozen set of injected sources for annulus ``ia``.

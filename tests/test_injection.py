@@ -242,3 +242,74 @@ def test_refpa_deg_still_rotates_when_a_model_asks_for_it():
     xc, yc = 30.0 + 20.0 * np.cos(np.deg2rad(az)), 30.0 + 20.0 * np.sin(np.deg2rad(az))
     xi, yi = int(round(xc)), int(round(yc))
     assert out[0, yi, xi + 5] < 0.2 * out[0, yi, xi], "refpa_deg=0 should have rotated it"
+
+
+# ----------------------------------------------------------------------------
+# the display's model image must be built at the data's own rolls
+# ----------------------------------------------------------------------------
+def _lobed_model(n=81):
+    """A PSF with one unmistakable lobe on +x in the SPACECRAFT frame."""
+    yy, xx = np.mgrid[0:n, 0:n]
+    c = (n - 1) / 2.0
+    st = (np.exp(-((xx - c) ** 2 + (yy - c) ** 2) / (2 * 1.4 ** 2))
+          + 0.6 * np.exp(-((xx - c - 6) ** 2 + (yy - c) ** 2) / (2 * 1.6 ** 2)))
+    return LibraryPSF(np.stack([st, st]), [0.2, 4.0], (c, c), ee_radius_px=3.0)
+
+
+def _lobe_pa_about_core(img):
+    """PA of the lobe measured from the source core, not from the star."""
+    m = np.nan_to_num(np.asarray(img, float))
+    cy, cx = np.unravel_index(np.argmax(m), m.shape)
+    yy, xx = np.mgrid[0:m.shape[0], 0:m.shape[1]]
+    d = np.hypot(xx - cx, yy - cy)
+    return float(np.degrees(np.arctan2(
+        *(lambda j: (j[0] - cy, j[1] - cx))(
+            np.unravel_index(np.argmax(np.where((d > 3.5) & (d < 9), m, -np.inf)), m.shape)))) % 360)
+
+
+class _FakeReducer:
+    pxscale, truenorth, fallback, angle_convention = 0.1103, 0.0, None, "pa"
+
+    def __init__(self, angles, model):
+        self._a = np.asarray(angles, float)
+        self.model = model
+
+    def frame_angles(self, pid=None):
+        return self._a
+
+
+class _FakeRunner:
+    def __init__(self, angles, model):
+        self.reducer = _FakeReducer(angles, model)
+
+
+@pytest.mark.parametrize("roll", [0.0, 45.0, 108.0, 250.0])
+def test_display_model_carries_the_lobes_round_with_the_roll(roll):
+    """The template is fixed to the spacecraft, so in the north-up image the derotation
+    is the ONLY thing that sets the lobe orientation.  A model built at parang 0 -- which
+    is what this did before -- shows its lobes off by the roll angle."""
+    from klip_tpe.display import injected_model_image
+
+    mdl = _lobed_model()
+    out = injected_model_image(_FakeRunner([roll], mdl), [Source(1.5, 40.0, 1.0)], (81, 81))
+    assert out is not None and np.isfinite(out).all(), "no NaN corners: the panel stretch reads this"
+    got = _lobe_pa_about_core(out)
+    assert min(abs(got - roll), 360 - abs(got - roll)) < 12.0, (
+        f"lobe at {got:.1f} deg for a roll of {roll:.1f} deg -- the model is not "
+        f"being derotated at the data's own angle")
+
+
+def test_display_model_superposes_the_rolls_rather_than_picking_one():
+    """Two rolls put the lobe in two places in the combined image.  The model must show
+    both, at the frame-count weighting, not one roll's version of the truth."""
+    from klip_tpe.display import injected_model_image
+
+    mdl = _lobed_model()
+    src = [Source(1.5, 40.0, 1.0)]
+    both = injected_model_image(_FakeRunner([0.0, 90.0], mdl), src, (81, 81))
+    one = injected_model_image(_FakeRunner([0.0], mdl), src, (81, 81))
+    m = np.nan_to_num(both)
+    cy, cx = np.unravel_index(np.argmax(m), m.shape)
+    # the 90-degree roll's lobe sits above the core; the single-roll model has nothing there
+    assert m[cy + 6, cx] > 0.3 * m[cy, cx]
+    assert np.nan_to_num(one)[cy + 6, cx] < 0.1 * np.nan_to_num(one)[cy, cx]

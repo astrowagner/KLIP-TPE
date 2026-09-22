@@ -1,5 +1,56 @@
 # Changelog
 
+## Unreleased — 2026-09-22 (MIRI destriping, source packing, the display's model orientation)
+- **The display's injected-PSF model was built at the wrong roll.**  Spotted by Kevin:
+  the matched-PSF panel's lobes pointed the wrong way.  `injected_model_image` injected
+  into a single `parang = 0` frame and derotated by the true-north offset alone — it
+  assumed the telescope had been pointed at roll 0.  That was invisible while the
+  injector span the stamp by the source's azimuth, and became glaring once the template
+  went spacecraft-fixed (`815fc55`), because the derotation is then the *only* thing
+  carrying lobe structure into the sky frame.  Measured on HIP 65426's rolls of 108.0 and
+  117.4°, the panel's lobes sat **112° away** from what is in the data.  It now builds at
+  the data's own angles (distinct rolls only, weighted by frame count) and derotates and
+  combines them as the science frames are, so a multi-roll set shows the real
+  superposition.  The *metric's* matched filter was never affected: `kernel_from_profile`
+  azimuthally averages the stamp, so it is circularly symmetric and has no orientation to
+  get wrong — which is also to say it discards the lobe structure entirely.
+- **MIRI is destriped in the detector frame by default** (`spaceklip.destripe_detector`,
+  `--no-destripe` to skip).  On a real F1140C integration the per-row offset has a scatter
+  of 3.1–3.7 MJy/sr against a pixel-to-pixel scatter of 3.0–3.7 — *the striping is as
+  large as the read noise* — and removing it drops the sky scatter by **1.63–1.77×**.
+  Columns carry only ~0.3× and are taken too.  The row pattern correlates at **+0.997**
+  between integrations of one exposure, so this is a static detector pattern, not random
+  1/f per frame; it survives into the KLIP residual as a fixed shape that derotation then
+  smears round the field instead of cancelling.
+  It runs on the **full subarray, after the background subtraction and before the crop**.
+  That is not a preference: a row of MIRI's 288×224 MASK1140 subarray is mostly sky, but
+  every row of the 81×81 crop the reducer works with passes through the coronagraphic PSF,
+  so destriping the crop would subtract the target.  The star (r < 45 px) and the 4QPM
+  boundaries (< 12 px, where the glow sticks run) are masked out of the estimate, then
+  what is left is sigma-clipped; the offset is subtracted from the whole row regardless.
+  The existing per-evaluation `do_destripe` (the IDL's, on the crop) is untouched and
+  still off.
+- **Injected source counts now respect the noise ring.**  `positions.max_sources_for_noise`
+  computes how many sources a ring can hold while leaving `min_ring` (6) clean apertures
+  for the Mawet S/N, from `mawet_peak_snr`'s own geometry — the CHORD test it actually
+  applies, not an arc approximation — and `n_sources_rule` caps on it, at the annulus's
+  **inner** edge, where apertures are scarcest.  It applies to an explicit `n_sources`
+  too, because past the cap the estimator abandons the ring for the radial band and the
+  extra sources cost every separation its noise estimate; `Runner._nsrc` logs when it
+  binds.  `mawet_peak_snr`'s details now report `nclean` / `ring_used`, so the number is
+  visible rather than inferred.
+- **What that measured, which was not what we expected.**  On the real `D_hip65426`
+  stitch, NIRCam holds 4 sources with **9** clean apertures (5 with 7) — it passes
+  comfortably.  MIRI is the one that starves: at its inner edge 3 sources already drop the
+  ring to **4**, because the 4QPM dead zones eat ~10% of it before any source lands.  So
+  the packing cap takes MIRI to 2 and leaves NIRCam alone.
+- **NIRCam is set to 2 anyway, for a different reason.**  Kevin's call: four sources at one
+  contrast in that small a field perturb the KLIP basis each other sees, which is mutual
+  contamination and is invisible to an aperture count.  `run_D`, the `H2` bench,
+  `calibrate_bench_contrast`'s H2 entry and `run_rxj0534`'s default all go to 2.
+  **`run_mwc758.py` is deliberately left at 3**: its contrast is forced "as the IDL run had
+  it" and changing the source count breaks that cross-check.  Say the word and it moves.
+
 ## Unreleased — 2026-09-22 (radial-profile subtraction off by default)
 - **`radprof` is no longer applied anywhere by default.**  At Kevin's direction.  The
   azimuthal integer-radius-bin mean subtraction was the IDL's default and was inherited

@@ -353,6 +353,12 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
             sd, bg = sd_band, mn_band
         elif sd_ring > 0:
             sd, bg = sd_ring, mn_ring
+        # nclean is the number of noise realisations this separation actually got, after
+        # injected sources, known companions, the frame edge and the pixel mask have eaten
+        # into the ring.  It decides whether the ring or the radial band is used, so it is
+        # the quantity a source-count rule has to respect -- recorded so it can be checked.
+        det["nclean"], det["min_ring"] = int(nclean), int(min_ring)
+        det["ring_used"] = bool(nclean >= min_ring and sd_ring > 0)
         if sd > 0:
             if sd_band > 0:
                 sd = max(sd, sd_band)

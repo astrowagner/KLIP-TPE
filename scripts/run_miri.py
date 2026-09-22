@@ -116,7 +116,7 @@ def build(a, log):
     sc = tuple(a.star_center) if getattr(a, "star_center", None) else None
     dsets, info = sk.load_calints(files, science_target=a.target, half_px=a.crop,
                                   partition=a.partition, filter=a.filter, star_center=sc,
-                                  log=log)
+                                  destripe=getattr(a, "destripe", None), log=log)
     filt = a.filter or info.get("FILTER") or info.get("filter")
     if not filt or str(filt).upper() not in miri.MODES:
         raise SystemExit(
@@ -233,6 +233,10 @@ def main(argv=None):
                     help="build everything and reduce once at the default, then stop")
     ap.add_argument("--default-only", action="store_true")
     ap.add_argument("--fresh", action="store_true")
+    ap.add_argument("--no-destripe", dest="destripe", action="store_false", default=None,
+                    help="skip the detector-frame destriping, which is ON by default for "
+                         "MIRI: the per-row offset measures as large as the pixel-to-pixel "
+                         "noise and removing it drops the sky scatter by ~1.7x")
     ap.add_argument("--show", nargs="?", const="window", default=False, metavar="MODE",
                     help="also open a live window in THIS process ('window' or 'inline'). "
                          "Panels are written either way -- prefer watching them with "

@@ -54,7 +54,7 @@ BENCH = {
     # configuration the calibration measures at is mode=RDI, k=10, the fakes' KLIP throughput
     # included.  Needs the STPSF grid (cached is enough) -- see run_demos.hip65426_objects.
     "H2": dict(groups=1, k_max=18, max_drop=None, defaults={"k_klip": 10}, edges=[6, 20],
-               n_sources=4, n_min_ref=4,  search_angles=False, target="hip65426"),
+               n_sources=2, n_min_ref=4,  search_angles=False, target="hip65426"),
 }
 
 

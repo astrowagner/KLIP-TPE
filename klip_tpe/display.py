@@ -3171,8 +3171,21 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
 # ----------------------------------------------------------------------------
 def injected_model_image(runner, sources, shape) -> Optional[np.ndarray]:
     """IDL ``disp_injmdl``: the injected-PSF model of ``sources`` (rho, theta, contrast)
-    as it appears in the final (north-up) image: injected into a zero-parang frame and
-    derotated by the instrument's true-north offset like the science frames are."""
+    as it appears in the final (north-up) image.
+
+    Built at the data's OWN roll angles, then derotated and combined the way the science
+    frames are.  It used to inject into a single ``parang = 0`` frame and derotate by the
+    true-north offset alone, which silently assumed the telescope had been pointed at
+    roll 0.  That was invisible while the injector span the stamp by the source's
+    azimuth, and glaring once the template became spacecraft-fixed (``815fc55``): the
+    lobe structure is carried into the sky frame entirely by the derotation, so a model
+    built at roll 0 shows its lobes rotated away from the data by the roll itself --
+    measured at ~112 degrees on HIP 65426's rolls of 108.0 and 117.4.
+
+    Frames sharing a roll give the same picture, so only the distinct angles are rotated,
+    weighted by how many frames carry each.  A multi-roll data set therefore shows the
+    superposition that is really in the combined image, not one arbitrary roll's version.
+    """
     try:
         from .injection import inject_sources
         from .klip import rotate_ccw
@@ -3184,13 +3197,23 @@ def injected_model_image(runner, sources, shape) -> Optional[np.ndarray]:
             return None
         src = [Source(*tuple(float(v) for v in (s.as_tuple() if hasattr(s, "as_tuple") else s)[:3])) for s in sources]
         tn = float(getattr(sub, "truenorth", 0.0))
-        blank = np.zeros((1,) + tuple(int(v) for v in shape), np.float32)
-        img = inject_sources(blank, np.zeros(1), src, sub.model, sub.pxscale, truenorth=tn,
-                             fallback=getattr(sub, "fallback", None), angle_convention=getattr(sub, "angle_convention", "pa"))
-        out = np.asarray(img[0], float)
-        if tn:
-            out = rotate_ccw(out, tn, cval=0.0)          # parang 0 frame -> sky (north up), as derotate() does
-        return out
+        try:
+            ang = np.asarray(sub.frame_angles(), float).ravel()
+            ang = ang[np.isfinite(ang)]
+        except Exception:
+            ang = np.zeros(0)
+        if ang.size == 0:
+            ang = np.zeros(1)
+        uang, cnt = np.unique(np.round(ang, 2), return_counts=True)
+        blank = np.zeros((uang.size,) + tuple(int(v) for v in shape), np.float32)
+        img = inject_sources(blank, uang, src, sub.model, sub.pxscale, truenorth=tn,
+                             fallback=getattr(sub, "fallback", None),
+                             angle_convention=getattr(sub, "angle_convention", "pa"))
+        # cval=0 rather than derotate()'s NaN fill: this is a display model, and NaN
+        # corners would drag the panel's robust stretch around.
+        der = np.stack([rotate_ccw(np.asarray(img[i], float), float(uang[i]) + tn, cval=0.0)
+                        for i in range(uang.size)])
+        return np.average(der, axis=0, weights=cnt.astype(float))
     except Exception:
         return None
 

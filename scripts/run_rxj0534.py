@@ -242,8 +242,10 @@ def main(argv=None):
                          "+/- 2 FWHM, which puts it exactly at the mid-radius the injections use")
     ap.add_argument("--ann-fwhm", type=float, default=2.0, metavar="N",
                     help="half-width of the default annulus in FWHM (default 2)")
-    ap.add_argument("--n-sources", type=int, default=3, metavar="N",
-                    help="injected sources per evaluation (default 3). They share the ring with "
+    ap.add_argument("--n-sources", type=int, default=2, metavar="N",
+                    help="injected sources per evaluation (default 2, lowered from 3 for NIRCam: "
+                         "its coronagraphic field is small enough that simultaneous sources "
+                         "perturb the KLIP basis each other sees). They also share the ring with "
                          "the real planet, and every source on it blanks part of the noise "
                          "annulus the S/N is measured against")
     ap.add_argument("--allow-offset-ann", action="store_true",

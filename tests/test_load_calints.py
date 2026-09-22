@@ -481,3 +481,65 @@ def test_blank_sky_medians_over_every_integration(tmp_path):
         h["SCI"].data[2, 50, 50] = 1e5                   # one hot integration
     bg = blank_sky([f])
     assert abs(bg[50, 50] - 20.0) < 2.0, f"the outlier survived: {bg[50, 50]:.1f}"
+
+
+# ----------------------------------------------------------------------------
+# detector-frame destriping
+# ----------------------------------------------------------------------------
+def _striped_frame(ny=224, nx=288, cx=144.0, cy=112.0, seed=5):
+    """A MIRI-shaped subarray: bright coronagraphic PSF, glow sticks along the 4QPM
+    boundaries, and a per-row offset as large as the pixel noise (what the real data
+    measures)."""
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    im = rng.normal(0.0, 3.0, (ny, nx))
+    im += 600.0 * np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * 3.0 ** 2))   # the star
+    im += 40.0 * np.exp(-((yy - cy) ** 2) / (2 * 2.5 ** 2))                     # glow stick
+    rows = rng.normal(0.0, 3.0, (ny, 1))                                        # the stripes
+    return im + rows, rows
+
+
+def test_destripe_removes_the_row_offset_without_eating_the_psf():
+    from klip_tpe.backends.spaceklip import destripe_detector
+
+    ny, nx, cx, cy = 224, 288, 144.0, 112.0
+    im, rows = _striped_frame(ny, nx, cx, cy)
+    out, stats = destripe_detector(im[None], (cx, cy))
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    sky = ~((np.hypot(xx - cx, yy - cy) < 45) | (np.abs(yy - cy) < 12) | (np.abs(xx - cx) < 12))
+
+    def scatter(a):
+        v = a[sky]
+        return float(np.nanmedian(np.abs(v - np.nanmedian(v))) * 1.4826)
+
+    assert scatter(out[0]) < 0.75 * scatter(im), "the stripes are still there"
+    assert stats["row_sigma"] > 1.0, "the row offsets were not even detected"
+    # the star survives: a per-row constant cannot take more than the offset itself
+    assert out[0].max() > 0.9 * im.max()
+
+
+def test_destripe_measures_the_offset_on_sky_not_through_the_star():
+    """The whole reason this runs on the full subarray.  Doubling the star's brightness
+    must not change the offsets, because the star is masked out of the estimate."""
+    from klip_tpe.backends.spaceklip import destripe_detector
+
+    ny, nx, cx, cy = 224, 288, 144.0, 112.0
+    im, _ = _striped_frame(ny, nx, cx, cy)
+    bright = im + 600.0 * np.exp(
+        -((np.mgrid[0:ny, 0:nx][1] - cx) ** 2 + (np.mgrid[0:ny, 0:nx][0] - cy) ** 2) / (2 * 3.0 ** 2))
+    a, _ = destripe_detector(im[None], (cx, cy))
+    b, _ = destripe_detector(bright[None], (cx, cy))
+    # away from the star the two must be destriped identically
+    far = np.zeros((ny, nx), bool)
+    far[:, :60] = True
+    assert np.allclose(a[0][far], b[0][far], atol=1e-9)
+
+
+def test_destripe_is_nan_safe_and_leaves_empty_rows_alone():
+    from klip_tpe.backends.spaceklip import destripe_detector
+
+    im, _ = _striped_frame()
+    im[10, :] = np.nan                       # a wholly dead row
+    out, _ = destripe_detector(im[None], (144.0, 112.0))
+    assert np.all(~np.isfinite(out[0][10]))  # still NaN, not turned into zeros
+    assert np.isfinite(out[0][50]).all()
