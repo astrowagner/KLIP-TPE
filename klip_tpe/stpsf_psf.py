@@ -65,8 +65,8 @@ _CACHE_VERSION = 3
 
 #: ``source_offset_theta`` that puts the source on **+x** of the detector array: STPSF
 #: measures the offset angle from +y, increasing towards -x, so +x is 270 deg.  Verified
-#: against the computed PSFs; keeping the source on +x is what makes ``refpa_deg=0`` the
-#: right anisotropy reference for :class:`~klip_tpe.injection.LibraryPSF`.
+#: against the computed PSFs.  It fixes where in the stamp the source sits; it does NOT make
+#: the stamp's *orientation* a function of the source's azimuth -- see :func:`library`.
 _THETA_PLUS_X = 270.0
 
 
@@ -421,21 +421,36 @@ def throughput_fn(g: Dict[str, Any]) -> Callable[[Any], Any]:
 
 
 def library(g: Dict[str, Any], star_flux: float = 1.0, ee_radius_px: Optional[float] = None,
-            refpa_deg: float = 0.0) -> LibraryPSF:
+            refpa_deg: Optional[float] = None) -> LibraryPSF:
     """:class:`~klip_tpe.injection.LibraryPSF` from an :func:`offaxis_grid`.
 
     The stamps are source-centred already, the mask throughput becomes
     ``LibraryPSF.throughput``, and ``flux_unit = star_flux`` is the star's flux in the
     data's own units (e.g. from the target-acquisition image or the reference star's
     photometry, measured in the *same* aperture ``ee_radius_px``; leave 1.0 to inject in
-    units of the template).  ``refpa_deg=0`` because each slice was computed with the
-    source along +x of the stamp, so the injector rotates it to the source's azimuth.
+    units of the template).
+
+    ``refpa_deg=None``: the stamp is **translated to the source and not rotated**.  Until
+    2026-09-22 this was 0.0, which made the injector spin the stamp by the source's detector
+    azimuth -- and that is wrong, because the structure you can see in a JWST coronagraphic
+    PSF (the Lyot stop's pattern, the segmented pupil's lobes) is fixed to the *spacecraft*,
+    not to where the source happens to sit relative to the mask.  It does not turn as a
+    companion moves round the field, so neither should the template.  The injected sources
+    came out with their side lobes pointing the wrong way, which is how it was noticed.
+
+    The IDL reduction this package ports settles it: ``reduce_nircam_v13.pro`` reads one
+    WebbPSF template per filter, centres it with ``cntrd`` + ``fshift`` -- a translation --
+    and at injection does ``fshift(big_ref * contrast, xshift, yshift)`` per frame and
+    nothing else.  One template per data set, in the spacecraft's orientation, never rotated.
+
+    Pass a number to restore the old behaviour (reproducing a pre-2026-09-22 run).
     """
     sl = np.asarray(g["slices"], float)
     c = tuple(g.get("center") or ((sl.shape[-1] - 1) / 2.0, (sl.shape[-2] - 1) / 2.0))
     rap = float(ee_radius_px if ee_radius_px is not None else g.get("ee_radius_px") or 3.0)
     return LibraryPSF(sl, g["seps"], center=c, ee_radius_px=rap,
-                      throughput_fn=throughput_fn(g), refpa_deg=float(refpa_deg),
+                      throughput_fn=throughput_fn(g),
+                      refpa_deg=None if refpa_deg is None else float(refpa_deg),
                       flux_unit=float(star_flux))
 
 
@@ -539,8 +554,10 @@ def star_flux_from_flux_density(g: Dict[str, Any], flux_density_jy: float, pixar
     companion.  It was not an optics number: the calints loader's sigma-clip repair had
     median-filtered the companion's core to 39% of its peak while the fakes, injected
     after the repair, kept theirs; 0.561 = 1/1.9 was what hid that.  With the repair fixed
-    and 1.0 here, HIP 65426 b gives dF444W = 8.74 +/- 0.09 against Carter et al. (2023)'s
-    8.703 +/- 0.055 with nothing tuned (``scripts/check_hip65426_contrast.py``).  Use a
+    and 1.0 here, HIP 65426 b gives dF444W = 8.796 +/- 0.092 against Carter et al. (2023)'s
+    8.703 +/- 0.055 -- 1.0 sigma, with nothing tuned (``scripts/check_hip65426_contrast.py``).
+    It read 8.74 until 2026-09-22, when :func:`library` stopped rotating the template by the
+    source's azimuth.  Use a
     value other than 1.0 only for data whose flux calibration demonstrably excludes part
     of the optical train, and say where the number comes from.
 

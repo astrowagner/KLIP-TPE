@@ -542,9 +542,14 @@ def library(filter: str = "F1065C", star_flux: float = 1.0,
     tmap = throughput_map(m["filter"], date=date, log=log)
     sl = np.asarray(grid["slices"], float)
     c = tuple(grid.get("center") or ((sl.shape[-1] - 1) / 2.0, (sl.shape[-2] - 1) / 2.0))
+    # refpa_deg=None: translated to the source, never rotated.  The lobe pattern of a MIRI
+    # coronagraphic PSF comes from the MASKFQPM Lyot stop and the segmented pupil, both fixed
+    # to the SPACECRAFT -- it does not turn as a companion moves round the field, so neither
+    # does the template.  See klip_tpe.stpsf_psf.library for the measurement and for the IDL
+    # reduction that does the same thing (translation only, one template per data set).
     return MIRILibraryPSF(sl, grid["seps"], center=c,
                           ee_radius_px=float(grid.get("ee_radius_px") or 3.0),
-                          refpa_deg=0.0, flux_unit=float(star_flux),
+                          refpa_deg=None, flux_unit=float(star_flux),
                           thru2d=throughput_map_fn(tmap))
 
 

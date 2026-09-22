@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — 2026-09-22 (the injected PSF's orientation)
+- **The injector rotated the PSF template by the source's position angle, and should not
+  have.**  Spotted by eye on a live display: the injected sources' side lobes pointed the
+  wrong way.  `stpsf_psf.library` and `miri.library` set `refpa_deg=0`, so `inject_sources`
+  span the stamp by the source's detector azimuth — but what you can see in a JWST
+  coronagraphic PSF (the Lyot stop's pattern, the segmented pupil's lobes) is fixed to the
+  **spacecraft**, not to where a companion happens to sit relative to the mask.  It does not
+  turn as the companion moves round the field, so neither should the template.  Measured
+  against STPSF on F1140C at 2″: rotating by 90° misplaces **23%** of the stamp's flux
+  (3.7% at 180°, where the mask and stop are symmetric).  The IDL reduction this package
+  ports settles it — `reduce_nircam_v13.pro` reads one WebbPSF template per filter, centres
+  it with `cntrd` + `fshift`, and at injection does `fshift(big_ref * contrast, …)` per frame
+  and nothing else: one template per data set, in the spacecraft's orientation, never
+  rotated.  Both libraries now default to `refpa_deg=None`; pass a number to reproduce an
+  older run.
+- **This moves the F444W cross-check**, which is the end-to-end test of the whole flux axis:
+  HIP 65426 b now measures **ΔF444W = 8.796 ± 0.092** against Carter et al. (2023)'s
+  8.703 ± 0.055, where it read 8.74 before.  That is +0.056 mag, *away* from the published
+  value — 1.0σ instead of 0.4σ, still a pass, and still with nothing tuned.  Recorded because
+  the physics decided it and not the agreement: the ±3% on the stellar flux density is
+  ±0.033 mag on its own, so the previous closeness was partly luck.  Anything quoting 8.74
+  (including the manuscript) needs updating.
+
 ## Unreleased — 2026-09-22 (the k-scan's argmax)
 - **The calibration k-scan reported an edge of its own range as an optimum, twice.**  Chasing why
   the HIP 65426 F1140C run picked `k_default = 1`: with the background-mismatched RDI library the

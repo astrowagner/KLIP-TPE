@@ -183,3 +183,62 @@ def test_inject_sources_rotates_anisotropic_stamp():
     col = img[:, px]
     row = img[py, :]
     assert (col > thr).sum() >= 4 and (row > thr).sum() <= 2
+
+
+def test_the_stamp_is_translated_to_the_source_and_not_rotated():
+    """The lobes belong to the spacecraft, not to the companion.
+
+    What you can see in a JWST coronagraphic PSF -- the Lyot stop's pattern, the segmented
+    pupil's lobes -- is fixed to the SPACECRAFT.  It does not turn as a companion moves round
+    the field, so the template must not either.  Until 2026-09-22 ``stpsf_psf.library`` and
+    ``miri.library`` set ``refpa_deg=0``, which made ``inject_sources`` spin the stamp by the
+    source's detector azimuth; the injected sources came out with their side lobes pointing
+    the wrong way, which is how it was caught.
+
+    The IDL reduction this package ports settles it (``reduce_nircam_v13.pro``): one WebbPSF
+    template per filter, centred with ``cntrd`` + ``fshift``, and at injection
+    ``fshift(big_ref * contrast, xshift, yshift)`` per frame -- a translation, and nothing
+    else.
+    """
+    from klip_tpe.injection import LibraryPSF, inject_sources, Source
+
+    # a stamp with an unmistakable one-sided lobe: bright core, satellite to its +x
+    st = np.zeros((21, 21))
+    st[10, 10] = 1.0
+    st[10, 15] = 0.4                                     # the "lobe", +5 px in x
+    lib = LibraryPSF(np.stack([st, st]), [0.5, 2.0], center=(10.0, 10.0), ee_radius_px=3.0,
+                     flux_unit=1.0)
+    assert lib.refpa_deg is None, "the library must not declare an anisotropy reference"
+
+    cube = np.zeros((2, 61, 61), np.float32)
+    out = inject_sources(cube, [0.0, 90.0],               # two frames, 90 deg of roll apart
+                         [Source(1.0, 0.0, 1.0), Source(1.0, 120.0, 1.0)],
+                         lib, pxscale=0.05)
+    # In every frame and for every source, the lobe sits 5 px in +x of that source's core.
+    for j, ang in enumerate((0.0, 90.0)):
+        for rho, theta in ((1.0, 0.0), (1.0, 120.0)):
+            az = theta - 0.0 - 270.0 - ang
+            xc = 30.0 + (rho / 0.05) * np.cos(np.deg2rad(az))
+            yc = 30.0 + (rho / 0.05) * np.sin(np.deg2rad(az))
+            xi, yi = int(round(xc)), int(round(yc))
+            core = out[j, yi, xi]
+            lobe_x = out[j, yi, xi + 5]                  # +x of the core, always
+            assert core > 0, f"no source at frame {j}, PA {theta}"
+            assert lobe_x == pytest.approx(0.4 * core, rel=0.15), \
+                f"the lobe moved: frame {j}, PA {theta} -- the stamp was rotated"
+
+
+def test_refpa_deg_still_rotates_when_a_model_asks_for_it():
+    """The old behaviour stays reachable, for reproducing a pre-2026-09-22 run."""
+    from klip_tpe.injection import LibraryPSF, inject_sources, Source
+    st = np.zeros((21, 21))
+    st[10, 10] = 1.0
+    st[10, 15] = 0.4
+    lib = LibraryPSF(np.stack([st, st]), [0.5, 2.0], center=(10.0, 10.0), ee_radius_px=3.0,
+                     refpa_deg=0.0, flux_unit=1.0)
+    out = inject_sources(np.zeros((1, 61, 61), np.float32), [0.0],
+                         [Source(1.0, 90.0, 1.0)], lib, pxscale=0.05)
+    az = 90.0 - 270.0
+    xc, yc = 30.0 + 20.0 * np.cos(np.deg2rad(az)), 30.0 + 20.0 * np.sin(np.deg2rad(az))
+    xi, yi = int(round(xc)), int(round(yc))
+    assert out[0, yi, xi + 5] < 0.2 * out[0, yi, xi], "refpa_deg=0 should have rotated it"

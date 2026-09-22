@@ -130,9 +130,13 @@ PHOTOMETRY = {
         # companion's core down to 39% of its peak while the fakes were injected AFTER the
         # repair and kept theirs, so the companion looked 1.9x too faint relative to them,
         # and 0.561 = 1/1.9 was what hid it.  With the repair fixed and 1.0 here, HIP 65426 b
-        # measures dF444W = 8.74 against Carter et al. (2023)'s 8.703 +/- 0.055 with nothing
-        # tuned -- an INDEPENDENT check of the whole axis (S, PIXAR_SR, EE, T(rho), centring,
-        # recovery).  See scripts/check_hip65426_contrast.py and docs/FLUX_CALIBRATION.md.
+        # measures dF444W = 8.796 +/- 0.092 against Carter et al. (2023)'s 8.703 +/- 0.055 --
+        # 1.0 sigma, with nothing tuned -- an INDEPENDENT check of the whole axis (S, PIXAR_SR,
+        # EE, T(rho), centring, recovery).  See scripts/check_hip65426_contrast.py and
+        # docs/FLUX_CALIBRATION.md.  (It read 8.74 until 2026-09-22, when the injector stopped
+        # rotating the template by the source's azimuth; that moved it +0.056 mag, away from the
+        # published value but well inside the combined error, and the physics decided it, not
+        # the agreement.)
         "optics_transmission": 1.0,
         "optics_transmission_source": "PHOTMJSR (PUPIL=MASKRND) already carries the coronagraphic optics",
         # GEOMETRY rather than photometry, but it lives here because it is the same

@@ -246,7 +246,7 @@ if HAVE_DATA:
 # imaging) was derived in this very optical train, so the MJy/sr in the file already put an
 # off-mask source at its true flux, and `EE` is a *fraction* of the Lyot-stop PSF in which the
 # stop's own 0.18 cancels.  The proof is the planet: with nothing tuned, HIP 65426 b measures
-# ΔF444W = 8.74 ± 0.09 against Carter et al. (2023)'s 8.703 ± 0.055
+# ΔF444W = 8.796 ± 0.092 against Carter et al. (2023)'s 8.703 ± 0.055 — 1.0σ
 # (`scripts/check_hip65426_contrast.py`).  Until 2026-09-16 a `T_optics` of 0.561 sat here,
 # "anchored" on the companion — it was compensating for the median-filter damage described in
 # section 1, not for any optics.  See `docs/FLUX_CALIBRATION.md`.

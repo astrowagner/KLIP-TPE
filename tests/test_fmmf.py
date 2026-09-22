@@ -282,7 +282,12 @@ def test_offaxis_cache_round_trip_and_library(tmp_path, monkeypatch):
     m = S.library(back, star_flux=7.0)
     st, c, ok = m.stamp(0.9)
     assert ok and c == (10.0, 10.0) and m.flux_unit == 7.0
-    assert m.refpa_deg == 0.0
+    # None, not 0.0: the stamp is translated to the source and never rotated.  What you can
+    # see in a JWST coronagraphic PSF is fixed to the spacecraft, not to where the companion
+    # sits, so spinning the template by the source's azimuth points its lobes the wrong way.
+    # See klip_tpe.stpsf_psf.library and
+    # tests/test_injection.py::test_the_stamp_is_translated_to_the_source_and_not_rotated
+    assert m.refpa_deg is None
     assert m.throughput(0.6) == pytest.approx(0.4)
     assert m.throughput(0.1) == pytest.approx(0.05)       # clamped below the first knot
     assert m.throughput(9.9) == pytest.approx(1.0)        # and above the last
