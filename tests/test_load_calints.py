@@ -22,19 +22,22 @@ PX = 0.063
 
 
 def write(path, target, roll, n_int=2, ny=100, nx=100, v3i_yang=0.0, vparity=1,
-          filt="F444W", crpix=None, seed=0, star=None, dq_px=((5, 5),)):
+          filt="F444W", crpix=None, seed=0, star=None, dq_px=((5, 5),),
+          bkgsub=False, level=0.0, starflux=800.0):
     """One stage-2 product carrying the keywords the loader reads."""
     rng = np.random.default_rng(seed)
     c = crpix if crpix is not None else ((nx - 1) / 2.0, (ny - 1) / 2.0)
     yy, xx = np.mgrid[0:ny, 0:nx]
     sx, sy = star if star is not None else c
-    img = 800.0 / (1.0 + (np.hypot(xx - sx, yy - sy) / 4.0) ** 2)
+    img = starflux / (1.0 + (np.hypot(xx - sx, yy - sy) / 4.0) ** 2) + float(level)
     sci = np.array([img + rng.normal(0.0, 0.5, (ny, nx)) for _ in range(n_int)], np.float32)
     dq = np.zeros_like(sci, np.int32)
     for (py, px_) in dq_px:
         dq[:, py, px_] = 1                                    # DO_NOT_USE
     ph = fits.Header({"TARGPROP": target, "INSTRUME": "NIRCAM", "FILTER": filt,
                       "CORONMSK": "MASKA335R", "PUPIL": "MASKRND"})
+    if bkgsub:
+        ph["S_BKDSUB"] = "COMPLETE"          # Image2 already removed the dedicated background
     sh = fits.Header({"ROLL_REF": float(roll), "V3I_YANG": float(v3i_yang),
                       "VPARITY": int(vparity), "PIXAR_A2": PX ** 2, "PIXAR_SR": 9.3e-14,
                       "CRPIX1": c[0] + 1, "CRPIX2": c[1] + 1, "BUNIT": "MJy/sr",
@@ -397,3 +400,84 @@ def test_an_unmeasurable_offset_is_reported_not_guessed(tmp_path):
     if any(not p.get("registered", True) for p in info["frames"]):
         assert any("left UNSHIFTED" in m for m in msgs), "an unmeasured offset must be said"
     assert np.isfinite(np.asarray(ds["sci"].cube, float)).all()
+
+
+def _load(files, msgs, **kw):
+    return load_calints(files, science_target="T", half_px=20, align=False, partition="all",
+                        log=msgs.append, **kw)
+
+# ------------------------------------ the dedicated background, and the mixture in an archive
+
+def _bkg_set(tmp_path, sci_done, ref_done, with_bkg=True, level=20.0):
+    """A programme whose science target got a dedicated background and whose PSF reference
+    did not -- which is the ordinary case, not a corner one."""
+    f = [write(tmp_path / "s_calints.fits", "T", roll=0.0, seed=1,
+               bkgsub=sci_done, level=0.0 if sci_done else level),
+         write(tmp_path / "r_calints.fits", "REFSTAR", roll=5.0, seed=2,
+               bkgsub=ref_done, level=0.0 if ref_done else level)]
+    if with_bkg:
+        f.append(write(tmp_path / "b_calints.fits", "T-BACKGROUND", roll=0.0, seed=3,
+                       level=level, starflux=0.0))
+    return f
+
+
+def test_the_reference_gets_the_background_the_science_already_had_removed(tmp_path):
+    """The mixture an archive download hides, and why it cannot be stacked.
+
+    A programme's SCIENCE targets get dedicated background pointings and Image2 subtracts
+    them (S_BKDSUB='COMPLETE'); its pure PSF REFERENCE stars usually do not get one, so the
+    step never runs on them.  On ERS 1386 at F1140C that is 14 of 16 reference files arriving
+    with a ~19 MJy/sr sky pedestal and the 4QPM glow sticks, against science frames with
+    neither -- one KLIP library, two sky levels, and its dominant common mode the background
+    rather than the star.
+    """
+    msgs = []
+    ds, info = _load(_bkg_set(tmp_path, sci_done=True, ref_done=False), msgs)
+    sci = np.asarray(ds["sci"].cube, float)
+    ref = np.asarray(ds["sci"].ref_cube, float)
+    assert abs(np.nanmedian(ref) - np.nanmedian(sci)) < 2.0, \
+        f"reference sits {np.nanmedian(ref) - np.nanmedian(sci):.1f} above the science"
+    assert any("subtracted the blank-sky median" in m for m in msgs)
+
+
+def test_frames_the_pipeline_already_did_are_not_subtracted_twice(tmp_path):
+    """Subtracting the background from a frame that already had it removed would push it
+    negative by the sky level, which is just as wrong in the other direction."""
+    ds, _ = _load(_bkg_set(tmp_path, sci_done=True, ref_done=True), [])
+    sci = np.asarray(ds["sci"].cube, float)
+    assert np.nanmedian(sci) > -1.0, f"science was double-subtracted: {np.nanmedian(sci):.1f}"
+
+
+def test_a_mixture_with_no_background_to_fix_it_refuses(tmp_path):
+    """Better to stop than to stack two sky levels into one basis and say nothing."""
+    with pytest.raises(ValueError, match="one KLIP library mixes two sky levels|mixes two sky"):
+        _load(_bkg_set(tmp_path, sci_done=True, ref_done=False, with_bkg=False), [])
+
+
+def test_a_uniformly_unsubtracted_set_is_allowed_but_said_out_loud(tmp_path):
+    """Self-consistent, so KLIP still works -- but the sky is in the basis and in the noise
+    the objective is measured against, which the run's record should show."""
+    msgs = []
+    ds, _ = _load(_bkg_set(tmp_path, sci_done=False, ref_done=False, with_bkg=False), msgs)
+    assert any("the sky is still in it" in m for m in msgs)
+
+
+def test_background_false_stacks_it_anyway(tmp_path):
+    msgs = []
+    ds, _ = _load(_bkg_set(tmp_path, sci_done=True, ref_done=False), msgs, background=False)
+    ref = np.asarray(ds["sci"].ref_cube, float)
+    sci = np.asarray(ds["sci"].cube, float)
+    assert np.nanmedian(ref) - np.nanmedian(sci) > 10.0, "the pedestal should still be there"
+    assert not any("subtracted the blank-sky median" in m for m in msgs)
+
+
+def test_blank_sky_medians_over_every_integration(tmp_path):
+    """A cosmic ray in one background integration must not print itself onto every science
+    frame, so the combination is a median over integrations and not a mean."""
+    from klip_tpe.backends.spaceklip import blank_sky
+    f = write(tmp_path / "b_calints.fits", "T-BACKGROUND", roll=0.0, n_int=5, level=20.0,
+              starflux=0.0, seed=4)
+    with fits.open(f, mode="update") as h:
+        h["SCI"].data[2, 50, 50] = 1e5                   # one hot integration
+    bg = blank_sky([f])
+    assert abs(bg[50, 50] - 20.0) < 2.0, f"the outlier survived: {bg[50, 50]:.1f}"

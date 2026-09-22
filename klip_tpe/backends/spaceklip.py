@@ -33,9 +33,44 @@ from ..reducer import Dataset, PartitionedReducer
 from .pyklip import PyKLIPReducer, dataset_from_pyklip
 
 __all__ = ["load_spaceklip", "load_calints", "make_reducer", "read_jwst_files", "JWST_DIAM",
-           "fill_dq_neighbours", "sigma_clip_repair", "shift_keeping_gaps"]
+           "fill_dq_neighbours", "sigma_clip_repair", "shift_keeping_gaps", "blank_sky"]
 
 JWST_DIAM = 6.5   # m (effective; lambda/D for the angsep unit and the default FWHM)
+
+
+def _background_done(*headers) -> bool:
+    """Has Image2's background step already run on this exposure? (``S_BKDSUB='COMPLETE'``)"""
+    for h in headers:
+        v = h.get("S_BKDSUB") if hasattr(h, "get") else None
+        if v is not None and str(v).strip().upper() == "COMPLETE":
+            return True
+    return False
+
+
+def blank_sky(files: Sequence[str]) -> np.ndarray:
+    """Median blank-sky frame from dedicated background pointings, for subtraction.
+
+    ``calints`` are in MJy/sr -- a surface brightness, already divided by the integration
+    time -- so exposures of different length combine and subtract directly, with no scaling.
+    The median runs over every integration of every file so that cosmic rays in the
+    background do not print themselves onto the science frames.
+
+    Pixels no background frame has (the unilluminated border of a MIRI coronagraphic
+    subarray) come back NaN, which is what they already are in the frames this is subtracted
+    from, so the subtraction does not widen the gaps.
+    """
+    from astropy.io import fits
+    ims = []
+    for f in files:
+        with fits.open(f) as h:
+            d = np.asarray(h["SCI"].data, float)
+            dq = np.asarray(h["DQ"].data, int)
+            ims.append(np.where((dq & 1).astype(bool), np.nan, d))
+    with np.errstate(all="ignore"):
+        import warnings as _w
+        with _w.catch_warnings():
+            _w.simplefilter("ignore", RuntimeWarning)
+            return np.nanmedian(np.concatenate(ims, axis=0), axis=0)
 
 
 def shift_keeping_gaps(im: np.ndarray, shift, order: int = 3) -> np.ndarray:
@@ -272,8 +307,17 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
                  align: bool = True, repair: Union[bool, str] = True,
                  star_center: Optional[Tuple[float, float]] = None, keep_frames: bool = False,
                  partition: str = "roll", filter: Optional[str] = None,
+                 background: Optional[bool] = None,
                  log: Callable[[str], None] = print) -> Tuple[Dict[str, Dataset], Dict[str, Any]]:
     """Stage-2 ``*_calints.fits`` straight into ``{name: Dataset}``, without spaceKLIP.
+
+    ``background`` (default ``None`` = as needed): subtract the dedicated blank-sky pointings
+    from whichever science / reference frames the pipeline did not already do it for.  The two
+    are told apart by ``S_BKDSUB='COMPLETE'``, which a programme's science targets carry and
+    its pure PSF reference stars usually do not -- so an archive download of one programme is
+    routinely a MIXTURE, and stacking it untreated puts a sky pedestal and the 4QPM glow
+    sticks into some frames of a KLIP library and not others.  A mixture with no background
+    pointing to fix it with raises rather than proceeding; ``False`` stacks it anyway.
 
     ``partition='roll'`` (default): one partition per unique roll angle, the other target's
     exposures as the RDI library of each.  ``partition='all'``: ONE partition holding every
@@ -402,7 +446,7 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
             f"(e.g. {os.path.basename(stolen[0])})")
     if bkg:
         log(f"  calints: {len(bkg)} background pointing(s) held out of the RDI library "
-            f"(blank sky is not a PSF reference); this loader does not background-subtract")
+            f"(blank sky is not a PSF reference); they are used for subtraction below")
     if not sci:
         raise ValueError(f"no science files matching TARGPROP {want!r} among {len(files)} files")
     if not ref:
@@ -436,6 +480,7 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
                     pas.append(pa)
                     prov.append({"file": os.path.basename(f), "integration": i, "role": role,
                                  "target": str(ph.get("TARGPROP", "")), "pa": pa,
+                                 "bkgsub": _background_done(ph, s),
                                  "n_dq": int(bad[i].sum()),
                                  "effinttm": float(ph.get("EFFINTTM", np.nan)),
                                  "readpatt": str(ph.get("READPATT", "")),
@@ -513,6 +558,51 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
     # region actually returned.  A MIRI coronagraphic subarray is a quarter unilluminated and
     # flagged; counting that against the 81x81 stamp around the star reports 27% where the
     # stamp's own figure is under one per cent, which is alarm about the wrong pixels.
+    # ---- the dedicated background, and the mixture an archive download hides -------------
+    # A programme's SCIENCE targets get dedicated background pointings and Image2 subtracts
+    # them (S_BKDSUB='COMPLETE'); its pure PSF REFERENCE stars usually do not get one, so the
+    # step never runs on them.  ERS 1386 at F1140C: both HIP-65426 rolls and both HD-141569A
+    # exposures are subtracted, while HIP-68245 (9 files) and HD-140986 (5) are not -- so 14
+    # of 16 reference frames arrive carrying a ~19 MJy/sr sky pedestal and the 4QPM glow
+    # sticks (+4.6 MJy/sr along the horizontal mask boundary, measured on a blank-sky frame
+    # with no star in it), and the loader used to stack all of that into ONE RDI library
+    # beside science frames that had none of it.  The library's dominant common mode is then
+    # the background rather than the stellar PSF, and because the reducer's high-pass hides a
+    # smooth pedestal, the optimizer is handed a reason to prefer a hard high-pass and to
+    # report that as the best reduction parameter.
+    done = [p["bkgsub"] for p in prov_s + prov_r]
+    need_s = np.array([not p["bkgsub"] for p in prov_s], bool)
+    need_r = np.array([not p["bkgsub"] for p in prov_r], bool) if prov_r else np.zeros(0, bool)
+    mixed, n_need = len(set(done)) > 1, int(sum(1 for d in done if not d))
+    if background is not False and n_need:
+        if bkg:
+            BG = blank_sky(bkg)
+            if need_s.any():
+                S[need_s] -= BG
+            if R.size and need_r.any():
+                R[need_r] -= BG
+            log(f"  calints: subtracted the blank-sky median of {len(bkg)} background "
+                f"pointing(s) from {n_need} of {len(done)} frames -- the ones whose header "
+                f"carries no S_BKDSUB=COMPLETE"
+                + (f"; the other {len(done) - n_need} the pipeline had already done, and "
+                   f"stacking the two untreated is the thing this avoids" if mixed else ""))
+        elif mixed:
+            raise ValueError(
+                f"{n_need} of {len(done)} science+reference frames have not had the "
+                f"background subtracted (no S_BKDSUB=COMPLETE) and the other "
+                f"{len(done) - n_need} have, and there is no background pointing among the "
+                f"files to fix it with. Stacking them into one KLIP library mixes two sky "
+                f"levels -- on MIRI that is a ~19 MJy/sr pedestal plus the 4QPM glow sticks "
+                f"in some frames and not others. Fetch the programme's *-BACKGROUND "
+                f"exposures (scripts/fetch_jwst_ar.py gets them), or pass background=False "
+                f"to stack them anyway and say why.")
+        else:
+            log("  calints: no frame carries S_BKDSUB=COMPLETE and no background pointing "
+                "was given -- the set is at least self-consistent, but the sky is still in "
+                "it, in the KLIP basis and in the noise the objective is measured against")
+    if background is True and not bkg:
+        raise ValueError("background=True but no dedicated background pointing is among the "
+                         "files given")
     gaps0_s = ~np.isfinite(S)
     gaps0_r = ~np.isfinite(R) if R.size else None
     if rmode != "none":

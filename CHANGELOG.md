@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased — 2026-09-22
+- **The RDI library mixed background-subtracted and unsubtracted frames.**  A programme's
+  *science* targets get dedicated background pointings and Image2 subtracts them
+  (`S_BKDSUB='COMPLETE'`); its pure *PSF reference* stars usually do not get one, so the step
+  never runs on them.  On ERS 1386 at F1140C that is both HIP-65426 rolls and both HD-141569A
+  exposures subtracted, against HIP-68245 (9 files) and HD-140986 (5) not — so 14 of 16
+  reference frames arrived carrying a ~19 MJy/sr sky pedestal and the 4QPM glow sticks, and
+  `load_calints` stacked all of it into ONE KLIP library beside science frames with neither.
+  The library's dominant common mode is then the background rather than the stellar PSF, and
+  since the reducer's high-pass hides a smooth pedestal, the optimizer was being handed a
+  reason to prefer a hard high-pass and report it as the best reduction parameter.
+  `load_calints` now reads `S_BKDSUB` per exposure and subtracts the median of the
+  programme's own blank-sky pointings (`blank_sky`, new) from whichever frames lack it,
+  leaving the rest alone; a mixture with no background to fix it with raises rather than
+  proceeding, and `background=False` stacks it anyway for anyone reproducing an old run.
+  Measured on the real files: reference-library median 22.20 → 3.14 MJy/sr against the
+  science frames' 0.52, and the glow-stick excess along the horizontal mask boundary
+  **+12.70 → +4.31 MJy/sr**.  The residual is plausibly the *starlight* scattered by the mask
+  — present in proportion to each star and so not removable by any blank-sky frame — which is
+  exactly what a PSF reference is supposed to carry and RDI to remove.  `calints` are in
+  MJy/sr, a rate, so exposures of different length subtract with no scaling.
+
 ## Unreleased — 2026-09-21 (the flux unit)
 - **The MIRI search spent two hours ranking noise, because `star_flux` defaulted to 1.0.**
   `make_reducer(star_flux=None)` becomes `star_flux or 1.0`, and 1.0 is not a neutral default
