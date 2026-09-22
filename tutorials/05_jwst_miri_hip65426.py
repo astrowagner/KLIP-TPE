@@ -77,10 +77,20 @@ print(f"{len(files)} calints under {DATA}, {len(in_filt)} in {FILTER}"
 # So an untreated load puts fourteen reference frames carrying a ~19 MJy/sr sky pedestal and
 # the mask's glow sticks into one KLIP library beside two that carry neither and science
 # frames that carry neither.  The library's dominant common mode is then the sky rather than
-# the stellar PSF — and because the reducer's high-pass hides a smooth pedestal, the
-# optimizer is handed a reason to prefer a hard high-pass and to report *that* as the best
-# reduction parameter.  A search result that is really a workaround for a calibration
-# mismatch is the worst thing this package can produce.
+# the stellar PSF.
+#
+# What that costs, measured on paired 1000-evaluation runs that differ only in this:
+# the calibration contrast falls from 2.27e-4 to 1.63e-4, so the *same* default
+# configuration reaches S/N 5 on a source 28% fainter once the library is consistent.  And
+# the k-scan curve changes shape: with the mismatch it was flat to 1.5% over k = 4..20 with
+# k = 1 on top, because the leading KL mode was the pedestal and removing it was the only
+# subtraction that helped; fixed, low k is clearly penalised and more modes keep helping.
+#
+# Worth recording what did *not* happen, because it is the obvious prediction and it is
+# wrong: one might expect the optimizer to compensate by choosing a hard high-pass, since a
+# high-pass hides a smooth pedestal, and so to choose a milder one once the mismatch is
+# gone.  It did not — the two runs chose `filter = 5` and `filter = 6`.  The mismatch is
+# worth fixing on the evidence above, not on that argument.
 #
 # `load_calints` reads `S_BKDSUB` per exposure, subtracts the median of the programme's own
 # blank-sky pointings from whichever frames lack it, and leaves the rest alone.  A mixture

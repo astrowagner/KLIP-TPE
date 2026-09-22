@@ -38,9 +38,15 @@
   exposures subtracted, against HIP-68245 (9 files) and HD-140986 (5) not — so 14 of 16
   reference frames arrived carrying a ~19 MJy/sr sky pedestal and the 4QPM glow sticks, and
   `load_calints` stacked all of it into ONE KLIP library beside science frames with neither.
-  The library's dominant common mode is then the background rather than the stellar PSF, and
-  since the reducer's high-pass hides a smooth pedestal, the optimizer was being handed a
-  reason to prefer a hard high-pass and report it as the best reduction parameter.
+  The library's dominant common mode is then the background rather than the stellar PSF.
+  (**Correction, 2026-09-22:** this entry and the `2b8a148` commit message went on to predict
+  that the mismatch would push the optimizer towards a hard high-pass, to hide the pedestal,
+  and that fixing it would bring the filter width down.  The paired 1000-evaluation runs say
+  otherwise: the mismatched run chose `filter = 5` and the fixed one `filter = 6`.  The
+  prediction was wrong.  Where the mismatch *did* show is the k-scan curve — see the entry
+  above — and the calibration contrast, which fell from 2.27e-4 to 1.63e-4, so the default
+  configuration reaches S/N 5 on a source 28% fainter.  The fix stands on the mixture itself
+  and on those two measurements, not on the high-pass argument.)
   `load_calints` now reads `S_BKDSUB` per exposure and subtracts the median of the
   programme's own blank-sky pointings (`blank_sky`, new) from whichever frames lack it,
   leaving the rest alone; a mixture with no background to fix it with raises rather than
