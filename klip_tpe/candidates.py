@@ -100,7 +100,7 @@ def psf_correlation(img: np.ndarray, px: int, py: int, fwhm: float) -> float:
 def candidate_metrics(px: np.ndarray, py: np.ndarray, snr0: np.ndarray, stack: np.ndarray, fwhm: float,
                       pxscale: float, iwa: float, owa: float, *, known: Sequence[Tuple[float, float]] = (),
                       injected: Sequence[Tuple[float, ...]] = (), excl_fwhm: float = 1.5, srad: float = 1.5,
-                      angle_convention: str = "pa") -> List[Dict[str, Any]]:
+                      angle_convention: str = "pa", flatten: bool = False) -> List[Dict[str, Any]]:
     """Per-peak metrics from the per-night stack ``(nn, ny, nx)`` (unflattened).
 
     Precomputed once (227-247): ``slices[j] = radprof(stack[j])``, ``comb =
@@ -120,18 +120,19 @@ def candidate_metrics(px: np.ndarray, py: np.ndarray, snr0: np.ndarray, stack: n
     exr = excl_fwhm * fwhm
     nresel = max(np.pi * (owa ** 2 - iwa ** 2) / fwhm ** 2, 1.0)
     ap = max(0.5 * fwhm, 1.5)
-    slices = np.stack([radprof(stack[j]) for j in range(nn)])
+    _flat = radprof if flatten else (lambda a: np.asarray(a, float))
+    slices = np.stack([_flat(stack[j]) for j in range(nn)])
     fin = np.isfinite(stack)
 
     def _nanmean(sel):
         z = np.where(fin[sel], stack[sel], 0.0)
         return z.sum(axis=0) / np.maximum(fin[sel].sum(axis=0), 1)
 
-    comb = radprof(_nanmean(slice(None))) if nn > 1 else slices[0]
+    comb = _flat(_nanmean(slice(None))) if nn > 1 else slices[0]
     if nn >= 2:
         i1, i2 = np.arange(nn) % 2 == 0, np.arange(nn) % 2 == 1
-        s1 = radprof(_nanmean(i1)) if i1.any() else comb
-        s2 = radprof(_nanmean(i2)) if i2.any() else comb
+        s1 = _flat(_nanmean(i1)) if i1.any() else comb
+        s2 = _flat(_nanmean(i2)) if i2.any() else comb
     else:
         s1 = s2 = comb
     mf_comb, mf_s1, mf_s2 = (mf_convolve(a, fwhm) for a in (comb, s1, s2))
@@ -243,8 +244,8 @@ def find_candidates(image: Optional[np.ndarray], stack: np.ndarray, fwhm: float,
                     known: Sequence[Tuple[float, float]] = (), injected: Sequence[Tuple[float, ...]] = (),
                     persistence_map: Optional[np.ndarray] = None, night_ids: Optional[Sequence[Any]] = None,
                     weights: Optional[Sequence[float]] = None, verify_top: int = 0,
-                    verify_kwargs: Optional[Dict[str, Any]] = None, angle_convention: str = "pa"
-                    ) -> List[Dict[str, Any]]:
+                    verify_kwargs: Optional[Dict[str, Any]] = None, angle_convention: str = "pa",
+                    flatten: bool = False) -> List[Dict[str, Any]]:
     """Blind candidate search (``near2_candidates``).
 
     Parameters
@@ -281,7 +282,8 @@ def find_candidates(image: Optional[np.ndarray], stack: np.ndarray, fwhm: float,
         if image is None:
             fin = np.isfinite(stack)
             image = np.where(fin, stack, 0.0).sum(axis=0) / np.where(fin.sum(axis=0) > 0, fin.sum(axis=0), np.nan)
-        snrmap = snr_map(radprof(np.asarray(image, float)), fwhm)
+        im = np.asarray(image, float)
+        snrmap = snr_map(radprof(im) if flatten else im, fwhm)
     snrmap = np.asarray(snrmap, float)
     iwa = 1.2 * fwhm if iwa_px is None else float(iwa_px)
     owa = (min(nx, ny) / 2.0 - fwhm) if owa_px is None else float(owa_px)
@@ -290,7 +292,7 @@ def find_candidates(image: Optional[np.ndarray], stack: np.ndarray, fwhm: float,
     if px.size == 0:
         return []
     rows = candidate_metrics(px, py, ps, stack, fwhm, pxscale, iwa, owa, known=known, injected=injected,
-                             angle_convention=angle_convention)
+                             angle_convention=angle_convention, flatten=flatten)
     rows = score_candidates(rows, nn, persistence_map)
     meta = {"nights": list(range(nn)) if night_ids is None else [str(v) for v in night_ids],
             "snrmin": snrmin, "sep": sep, "iwa": iwa, "owa": owa,

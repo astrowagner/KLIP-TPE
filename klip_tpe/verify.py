@@ -297,18 +297,25 @@ def night_subsets(nn: int) -> Dict[str, np.ndarray]:
             "even": a[a % 2 == 0], "odd": a[a % 2 == 1]}
 
 
-def verify_maps(stack: np.ndarray, weights: Optional[np.ndarray] = None, fwhm: Optional[float] = None
-                ) -> Dict[str, Any]:
-    """Subset images (radprof-flattened weighted combines, verify 545-552), the
-    night-STIM map (555) and, when ``fwhm`` is given, the matched-filter map of
-    every subset.  Empty subsets (nn = 1) give all-NaN images."""
+def verify_maps(stack: np.ndarray, weights: Optional[np.ndarray] = None, fwhm: Optional[float] = None,
+                flatten: bool = False) -> Dict[str, Any]:
+    """Subset images (weighted combines, verify 545-552), the night-STIM map (555)
+    and, when ``fwhm`` is given, the matched-filter map of every subset.  Empty
+    subsets (nn = 1) give all-NaN images.
+
+    ``flatten`` applies :func:`radprof` to each combine, as the IDL does; off by
+    default so the subsets match what the run scored."""
     stack = np.asarray(stack, float)
     nn = stack.shape[0]
     w = np.ones(nn) if weights is None else np.asarray(weights, float)
     subs = night_subsets(nn)
     imgs: Dict[str, np.ndarray] = {}
     for name, idx in subs.items():
-        imgs[name] = radprof(combine_nights(stack, w, idx)) if idx.size else np.full(stack.shape[1:], np.nan)
+        if not idx.size:
+            imgs[name] = np.full(stack.shape[1:], np.nan)
+            continue
+        c = combine_nights(stack, w, idx)
+        imgs[name] = radprof(c) if flatten else c
     out: Dict[str, Any] = {"subsets": imgs, "stim": night_stim(stack, w), "weights": w, "subset_index": subs}
     if fwhm is not None:
         out["mf"] = {k: mf_convolve(v, fwhm) for k, v in imgs.items()}

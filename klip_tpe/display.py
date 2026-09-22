@@ -779,12 +779,17 @@ def known_snr(ad: AnnulusData, img) -> Optional[List[float]]:
 
 def draw_image(ax, img: Optional[np.ndarray], ad: AnnulusData, title: str, cmap: str = "inferno",
                sources=None, labels=None, snr: bool = False, note: Optional[str] = None,
-               flatten: bool = True, vrange: Optional[Tuple[float, float]] = None, edges: bool = False,
+               flatten: bool = False, vrange: Optional[Tuple[float, float]] = None, edges: bool = False,
                scale: str = "linear", known_labels=None):
-    """One image cell: robust ``-1..5 sigma`` stretch of the radial-profile-flattened
-    image (or a fixed ``-3..8`` stretch for S/N maps), arcsec axes centred on the
-    star, injected sources circled (0.9 FWHM) and labelled with their per-source
-    metric value."""
+    """One image cell: robust ``-1..5 sigma`` stretch of the image (or a fixed
+    ``-3..8`` stretch for S/N maps), arcsec axes centred on the star, injected
+    sources circled (0.9 FWHM) and labelled with their per-source metric value.
+
+    ``flatten=False`` by default, matching the metrics: the panel shows the image the
+    run actually scored.  The robust stretch is measured on whatever it is handed, so
+    an unflattened panel is dominated by the stellar halo at small separations -- that
+    is the honest picture, not a display fault.  Pass ``flatten=True`` for the old
+    :func:`radprof` stretch."""
     ax.set_title(title)
     ax.grid(False)
     if img is None or np.ndim(img) != 2 or img.shape[0] < 4 or not np.isfinite(img).any():
@@ -859,7 +864,8 @@ def _fm_range(img: Optional[np.ndarray]) -> Optional[Tuple[float, float]]:
     return (0.0, hi) if hi > 0 else None
 
 
-def _snr_map(img: Optional[np.ndarray], ad: AnnulusData, sources=None) -> Optional[np.ndarray]:
+def _snr_map(img: Optional[np.ndarray], ad: AnnulusData, sources=None,
+             flatten: bool = False) -> Optional[np.ndarray]:
     if img is None or np.ndim(img) != 2 or img.shape[0] < 8:
         return None
     from .products import snr_map
@@ -871,7 +877,7 @@ def _snr_map(img: Optional[np.ndarray], ad: AnnulusData, sources=None) -> Option
             th = [s[1] for s in sources]
             xs, ys = source_xy(rho, th, ad.pxscale, cx, cy, ad.angle_convention)
             ex = list(zip(xs, ys))
-        return snr_map(radprof(img), ad.fwhm, exclude_xy=ex)
+        return snr_map(radprof(img) if flatten else img, ad.fwhm, exclude_xy=ex)
     except Exception:
         return None
 

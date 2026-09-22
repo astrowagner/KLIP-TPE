@@ -145,7 +145,7 @@ class FMMFSNR(Metric):
     min_ring: int = 6
     penalty: str = "geometric"
     pixel_mask: Optional[np.ndarray] = None
-    flatten: bool = True
+    flatten: bool = False
     angle_convention: str = "pa"
     name: str = "fmmf"
     needs_fm: bool = True
@@ -200,7 +200,7 @@ class FMMFSNR(Metric):
 # --------------------------------------------------------------------------- full map
 def fmmf_map(image: np.ndarray, fm_image: np.ndarray, sources: Sequence[Any], pxscale: float,
              fwhm: float, *, contrast: float = 1.0, size_fwhm: float = 2.5,
-             angle_convention: str = "pa", zero_mean: bool = True, flatten: bool = True,
+             angle_convention: str = "pa", zero_mean: bool = True, flatten: bool = False,
              n_theta: Optional[int] = None) -> Dict[str, np.ndarray]:
     """A full-frame FMMF amplitude and S/N map from a ring of forward-modelled templates.
 

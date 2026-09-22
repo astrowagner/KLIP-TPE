@@ -700,7 +700,8 @@ class Runner:
         clean = ev.image if clean_img is None else clean_img
         cc = fm_contrast_curve(ev.fm_image, clean, contrast, self.fwhm, self.pxscale, rin, float(a_out), srcs,
                                kernel_fn=self.reducer.matched_filter_kernel,
-                               angle_convention=self.reducer.angle_convention, known=self._known())
+                               angle_convention=self.reducer.angle_convention,
+                               flatten=self.flatten_products, known=self._known())
         curve = {k: [None if not np.isfinite(v) else float(v) for v in np.atleast_1d(np.asarray(v_, float))]
                  for k, v_ in cc.items()}
         return {"images": ev, "fm_image": ev.fm_image, "clean": clean, "sources": srcs, "curve": curve}
@@ -2028,6 +2029,24 @@ class Runner:
                            getattr(self.reducer, "angle_convention", "pa"))
         return list(zip(np.atleast_1d(xs), np.atleast_1d(ys)))
 
+    @property
+    def flatten_products(self) -> bool:
+        """Whether the saved stitches carry :func:`radprof`.
+
+        Follows the metric rather than being a knob of its own, so the FITS on disk is
+        the image the run actually scored.  These products used to flatten
+        unconditionally, which meant a run could be optimised on one image and shipped
+        with another -- and the header said ``radprof-flattened`` either way.
+        """
+        return bool(getattr(getattr(self.objective, "metric", None), "flatten", False))
+
+    def _maybe_flatten(self, img: np.ndarray) -> np.ndarray:
+        return radprof(img) if self.flatten_products else np.asarray(img, float)
+
+    @property
+    def _flat_tag(self) -> str:
+        return " (radprof-flattened)" if self.flatten_products else ""
+
     def _running_stitch(self, ia: int, at_end: bool = False) -> Optional[Dict[str, Any]]:
         """Equal-weight NaN-aware running stitch (A §9.1): tiles of the previous annuli's
         winners plus the current running best (or, ``at_end``, this annulus' winner).
@@ -2056,9 +2075,9 @@ class Runner:
             return None
         neval = 0 if self.history is None else len(self.history)
         hdr = {"ANNULUS": ia + 1, "NEVAL": neval, "RUNNING": 1, "NANN": len(cleans), "PHASE": "final" if at_end else "eval",
-               "IMGTYPE": "running equal-weight stitch (radprof-flattened)", "EDGES": ",".join(f"{z[0]:.1f}" for z in zones)
+               "IMGTYPE": f"running equal-weight stitch{self._flat_tag}", "EDGES": ",".join(f"{z[0]:.1f}" for z in zones)
                + f",{zones[-1][1]:.1f}"}
-        st = radprof(stitch_tiles(cleans, zones))
+        st = self._maybe_flatten(stitch_tiles(cleans, zones))
         files = {"clean": os.path.join(self.run_dir, "klip_stitched_running.fits")}
         _write_fits(files["clean"], st, hdr)
         snr = snr_map(st, self.fwhm)
@@ -2066,7 +2085,7 @@ class Runner:
         _write_fits(files["snr"], snr, dict(hdr, IMGTYPE="running stitched S/N map (Mawet)"))
         out = {"clean": st, "snr": snr, "zones": zones}
         if any(i is not None for i in injs):
-            sti = radprof(stitch_tiles([i if i is not None else c for i, c in zip(injs, cleans)], zones))
+            sti = self._maybe_flatten(stitch_tiles([i if i is not None else c for i, c in zip(injs, cleans)], zones))
             hi = dict(hdr, IMGTYPE="running equal-weight stitch (injected)", INJNSRC=len(sources))
             for j, s in enumerate(sources):
                 hi[f"INJRHO{j+1}"], hi[f"INJPA{j+1}"] = float(s[0]), float(s[1])
@@ -2202,7 +2221,8 @@ class Runner:
                            ccal=self.contrast, tag=f"{ia+1:02d}", n_pv=int(self.cfg.n_pv),
                            pv_divmin=float(self.cfg.pv_divmin), n_init=self.cfg.per_annulus(self.cfg.n_init, ia),
                            nsrc=self._nsrc(ia), rng=rng, known=list(getattr(self.sampler, "known", ()) or ()),
-                           angle_convention=self.reducer.angle_convention, log=self.log)
+                           angle_convention=self.reducer.angle_convention,
+                           flatten=self.flatten_products, log=self.log)
         if res is not None:
             res["zone"] = (rlo, rhi)
             self._pv_results[ia] = res
@@ -2270,7 +2290,8 @@ class Runner:
             rows = find_candidates(img, stack, self.fwhm, self.pxscale, snrmap=st.get(snr_key),
                                    injected=allsrc if label else (), night_ids=ids,
                                    verify_top=int(self.cfg.cand_verify_top) if (final and not label) else 0,
-                                   verify_kwargs={"n_boot": int(self.cfg.verify_n_boot), "rng": rng}, **kw)
+                                   verify_kwargs={"n_boot": int(self.cfg.verify_n_boot), "rng": rng},
+                                   flatten=self.flatten_products, **kw)
             write_candidates(os.path.join(cdir, f"{label}candidates.txt"), rows,
                              source=("final " if final else f"running (annulus {ia+1}) ") + img_key + " stitch")
             results[label or "clean"] = rows
@@ -2438,7 +2459,7 @@ class Runner:
             # where the same line would hide eight reductions.
             self.log(f"  seam patching: {int(seam.sum())} pixel(s), {npatch} filled "
                      f"({time.time() - t_seam:.1f} s; one re-reduction per annulus with a seam)")
-        st_f = radprof(st)
+        st_f = self._maybe_flatten(st)
         hist = ["per-annulus best (edges px | k bin nang filt angsep anglemax | SNR | partitions):"]
         for r, d in items:
             p = r.winner_config.get("params", {})
@@ -2446,7 +2467,7 @@ class Runner:
                                                        ("angsep", "as"), ("anglemax", "am")) if p.get(k) is not None)
             hist.append(f"  a{r.annulus+1} [{r.inrad:5.1f}-{r.outrad:5.1f}] {ptxt} "
                         f"SNR{r.winner_score:6.2f} c{r.contrast:.2E} n={','.join(r.partitions) or 'all'}")
-        hdr = {"NANN": len(items), "PHASE": "final", "IMGTYPE": "radially-optimized stitch (radprof-flattened)",
+        hdr = {"NANN": len(items), "PHASE": "final", "IMGTYPE": f"radially-optimized stitch{self._flat_tag}",
                "LEGACY": int(self.cfg.legacy_stitch), "NSEAM": int(seam.sum()), "NPATCH": npatch,
                "EDGES": ",".join(f"{e:.1f}" for e in edges), "WEIGHTS": ",".join(f"{v:.3f}" for v in w),
                "METRIC": getattr(self.objective.metric, "name", "metric"), "KMODE": self.cfg.k_mode,
@@ -2465,8 +2486,9 @@ class Runner:
         for _, d in items:
             allsrc.extend(d.get("sources") or [])
         if any(d.get("inj") is not None for _, d in items):
-            sti = radprof(stitch_tiles([d["inj"] if d.get("inj") is not None else d["clean"] for _, d in items], zones, w))
-            hi = dict(hdr, IMGTYPE="validated-winner injected stitch (radprof-flattened)", INJNSRC=len(allsrc))
+            sti = self._maybe_flatten(stitch_tiles([d["inj"] if d.get("inj") is not None else d["clean"]
+                                                    for _, d in items], zones, w))
+            hi = dict(hdr, IMGTYPE=f"validated-winner injected stitch{self._flat_tag}", INJNSRC=len(allsrc))
             for j, s in enumerate(allsrc):
                 hi[f"INJRHO{j+1}"], hi[f"INJPA{j+1}"] = float(s[0]), float(s[1])
                 if len(s) > 2:

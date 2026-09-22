@@ -236,7 +236,19 @@ def test_mawet_metric_object_flatten_and_kernel(noise):
     yy, xx = _grid()
     halo = 50 * np.exp(-np.hypot(xx - N / 2, yy - N / 2) / 8.0)
     img = halo + noise + _gauss(xs[0], ys[0], 20.0)
-    m = MawetPeakSNR(pxscale=PX, fwhm=FWHM)
+
+    # flatten is OFF by default, and that is not a free choice: this halo falls off as
+    # exp(-r/8), so it has a steep gradient ACROSS each reference aperture.  radprof
+    # removes it (it is azimuthally symmetric); without radprof the gradient inflates
+    # the ring scatter and the same source measures ~10x lower.  Both numbers are
+    # pinned so a silent flip of the default cannot pass.
+    assert MawetPeakSNR(pxscale=PX, fwhm=FWHM).flatten is False
+    s_flat = MawetPeakSNR(pxscale=PX, fwhm=FWHM, flatten=True).per_source(img, None, [1.0], [30.0])
+    s_raw = MawetPeakSNR(pxscale=PX, fwhm=FWHM).per_source(img, None, [1.0], [30.0])
+    assert s_flat[0] > 20
+    assert 2.0 < s_raw[0] < 0.25 * s_flat[0]
+
+    m = MawetPeakSNR(pxscale=PX, fwhm=FWHM, flatten=True)
     s = m.per_source(img, None, [1.0], [30.0])
     assert s[0] > 20
     calls = []
@@ -251,6 +263,47 @@ def test_mawet_metric_object_flatten_and_kernel(noise):
     assert m2.describe()["measured_kernel"] is True
     m3 = MawetPeakSNR(pxscale=PX, fwhm=FWHM, kernel_fn=lambda r: None)
     assert m3.kernel(1.0).shape == gaussian_kernel(FWHM).shape
+
+
+def test_radial_profile_subtraction_is_off_by_default_everywhere():
+    """One assertion per place radprof used to be applied unconditionally.
+
+    The point of the change is that a run is scored, saved and displayed on the SAME
+    image.  Each of these was an independent default, so a single one flipping back is
+    exactly the kind of inconsistency this pins down.
+    """
+    import inspect
+    from klip_tpe import candidates, display, fmmf, param_verify, products, verify
+
+    assert MawetPeakSNR(pxscale=PX, fwhm=FWHM).flatten is False
+    assert InjectionDifferenceSNR(pxscale=PX, fwhm=FWHM).flatten is False
+    assert fmmf.FMMFSNR(pxscale=PX, fwhm=FWHM).flatten is False
+
+    for fn in (fmmf.fmmf_map, display.draw_image, display._snr_map, products.fm_contrast_curve,
+               verify.verify_maps, param_verify.param_verify, param_verify.param_verify_cubes,
+               candidates.find_candidates, candidates.candidate_metrics):
+        p = inspect.signature(fn).parameters.get("flatten")
+        assert p is not None, f"{fn.__name__} lost its flatten switch"
+        assert p.default is False, f"{fn.__name__} flattens by default"
+
+
+def test_runner_products_follow_the_metric_not_a_separate_knob():
+    """The saved stitches used to flatten whatever the metric did, so the FITS on disk
+    could differ from the image that was optimised.  They now follow the metric."""
+    from klip_tpe.runner import Runner
+
+    class _R:
+        flatten_products = Runner.flatten_products
+        _flat_tag = Runner._flat_tag
+        objective = Objective(MawetPeakSNR(pxscale=PX, fwhm=FWHM))
+
+    class _RF(_R):
+        objective = Objective(MawetPeakSNR(pxscale=PX, fwhm=FWHM, flatten=True))
+
+    assert _R().flatten_products is False
+    assert _R()._flat_tag == ""
+    assert _RF().flatten_products is True
+    assert "radprof" in _RF()._flat_tag
 
 
 def test_injection_difference_metric_needs_clean(noise):

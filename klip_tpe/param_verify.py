@@ -171,7 +171,7 @@ def param_verify_cubes(cclean: np.ndarray, cinj: np.ndarray, wts: Sequence[float
                        sources: Sequence[Source], ccal: float, pxscale: float, fwhm: float,
                        rlo: float, rhi: float, out_dir: Optional[str] = None, tag: str = "01",
                        snr_thr: float = 3.0, angle_convention: str = "pa",
-                       write_fits: bool = True) -> Dict[str, Any]:
+                       flatten: bool = False, write_fits: bool = True) -> Dict[str, Any]:
     """``near2m_paramverify`` (param_verify 135-249) on ``(N, ny, nx)`` clean and
     injected cubes of the ensemble.
 
@@ -206,8 +206,9 @@ def param_verify_cubes(cclean: np.ndarray, cinj: np.ndarray, wts: Sequence[float
     ex_xy = list(zip(sxp, syp))
     nf = rho.size
 
-    sncl = np.stack([snr_map(radprof(cclean[i]), fwhm) for i in range(nn)])
-    snij = np.stack([snr_map(radprof(cinj[i]), fwhm, exclude_xy=ex_xy) for i in range(nn)])
+    _flat = radprof if flatten else (lambda a: np.asarray(a, float))
+    sncl = np.stack([snr_map(_flat(cclean[i]), fwhm) for i in range(nn)])
+    snij = np.stack([snr_map(_flat(cinj[i]), fwhm, exclude_xy=ex_xy) for i in range(nn)])
 
     stim = param_stim(sncl)
     fin = np.isfinite(sncl)
@@ -246,11 +247,11 @@ def param_verify_cubes(cclean: np.ndarray, cinj: np.ndarray, wts: Sequence[float
         return num / np.where(den > 0, den, np.nan)
     comb = _wsum(cclean)
     combj = _wsum(cinj)
-    combsnr = snr_map(radprof(comb), fwhm)
+    combsnr = snr_map(_flat(comb), fwhm)
 
-    ps = mawet_peak_snr(radprof(combj), rho, th, pxscale, fwhm, angle_convention=angle_convention)
+    ps = mawet_peak_snr(_flat(combj), rho, th, pxscale, fwhm, angle_convention=angle_convention)
     reval = rlo + (rhi - rlo) * (np.arange(12) + 0.5) / 12.0
-    rp_comb = radprof(comb)
+    rp_comb = _flat(comb)
     sig_r = radial_rms(rp_comb, reval)
     sig_s = radial_rms(rp_comb, rho / pxscale)
     Kcal = np.where(np.isfinite(ps) & (sig_s > 0), ps * sig_s / ccal, np.nan)
@@ -307,8 +308,8 @@ def param_verify(history: History, space: SearchSpace, reduce_fn: Callable[..., 
                  ccal: float, tag: str = "01", n_pv: int = 20, pv_divmin: float = 0.05,
                  n_init: Optional[int] = None, nsrc: int = 4, fixed_sources: Optional[Sequence[Source]] = None,
                  rng: Optional[np.random.Generator] = None, known: Sequence[Tuple[float, float]] = (),
-                 snr_thr: float = 3.0, angle_convention: str = "pa", log: Callable[[str], None] = print
-                 ) -> Optional[Dict[str, Any]]:
+                 snr_thr: float = 3.0, angle_convention: str = "pa", flatten: bool = False,
+                 log: Callable[[str], None] = print) -> Optional[Dict[str, Any]]:
     """Run the param_verify stage for one annulus (opt 7781-7935 + ``near2m_paramverify``).
 
     Parameters
@@ -366,7 +367,7 @@ def param_verify(history: History, space: SearchSpace, reduce_fn: Callable[..., 
         log("param_verify: fewer than 2 configs reduced -- skipped")
         return None
     out = param_verify_cubes(np.stack(cclean), np.stack(cinj), wts, fixed_sources, ccal, pxscale, fwhm,
-                             rlo, rhi, out_dir, tag, snr_thr, angle_convention)
+                             rlo, rhi, out_dir, tag, snr_thr, angle_convention, flatten=flatten)
     out["eval_indices"] = kept
     out["X"] = history.X[kept].copy()
     log(f"param_verify annulus {tag}: {len(kept)} configs; combine K~{out['Kc']:.3E}")

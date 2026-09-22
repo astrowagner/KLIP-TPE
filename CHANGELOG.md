@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased — 2026-09-22 (radial-profile subtraction off by default)
+- **`radprof` is no longer applied anywhere by default.**  At Kevin's direction.  The
+  azimuthal integer-radius-bin mean subtraction was the IDL's default and was inherited
+  here as nine *independent* defaults — the three metrics, the FMMF map, the display
+  panels, the saved stitches, the FM contrast curve, the verify subsets, `param_verify`
+  and the candidate search.  Six of those were not switches at all: they called
+  `radprof()` unconditionally, so there was no way to turn them off and no record in the
+  output that they were on.  All nine now take `flatten=`, defaulting to `False`.
+- **Why it is wrong as a default.**  `radprof` subtracts the mean of each integer-radius
+  bin from every pixel in that bin, so anything that is not azimuthally uniform at a
+  given radius leaks into that mean and is then removed from the whole ring — a bright
+  companion subtracts a fraction of itself, and on MIRI the 4QPM dead zones and
+  glow-stick residuals bias the ring they sit on.  Worse on a masked ring, where the
+  mean is taken over the surviving pixels and removed from all of them.
+- **The saved products now follow the metric** (`Runner.flatten_products`) instead of
+  flattening regardless.  Previously a run could be optimised on one image and shipped
+  with another, and the FITS header said `radprof-flattened` either way; the `IMGTYPE`
+  strings now carry the tag only when it is true.
+- **This changes the numbers, and not by a little.**  On a synthetic frame with an
+  `exp(-r/8)` halo, the same source measures **S/N 34.5 flattened and 3.2 unflattened** —
+  the radial gradient across each reference aperture inflates the ring scatter.  Real
+  post-KLIP residuals are far shallower than that, but the direction holds: absolute S/N
+  falls wherever a radial gradient survives, so the calibration lands at a different
+  contrast and **no number from before this commit is comparable to one after it**.  That
+  is the intended effect — the optimiser must now suppress the gradient itself rather
+  than lean on `radprof` to hide it afterwards.  Every benchmark (E2/F2/G2/H2) and every
+  MIRI contrast predates the change.
+- Pass `flatten=True` anywhere to restore the IDL behaviour.  `tests/test_metrics.py`
+  pins all nine defaults and both halves of the 34.5/3.2 split, so a silent flip fails.
+- **Not changed, and needing a decision**: `scripts/check_hip65426_contrast.py`,
+  `check_betapic_contrast.py` and `check_hd95086_klipfm.py` still call `radprof()`
+  explicitly.  They are published-value cross-checks, and the HIP 65426 one is the source
+  of the ΔF444W = 8.796 ± 0.092 below — changing them moves a manuscript number.
+
 ## Unreleased — 2026-09-22 (the injected PSF's orientation)
 - **The injector rotated the PSF template by the source's position angle, and should not
   have.**  Spotted by eye on a live display: the injected sources' side lobes pointed the

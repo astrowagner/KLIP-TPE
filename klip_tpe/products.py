@@ -255,15 +255,20 @@ def fm_contrast_curve(fm_image: np.ndarray, clean_image: np.ndarray, contrast: f
                       pxscale: float, rin_px: float, rout_px: float, sources: Sequence[Source],
                       kernel_fn: Optional[Callable[[float], Optional[np.ndarray]]] = None,
                       nsigma: float = 5.0, search_px: float = 1.5,
-                      angle_convention: str = "pa",
+                      angle_convention: str = "pa", flatten: bool = False,
                       known: Sequence[Tuple[float, float]] = ()) -> Dict[str, np.ndarray]:
     """KLIP-FM ``nsigma`` contrast curve (A_main_procedure.md section 9.1, L7655-7677).
 
-    ``resp = fm_response(radprof(fm_image), sources)``; ``K_fm = resp / contrast``;
-    ``sigma_mf`` = :func:`noise_profile` of ``radprof(clean_image)`` measured with the
+    ``resp = fm_response(fm_image, sources)``; ``K_fm = resp / contrast``;
+    ``sigma_mf`` = :func:`noise_profile` of ``clean_image`` measured with the
     unit-sum matched-filter kernel (``kernel_fn`` at the median valid test
     separation, else the FWHM Gaussian); ``curve = nsigma * interp(sigma_mf)(r) /
     K_fm`` at the test radii with ``K_fm > 0`` (at least 3 needed, else NaN).
+
+    ``flatten`` applies :func:`radprof` to BOTH images first -- the IDL behaviour, and
+    off by default here.  It has to be both or neither: ``K_fm`` is a response measured
+    on the model and divided into a noise measured on the data, so flattening one and
+    not the other puts a bias straight into the contrast axis.
 
     ``known`` = real companions [(rho_arcsec, pa_deg), ...] left out of the noise rings.
 
@@ -273,7 +278,8 @@ def fm_contrast_curve(fm_image: np.ndarray, clean_image: np.ndarray, contrast: f
     """
     rho = np.array([s.rho for s in sources], float)
     th = np.array([s.theta for s in sources], float)
-    resp = fm_response(radprof(fm_image), rho, th, pxscale, fwhm, kernel_fn=kernel_fn,
+    _flat = radprof if flatten else (lambda a: np.asarray(a, float))
+    resp = fm_response(_flat(fm_image), rho, th, pxscale, fwhm, kernel_fn=kernel_fn,
                        search_px=search_px, angle_convention=angle_convention)
     K = resp / float(contrast)
     g = np.isfinite(K) & (K > 0)
@@ -286,7 +292,7 @@ def fm_contrast_curve(fm_image: np.ndarray, clean_image: np.ndarray, contrast: f
         kern = kernel_fn(float(np.median(rho[g])))
     if kern is None:
         kern = gaussian_kernel(fwhm)
-    sig, rprof = noise_profile(radprof(clean_image), fwhm, rin_px, rout_px, kernel=np.asarray(kern, float),
+    sig, rprof = noise_profile(_flat(clean_image), fwhm, rin_px, rout_px, kernel=np.asarray(kern, float),
                                known=known, pxscale=pxscale)
     out["sigma_mf"], out["r_sigma_px"] = sig, rprof
     ok = np.isfinite(sig)

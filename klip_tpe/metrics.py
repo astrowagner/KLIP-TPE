@@ -477,7 +477,16 @@ class MawetPeakSNR(Metric):
 
     ``kernel_fn(rho_arcsec) -> kernel`` lets an injection model supply the measured
     matched filter at the sources' median separation; ``flatten`` applies
-    :func:`radprof` before scoring (all IDL variants do)."""
+    :func:`radprof` before scoring.
+
+    ``flatten=False`` is the default, which is a deliberate divergence from the IDL --
+    every IDL variant flattens.  :func:`radprof` subtracts the azimuthal mean of each
+    integer-radius bin, so anything that is not azimuthally uniform at a given radius
+    leaks into that mean and is subtracted off the whole ring: a bright companion, the
+    MIRI 4QPM dead zones, a glow-stick residual.  On a ring the mask already eats, the
+    mean is taken over the surviving pixels and then removed from all of them, which
+    biases the very sources the metric is trying to measure.  Pass ``flatten=True`` to
+    restore the IDL behaviour."""
 
     pxscale: float
     fwhm: float
@@ -491,7 +500,7 @@ class MawetPeakSNR(Metric):
     min_ring: int = 6
     penalty: str = "geometric"
     pixel_mask: Optional[np.ndarray] = None
-    flatten: bool = True
+    flatten: bool = False
     angle_convention: str = "pa"
     name: str = "mawet_peak"
 
@@ -531,7 +540,7 @@ class InjectionDifferenceSNR(Metric):
     fwhm: float
     excl_fwhm: float = 1.5
     known: Sequence[Tuple[float, float]] = ()
-    flatten: bool = True
+    flatten: bool = False
     angle_convention: str = "pa"
     name: str = "injection_difference"
     needs_clean: bool = True
