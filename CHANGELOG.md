@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — 2026-09-22 (the k-scan's argmax)
+- **The calibration k-scan reported an edge of its own range as an optimum, twice.**  Chasing why
+  the HIP 65426 F1140C run picked `k_default = 1`: with the background-mismatched RDI library the
+  S/N-vs-k curve was flat to **1.5%** over k = 4..20 with k = 1 on top by 1.6%, which is the
+  signature of a basis whose leading KL mode is the sky pedestal rather than the star — removing
+  it was the only subtraction that helped, so nothing after k = 1 added anything.  That confirms
+  the background mixture (`2b8a148`) was the cause.  But with the background fixed the argmax
+  moved to **k = 20**, the *other* end of the range, winning by **0.1%**.  Neither was an interior
+  optimum, and `--k-max 20` caps the *search* as well as the scan, so the run was working against
+  a ceiling the data had already reached.  `Runner._scan_k` now names an argmax at either end as
+  an edge hit (and at the top says which knob is limiting), keeps the draw-to-draw spread it used
+  to discard with the median (`info["kscan_draw_spread"]`), and keeps the incumbent when the win
+  is inside that spread rather than moving the run's seed on noise.  This is the guard
+  `locate_boundaries` has always applied to its own scan — "an extremum at the edge of the window
+  means the window is wrong" — finally applied to this one.  New `tests/test_kscan.py`, in the
+  quick suite because the curve is dictated by a stub and no reduction happens.
+
 ## Unreleased — 2026-09-22 (the cache, on a machine without STPSF)
 - **A missing cache file failed as `ModuleNotFoundError: stpsf`, six frames down.**  The cache
   exists precisely so a machine without STPSF can run from a copied one — the Mac this is

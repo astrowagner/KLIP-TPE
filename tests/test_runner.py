@@ -763,3 +763,4 @@ def test_a_calibrated_annulus_is_not_flagged(tmp_path):
     cfg.calibration.forced = [1e-4]
     _, _, info2 = Runner(red, space, obj, samp, cfg, str(tmp_path / "f"), log=QUIET).calibrate(0)
     assert info2["uncalibrated"] is False and info2["forced"] == 1e-4
+

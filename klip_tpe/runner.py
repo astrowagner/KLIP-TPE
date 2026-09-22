@@ -996,8 +996,17 @@ class Runner:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", RuntimeWarning)        # all-NaN slices are a legal answer
                 sc = np.nanmedian(np.array([c[:n] for c in curves], float), axis=0)
+            # The spread ACROSS draws, kept rather than thrown away with the median: it is the
+            # only estimate available of how much of this curve is the draw, and the margin
+            # the argmax wins by has to be read against it.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                arr = np.array([c[:n] for c in curves], float)
+                spread = float(np.nanmedian(np.nanmax(arr, axis=0) - np.nanmin(arr, axis=0))) \
+                    if arr.shape[0] > 1 else float("nan")
             info["kscan"] = [None if not np.isfinite(v) else float(v) for v in sc]
             info["kscan_contrast"] = float(contrast)
+            info["kscan_draw_spread"] = None if not np.isfinite(spread) else spread
             if not np.any(np.isfinite(sc)):
                 self.log(f"  calibration k-scan at contrast {contrast:.3e}: no finite score at any k; keeping k = {k_now}")
                 return None
@@ -1005,6 +1014,35 @@ class Runner:
             now = sc[k_now - 1] if 1 <= k_now <= sc.size else np.nan
             self.log(f"  calibration k-scan at contrast {contrast:.3e}: k_default = {k} "
                      f"(S/N {sc[k - 1]:.2f}; k = {k_now} scores {now:.2f})")
+            # An argmax at either end of the scanned range is not an interior optimum, and
+            # saying so is the same guard locate_boundaries already applies to its own scan:
+            # a extremum at the edge of the window means the window is wrong.  Measured on
+            # HIP 65426 F1140C: with a background-mismatched RDI library the curve was flat to
+            # 1.5% over k = 4..20 with k = 1 on top by 1.6% (the leading KL mode was the sky
+            # pedestal, so removing it was the only subtraction that helped); with the
+            # background fixed the argmax moved to k = 20 -- the other end -- winning by 0.1%.
+            # Neither was a measurement of anything.
+            edge = "bottom" if k == 1 else ("top" if k == sc.size else "")
+            if edge:
+                self.log(f"  calibration k-scan: WARNING k_default = {k} is at the {edge} of the "
+                         f"scanned range (1..{sc.size}), so this is an edge hit and not an "
+                         f"interior optimum"
+                         + (f" -- the data still wants more modes at k = {sc.size}; raise "
+                            f"k_klip_max, which caps the SEARCH as well as this scan"
+                            if edge == "top" else
+                            " -- k = 1 keeps only the single dominant mode, which is the "
+                            "signature of a basis whose first component is not the star "
+                            "(an unsubtracted background, say)"))
+            info["kscan_edge"] = edge or None
+            # And when the win is inside the draw-to-draw spread, it is not a win: keep the
+            # incumbent rather than moving the seed of the whole run on noise.
+            if (np.isfinite(spread) and np.isfinite(now) and 1 <= k_now <= sc.size
+                    and (sc[k - 1] - now) < spread):
+                self.log(f"  calibration k-scan: keeping k = {k_now} -- k = {k} beats it by "
+                         f"{sc[k - 1] - now:.3f} in S/N, inside the {spread:.3f} spread between "
+                         f"the {arr.shape[0]} draws, so the argmax is not resolved")
+                info["kscan_unresolved"] = True
+                return None
             return k
         except Exception as exc:
             self.log(f"  calibration k-scan failed ({exc!r}); keeping k = {k_now}")
