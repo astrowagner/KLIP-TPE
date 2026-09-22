@@ -176,6 +176,23 @@ PHOTOMETRY = {
         "check": "Carter et al. (2023, ApJL 951, L20): ~2.7 uJy F1140C sensitivity -> a 3.9e-5 "
                  "contrast floor, against their ~2e-4 for the companion",
     } for f, s in (("F1065C", 0.07813), ("F1140C", 0.06899), ("F1550C", 0.03739))},
+    # ---- HR 8799 through the same three MIRI filters (GO 1194, Boccaletti et al. 2024,
+    # A&A 686, A33).  Computed from scratch rather than anchored, because this star has an
+    # INDEPENDENT check available and passing it is worth more than the anchor: those authors
+    # interpolate the stellar flux density at 15.5 um from WISE and AKARI photometry and get
+    # 154.2 mJy, and Planck(7600 K) through the F1550C bandpass normalised to 2MASS
+    # Ks = 5.240 gives 155.8 -- agreement to 1.0%, with nothing in common between the two
+    # routes.  Over Teff = 7200-7800 K the F1550C value moves 159.6 -> 154.0 mJy, so the
+    # agreement also pins the inputs: an error in Ks would scale the answer straight through.
+    **{f"hr8799_{f.lower()}": {
+        "flux_density_jy": s, "flux_density_err_frac": 0.04, "filter": f,
+        "ref": "synthetic photometry: Planck(Teff=7600 K, A5V) through the STPSF bandpass, "
+               "normalised to 2MASS Ks = 5.240",
+        "optics_transmission": 1.0,
+        "optics_transmission_source": "PHOTMJSR of the coronagraphic mode already carries its optics",
+        "check": "F1550C 155.8 mJy against Boccaletti et al. (2024, A&A 686, A33) 154.2 mJy "
+                 "interpolated from WISE + AKARI -- 1.0%, by an independent route",
+    } for f, s in (("F1065C", 0.3244), ("F1140C", 0.2866), ("F1550C", 0.1558))},
 }
 
 
