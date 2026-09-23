@@ -1,5 +1,52 @@
 # Changelog
 
+## Unreleased — 2026-09-23 (a tutorial budget that can actually find something)
+
+A student ran tutorial 1, stopped at ~20 evaluations because nothing seemed to be happening,
+and concluded it was not working.  Both halves of that were the package's fault.
+
+- **Fix: `show="inline"` outside a Jupyter kernel silently displayed nothing.**  Inline mode
+  pushes the panel to an IPython display handle, which renders nothing in a terminal — no
+  window, no warning, no hint that a live display exists at all.  The tutorials ship as
+  `.py` files as well as notebooks, so running one as a script hit exactly this.  It now
+  falls back to a window and logs why.  Tutorial 1 also asked for `"inline"` explicitly
+  where `"auto"` was meant.
+- **The tutorial's budget could not have worked, and now there are numbers for that.**
+  Four 1200-evaluation searches plus eight 300-evaluation searches on the tutorial's own
+  data, with every incumbent re-scored on fresh injections rather than trusted at its
+  search value:
+  - the per-injection-set scatter of the objective is **σ = 0.87 S/N** (853 repeated-draw
+    trials) against a landscape only **1.44** wide, so a single-draw score barely separates
+    two configurations at all;
+  - the answer improves steeply to **~100–120 evaluations** and is flat after that, while
+    the best score *seen* keeps climbing — selection bias reaching **+1.6 S/N at 1200**,
+    which matches `σ/√n_remeasure × Φ⁻¹(1−1/N)` to 0.02;
+  - `n_init=15` leaves TPE four points in nine dimensions and measurably loses ~0.4 S/N
+    against 40, 100 or 200, which are indistinguishable;
+  - the configuration a search ranks **first** was the truly-best of its own top eight in
+    **none** of twelve runs, so `n_top` matters more than `n_valid`.
+  Tutorial 1 goes to `n_iter=300, n_init=40, n_top=6, n_valid=8, n_remeasure=3`, and the
+  README's quick start with it.  New `docs/BUDGET.md` carries the measurements and the
+  rules of thumb (`n_init` ≈ 4–8 × dimensions, `n_iter` ≈ 30 × dimensions).
+- **The quick start now points at the live display before the code**, says what each phase
+  looks like on the panel and when it starts to mean something, and mentions `klip-tpe view`
+  for attaching to a run in progress.
+- **New `--n-remeasure` CLI flag.**  It was reachable only from the API, so every
+  command-line run was single-draw.  Default stays 1; nothing existing changes.
+- **Measured: drawing the live panel is not free.**  60 evaluations took 43 s headless,
+  171 s at `every=5` and 290 s at `every=1` on one core.  The display already skips frames
+  rather than blocking, but on a machine short of cores the panel dominates the wall clock,
+  so tutorial 1 throttles to `every=2` and `docs/BUDGET.md` says to raise `every` before
+  cutting `n_iter`.
+- **Tutorial 1 no longer implies the winner must improve β Pic b.**  It is an independent
+  check and is allowed to disagree: across fifteen runs the validated winner put β Pic b
+  between 11 and 22 against ~16 for the default, because the objective medians over position
+  angle while the planet sits at one (within a single winner, an injected source varies
+  across PA with sd 1.5 on a mean of 9 — the same fractional scatter).  Section 5 now prints
+  β Pic b for every validated candidate so the spread is visible in the reader's own run,
+  and uses the objective's own metric — one built without `known=` counts β Pic b as noise
+  in its own ring and reads ~3× low.
+
 ## Unreleased — 2026-09-23 (the NIRCam stages remeasure too)
 - **`run_D` and `H2` now score each trial as the mean of 3 fresh draws**, as the MIRI driver
   does.  They had `n_remeasure=3` on `CalibrationConfig` — the calibration's own, older

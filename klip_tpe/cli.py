@@ -225,6 +225,10 @@ def _protocol_args(p):
     p.add_argument("--param-verify", dest="param_verify", action="store_true", default=None,
                    help="parameter-ensemble persistence stage (default: on when per-night blocks exist)")
     p.add_argument("--no-param-verify", dest="param_verify", action="store_false")
+    p.add_argument("--n-remeasure", type=int, default=1, metavar="N",
+                   help="score each trial as the MEAN of N independent injection draws (default 1). "
+                        "The objective's per-draw scatter is ~0.9 S/N on typical data, so N=3 divides "
+                        "it by sqrt(3) and roughly halves the optimism of the reported best; see docs/BUDGET.md")
     p.add_argument("--n-pv", type=int, default=20)
     p.add_argument("--pv-divmin", type=float, default=0.05)
     p.add_argument("--candidates", action="store_true", help="blind candidate search on the running/final stitch")
@@ -255,6 +259,7 @@ def _protocol_config(a) -> dict:
     return dict(opt_width=a.opt_width, width_range=tuple(a.width_range), r_cap=a.r_cap, k_mode=a.k_mode,
                 k_scan_max=a.k_scan_max, stitch_every=a.stitch_every, verify=a.verify, verify_n_boot=a.verify_n_boot,
                 param_verify=a.param_verify, n_pv=a.n_pv, pv_divmin=a.pv_divmin, candidates=a.candidates,
+                n_remeasure=max(int(getattr(a, "n_remeasure", 1) or 1), 1),
                 write_setup_files=a.write_setup_files, legacy_stitch=a.legacy_stitch,
                 partition_weighting=a.weighting, fm_curve=a.fm_curve, fm_preview=a.fm_preview,
                 pair_area_midpoint=not getattr(a, "ladder_pair", False))

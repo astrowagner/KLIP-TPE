@@ -30,7 +30,13 @@ klip-tpe is not on PyPI yet; install from GitHub as above.
 Python ≥ 3.9.  A GUI matplotlib backend (MacOSX, Qt, Tk) is needed for the live window;
 Jupyter for the inline display.
 
-## Sixty seconds
+## Your first run
+
+About five minutes on one core, on public data (VIP's β Pictoris tutorial sequence).  **It
+draws a live panel while it runs — watch it**; a search is otherwise a silent process, and
+the panel is the only way to tell a converging run from a stuck one.  If no window appears,
+the same panel is written to `runs/betapic/steps/stepNNNN.png` after every evaluation, and
+`klip-tpe view --run-dir runs/betapic` opens one on a run that is already going.
 
 ```python
 from klip_tpe import Runner, RunConfig, ValidationConfig, datasets
@@ -46,7 +52,8 @@ red = generic.make_reducer({"betapic": ds}, star_flux=sf, **datasets.INSTRUMENT[
 space = generic.make_space(red, k_klip_max=30); space.project = generic.make_guard(red, k_max=30)
 objective, sampler = generic.default_config(red, known=[(0.452, 211.9)])   # keep injections off the planet
 
-cfg = RunConfig(ann_edges=[8, 22], n_iter=60, n_init=15, validation=ValidationConfig(n_top=2, n_valid=3))
+cfg = RunConfig(ann_edges=[8, 22], n_iter=300, n_init=40, n_remeasure=3,   # 40 random warm-up,
+                validation=ValidationConfig(n_top=6, n_valid=8))          # then 260 guided
 Runner(red, space, objective, sampler, cfg, "runs/betapic", callbacks=[LiveDisplay("runs/betapic", show="auto")]).run()
 ```
 
@@ -55,10 +62,21 @@ or, the same from a terminal:
 ```
 klip-tpe generic --cube naco_betapic_cube_cen.fits --angles naco_betapic_derot_angles.fits \
     --psf naco_betapic_psf.fits --star-flux 3.3268e6 --pxscale 0.02719 --lam 3.8e-6 --diam 8.2 \
-    --known 0.452 211.9 --ann-edges 8 22 --n-iter 60 --n-init 15 --run-dir runs/betapic --show
+    --known 0.452 211.9 --ann-edges 8 22 --n-iter 300 --n-init 40 --n-remeasure 3 \
+    --n-top 6 --n-valid 8 --run-dir runs/betapic --show
 klip-tpe resume --run-dir runs/betapic ...        # after an interruption (or: --run-dir last)
 klip-tpe plots  --run-dir runs/betapic            # regenerate the figures
 ```
+
+**Those four numbers are not arbitrary, and smaller ones do not just give a rougher answer —
+they give a meaningless one.**  Measured on this data set: the first ~40 evaluations are a
+random warm-up that TPE needs before it can model anything; the answer improves steeply to
+~100–120 evaluations and is flat after that; and the best score a search has *seen* is
+optimistic by **+1.5 S/N**, which is what validating the top 6 candidates on 8 fresh
+injection sets each removes.  A run stopped at 20 evaluations has told you nothing — the
+configuration it would hand you is worth S/N ≈ 6.4 where the full search reaches ≈ 7.6.
+[docs/BUDGET.md](docs/BUDGET.md) has the measurements and how to size a budget for your own
+data.
 
 ## Tutorials (Jupyter, run end to end)
 
@@ -171,6 +189,7 @@ lists all of them.
 ## Documentation
 
 * `docs/TUTORIALS.md` — the notebooks and what to read when.
+* `docs/BUDGET.md` — **how many evaluations a run needs**, measured: warm-up, search, validation.
 * `docs/PYNOMIC.md` — LBTI/NOMIC via pyNOMIC: loading, image groups as partitions, checks.
 * `docs/RUNNING.md` — the NEAR production protocol from a terminal or Jupyter.
 * `docs/DISPLAY.md` — the live panel, cell by cell, and every product file.

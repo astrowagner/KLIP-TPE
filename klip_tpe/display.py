@@ -3311,6 +3311,14 @@ class LiveDisplay(RunCallback):
         mode = mode.lower()
         if mode == "auto":
             mode = "inline" if _in_notebook() else "window"
+        # "inline" outside a Jupyter kernel used to push the panel to an IPython display
+        # handle that renders nothing in a terminal -- no window, no warning, and no hint
+        # that a live display exists at all.  The tutorials are .py files as well as
+        # notebooks, so a student running one as a script hit exactly that.  Fall back to
+        # the window and say so.
+        self._inline_fallback = mode == "inline" and not _in_notebook()
+        if self._inline_fallback:
+            mode = "window"
         self.inline = mode == "inline"
         self.save_png, self.show, self.cmap, self.dpi, self.movie = save_png, bool(mode), cmap, int(dpi), movie
         self._handle = None                          # IPython display handle (inline mode)
@@ -3374,6 +3382,9 @@ class LiveDisplay(RunCallback):
         if getattr(self, "_gui_checked", False) or self.inline:
             return self.show
         self._gui_checked = True
+        if getattr(self, "_inline_fallback", False):
+            self._say(runner, 'live display: show="inline" only works inside a Jupyter kernel -- '
+                              "opening a window instead")
         import matplotlib
         matplotlib.rcParams["toolbar"] = "None"        # no home/arrows bar under the live panel
         cur = matplotlib.get_backend().lower()

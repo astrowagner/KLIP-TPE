@@ -14,6 +14,12 @@ without running anything).  Authored as `tutorials/NN_name.py` (cell markers `# 
 | 6 | `06_jwst_miri_hr8799.ipynb` | JWST/MIRI F1065C (and F1140C, F1550C) HR 8799 + 9-point SGD reference (MAST; `--fetch hr8799`) | **a one-roll observation** — no field rotation, so ADI is impossible and the partition layout is what decides whether `mode` means anything (the trap that invalidated two of this package's own paper runs); the reference-library dimensions that matter when RDI is all there is; four companions at four position angles as the only real test of a 2-D throughput; why the tutorial refuses to hand you their astrometry; and a stellar flux that agrees to 1% with one derived from WISE and AKARI |
 | — | `notebooks/near2_production_run.ipynb` | NEAR campaign (private) | the production run from Jupyter (background thread, watch cell, resume) |
 
+All of them draw a **live panel** while they run — that is where you watch a search
+converge, and a run without it is a silent process for several minutes.  All of them also
+use budgets chosen so the tutorial finishes quickly, which is *not* the budget an answer
+needs: see [BUDGET.md](BUDGET.md) for how many evaluations warm-up, search and validation
+actually require, measured on tutorial 1's data.
+
 Reading order: 1, then 4 if your field has a real companion or disk, then 2 or 3 depending
 on your data.  JWST/MIRI: 3 first for the spaceKLIP path, then 5 for everything the
 four-quadrant masks change, then 6 if your observation has a single roll (most do).  pyNOMIC users: 1 for the
@@ -26,7 +32,9 @@ pip install "klip-tpe[all]"          # includes jupyter, pyklip, vip_hci
 jupyter lab tutorials/
 ```
 
-Run times on a laptop (8 cores): tutorial 1 ≈ 5–10 min, tutorial 2 ≈ 10–15 min, tutorial 3
+Run times on a laptop (8 cores): tutorial 1 ≈ 10–20 min (300 evaluations × 3 injection
+draws; the reductions alone are ~5 min on *one* core, the rest is the live panel — see
+[BUDGET.md](BUDGET.md) for both measurements and the `every=` throttle), tutorial 2 ≈ 10–15 min, tutorial 3
 ≈ 15 min after the download, tutorial 4 ≈ 1 min (no optimization run), tutorials 5 and 6
 ≈ 10 min each after the download (both need a cached STPSF throughput map for their
 filter — see their last section; F1550C's is not computed yet).  Most of the time goes into the live panel; `every=2` in

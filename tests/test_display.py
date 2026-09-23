@@ -419,9 +419,16 @@ def test_progress_movie_written_periodically(tmp_path):
     assert animate.thin(list(range(1000)), 400)[-1] == 999 and len(animate.thin(list(range(1000)), 400)) == 400
 
 
-def test_inline_display_updates_one_output(tmp_path):
-    """show='inline' pushes the panel into one IPython display handle, updated in place."""
+def test_inline_display_updates_one_output(tmp_path, monkeypatch):
+    """show='inline' pushes the panel into one IPython display handle, updated in place.
+
+    Inline mode is only selected inside a Jupyter kernel (outside one it falls back to a
+    window -- see ``test_inline_outside_notebook_falls_back_to_window``), so the kernel
+    check is stubbed here to exercise the inline path itself.
+    """
     ipd = pytest.importorskip("IPython.display")
+    from klip_tpe import display as dm
+    monkeypatch.setattr(dm, "_in_notebook", lambda: True)
     calls = []
 
     class H:
@@ -586,3 +593,31 @@ def test_display_pdfs_never_ask_freetype_for_u_fffe():
     finally:
         if real is not None:
             backend_pdf.warnings = real
+
+
+def test_inline_outside_notebook_falls_back_to_window(monkeypatch):
+    """``show="inline"`` in a plain Python process must not silently show nothing.
+
+    Inline mode pushes the panel to an IPython display handle.  Outside a Jupyter kernel
+    that handle renders nothing in the terminal, so a run looked display-less: no window,
+    no warning, no hint that a live display exists.  The tutorials ship as ``.py`` files
+    as well as notebooks, so running one as a script hit this.  Now it opens a window and
+    logs why.
+    """
+    from klip_tpe import display as dm
+
+    monkeypatch.setattr(dm, "_in_notebook", lambda: False)
+    d = LiveDisplay("/tmp/klip_tpe_inline_probe", show="inline")
+    assert d.inline is False and d.show is True and d._inline_fallback is True
+    logs = []
+    d._log = logs.append
+    d._interactive_backend(None)
+    assert any('show="inline"' in l and "Jupyter" in l for l in logs)
+
+    monkeypatch.setattr(dm, "_in_notebook", lambda: True)
+    d2 = LiveDisplay("/tmp/klip_tpe_inline_probe", show="inline")
+    assert d2.inline is True and d2._inline_fallback is False
+    # "auto" already resolved correctly and must keep doing so
+    assert LiveDisplay("/tmp/klip_tpe_inline_probe", show="auto").inline is True
+    monkeypatch.setattr(dm, "_in_notebook", lambda: False)
+    assert LiveDisplay("/tmp/klip_tpe_inline_probe", show="auto").inline is False
