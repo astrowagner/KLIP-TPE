@@ -632,3 +632,50 @@ def test_destripe_recovers_the_injected_offset_off_the_glow_stick():
         f"emptied and the fallback did not reach")
     # the glow-stick rows are the known exception, and there are only a few of them
     assert int((~off).sum()) < 25, "the untreated band must stay narrow"
+
+
+# ----------------------------------------------------------------------------
+# which stars the RDI library may be built from
+# ----------------------------------------------------------------------------
+def test_ref_targets_keeps_a_disk_bearing_neighbour_out_of_the_library(tmp_path, capsys):
+    """HIP 65426's MIRI directory also holds HD 141569A and HD 141569A's own reference
+    HD 140986, and "science, and everything else is the library" put both in.  So F1140C's
+    122-frame library was 90 frames of phi Cen, 20 of HD 140986 and 12 of HD 141569A -- a
+    RESOLVED DISK in the KL basis of a bare star.  The numbers never said so; the loader
+    reported "16 reference files" and nothing about whose."""
+    d = tmp_path / "mixed"
+    d.mkdir()
+    for i, (t, roll) in enumerate([("HIP-65426", 103.2), ("HIP-65426", 112.6),
+                                   ("HIP-68245", 104.4), ("HIP-68245", 104.4),
+                                   ("HD-140986", 106.9),
+                                   ("HD-141569A", 102.9)]):
+        write(str(d / f"jw{i:05d}_calints.fits"), t, roll)
+    files = sorted(str(p) for p in d.glob("*.fits"))
+
+    msgs = []
+    dsets, info = load_calints(files, science_target="HIP65426", half_px=20, align=False,
+                               log=msgs.append)
+    assert info["n_ref"] == 8, "default: every non-background non-science pointing (4 files)"
+    assert any("RDI library from" in m and "HD141569A" in m.replace("-", "") for m in msgs), \
+        "the composition must be logged by name -- that is the line whose absence hid the disk"
+
+    msgs = []
+    dsets, info = load_calints(files, science_target="HIP65426", half_px=20, align=False,
+                               ref_targets=["HIP-68245"], log=msgs.append)
+    assert info["n_ref"] == 4, f"phi Cen only: 2 files x 2 ints, got {info['n_ref']}"
+    assert any("restricted to HIP68245" in m for m in msgs), msgs
+    assert any("HD141569A x1" in m.replace("-", "") for m in msgs), \
+        "it must say what it dropped, not just what it kept"
+
+
+def test_ref_targets_that_matches_nothing_is_an_error_not_an_empty_library(tmp_path):
+    """Silently reducing with no references because of a typo in a star name is exactly the
+    kind of quiet wrong answer this package keeps finding."""
+    d = tmp_path / "t"
+    d.mkdir()
+    write(str(d / "a_calints.fits"), "HIP-65426", 103.2)
+    write(str(d / "b_calints.fits"), "HIP-68245", 104.4)
+    files = sorted(str(p) for p in d.glob("*.fits"))
+    with pytest.raises(ValueError, match="matched none"):
+        load_calints(files, science_target="HIP65426", half_px=20, align=False,
+                     ref_targets=["PHI-CEN"], log=lambda s: None)

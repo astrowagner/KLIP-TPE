@@ -161,7 +161,8 @@ def build(a, log):
     sc = tuple(a.star_center) if getattr(a, "star_center", None) else None
     dsets, info = sk.load_calints(files, science_target=a.target, half_px=a.crop,
                                   partition=a.partition, filter=a.filter, star_center=sc,
-                                  destripe=getattr(a, "destripe", None), log=log)
+                                  destripe=getattr(a, "destripe", None),
+                                  ref_targets=getattr(a, "ref_target", None), log=log)
     filt = a.filter or info.get("FILTER") or info.get("filter")
     if not filt or str(filt).upper() not in miri.MODES:
         raise SystemExit(
@@ -190,6 +191,35 @@ def build(a, log):
                           mode=a.mode, log=log)
     lod = (m["lam_m"] / miri.DIAMETER_M) * 206265.0 / px
     log(f"lambda/D = {lod:.2f} px, FWHM = {red.fwhm:.2f} px")
+
+    # A searched reference library instead of the fixed all-or-nothing one: how many
+    # correlation-ranked frames to keep from the OTHER roll (nkeep_altroll) and from the
+    # reference star (nkeep_psfref).  Those two subsume the ADI / RDI / ADI+RDI categorical --
+    # nkeep_psfref = 0 is ADI, nkeep_altroll = 0 is RDI -- and are strictly more expressive,
+    # because they can take PART of a pool rather than all of it.  ReferenceLibraryGuard
+    # already floors their sum at n_min_ref, so the empty basis is unreachable while both
+    # pure cases stay reachable.
+    if getattr(a, "searched_library", True):
+        if len(red.reducers) != 1:
+            log("  library: NOT searched -- --partition roll puts each roll in its own "
+                "reducer, where every frame shares the target's partition label, so the "
+                "alternate-roll pool is empty by construction.  Use --partition all.")
+        else:
+            r0 = next(iter(red.reducers.values()))
+            nref = 0 if r0.data.ref_cube is None else int(np.shape(r0.data.ref_cube)[0])
+            ang = np.asarray(r0.data.angles, float)
+            part = np.round(ang, 1).astype(str)            # the roll is the label
+            rolls, counts = np.unique(part, return_counts=True)
+            if nref < 2 or rolls.size < 2:
+                log(f"  library: NOT searched -- {nref} reference frame(s) and {rolls.size} "
+                    f"roll(s); a ranked library needs a pool to rank")
+            else:
+                r0.set_reference_library(partition=part, ref_group="psfref",
+                                         n_min_ref=2, metric="cc")
+                log(f"  library: searched, ranked per target frame by cross-correlation -- "
+                    f"nkeep_altroll over {int(ang.size)} science frames in {rolls.size} rolls "
+                    f"({', '.join(f'{c}@{r}' for r, c in zip(rolls, counts))}), "
+                    f"nkeep_psfref over {nref} reference frames; sum floored at 2")
 
     ann = tuple(a.ann) if a.ann else default_annuli(red.fwhm, a.crop)
     if len(ann) < 2 or any(b <= c for c, b in zip(ann, ann[1:])):
@@ -242,7 +272,22 @@ def main(argv=None):
                     help="SELECT the files of this filter (not just relabel them). A "
                          "programme downloaded whole holds several; a dataset has one "
                          "wavelength and one mask, so loading them together is wrong")
-    ap.add_argument("--partition", default="roll", choices=["roll", "all"])
+    # 'all', not 'roll'.  A searched reference library needs both rolls in ONE reducer: under
+    # 'roll' each partition holds only its own roll's frames and ref_cube is the reference
+    # star alone, so the "altroll" pool is empty (ReferenceLibrary.eligible drops every frame
+    # sharing the target's partition label, and under 'roll' they all share it).  The price,
+    # as the loader's own docstring says, is one bin/n_ang/filter/k_klip block for both rolls
+    # instead of one per roll -- which also takes the dimension count down, not up.
+    ap.add_argument("--partition", default="all", choices=["roll", "all"])
+    ap.add_argument("--ref-target", nargs="+", default=None, metavar="TARGPROP",
+                    help="restrict the RDI library to these star(s) by TARGPROP prefix. "
+                         "The default takes every non-background pointing that is not the "
+                         "science target, which in a multi-programme directory pulls in "
+                         "other people's targets: HIP 65426's MIRI download also holds "
+                         "HD 141569A, a resolved disk")
+    ap.add_argument("--no-searched-library", dest="searched_library", action="store_false",
+                    help="keep the whole RDI library fixed instead of searching how many "
+                         "correlation-ranked frames to keep from each pool")
     ap.add_argument("--crop", type=int, default=80, metavar="HALF",
                     help="crop to 2*HALF+1 px about the star (default 80 = 17.5 arcsec)")
     ap.add_argument("--star-center", type=float, nargs=2, default=None, metavar=("X", "Y"),

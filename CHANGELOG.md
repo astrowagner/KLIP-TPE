@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased — 2026-09-23 (nkalt / nkref replace the ADI/RDI mode, on NIRCam and MIRI)
+- **The searched reference library is wired into both JWST paths.**  `nkeep_altroll` and
+  `nkeep_psfref` — how many correlation-ranked frames to keep from the other roll and from
+  the reference star — replace the ADI / RDI / ADI+RDI categorical on `run_D` / `H2`, and
+  arrive on MIRI for the first time.  `nkeep_psfref = 0` **is** ADI and
+  `nkeep_altroll = 0` **is** RDI, and unlike the categorical either pool can contribute
+  *part* of itself, ranked per target frame.  `ReferenceLibraryGuard` already floors the two
+  counts' sum at `n_min_ref`, so the empty basis is unreachable while both pure modes stay
+  reachable, and it clamps `k_klip` to the basis the counts buy.
+- **MIRI defaults to `--partition all`.**  This is a precondition, not a preference: under
+  `partition='roll'` each partition holds only its own roll and `ref_cube` is the reference
+  star alone, so `ReferenceLibrary.eligible` — which drops every frame sharing the target's
+  label — returns nothing for the alternate-roll pool.  The price, as the loader's own
+  docstring has always said, is one `bin`/`n_ang`/`filter`/`k_klip` block for both rolls
+  instead of one per roll; the dimension count goes *down*, not up.  `--partition roll` still
+  works and now says plainly that the library cannot be searched there.
+- Ranges, from the headers: F444W `nkeep_altroll` 0–2 over 4 science frames with 18 φ Cen;
+  F1140C 0–41 over 82 with 90 φ Cen; F1550C 0–60 over 120 with 171.  **F1065C has no
+  HIP 65426 data at all** — no science and no φ Cen — so that filter is not available for
+  this target whatever the STPSF cache holds.
+- **`ref_targets` restricts the library by star, and the composition is now always logged.**
+  "Science, and everything else is the library" is right for one programme's download and
+  wrong for a directory holding several.  HIP 65426's MIRI directory also holds HD 141569A
+  and HD 141569A's own reference HD 140986, so F1140C's "16 reference files" were 90 frames
+  of φ Cen, 20 of HD 140986 and **12 of HD 141569A — a resolved disk, in the KL basis of a
+  bare star**.  Nothing in the numbers said so, because the loader only ever reported a file
+  count.  At Kevin's direction the MIRI runs now pass φ Cen alone; the loader names every
+  star in the library with its file count either way, and refuses a `ref_targets` that
+  matches nothing rather than reducing with an empty library.
+- H2's `n_min_ref` drops 4 → 2: it is now the floor on the two counts' sum, i.e. the basis
+  size, rather than on an angular reference census the searched library does not use.
+
 ## Unreleased — 2026-09-23 (destriping left 24 rows and 24 columns uncorrected)
 - **My bug, spotted by Kevin as "striping at 90 degrees".**  Columns were already being
   destriped — but the star disc (r < 45) and the 4QPM boundary band (< 12 px) cross AT the

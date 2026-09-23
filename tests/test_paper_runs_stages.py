@@ -98,10 +98,12 @@ def test_the_bench_figure_orders_its_rows_by_dimension():
     """The ladder only reads as a ladder if the rows are in order: 5, 9, 20, 38.
 
     It used to say 9, 11, 20, 38, with the JWST problem second.  That was wrong twice
-    over: HIP 65426 searches five dimensions, not eleven (bin, n_ang, filter, k_klip and
-    the categorical subtraction mode -- the angular-selection parameters are dropped in
-    single-basis mode), so it is the *smallest* problem and belongs first.  The figure was
-    fixed and this test was not, which is how it went red."""
+    over: HIP 65426 searches five dimensions, not eleven, so it is the *smallest* problem
+    and belongs first.  The figure was fixed and this test was not, which is how it went red.
+
+    Still five, by a different route: n_ang, filter, k_klip and the two reference-library
+    counts.  ``bin`` is pinned (its range collapses to (1, 1) on four science frames) and
+    the ADI/RDI/ADI+RDI categorical was replaced by ``nkeep_altroll`` / ``nkeep_psfref``."""
     fig = _text("figs.py")
     order = [fig.index(d) for d in ("H2_bench_jwst", "E2_bench", "G2_bench_sphere", "F2_bench_highdim")]
     assert order == sorted(order), order
@@ -183,8 +185,15 @@ def test_max_drop_none_leaves_make_space_its_own_default(demos, monkeypatch, tmp
     assert seen2["space_kw"]["max_drop"] == 2
 
 
-def test_h2_carries_the_searched_klip_mode_and_unsearched_angles(demos, monkeypatch, tmp_path):
-    """Run D searches ADI/RDI/ADI+RDI and does not search angles (two frames per roll)."""
+def test_h2_searches_no_mode_categorical_and_no_angles(demos, monkeypatch, tmp_path):
+    """H2 does not search angles (two frames per roll, so no field rotation to exploit) and
+    no longer searches an ADI/RDI/ADI+RDI categorical.
+
+    The mode is now carried by the reference library's own counts, which `hip65426_objects`
+    installs on the reducer: ``nkeep_psfref = 0`` is ADI, ``nkeep_altroll = 0`` is RDI, and
+    either pool can contribute part of itself, which the categorical could not express.
+    Those arrive through ``reference_params()`` inside ``make_space``, not through
+    ``space.add``, so nothing should be added here at all."""
     seen = {}
     space = _FakeSpace()
     monkeypatch.setattr(demos, "OUT", str(tmp_path))
@@ -199,8 +208,8 @@ def test_h2_carries_the_searched_klip_mode_and_unsearched_angles(demos, monkeypa
                         make_runner("tpe", 0, out_dir))
     demos.run_H2()
     assert seen["search_angles"] is False
-    assert [p.name for p in space.added] == ["mode"]
-    assert space.added[0].choices == ["ADI", "RDI", "ADI+RDI"]
+    assert [p.name for p in space.added] == [], (
+        f"H2 should add no dimension of its own; got {[p.name for p in space.added]}")
 
 
 # ------------------------------------------------------------------ the live window

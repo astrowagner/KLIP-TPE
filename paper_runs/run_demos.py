@@ -310,14 +310,29 @@ def hip65426_objects(partition="all"):
         ) from exc
     model = stpsf_psf.library(grid, star_flux=sf)
     red = sk.make_reducer(dsets, injection_model=model, mode="RDI", max_workers=workers(), log=log)
+    # A searched reference library rather than the fixed one, and it replaces the ADI / RDI /
+    # ADI+RDI categorical: nkeep_psfref = 0 is ADI, nkeep_altroll = 0 is RDI, and unlike the
+    # categorical either pool can contribute PART of itself.  This sequence has 2 science
+    # frames per roll and 18 phi Cen frames, so the ranges are [0, 4] and [0, 18] with their
+    # sum floored at 2 by ReferenceLibraryGuard.
+    if partition == "all" and len(red.reducers) == 1:
+        r0 = next(iter(red.reducers.values()))
+        nref = 0 if r0.data.ref_cube is None else int(np.shape(r0.data.ref_cube)[0])
+        part = np.round(np.asarray(r0.data.angles, float), 1).astype(str)
+        if nref >= 2 and np.unique(part).size >= 2:
+            r0.set_reference_library(partition=part, ref_group="psfref",
+                                     n_min_ref=2, metric="cc")
+            log(f"  library: searched -- nkeep_altroll over {part.size} science frames in "
+                f"{np.unique(part).size} rolls, nkeep_psfref over {nref} reference frames")
     return red
 
 
 def run_D():
     red = hip65426_objects()
+    # No `mode` dimension: the library's nkeep_altroll / nkeep_psfref subsume it (0 in one
+    # pool IS the corresponding pure mode) and can also take part of a pool, which the
+    # categorical could not.
     space = generic.make_space(red, k_klip_max=18, search_angles=False)
-    space.add(Param("mode", 0, 2, "categorical", choices=["ADI", "RDI", "ADI+RDI"], default="RDI",
-                    doc="pyKLIP PSF-subtraction mode"))
     space.project = generic.make_guard(red, k_max=18, n_min_ref=4)
     obj, samp = generic.default_config(red, known=[HIP])
     n_iter, n_init = budget([200, 150], [40, 30])
@@ -575,9 +590,12 @@ def run_H2():
     # existed to hide that; and before it a forced 5.270e1 -- a "contrast" of 52.7, the
     # raw-detector-units axis of flux_unit = 1.0.  See docs/FLUX_CALIBRATION.md.
     _bench_hi("H2", 1, ("tpe", "random"), 18, None, {"k_klip": 10}, 2.022e-04, [6, 20], "H2_bench_jwst",
-              make_red=hip65426_objects, known=[HIP], n_sources=2, search_angles=False, n_min_ref=4,
-              add_params=[lambda: Param("mode", 0, 2, "categorical", choices=["ADI", "RDI", "ADI+RDI"],
-                                        default="RDI", doc="pyKLIP PSF-subtraction mode")])
+              make_red=hip65426_objects, known=[HIP], n_sources=2, search_angles=False, n_min_ref=2,
+              # no `mode`: hip65426_objects now installs a searched reference library, and
+              # nkeep_altroll / nkeep_psfref subsume the categorical.  n_min_ref drops to 2
+              # because it is now the floor on the two counts' SUM (the basis size), not on
+              # an angular reference census.
+              )
 
 
 if __name__ == "__main__":

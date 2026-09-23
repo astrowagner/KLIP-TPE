@@ -426,6 +426,7 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
                  star_center: Optional[Tuple[float, float]] = None, keep_frames: bool = False,
                  partition: str = "roll", filter: Optional[str] = None,
                  background: Optional[bool] = None, destripe: Optional[bool] = None,
+                 ref_targets: Optional[Union[str, Sequence[str]]] = None,
                  log: Callable[[str], None] = print) -> Tuple[Dict[str, Dataset], Dict[str, Any]]:
     """Stage-2 ``*_calints.fits`` straight into ``{name: Dataset}``, without spaceKLIP.
 
@@ -463,6 +464,14 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
     half a pixel off in each axis -- 0.7 px radially, which at HIP 65426 b's 13 px
     separation is a 3 degree error in position angle and a throughput mismatch between the
     companion and the fakes injected to calibrate it.
+
+    ``ref_targets`` names the star(s) the RDI library may be built from, by ``TARGPROP``
+    prefix.  The default takes everything that is neither the science target nor a
+    background, which is right for one programme's download and wrong for a directory
+    holding several: HIP 65426's MIRI directory also holds HD 141569A and its own reference
+    HD 140986, so F1140C's "16 reference files" were 90 frames of phi Cen, 20 of HD 140986
+    and **12 of HD 141569A -- a resolved disk, in the KL basis of a bare star**.  Whatever
+    is passed or not, the library's composition is now logged by name and count.
 
     ``star_center`` (0-based detector pixels) overrides ``CRPIX`` as the point the crop is
     centred on.  **Use it.**  ``CRPIX`` is the aperture reference point, not a measured star
@@ -557,6 +566,33 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
     named_ref = [] if want_is_ref else [f for f in rest if is_reference(f)]
     sci = [f for f in rest if f not in named_ref and targ(f).startswith(want)]
     ref = [f for f in rest if f not in sci]
+    # "Science, and everything else is the library" is right for a download of one
+    # programme and wrong for a directory holding several.  HIP 65426's MIRI directory also
+    # holds HD 141569A and its reference HD 140986, so the F1140C library came out at 122
+    # frames of which only 90 were phi Cen -- and 12 were HD 141569A, a resolved DISK,
+    # putting disk structure into the KL basis of a bare star.  Nothing in the numbers said
+    # so; the loader only ever reported "16 reference files".
+    if ref_targets:
+        keys = [str(t).replace("-", "").replace("_", "").upper() for t in
+                ([ref_targets] if isinstance(ref_targets, str) else list(ref_targets))]
+        kept = [f for f in ref if any(targ(f).startswith(k) for k in keys)]
+        dropped = [f for f in ref if f not in kept]
+        if not kept:
+            raise ValueError(
+                f"ref_targets={list(keys)} matched none of the {len(ref)} reference file(s); "
+                f"their TARGPROPs are {sorted({targ(f) for f in ref})}")
+        if dropped:
+            log(f"  calints: reference library restricted to {', '.join(keys)} -- "
+                f"{len(dropped)} file(s) dropped ("
+                + ", ".join(f"{t} x{sum(1 for f in dropped if targ(f) == t)}"
+                            for t in sorted({targ(f) for f in dropped})) + ")")
+        ref = kept
+    if ref:
+        # Always say WHO is in the library, by name and count.  This is the line whose
+        # absence hid HD 141569A in there.
+        log("  calints: RDI library from " + ", ".join(
+            f"{t} ({sum(1 for f in ref if targ(f) == t)} file(s))"
+            for t in sorted({targ(f) for f in ref})))
     stolen = [f for f in named_ref if targ(f).startswith(want)]
     if stolen:
         log(f"  calints: {len(stolen)} file(s) whose TARGPROP starts with {want!r} are named "
