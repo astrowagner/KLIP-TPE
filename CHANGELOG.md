@@ -1,5 +1,56 @@
 # Changelog
 
+## Unreleased — 2026-09-23 (per-trial remeasurement; dead search dimensions removed)
+- **Search trials are scored as the mean of `RunConfig.n_remeasure` fresh source draws**
+  (`Runner.evaluate_mean`), 3 by default on MIRI via `--n-remeasure`.  The objective's only
+  stochastic input is the injected sources' azimuth anchor, and it is not small: on
+  HIP 65426 F1140C, repeated evaluations of *identical* configurations scatter with
+  **sd 0.84** against a total useful range of 0.86–7.11.  A search that cannot separate 0.84
+  of S/N spends much of its budget ranking noise — it is also why the winner's curse runs
+  ~1.13× and why single-dimension effects were invisible in v3's 1000 evaluations.
+- Averaging 3 draws measured **0.48**, a factor 1.74 — the √3 an independent draw predicts,
+  which is itself the evidence that the draws are independent.  The **mean**, not the median:
+  median-of-3 reached only 0.68 on the same data, because the residuals are mildly
+  left-skewed (−0.85) with no excess kurtosis (−0.03), so there are no heavy tails for a
+  median to earn its efficiency back on.  `CalibrationConfig.n_remeasure` (the calibration's
+  own, median-based) is untouched.
+- One trial stays one history entry however many draws it took; appending them individually
+  would let the optimizer read one configuration as n and triple the apparent budget.  The
+  record carries the mean in `score` and everything positional from the **last** draw, so the
+  panel shows one real measurement beside the average, and says so: `= mean of 3 draws
+  [5.2, 5.8, 5.2]  sd 0.35  (image is the last draw)`.  `meta['draw_scores']` /
+  `draw_sd` / `draw_spread` make the run report its own noise as it goes.  A failed draw is
+  dropped from the mean rather than counted as zero.
+- New `RunCallback.on_draw` carries each draw to the display.  Deliberately not `on_eval`:
+  that hook's timestamps are the source of s/eval and both ETAs and it drives the panel
+  cadence, so feeding draws through it would report the gap between draws as the cost of a
+  trial and divide the ETA by `n_remeasure`.
+- **MIRI drops `angsep` and `anglemax`** (`search_angles=False`) — 12 searched dimensions to
+  8.  They are not weak on two-roll data, they are inert: each partition is one roll, so
+  every science frame in it shares a position angle and `reference_mask`'s
+  `dpa = |angle − angle[target]|` is identically zero.  Then `dpa <= anglemax` holds for any
+  `anglemax >= 20` (the parameter's own floor), and `dpa >= angsep_deg` fails for every frame
+  once `angsep > 0`, which empties the mask and falls through
+  `if refs.sum() < 4: refs = all but the target` — exactly the `angsep = 0` set.  The same
+  basis by two routes.  Corroborated in v3: groups differing only in `anglemax` spread 1.31
+  in score, against 1.41 for groups differing in *nothing*.
+- **A parameter whose range has collapsed to a point is pinned, not searched.**  NIRCam hit
+  this for real — its cubes are short enough that `bin_range` came out `(1, 1)`, so every
+  HIP 65426 run has carried `bin : [1.000, 1.000]` as a search dimension.  `fixed` reaches
+  the reducer through `decode`, so the value is unchanged and only the coordinate goes away.
+- **Fixed a latent crash:** `anglemax_hi` was taken from the sequence's PA span while the
+  parameter's floor stayed at 20, so any span in (5, 20]° built `Param(20, span)` and raised
+  `anglemax: hi < lo` in `make_space`, before a single evaluation ran.  Such a span cannot
+  constrain anything, so `anglemax` is now pinned open at 360 instead.
+- `n_ang` is **kept** as a searched dimension.  It is azimuthal subdivision of the KLIP zone,
+  which changes the reduction whatever the number of rolls, so the two-roll argument that
+  retires `angsep`/`anglemax` does not reach it.
+- `tests/test_display.py::test_resume_restores_best_images` asserted the pre-crash incumbent
+  was still best after the resumed evaluations finished, which tests the score landscape
+  rather than the resume; the radprof change moved the landscape and eval 5 now wins
+  legitimately.  It now checks that the restored images are the pre-crash incumbent's at the
+  moment of restore, and that the images on hand afterwards belong to whatever is best then.
+
 ## Unreleased — 2026-09-22 (correction: what destriping is actually worth)
 - **The destriping gain below is overstated, and this is the number to use: 1.28x, not
   1.63–1.77x.**  Measured in the running pipeline on HIP 65426 F1140C — per-row sigma 1.05,

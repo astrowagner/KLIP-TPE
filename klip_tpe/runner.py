@@ -38,7 +38,7 @@ import shutil
 import tempfile
 import time
 import warnings
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -192,6 +192,26 @@ class RunConfig:
     seed: Optional[int] = None
     contrast0: float = 3e-5
     n_sources: Any = None                 # None -> per-annulus rule; an int everywhere; a list per annulus
+    #: Fresh-position measurements per SEARCH trial, averaged into one score (1 = the IDL's
+    #: single draw).  Not to be confused with ``CalibrationConfig.n_remeasure``, which is the
+    #: same idea applied to the calibration trials and the k-scan only.
+    #:
+    #: The objective's only stochastic input is the azimuth anchor of the injected sources,
+    #: and it is not a small effect: on HIP 65426 F1140C, repeated evaluations of *identical*
+    #: configurations scatter with sd 0.84 against a total useful range of 0.86-7.11.  A
+    #: search that cannot tell 0.84 of S/N apart is ranking noise for much of its budget.
+    #: Averaging 3 draws measured 0.48 -- a factor 1.74, i.e. the sqrt(3) an independent
+    #: draw predicts, which is itself the evidence that the draws are independent.
+    #:
+    #: The MEAN, not the median: on the same data median-of-3 reached only 0.68, because the
+    #: residuals are mildly left-skewed (-0.85) with no excess kurtosis (-0.03) -- there are
+    #: no heavy tails for a median to earn its efficiency back on.
+    #:
+    #: Costs n reductions per trial, so at fixed wall clock it buys ranking fidelity with
+    #: trials.  Raising the source count is the cheaper lever where the noise ring allows it,
+    #: since one reduction serves every source; a fresh draw additionally re-randomises the
+    #: azimuth anchor, which extra sources in a single draw do not.
+    n_remeasure: int = 1
     inject_inset_fwhm: float = 1.0        # injection band inset from the annulus edges
     pair_area_midpoint: bool = True       # 2 sources -> both at sqrt((r_in^2+r_out^2)/2), 180 deg apart (IDL 2026-09-05)
     #: Freeze the search's injected sources -- radii AND azimuths -- for a whole annulus, so
@@ -393,6 +413,18 @@ class RunCallback:
         :meth:`on_calibration` for the last measurement of that trial."""
         ...
     def on_eval(self, runner, record: "EvalRecord", inj: EvalImages, clean: Optional[EvalImages], is_best: bool) -> None: ...
+    def on_draw(self, runner, draw: int, n_draws: int, record: "EvalRecord", inj: EvalImages,
+                clean: Optional[EvalImages]) -> None:
+        """One remeasurement of a trial under ``RunConfig.n_remeasure > 1``, before the draws
+        are averaged into the trial's score.  ``record`` is that draw alone.
+
+        Deliberately NOT ``on_eval``: the display times every ``on_eval`` to derive s/eval and
+        both ETAs, and counts them for its panel cadence, so feeding draws through it would
+        report the interval between draws as the cost of a trial and divide the ETA by
+        ``n_remeasure``.  A callback that ignores this hook loses nothing -- the averaged
+        trial still arrives through ``on_eval``.
+        """
+        ...
     def on_validation_trial(self, runner, ia: int, ci: int, n_cand: int, eval_index: int, trial: int, n_valid: int,
                             inj: EvalImages, clean: Optional[EvalImages], sources, score_result, trials) -> None:
         """After every validation trial: candidate ``ci`` (of ``n_cand``, = search eval
@@ -492,6 +524,12 @@ class Runner:
                 fn(self, *args)
             except Exception as exc:      # never let a display problem kill a run
                 self.log(f"  callback {type(cb).__name__}.{event} failed: {exc!r}")
+
+    def _on_draw(self, ia: int, j: int, n: int, rec: "EvalRecord", inj, clean) -> None:
+        """One remeasurement finished: log it and offer it to the display."""
+        s = "failed" if rec.score is None else f"{rec.score:.3f}"
+        self.log(f"[ann {ia+1}]   draw {j+1}/{n} score={s}  ({rec.wall_s:.0f}s)")
+        self._emit("on_draw", j, n, rec, inj, clean)
 
     def _guard(self, what: str, fn: Callable, *args, **kw):
         """Run an optional stage; any exception is logged and swallowed."""
@@ -1047,6 +1085,52 @@ class Runner:
             k_used=k_used, contrast=contrast, wall_s=time.time() - t0, meta=meta)
         return rec, inj, clean
 
+    def evaluate_mean(self, x: np.ndarray, phase: str, tag: str = "eval",
+                      n: Optional[int] = None, on_draw=None
+                      ) -> Tuple[EvalRecord, EvalImages, Optional[EvalImages]]:
+        """:meth:`evaluate` repeated on ``n`` fresh source draws, scored as their MEAN.
+
+        One trial, one history entry: the draws are an estimator of this configuration's
+        score, not separate configurations.  Appending them individually would let the
+        optimizer read one trial as ``n`` and would triple the apparent budget.
+
+        The returned record carries the MEAN in ``score`` / ``raw_score`` and everything
+        positional -- ``sources``, ``per_source``, the images -- from the LAST draw, which is
+        what the panel then shows.  So the panel is one real measurement and the number
+        beside it is the average of ``n``; ``meta['draw_scores']`` and ``meta['draw_sd']``
+        record the spread so the run reports its own noise as it goes.
+        """
+        n = int(self.cfg.n_remeasure if n is None else n)
+        if n <= 1:
+            return self.evaluate(x, phase, tag=tag)
+        recs, last = [], (None, None, None)
+        for j in range(n):
+            rec, inj, clean = self.evaluate(x, phase, tag=f"{tag}_d{j+1}")
+            recs.append(rec)
+            last = (rec, inj, clean)
+            if on_draw is not None:
+                on_draw(j, n, rec, inj, clean)
+        rec, inj, clean = last
+        return self._combine_draws(recs, rec), inj, clean
+
+    @staticmethod
+    def _combine_draws(recs: List[EvalRecord], last: EvalRecord) -> EvalRecord:
+        """Average the draws' scores onto the last draw's record."""
+        def _mean(vals):
+            v = [float(s) for s in vals if s is not None and np.isfinite(s)]
+            return float(np.mean(v)) if v else None
+
+        scores = [r.score for r in recs]
+        good = [float(s) for s in scores if s is not None and np.isfinite(s)]
+        meta = dict(last.meta)
+        meta["draw_scores"] = [None if s is None or not np.isfinite(s) else float(s) for s in scores]
+        meta["draw_n"] = len(recs)
+        meta["draw_failed"] = int(len(recs) - len(good))
+        meta["draw_sd"] = float(np.std(good, ddof=1)) if len(good) > 1 else None
+        meta["draw_spread"] = float(max(good) - min(good)) if len(good) > 1 else None
+        return replace(last, score=_mean(scores), raw_score=_mean([r.raw_score for r in recs]),
+                       wall_s=float(sum(r.wall_s for r in recs)), meta=meta)
+
     # ------------------------------------------------------------ calibration
     def _scan_k(self, cfg0: Config, rlo: float, rhi: float, nsrc: int, contrast: float,
                 info: Dict[str, Any], k_now: int) -> Optional[int]:
@@ -1374,7 +1458,9 @@ class Runner:
                 is_random = phase in ("warmup", "explore", "random")
                 x = self._project(pr.x, is_random=is_random)   # optimizer already tied link_params
                 self._hb_eval(ia, len(self.history) + 1, n_iter, phase)
-                rec, inj, clean = self.evaluate(x, phase, tag=f"a{ia+1}_e{len(self.history)+1}")
+                rec, inj, clean = self.evaluate_mean(
+                    x, phase, tag=f"a{ia+1}_e{len(self.history)+1}",
+                    on_draw=lambda j, nd, r, i_, c_: self._on_draw(ia, j, nd, r, i_, c_))
                 i = self._append(rec)
                 bi, bs = self.history.best()
                 if i == bi and inj.image is not None and inj.image.ndim == 2:
@@ -1383,8 +1469,11 @@ class Runner:
                 self._emit("on_eval", rec, inj, clean, i == bi)
                 elapsed = time.time() - self.wall0 + self.wall_prev
                 loop_s = time.time() - t_loop                    # propose + reduce + score + display
+                _sd = rec.meta.get("draw_sd")
+                _dn = rec.meta.get("draw_n")
                 self.log(f"[ann {ia+1}] eval {i+1}/{n_iter} {phase:<7s} score={rec.score if rec.score is None else round(rec.score,3)}"
-                         f" raw={rec.raw_score if rec.raw_score is None else round(rec.raw_score,3)}"
+                         + (f" (mean of {_dn}" + (f", sd {_sd:.2f})" if _sd is not None else ")") if _dn else "")
+                         + f" raw={rec.raw_score if rec.raw_score is None else round(rec.raw_score,3)}"
                          f" best={bs:.3f}@{bi+1}  contrast={self.contrast:.2e}  reduce {rec.wall_s:.0f}s / loop {loop_s:.0f}s"
                          f"  ({elapsed/3600:.2f} h)")
                 self.checkpoint()
@@ -1452,7 +1541,9 @@ class Runner:
         self.history = History(self.space.ndim)
         if self.cfg.seed_default:
             x0 = self._project(self._default_vector(self._k_default), is_random=False)
-            rec, inj, clean = self.evaluate(x0, "seed", tag=f"a{ia+1}_seed")
+            rec, inj, clean = self.evaluate_mean(
+                x0, "seed", tag=f"a{ia+1}_seed",
+                on_draw=lambda j, nd, r, i_, c_: self._on_draw(ia, j, nd, r, i_, c_))
             self._append(rec)
             self._set_best_images(rec, inj, clean)
             self.checkpoint()

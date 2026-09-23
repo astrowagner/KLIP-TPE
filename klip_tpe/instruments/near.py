@@ -312,14 +312,26 @@ def make_space(reducer: PartitionedReducer, per_night: bool = True, k_klip_max: 
         anglemax_hi = float(np.ceil(span)) if span > 5 else 360.0
     b_lo, b_hi = (5, 30) if bin_range is None else (int(bin_range[0]), int(bin_range[1]))
     b_lo, b_hi = max(b_lo, 1), max(b_hi, max(b_lo, 1))
+    extra_fixed: Dict[str, Any] = {}      # parameters pinned open rather than searched
     block = [Param("bin", b_lo, b_hi, "int", default=int(min(max(d["bin"], b_lo), b_hi)),
                    doc="temporal binning (frames)"),
              Param("n_ang", 1, 8, "int", default=d["n_ang"], doc="azimuthal subdivisions"),
              Param("filter", 0, 25, "int", default=d["filter"], doc="high-pass width (px)")]
     if search_angles:
-        block += [Param("angsep", 0.0, 3.0, "float", default=d["angsep"], doc="min reference separation (lambda/D)"),
-                  Param("anglemax", 20.0, anglemax_hi, "int", default=min(d["anglemax"], anglemax_hi),
-                        doc="max reference field-rotation window (deg)")]
+        block += [Param("angsep", 0.0, 3.0, "float", default=d["angsep"],
+                        doc="min reference separation (lambda/D)")]
+        # anglemax caps |dPA| between a target and a reference, and its floor is 20 deg.  A
+        # sequence whose own PA span cannot reach 20 therefore has nothing to constrain: every
+        # pair already satisfies any admissible value.  Searching it anyway used to raise
+        # `anglemax: hi < lo` outright for a span between 5 and 20 deg, because anglemax_hi
+        # was set from the span while the floor stayed at 20 -- a crash in make_space for any
+        # such data set.  Pin it open instead of searching a window that cannot close.
+        if float(anglemax_hi) <= 20.0:
+            extra_fixed["anglemax"] = 360.0
+        else:
+            block += [Param("anglemax", 20.0, anglemax_hi, "int",
+                            default=min(d["anglemax"], anglemax_hi),
+                            doc="max reference field-rotation window (deg)")]
     if opt_framesel:
         block += [Param("corr_thresh", 0.0, 1.0, "float", default=d["corr_thresh"]),
                   Param("noise_max", 0.3, 3.0, "float", default=d["noise_max"]),
@@ -328,7 +340,21 @@ def make_space(reducer: PartitionedReducer, per_night: bool = True, k_klip_max: 
         block += [Param("k_klip", 1, k_klip_max, "int", grid=kgrid(k_klip_max), default=min(d["k_klip"], k_klip_max),
                         doc="KL modes (non-uniform sampling grid)")]
     parts = reducer.partitions()
-    sp = SearchSpace(fixed={"spat_mean": False, "temp_mean": False})
+    # A parameter whose range has collapsed to a point is not a search dimension, it is a
+    # constant wearing one.  It still costs the sampler a coordinate, the TPE a density to
+    # model and the reader a line in the setup file, and it buys nothing.  NIRCam hit this
+    # for real: its cubes are short enough that bin_range came out (1, 1), so every
+    # HIP 65426 run has been searching `bin : [1.000, 1.000]`.  Pin it instead -- `fixed`
+    # reaches the reducer through `decode`, so the value is unchanged and only the dimension
+    # goes away.
+    fixed: Dict[str, Any] = {"spat_mean": False, "temp_mean": False, **extra_fixed}
+    pin_ids = set()
+    for b in block:
+        if float(b.hi) <= float(b.lo):
+            fixed[b.name] = b.default if b.default is not None else b.lo
+            pin_ids.add(id(b))
+    block = [b for b in block if id(b) not in pin_ids]
+    sp = SearchSpace(fixed=fixed)
     if per_night and len(parts) > 1:
         sp.replicate(block, parts, name_fmt="{base}_{pid}")
     else:

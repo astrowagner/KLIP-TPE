@@ -629,7 +629,13 @@ def annulus_from_records(records: Sequence[Dict[str, Any]], space: Dict[str, Any
         gamma=float(cfg.get("gamma", 0.25)), metric_name=metric_name, search_mode=str(cfg.get("search_mode", "?")),
         winner=winner, validation=validation, calibration=calibration, angle_convention=angle_convention,
         seed_default=bool(cfg.get("seed_default", True)), partition_label=str(partition_label or "night"),
-        known=[(float(k[0]), float(k[1])) for k in (known or ()) if k is not None and len(k) >= 2])
+        known=[(float(k[0]), float(k[1])) for k in (known or ()) if k is not None and len(k) >= 2],
+        # Per-eval remeasurement record under RunConfig.n_remeasure > 1: the panel has to say
+        # that its score is a mean of n and how far the draws sat apart, or the number beside
+        # a single displayed image reads as that image's measurement.
+        extra={"draws": [{k: (r.get("meta") or {}).get(k)
+                          for k in ("draw_scores", "draw_n", "draw_sd", "draw_spread", "draw_failed")}
+                         for r in recs]})
 
 
 def annulus_from_run(run_dir: str, ia: int, run: Optional[Dict[str, Any]] = None,
@@ -2699,6 +2705,16 @@ def _step_text(ad: AnnulusData, i: int, bi: int, elapsed_s: float, eta_s: float)
     lines = [
         f"eval {i + 1}/{ad.n_iter}   phase {ph}   [{ad.search_mode}]",
         f"score      {_fnum(y)}   (search, upward-biased)",
+    ]
+    _dw = (ad.extra.get("draws") or [None] * ad.n)[i] if isinstance(ad.extra, dict) else None
+    if _dw and _dw.get("draw_n"):
+        _ds = _dw.get("draw_scores") or []
+        _txt = ", ".join("--" if v is None else f"{float(v):.2f}" for v in _ds)
+        _sd = _dw.get("draw_sd")
+        lines.append(f"  = mean of {int(_dw['draw_n'])} draws [{_txt}]"
+                     + (f"   sd {float(_sd):.2f}" if _sd is not None else "")
+                     + ("   (image is the last draw)" if len(_ds) > 1 else ""))
+    lines += [
         f"raw        {_fnum(raw)}   clean term {_fnum(cl)}",
         f"best       {_fnum(ad.y[bi]) if bi >= 0 else '--'} @ eval {bi + 1 if bi >= 0 else '--'}   (search)",
     ]
@@ -3904,6 +3920,25 @@ class LiveDisplay(RunCallback):
                         os.path.join(self._ann_dir(runner.ia), "calibration_panel.png"), clean=clean, inj=inj,
                         sources=src, per_source=ps, clean_per_source=cps, cmap=self.cmap,
                         target=tuple(runner.cfg.calibration.target))
+
+    def on_draw(self, runner, draw: int, n_draws: int, record, inj, clean) -> None:
+        """Keep the live image current between a trial's remeasurements.
+
+        Deliberately light: it refreshes the images the next panel will use and nothing
+        else.  It does NOT touch ``_eval_times`` (the source of s/eval and both ETAs), the
+        ``_records`` list, or the panel cadence counter -- a draw is part of a trial, not a
+        trial, and counting it as one would divide the ETA by ``n_remeasure`` and report the
+        gap between draws as the cost of an evaluation.  The trial's own panel arrives
+        through :meth:`on_eval` once the draws are averaged, showing the last draw's image
+        beside the mean.
+        """
+        try:
+            img = None if inj is None else inj.image
+            if img is not None and np.ndim(img) == 2 and img.shape[0] >= 4:
+                self._last_images = {"inj": img, "clean": None if clean is None else clean.image,
+                                     "index": record.index, "draw": int(draw) + 1, "n_draws": int(n_draws)}
+        except Exception as exc:
+            self._say(runner, f"on_draw failed: {exc!r}")
 
     def on_eval(self, runner, record, inj, clean, is_best: bool) -> None:
         try:

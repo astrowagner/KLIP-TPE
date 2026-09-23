@@ -1,0 +1,241 @@
+"""``RunConfig.n_remeasure``: a trial scored as the mean of several fresh draws.
+
+The objective's only stochastic input is the injected sources' azimuth anchor, and on
+HIP 65426 F1140C repeated evaluations of identical configurations scatter with sd 0.84
+against a useful range of 0.86-7.11.  Averaging draws is how the search stops ranking that
+noise.  What has to hold: one trial is one history entry however many draws it took, the
+score is the MEAN, and everything positional comes from the last draw so the panel shows a
+real measurement rather than an average of images.
+"""
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from klip_tpe.runner import EvalRecord, RunCallback, RunConfig, Runner
+
+
+def _rec(score, raw=None, wall=1.0, idx=0, srcs=((1.0, 0.0, 1e-4),), per=(5.0,)):
+    return EvalRecord(annulus=0, index=idx, phase="tpe", x=[0.0], config={"params": {}},
+                      sources=[tuple(s) for s in srcs], score=score,
+                      raw_score=score if raw is None else raw,
+                      per_source=list(per), raw_per_source=list(per), clean_per_source=None,
+                      partition_snr={}, k_used=7, contrast=1e-4, wall_s=wall, meta={"keep": "me"})
+
+
+def test_draws_average_and_the_last_one_supplies_the_positions():
+    recs = [_rec(4.0, srcs=((1.0, 10.0, 1e-4),), per=(4.0,)),
+            _rec(6.0, srcs=((1.0, 20.0, 1e-4),), per=(6.0,)),
+            _rec(8.0, srcs=((1.0, 30.0, 1e-4),), per=(8.0,))]
+    out = Runner._combine_draws(recs, recs[-1])
+    assert out.score == pytest.approx(6.0), "score is the mean of the draws"
+    assert out.raw_score == pytest.approx(6.0)
+    assert out.sources == [(1.0, 30.0, 1e-4)], "positions come from the LAST draw"
+    assert out.per_source == [8.0], "so do the per-source values the panel labels with"
+    assert out.wall_s == pytest.approx(3.0), "the trial cost every draw"
+    assert out.meta["keep"] == "me", "the last draw's own meta survives"
+    assert out.meta["draw_scores"] == [4.0, 6.0, 8.0]
+    assert out.meta["draw_n"] == 3
+    assert out.meta["draw_sd"] == pytest.approx(2.0)
+    assert out.meta["draw_spread"] == pytest.approx(4.0)
+    assert out.meta["draw_failed"] == 0
+
+
+def test_a_failed_draw_is_dropped_from_the_mean_not_counted_as_zero():
+    """A reduction that failed is missing information, not a score of zero -- counting it as
+    one would make any configuration that fails intermittently look catastrophic and teach
+    the optimizer to avoid a neighbourhood for the wrong reason."""
+    out = Runner._combine_draws([_rec(4.0), _rec(None), _rec(8.0)], _rec(8.0))
+    assert out.score == pytest.approx(6.0)
+    assert out.meta["draw_failed"] == 1
+    assert out.meta["draw_scores"] == [4.0, None, 8.0]
+    allfail = Runner._combine_draws([_rec(None), _rec(None)], _rec(None))
+    assert allfail.score is None and allfail.meta["draw_failed"] == 2
+    assert allfail.meta["draw_sd"] is None
+
+
+def test_one_draw_is_the_old_behaviour_exactly():
+    r = _rec(5.0)
+    out = Runner._combine_draws([r], r)
+    assert out.score == pytest.approx(5.0)
+    assert out.meta["draw_n"] == 1 and out.meta["draw_sd"] is None
+
+
+def test_averaging_shrinks_the_noise_by_root_n():
+    """The claim the feature rests on, on synthetic draws with the measured sd."""
+    rng = np.random.default_rng(4)
+    sd1 = 0.84
+    single, mean3 = [], []
+    for _ in range(20000):
+        d = rng.normal(0.0, sd1, 3)
+        single.append(d[0])
+        mean3.append(d.mean())
+    got = np.std(single) / np.std(mean3)
+    assert abs(got - np.sqrt(3)) < 0.05, f"mean of 3 should cut sd by sqrt(3), got {got:.3f}"
+
+
+def test_evaluate_mean_makes_one_history_entry_and_reports_every_draw():
+    """One trial, one entry.  Appending draws individually would let the optimizer read one
+    configuration as n and would triple the apparent budget."""
+    seen = []
+
+    class _R:
+        cfg = RunConfig(ann_edges=[6, 20], n_remeasure=3)
+        evaluate_mean = Runner.evaluate_mean
+        _combine_draws = staticmethod(Runner._combine_draws)
+
+        def __init__(self):
+            self.n = 0
+
+        def evaluate(self, x, phase, tag="eval"):
+            self.n += 1
+            return _rec(float(self.n) * 2.0), object(), None
+
+    r = _R()
+    out, inj, clean = r.evaluate_mean(np.zeros(1), "tpe", tag="t",
+                                      on_draw=lambda j, nd, rec, i_, c_: seen.append((j, nd, rec.score)))
+    assert r.n == 3, "three draws were reduced"
+    assert out.score == pytest.approx(4.0), "mean of 2, 4, 6"
+    assert [s[0] for s in seen] == [0, 1, 2], "every draw was reported live, in order"
+    assert all(s[1] == 3 for s in seen)
+    assert [s[2] for s in seen] == [2.0, 4.0, 6.0]
+
+
+def test_n_remeasure_1_does_not_wrap_or_retag():
+    """With one draw the path must be the plain one -- no draw suffix on the tag, so eval
+    image filenames and the saved products keep the names every earlier run used."""
+    tags = []
+
+    class _R:
+        cfg = RunConfig(ann_edges=[6, 20], n_remeasure=1)
+        evaluate_mean = Runner.evaluate_mean
+        _combine_draws = staticmethod(Runner._combine_draws)
+
+        def evaluate(self, x, phase, tag="eval"):
+            tags.append(tag)
+            return _rec(5.0), None, None
+
+    out, _, _ = _R().evaluate_mean(np.zeros(1), "tpe", tag="a1_e7")
+    assert tags == ["a1_e7"], f"tag must not gain a draw suffix, got {tags}"
+    assert "draw_n" not in out.meta
+
+
+def test_on_draw_is_optional_for_a_callback():
+    """A callback written before this feature must keep working untouched."""
+    class Old(RunCallback):
+        pass
+
+    assert hasattr(Old(), "on_draw")
+    Old().on_draw(None, 0, 3, _rec(5.0), None, None)   # must not raise
+
+
+# ----------------------------------------------------------------------------
+# a collapsed range is a constant, not a dimension
+# ----------------------------------------------------------------------------
+def _fake_partitioned(parts, angles, nframes=80, pxscale=0.11, fwhm=3.34):
+    """Minimum surface make_space reads: per-partition frames, angles and tags."""
+    ang = np.asarray(angles, float)
+
+    class _D:
+        pass
+
+    class _R:
+        pxscale, fwhm, lam_over_d_px, truenorth = 0.0, 0.0, 0.0, 0.0
+        angle_convention = "pa"
+
+        def __init__(self):
+            self.data = _D()
+            self.data.nframes = int(nframes)
+            self.data.cube = np.zeros((int(nframes), 40, 40), np.float32)
+            self.data.angles = ang
+            self.data.tags = []
+            self.data.texp = 1.0
+
+        def frame_tags(self, pid=None):
+            return []
+
+        def frame_angles(self, pid=None):
+            return ang
+
+    class _P:
+        def __init__(self):
+            self.reducers = {p: _R() for p in parts}
+            self.pxscale, self.fwhm = pxscale, fwhm
+
+        def partitions(self):
+            return list(parts)
+
+        def frame_tags(self, pid=None):
+            return []
+
+        def frame_angles(self, pid=None):
+            return ang
+
+    for r in (_R,):
+        r.pxscale, r.fwhm, r.lam_over_d_px = pxscale, fwhm, 3.25
+    return _P()
+
+
+def test_a_point_range_parameter_is_pinned_not_searched():
+    """NIRCam's cubes are short enough that make_space computed bin_range = (1, 1), so every
+    HIP 65426 run has carried `bin : [1.000, 1.000]` as a searched dimension.  It must become
+    a fixed value: the same number reaches the reducer, the sampler loses a coordinate."""
+    from klip_tpe.instruments import near
+
+    red = _fake_partitioned(["sci"], np.linspace(0, 1, 8), nframes=8, pxscale=0.06, fwhm=2.3)
+    sp = near.make_space(red, bin_range=(1, 1), opt_framesel=False, search_angles=False,
+                         selection=None, k_klip_max=18)
+    names = {p.base or p.name for p in sp.params}
+    assert "bin" not in names, f"bin must not be searched when its range is a point: {sorted(names)}"
+    assert sp.fixed.get("bin") == 1, f"bin must still reach the reducer as 1, got {sp.fixed}"
+
+    sp2 = near.make_space(red, bin_range=(1, 5), opt_framesel=False, search_angles=False,
+                          selection=None, k_klip_max=18)
+    assert "bin" in {p.base or p.name for p in sp2.params}
+    assert "bin" not in sp2.fixed
+
+
+def test_no_space_ships_a_constant_dimension():
+    """The general form of the bug: any parameter whose lo equals its hi."""
+    from klip_tpe.instruments import near
+
+    red = _fake_partitioned(["roll1", "roll2"], np.linspace(0, 9, 80))
+    for kw in ({}, {"search_angles": False}, {"bin_range": (1, 1)}, {"bin_range": (3, 3)}):
+        sp = near.make_space(red, opt_framesel=False, k_klip_max=20, **kw)
+        bad = [(p.name, p.lo, p.hi) for p in sp.params if float(p.hi) <= float(p.lo)]
+        assert not bad, f"constant dimensions shipped with {kw}: {bad}"
+
+
+def test_search_angles_false_removes_both_inert_dimensions():
+    """angsep and anglemax are inert on two-roll data: within a roll every science frame
+    shares a position angle, so reference_mask's dpa is identically zero, anglemax always
+    passes, and any angsep > 0 empties the mask and falls back to the angsep = 0 set.  On a
+    two-partition MIRI run that is 4 of 12 dimensions."""
+    from klip_tpe.instruments import near
+
+    red = _fake_partitioned(["roll1", "roll2"], np.full(80, 108.0))   # one roll: no rotation
+    on = {p.base or p.name for p in near.make_space(red, opt_framesel=False, k_klip_max=20).params}
+    off = {p.base or p.name for p in near.make_space(red, opt_framesel=False, k_klip_max=20,
+                                                     search_angles=False).params}
+    assert {"angsep", "anglemax"} <= on
+    assert not ({"angsep", "anglemax"} & off)
+    assert {"k_klip", "filter", "n_ang"} <= off, "only the inert pair should go"
+
+
+def test_a_pa_span_between_5_and_20_degrees_no_longer_crashes_make_space():
+    """Regression: anglemax_hi came from the sequence's PA span while the parameter's floor
+    stayed at 20, so any span in (5, 20] built Param(20, span) and raised `anglemax: hi < lo`
+    before a single evaluation ran.  Such a span cannot constrain anything, so the parameter
+    is pinned open."""
+    from klip_tpe.instruments import near
+
+    for span in (6.0, 9.4, 12.0, 19.9):
+        red = _fake_partitioned(["p"], np.linspace(0.0, span, 40), nframes=40)
+        sp = near.make_space(red, opt_framesel=False, k_klip_max=20, selection=None)
+        assert "anglemax" not in {p.base or p.name for p in sp.params}, f"span {span}"
+        assert sp.fixed.get("anglemax") == 360.0, f"span {span}: must be pinned open, got {sp.fixed}"
+        assert "angsep" in {p.base or p.name for p in sp.params}, "angsep is a separate question"
+    # a span with real room keeps searching it
+    red = _fake_partitioned(["p"], np.linspace(0.0, 90.0, 40), nframes=40)
+    sp = near.make_space(red, opt_framesel=False, k_klip_max=20, selection=None)
+    assert "anglemax" in {p.base or p.name for p in sp.params}

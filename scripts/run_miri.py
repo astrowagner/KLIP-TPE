@@ -279,6 +279,12 @@ def main(argv=None):
                          "with a high-pass filter of any width (it spreads NaN over the "
                          "whole frame and every frame is then dropped as empty)")
     ap.add_argument("--n-iter", type=int, default=1000)
+    ap.add_argument("--n-remeasure", type=int, default=3, metavar="N",
+                    help="fresh source draws per search trial, averaged into its score "
+                         "(default 3). The objective's only random input is the injected "
+                         "sources' azimuth, and it is worth sd 0.84 of S/N on a single draw; "
+                         "averaging 3 measured 0.48. Costs N reductions per trial. 1 = the "
+                         "IDL's single draw")
     ap.add_argument("--n-init", type=int, default=None)
     ap.add_argument("--k-max", type=int, default=20)
     ap.add_argument("--max-drop", type=int, default=0)
@@ -318,7 +324,14 @@ def main(argv=None):
 
     dsets, info, red, ann, obj, samp, m, px = build(a, log)
 
-    space = generic.make_space(red, k_klip_max=a.k_max, max_drop=a.max_drop)
+    # search_angles=False: angsep and anglemax are not weak on two-roll JWST data, they are
+    # inert.  Each partition is one roll, so every science frame in it shares a position
+    # angle and reference_mask's dpa = |angle - angle[target]| is identically 0.  Then
+    # dpa <= anglemax holds for any anglemax >= 20 (the parameter's own floor), and
+    # dpa >= angsep_deg fails for every frame once angsep > 0, which empties the mask and
+    # sends it through `if refs.sum() < 4: refs = all but the target` -- exactly the
+    # angsep = 0 set.  Same basis by two routes, at the cost of 4 of 12 dimensions.
+    space = generic.make_space(red, k_klip_max=a.k_max, max_drop=a.max_drop, search_angles=False)
     space.project = generic.make_guard(red, k_max=a.k_max)
     log(f"search space: {space.ndim} dimensions over {len(dsets)} partition(s)")
 
@@ -327,6 +340,7 @@ def main(argv=None):
     cfg = RunConfig(ann_edges=[float(v) for v in ann], n_iter=n_iter, n_init=n_init, seed=a.seed,
                     validation=ValidationConfig(n_top=1 if n_iter == 1 else 6, n_valid=10),
                     calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=3),
+                    n_remeasure=1 if a.check else max(int(a.n_remeasure), 1),
                     verify=n_iter > 1, save_eval_images=False)
 
     if a.check:

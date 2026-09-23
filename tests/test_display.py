@@ -383,9 +383,14 @@ def test_resume_restores_best_images(tmp_path):
     finally:
         dm.render_step = orig_rs
     assert any("best images restored" in l for l in logs), logs
-    assert r2._best_images.get("record").index == bi0
     first = [s for s in seen if s[0] == 4][0]
     assert first[2], seen                      # the Best cell had an image on the first post-restart frame
+    assert first[1] == bi0, seen               # and it was the PRE-CRASH incumbent that was restored
+    # After the resumed evaluations the incumbent may legitimately have moved on -- asserting
+    # it is still bi0 at the end tests the score landscape, not the resume.  What has to hold
+    # is that the images on hand belong to whatever is best NOW, and that they exist.
+    assert r2._best_images.get("record").index == r2.history.best()[0]
+    assert r2._best_images.get("inj") is not None
 
 
 def test_progress_movie_written_periodically(tmp_path):
