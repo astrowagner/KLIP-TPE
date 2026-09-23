@@ -103,9 +103,32 @@ def shift_keeping_gaps(im: np.ndarray, shift, order: int = 3) -> np.ndarray:
     return out
 
 
+def _clip_sky(m: np.ndarray, clip: float) -> np.ndarray:
+    """Sigma-clip ``m`` about its global median, so a bright feature cannot drag a line's
+    offset with it.
+
+    A line whose pixels are ALL rejected gets no offset and is left alone, deliberately.
+    The tempting repair -- fall back to that line's unclipped median -- was measured and is
+    much worse than the disease: on a real F1140C integration a global median of 21 and MAD
+    of 3.1 rejects 31 rows and **91 columns** outright, because those lines run through the
+    PSF wings rather than through sky, and their unclipped medians are 240-470 MJy/sr.
+    Subtracting those took the stellar peak from 627 to 256.  A line with no sky in it has
+    no sky offset to measure, and the honest answer is to leave it.
+    """
+    if clip <= 0:
+        return m
+    with np.errstate(all="ignore"):
+        med = np.nanmedian(m)
+        mad = np.nanmedian(np.abs(m - med)) * 1.4826
+    if not np.isfinite(mad) or mad <= 0:
+        return m
+    return np.where(np.abs(m - med) < clip * mad, m, np.nan)
+
+
 def destripe_detector(cube: np.ndarray, center: Optional[Tuple[float, float]] = None,
                       star_radius_px: float = 45.0, boundary_px: float = 12.0,
-                      clip: float = 4.0, columns: bool = True) -> Tuple[np.ndarray, Dict[str, float]]:
+                      clip: float = 4.0, columns: bool = True,
+                      min_line_px: int = 30) -> Tuple[np.ndarray, Dict[str, float]]:
     """Remove each frame's per-row (then per-column) offset, measured on masked sky.
 
     Run in the DETECTOR frame on the FULL subarray, before any crop.  That is not a
@@ -142,12 +165,37 @@ def destripe_detector(cube: np.ndarray, center: Optional[Tuple[float, float]] = 
     ny, nx = cube.shape[1:]
     yy, xx = np.mgrid[0:ny, 0:nx]
     blocked = np.zeros((ny, nx), bool)
+    disc = np.zeros((ny, nx), bool)
     if center is not None:
         cx, cy = float(center[0]), float(center[1])
         if star_radius_px > 0:
-            blocked |= np.hypot(xx - cx, yy - cy) < star_radius_px
+            disc = np.hypot(xx - cx, yy - cy) < star_radius_px
+        blocked |= disc
         if boundary_px > 0:
             blocked |= (np.abs(yy - cy) < boundary_px) | (np.abs(xx - cx) < boundary_px)
+    # A line the mask empties gets NO offset, and that is worse than not destriping at all:
+    # every other line loses its offset while this one keeps it, which turns a smooth
+    # gradient into a step.  The star disc and the boundary band cross at the star, so on
+    # MASK1140 the two together covered rows 101-124 and columns 108-131 outright -- 24 of
+    # each, straight through the target, and the crop is centred on exactly that.  Measured
+    # on a real F1140C integration, line-to-line steps inside the 81x81 crop went from 1.87
+    # raw to 4.05 destriped along rows; with the fallback below they go to 1.46.  The global
+    # sky scatter never noticed (1.826 vs 1.827), because the damage was confined to the one
+    # region the science comes from.
+    #
+    # So where the full mask leaves a line too thin to measure, that line falls back to the
+    # star disc alone: the ~200 rows away from the boundary keep their glow-stick protection,
+    # and the ones crossing it are still corrected.
+    per_axis = {}
+    for axis in (1, 0):
+        m = blocked.copy()
+        thin = (~m).sum(axis=axis) < int(min_line_px)
+        if thin.any() and disc.any():
+            if axis == 1:
+                m[thin, :] = disc[thin, :]
+            else:
+                m[:, thin] = disc[:, thin]
+        per_axis[axis] = m
     import warnings as _w
     out = cube.copy()
     rs, cs = [], []
@@ -155,25 +203,13 @@ def destripe_detector(cube: np.ndarray, center: Optional[Tuple[float, float]] = 
     ctx.__enter__()
     _w.simplefilter("ignore", RuntimeWarning)   # all-NaN rows are expected and handled below
     for i in range(out.shape[0]):
-        m = np.where(blocked, np.nan, out[i])
-        if clip > 0:
-            with np.errstate(all="ignore"):
-                med = np.nanmedian(m)
-                mad = np.nanmedian(np.abs(m - med)) * 1.4826
-            if np.isfinite(mad) and mad > 0:
-                m = np.where(np.abs(m - med) < clip * mad, m, np.nan)
+        m = _clip_sky(np.where(per_axis[1], np.nan, out[i]), clip)
         with np.errstate(all="ignore"):
             row = np.nanmedian(m, axis=1, keepdims=True)
         rs.append(float(np.nanstd(row)))
         out[i] = out[i] - np.where(np.isfinite(row), row, 0.0)
         if columns:
-            m2 = np.where(blocked, np.nan, out[i])
-            if clip > 0:
-                with np.errstate(all="ignore"):
-                    med2 = np.nanmedian(m2)
-                    mad2 = np.nanmedian(np.abs(m2 - med2)) * 1.4826
-                if np.isfinite(mad2) and mad2 > 0:
-                    m2 = np.where(np.abs(m2 - med2) < clip * mad2, m2, np.nan)
+            m2 = _clip_sky(np.where(per_axis[0], np.nan, out[i]), clip)
             with np.errstate(all="ignore"):
                 col = np.nanmedian(m2, axis=0, keepdims=True)
             cs.append(float(np.nanstd(col)))

@@ -543,3 +543,92 @@ def test_destripe_is_nan_safe_and_leaves_empty_rows_alone():
     out, _ = destripe_detector(im[None], (144.0, 112.0))
     assert np.all(~np.isfinite(out[0][10]))  # still NaN, not turned into zeros
     assert np.isfinite(out[0][50]).all()
+
+
+def test_destripe_leaves_no_line_uncorrected_through_the_star():
+    """The bug this guards: the star disc and the 4QPM boundary band cross AT the star, so
+    together they emptied 24 rows and 24 columns outright on MASK1140 -- rows 101-124 and
+    columns 108-131, straight through the target, and the crop is centred on exactly that.
+    A line with no offset estimate keeps its offset while every neighbour loses theirs, which
+    turns a gradient into a step: measured on a real F1140C integration, line-to-line steps
+    inside the 81x81 crop went from 1.87 raw to 4.05 'destriped'.  The global sky scatter
+    never noticed (1.826 against 1.827), because the damage sat only where the science is.
+    """
+    from klip_tpe.backends.spaceklip import destripe_detector
+
+    ny, nx, cx, cy = 224, 288, 144.0, 112.0
+    rng = np.random.default_rng(11)
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    im = rng.normal(0.0, 3.0, (ny, nx))
+    im += 600.0 * np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * 3.0 ** 2))
+    im += 40.0 * np.exp(-((yy - cy) ** 2) / (2 * 2.5 ** 2))          # glow stick
+    rows = rng.normal(0.0, 3.0, (ny, 1))                             # the striping
+    cols = rng.normal(0.0, 1.0, (1, nx))
+    out, _ = destripe_detector((im + rows + cols)[None], (cx, cy))
+
+    # every row that the star+boundary mask would have emptied must still be corrected: its
+    # residual offset has to be far below the stripe amplitude it came in with
+    disc_and_band = (np.hypot(xx - cx, yy - cy) < 45) | (np.abs(yy - cy) < 12) | (np.abs(xx - cx) < 12)
+    dead_rows = [j for j in range(ny) if disc_and_band[j, :].all()]
+    dead_cols = [i for i in range(nx) if disc_and_band[:, i].all()]
+    assert dead_rows and dead_cols, "fixture must reproduce the geometry that caused the bug"
+
+    sky = ~((np.hypot(xx - cx, yy - cy) < 55) | (np.abs(yy - cy) < 14) | (np.abs(xx - cx) < 14))
+    res = np.where(sky, out[0], np.nan)
+    live = [j for j in range(ny) if np.isfinite(res[j]).sum() > 20 and j not in dead_rows]
+    ref = float(np.nanstd([np.nanmedian(res[j]) for j in live]))
+    for j in dead_rows:
+        v = res[j][np.isfinite(res[j])]
+        if v.size > 20:
+            assert abs(float(np.median(v))) < 5.0 * max(ref, 0.2), (
+                f"row {j} was left uncorrected: offset {np.median(v):.2f} against a "
+                f"corrected-row scatter of {ref:.2f}")
+
+
+def test_destripe_recovers_the_injected_offset_off_the_glow_stick():
+    """Inject a known per-row offset and check it comes back off the rows that have sky in
+    them -- which is every row except the handful crossing the glow stick.
+
+    Those are left alone on purpose.  The glow stick sits ~13 sigma above the sky right
+    across its rows, so the sigma clip rejects them entirely and they get no estimate.  The
+    obvious repair -- use their unclipped median instead -- was measured and is far worse
+    than the disease: on a real F1140C integration the same rule empties 31 rows and 91
+    COLUMNS, because those run through the PSF wings rather than sky, and their unclipped
+    medians are 240-470 MJy/sr.  Subtracting them took the stellar peak from 627 to 256.
+    """
+    from klip_tpe.backends.spaceklip import destripe_detector
+
+    ny, nx, cx, cy = 224, 288, 144.0, 112.0
+    rng = np.random.default_rng(5)
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    base = (rng.normal(0.0, 3.0, (ny, nx))
+            + 600.0 * np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * 3.0 ** 2))
+            + 40.0 * np.exp(-((yy - cy) ** 2) / (2 * 2.5 ** 2)))          # glow stick
+    rows = rng.normal(0.0, 3.0, (ny, 1))
+    clean, _ = destripe_detector(base[None], (cx, cy))
+    striped, _ = destripe_detector((base + rows)[None], (cx, cy))
+
+    sky = ~((np.hypot(xx - cx, yy - cy) < 55) | (np.abs(xx - cx) < 14))
+    res, idx = [], []
+    for j in range(ny):
+        m = sky[j]
+        if m.sum() > 30:
+            res.append(float(np.median(striped[0][j][m] - clean[0][j][m])))
+            idx.append(j)
+    res, idx = np.array(res), np.array(idx)
+    inj = float(np.std(rows))
+    assert res.size > 150
+
+    # overall: the offsets are gone to well within a third of what went in
+    assert np.std(res) < inj / 3.0, f"residual sd {np.std(res):.3f} against injected {inj:.3f}"
+
+    # and row by row, away from the glow stick, essentially nothing survives.  This is the
+    # assertion that fails if the star disc and the boundary band are ever again allowed to
+    # empty a line between them: those 24 rows sat at |y - cy| up to 12, i.e. right here.
+    off = np.abs(idx - cy) > 8
+    worst = float(np.max(np.abs(res[off] - np.median(res[off]))))
+    assert worst < 0.75 * inj, (
+        f"a row with sky in it kept {worst:.2f} of a {inj:.2f} offset -- a line the mask "
+        f"emptied and the fallback did not reach")
+    # the glow-stick rows are the known exception, and there are only a few of them
+    assert int((~off).sum()) < 25, "the untreated band must stay narrow"

@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased — 2026-09-23 (destriping left 24 rows and 24 columns uncorrected)
+- **My bug, spotted by Kevin as "striping at 90 degrees".**  Columns were already being
+  destriped — but the star disc (r < 45) and the 4QPM boundary band (< 12 px) cross AT the
+  star, and between them they covered **rows 101–124 and columns 108–131 outright** on
+  MASK1140.  24 of each, with no unmasked pixel, so `nanmedian` returned NaN and
+  `np.where(isfinite…)` quietly substituted a zero offset.
+- A line with no offset is worse than no destriping at all: every neighbour loses its offset
+  while that one keeps it, turning a gradient into a step — and the crop is centred on
+  exactly those lines.  Measured on a real F1140C integration, line-to-line steps inside the
+  81×81 crop went from **1.87 raw to 4.05 "destriped"** along rows.  The uncorrected
+  24-column band is a vertical stripe, which is what was visible.
+- **The global sky metric never noticed**: 1.826 against 1.827.  The damage was confined to
+  the one region the science comes from, which is why the 1.28× in-pipeline gain reported
+  earlier was real and yet the product was worse where it mattered.
+- Fixed with a per-line fallback (`min_line_px`): where the full mask leaves a line too thin
+  to measure, that line falls back to the star disc alone.  The ~200 rows away from the
+  boundary keep their glow-stick protection and the ones crossing it are still corrected.
+  In-crop row steps now **1.87 → 1.45** (1.28× better), columns 0.77 → 0.56 (1.39×), sky
+  scatter unchanged at 1.69×, stellar peak −1.86% as before.
+- **A repair I measured and rejected.**  Rows crossing the glow stick are also emptied, by
+  the sigma clip rather than the mask, and the tempting fix is to use their unclipped median.
+  On the real frame that rule empties 31 rows and **91 columns** — those run through the PSF
+  wings, not sky, and their unclipped medians are 240–470 MJy/sr.  Subtracting them took the
+  stellar peak from **627 to 256**.  A line with no sky in it has no sky offset to measure,
+  so it is left alone; the untreated band is now ~9 rows at |y − y*| ≤ 4 instead of 24 + 24.
+- Two regression tests, both of which fail on the old behaviour: one that every row the mask
+  would have emptied is still corrected, and one that recovers a known injected offset row by
+  row away from the glow stick.
+
 ## Unreleased — 2026-09-23 (the draws as an error bar)
 - **Every score plot now shows the min-to-max span of the draws** behind each trial when
   `n_remeasure > 1`: the live panel's convergence trace (`panel_trace`) and the saved
