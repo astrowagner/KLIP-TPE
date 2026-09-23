@@ -199,6 +199,31 @@ def test_versus_pairs_winners_only_on_identical_injections():
         assert not any(" x" in l for l in logs), logs              # and no ratio was reported
 
 
+def test_ablation_says_why_when_a_run_is_not_finished(tmp_path):
+    """Run a minute after its searches started -- as happened on v7 -- the ablation raised a
+    bare FileNotFoundError.  It now says what is missing and where the progress is, before
+    any reduction, and checks the --versus file up front rather than crashing after hours."""
+    la = _la()
+    run = tmp_path / "v7_pyklip"
+
+    def main(*extra):
+        with pytest.raises(SystemExit) as e:
+            la.main(["--data", str(tmp_path), "--run-dir", str(run), *extra])
+        return str(e.value)
+    assert "no such directory" in main()
+    run.mkdir()
+    (run / "run.log").write_text("[10:44:56] 63 calints\n")
+    msg = main()
+    assert "has not started its search yet" in msg and "run.log" in msg, msg
+    (run / "run_setup.json").write_text("{}")
+    assert "has not finished" in main()
+    (run / "final_results.json").write_text('{"annuli": []}')
+    msg = main("--contrast-from", str(tmp_path / "v7_klip"))
+    assert msg.startswith("--contrast-from") and "no such directory" in msg, msg
+    msg = main("--versus", str(tmp_path / "v7_klip_ablation.json"))
+    assert msg.startswith("--versus") and "make that one first" in msg, msg
+
+
 def test_ablation_follows_the_runs_own_engine_and_dimensions(tmp_path):
     """Run on a klip run without --backend, the ablation used to rebuild it on pyKLIP and
     carry the winners across by name: nkeep_* dropped silently, mode / maxnumbasis at their

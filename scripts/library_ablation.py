@@ -84,6 +84,24 @@ PLANET = (0.823, 149.0)
 IWA_AS = 0.36                                   # FQPM1140C nominal inner working angle
 
 
+def _need_finished_run(run_dir: str, flag: str) -> None:
+    """Stop, saying why, unless ``run_dir`` holds a FINISHED ``run_miri.py`` run: this script
+    rebuilds a run from its ``run_setup.json`` (written once the search starts) and takes the
+    winners from its ``final_results.json`` (written when it ends)."""
+    log_file = os.path.join(run_dir, "run.log")
+    where = f"; its progress is in {log_file}" if os.path.isfile(log_file) else ""
+    if not os.path.isdir(run_dir):
+        raise SystemExit(f"{flag} {run_dir}: no such directory -- is it the --out of a run_miri.py "
+                         f"run, and are you in the directory that run was started from?")
+    if not os.path.isfile(os.path.join(run_dir, "run_setup.json")):
+        raise SystemExit(f"{flag} {run_dir}: the run has not started its search yet (no "
+                         f"run_setup.json){where}.  This compares FINISHED runs -- run it once "
+                         f"final_results.json appears.")
+    if not os.path.isfile(os.path.join(run_dir, "final_results.json")):
+        raise SystemExit(f"{flag} {run_dir}: the run has not finished (no final_results.json "
+                         f"yet){where}.  Run this once it has.")
+
+
 def _run_backend(full_setup: dict):
     """The engine a finished run reduced with, from its ``run_setup.json``: pyKLIP writes its
     name into the reducer's description and the built-in engine writes none, so a partition
@@ -200,6 +218,13 @@ def main(argv=None) -> int:
     def log(s):
         print(f"[{time.strftime('%H:%M:%S')}] {s}", flush=True)
 
+    # Everything this needs must exist before the first of hours of reductions, not after.
+    _need_finished_run(a.run_dir, "--run-dir")
+    if a.contrast_from:
+        _need_finished_run(a.contrast_from, "--contrast-from")
+    if a.versus and not os.path.isfile(a.versus):
+        raise SystemExit(f"--versus {a.versus}: no such file yet.  It is the other run's ablation "
+                         f"output -- make that one first (the two commands run one after the other).")
     with open(os.path.join(a.run_dir, "run_setup.json")) as f:
         full_setup = json.load(f)
     setup = full_setup.get("config", full_setup)

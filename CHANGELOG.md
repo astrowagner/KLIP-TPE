@@ -20,6 +20,12 @@
   its dead counts have no counterpart); naming the other engine is a cross-engine test and
   is noted as one.
 - The `make_reducer` docstring no longer says pyKLIP cannot search a library.
+- **Run on an unfinished run, the ablation now says so.**  Started a minute after the v7
+  searches, it raised a bare `FileNotFoundError` on `run_setup.json`.  It now checks
+  `--run-dir` and `--contrast-from` for a finished run (`run_setup.json` appears once the
+  search starts, `final_results.json` when it ends) and points at the run's `run.log`, and
+  it checks that the `--versus` file exists before the first reduction rather than failing
+  at the end of hours of them.
 
 ## Unreleased — 2026-09-23 (both libraries, and a check that every searched dimension is live)
 
