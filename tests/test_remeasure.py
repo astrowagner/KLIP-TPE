@@ -289,6 +289,46 @@ def test_draw_ranges_labels_the_draw_count_and_sits_under_the_points():
     assert coll.get_zorder() < 3, "the bar must sit under the score points, not over them"
 
 
+def test_each_bar_takes_its_own_point_colour():
+    """The bars belong to their points, so they carry the phase colour rather than one grey
+    band across every phase."""
+    from klip_tpe.plots import draw_ranges
+
+    ax = _axes()
+    n = draw_ranges(ax, [1, 2, 3], [[4.0, 6.0], [5.0, 7.0], [1.0, 3.0]],
+                    colors=["#111111", "#222222", "#111111"])
+    assert n == 3
+    colls = [c for c in ax.collections if hasattr(c, "get_segments")]
+    # grouped by colour: two calls for two distinct colours, not one per trial
+    assert len(colls) == 2, f"expected one vlines per distinct colour, got {len(colls)}"
+    from matplotlib.colors import to_hex
+    got = {}
+    for c in colls:
+        col = to_hex(c.get_colors()[0])
+        got[col] = len(c.get_segments())
+    assert got == {"#111111": 2, "#222222": 1}, got
+
+
+def test_the_legend_gets_one_neutral_entry_not_one_per_phase():
+    """Per-colour entries would duplicate the phase legend the points already carry."""
+    from klip_tpe.plots import draw_ranges
+
+    ax = _axes()
+    draw_ranges(ax, [1, 2, 3, 4], [[4.0, 6.0]] * 4,
+                colors=["#111111", "#222222", "#333333", "#444444"])
+    labels = ax.get_legend_handles_labels()[1]
+    assert sum(1 for s in labels if "min-max" in s) == 1, labels
+
+
+def test_a_short_colour_list_does_not_misalign_the_bars():
+    """Defensive: the caller builds colours from phases and draws from meta independently."""
+    from klip_tpe.plots import draw_ranges
+
+    ax = _axes()
+    assert draw_ranges(ax, [1, 2, 3], [[4.0, 6.0], [5.0, 7.0], [1.0, 3.0]],
+                       colors=["#111111"]) == 3
+
+
 def test_draw_ranges_tolerates_a_wholly_failed_trial():
     from klip_tpe.plots import draw_ranges
 

@@ -907,8 +907,11 @@ def panel_trace(ax, ad: AnnulusData, current: Optional[int] = None, compact: boo
     try:
         from .plots import draw_ranges
         _dw = (ad.extra or {}).get("draws") or []
+        # _phase_color, not the marker facecolor: random phases draw open markers, so the
+        # edge is the colour the eye reads for them.
         draw_ranges(ax, ev, [(d or {}).get("draw_scores") if isinstance(d, dict) else None
-                             for d in (_dw + [None] * max(0, n - len(_dw)))][:n])
+                             for d in (_dw + [None] * max(0, n - len(_dw)))][:n],
+                    colors=[_phase_color(p) for p in ad.phases])
     except Exception:
         pass
     for p in PHASE_ORDER + sorted(set(ad.phases) - set(PHASE_ORDER)):

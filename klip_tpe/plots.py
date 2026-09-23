@@ -140,36 +140,59 @@ def draw_scores_of(recs) -> List[Optional[List[float]]]:
     return out
 
 
-def draw_ranges(ax, x, draws, color: str = "#8a8a8a", lw: float = 0.9, alpha: float = 0.7,
-                zorder: int = 2, label: Optional[str] = None) -> int:
+def draw_ranges(ax, x, draws, colors=None, color: str = "#8a8a8a", lw: float = 0.9,
+                alpha: float = 0.7, zorder: int = 2, label: Optional[str] = None) -> int:
     """Vertical min-to-max bar for every trial that was scored over more than one draw.
 
     The observed range, not a parametric interval: with three draws a +/- sd would be a
     two-degree-of-freedom estimate dressed up as a confidence band, whereas min-max is
-    exactly what was measured.  Drawn under the points (``zorder`` below the scatter) and in
-    grey, so a trial's score still reads as the datum and the bar as its uncertainty.
+    exactly what was measured.  Drawn under the points (``zorder`` below the scatter), so a
+    trial's score still reads as the datum and the bar as its uncertainty.
+
+    ``colors`` gives a colour per trial -- pass the same phase colours the points use and
+    each bar belongs to its point rather than to a grey undifferentiated band.  Bars are
+    grouped by colour so this stays a handful of ``vlines`` calls however many trials there
+    are.  A single ``color`` applies to all of them.
+
+    One legend entry, on a neutral proxy handle: per-colour entries would duplicate the
+    phase legend the points already carry, and the entry is there to say what the bars MEAN,
+    not which phase any one of them came from.
 
     Returns the number of bars drawn, so the caller can leave the legend alone when a run
     had a single draw per trial and there is nothing to show.
     """
-    xs, lo, hi, ns = [], [], [], []
-    for xi, vals in zip(np.atleast_1d(x), draws):
+    xx = np.atleast_1d(x)
+    if colors is None:
+        cols = [color] * len(xx)
+    elif isinstance(colors, str):
+        cols = [colors] * len(xx)
+    else:
+        cols = list(colors) + [color] * max(0, len(xx) - len(list(colors)))
+    groups: Dict[Any, Tuple[List[float], List[float], List[float]]] = {}
+    ns: List[int] = []
+    for xi, vals, c in zip(xx, draws, cols):
         # sanitised here rather than trusted: a failed draw is recorded as None, and the
         # live-display caller passes meta['draw_scores'] through untouched
         v = [float(q) for q in (vals or []) if q is not None and np.isfinite(q)]
         if len(v) < 2:
             continue
-        xs.append(float(xi))
-        lo.append(float(min(v)))
-        hi.append(float(max(v)))
+        g = groups.setdefault(c, ([], [], []))
+        g[0].append(float(xi))
+        g[1].append(float(min(v)))
+        g[2].append(float(max(v)))
         ns.append(len(v))
-    if not xs:
+    if not ns:
         return 0
+    for c, (xs, lo, hi) in groups.items():
+        ax.vlines(xs, lo, hi, color=c, lw=lw, alpha=alpha, zorder=zorder)
     if label is None:
         nmode = int(max(set(ns), key=ns.count))
         label = f"draw range (min-max of {nmode})"
-    ax.vlines(xs, lo, hi, color=color, lw=lw, alpha=alpha, zorder=zorder, label=label)
-    return len(xs)
+    if label:
+        from matplotlib.lines import Line2D
+        h = Line2D([], [], color="#8a8a8a", lw=lw, alpha=alpha, label=label)
+        ax.add_line(h)                      # never drawn (no data), only carried by the legend
+    return len(ns)
 
 
 # ----------------------------------------------------------------------------
@@ -187,8 +210,9 @@ def plot_trace(run_dir: str, annulus: int = 0, save: bool = True, ax=None) -> Fi
         n = np.array([int(r["index"]) + 1 for r in recs])
         y = np.array([_score(r) for r in recs])
         ph = [r.get("phase", "?") for r in recs]
-        # under the points: what the draws of each trial actually spanned
-        draw_ranges(ax, n, draw_scores_of(recs))
+        # under the points, in each point's own phase colour: what its draws spanned
+        draw_ranges(ax, n, draw_scores_of(recs),
+                    colors=[PHASE_COLORS.get(p, "#333333") for p in ph])
         for p in PHASE_ORDER + sorted(set(ph) - set(PHASE_ORDER)):
             m = np.array([q == p for q in ph])
             if not m.any():
