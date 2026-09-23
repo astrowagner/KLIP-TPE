@@ -376,3 +376,58 @@ def _min_annulus_data(dm, y, draws):
         raw=np.array(y, float), wall=np.ones(n), contrast=np.full(n, 1e-4),
         configs=[{}] * n, n_init=1, n_iter=n, gamma=0.25, metric_name="m", search_mode="tpe",
         seed_default=False, extra={"draws": draws})
+
+
+def test_the_panel_render_step_actually_draws_gets_the_bars_too():
+    """The bug this guards: the bars went into ``panel_trace``, which only
+    ``render_step_classic`` calls.  The live window and the step PDFs go through
+    ``render_step`` -> ``panel_convergence_idl``, so neither showed anything.  Both panels
+    are checked here, by counting the vline segments each one adds."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from klip_tpe import display as dm
+
+    draws = [{"draw_scores": [4.0, 6.0, 5.0], "draw_n": 3},
+             {"draw_scores": [5.0, 7.0, 6.0], "draw_n": 3},
+             {"draw_scores": [6.5, 6.9, 6.7], "draw_n": 3}]
+    ad = _min_annulus_data(dm, y=[5.0, 6.0, 6.7], draws=draws)
+    for fn in (dm.panel_convergence_idl, dm.panel_trace):
+        ax = plt.subplots()[1]
+        fn(ax, ad)
+        segs = sum(len(c.get_segments()) for c in ax.collections if hasattr(c, "get_segments"))
+        assert segs >= 3, f"{fn.__name__} drew {segs} range bars for 3 remeasured trials"
+        plt.close(ax.figure)
+
+
+def test_the_convergence_panel_widens_its_y_limits_for_the_bars():
+    """A clipped error bar is worse than none: the panel sets its own y-range from the means,
+    and the draws reach past them by construction."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from klip_tpe import display as dm
+
+    # one draw far above every mean
+    ad = _min_annulus_data(dm, y=[5.0, 5.0], draws=[{"draw_scores": [4.0, 6.0], "draw_n": 2},
+                                                    {"draw_scores": [1.0, 12.0], "draw_n": 2}])
+    ax = plt.subplots()[1]
+    dm.panel_convergence_idl(ax, ad)
+    lo, hi = ax.get_ylim()
+    assert hi >= 12.0, f"upper bound {hi:.2f} clips a draw at 12"
+    assert lo <= 1.0, f"lower bound {lo:.2f} clips a draw at 1"
+    plt.close(ax.figure)
+
+
+def test_a_single_draw_run_leaves_the_convergence_panel_untouched():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from klip_tpe import display as dm
+
+    ad = _min_annulus_data(dm, y=[5.0, 6.0], draws=[{}, {}])
+    ax = plt.subplots()[1]
+    dm.panel_convergence_idl(ax, ad)
+    segs = sum(len(c.get_segments()) for c in ax.collections if hasattr(c, "get_segments"))
+    assert segs == 0, f"drew {segs} bars for a run with one draw per trial"
+    plt.close(ax.figure)

@@ -2287,7 +2287,24 @@ def panel_convergence_idl(ax, ad: AnnulusData, current: Optional[int] = None):
     cm = matplotlib.colormaps.get_cmap(SCORE_CMAP)
     c_tpe, c_loc, c_s20, c_s50 = cm(0.35), cm(0.55), cm(0.80), cm(0.97)
     fg = _fg()
+    n_bars, dlo, dhi = 0, np.inf, -np.inf
     if n:
+        # Under the points when n_remeasure > 1: the min-to-max span of the draws each
+        # trial's score is the mean of.  This panel is the one render_step draws -- panel_trace
+        # belongs to render_step_classic -- so the bars have to be added here too or the live
+        # window and the step PDFs show a mean with no indication of what it is a mean of.
+        try:
+            from .plots import draw_ranges
+            _dw = list((ad.extra or {}).get("draws") or [])
+            _ds = [(d or {}).get("draw_scores") if isinstance(d, dict) else None
+                   for d in (_dw + [None] * max(0, n - len(_dw)))][:n]
+            _cols = [("#9a9a9a" if r else (c_loc if l else c_tpe)) for r, l in zip(rnd, loc)]
+            n_bars = draw_ranges(ax, ev, _ds, colors=_cols, label="")
+            flat = [float(v) for d in _ds for v in (d or []) if v is not None and np.isfinite(v)]
+            if flat:
+                dlo, dhi = min(flat), max(flat)
+        except Exception:
+            n_bars = 0
         sma20, sma50, smag = _sma(y, ~rnd, 20), _sma(y, ~rnd, 50), _sma(y, rnd, 20)
         g = np.isfinite(sma20)
         slope = np.nan
@@ -2313,6 +2330,8 @@ def panel_convergence_idl(ax, ad: AnnulusData, current: Optional[int] = None):
             ax.scatter([current], [y[current]], s=60, marker="s", facecolor="none", edgecolor=CUR_COLOR, lw=1.0, zorder=5)
         fin = y[np.isfinite(y)]
         lo, hi = (min(float(fin.min()), 0.0), float(fin.max()) * 1.1) if fin.size else (0.0, 1.0)
+        if n_bars:                      # a clipped error bar is worse than none
+            lo, hi = min(lo, float(dlo)), max(hi, float(dhi) * 1.02)
         if hi <= lo:
             hi = lo + 1.0
         ax.set_ylim(lo, hi)
@@ -2327,8 +2346,13 @@ def panel_convergence_idl(ax, ad: AnnulusData, current: Optional[int] = None):
     ax.set_ylabel(f"{'mean' if nsrc == 2 else 'median'} S/N")
     # colour-coded flowing legend (IDL): one word per series
     x = 0.01
-    for txt, col in (("warm-up/explore ", "#9a9a9a"), ("TPE ", c_tpe), ("local ", c_loc), ("SMA20 ", c_s20),
-                     ("SMA50 ", c_s50), ("random SMA20", "#9a9a9a")):
+    series = [("warm-up/explore ", "#9a9a9a"), ("TPE ", c_tpe), ("local ", c_loc), ("SMA20 ", c_s20),
+              ("SMA50 ", c_s50), ("random SMA20", "#9a9a9a")]
+    if n_bars:
+        nd = max((len(d.get("draw_scores") or []) for d in ((ad.extra or {}).get("draws") or [])
+                  if isinstance(d, dict)), default=0)
+        series.append((f"  | bars: min-max of {nd}" if nd else "  | bars: draw min-max", "#8a8a8a"))
+    for txt, col in series:
         t = ax.text(x, 0.02, txt, transform=ax.transAxes, color=col, fontsize=6.3, va="bottom")
         try:
             ax.figure.canvas.draw()

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased — 2026-09-23 (the draw bars went into a panel nothing draws)
+- **Fix: the error bars were added to `panel_trace`, which only `render_step_classic` calls.**
+  The live window and the step PDFs go through `render_step` → `panel_convergence_idl`, so
+  neither showed anything — the feature was invisible in exactly the two places it was asked
+  for.  `panel_convergence_idl` now draws them too, in each point's own series colour
+  (grey for warm-up/explore, the TPE and local colours otherwise) with the flowing legend
+  gaining a `bars: min-max of N` word.
+- That panel sets its own y-range from the means, and the draws reach past them by
+  construction, so the range is widened to contain them: a clipped error bar is worse than
+  none.
+- Three regression tests, which fail on the old behaviour: both panels draw a bar per
+  remeasured trial, the convergence panel's limits contain the extreme draws, and a
+  single-draw run still adds nothing.
+
 ## Unreleased — 2026-09-23 (nkalt / nkref replace the ADI/RDI mode, on NIRCam and MIRI)
 - **The searched reference library is wired into both JWST paths.**  `nkeep_altroll` and
   `nkeep_psfref` — how many correlation-ranked frames to keep from the other roll and from
