@@ -125,6 +125,53 @@ def _score(r: Dict[str, Any]) -> float:
     return np.nan if s is None else float(s)
 
 
+def draw_scores_of(recs) -> List[Optional[List[float]]]:
+    """Per-record list of the individual draw scores, or None where a record has none.
+
+    Reads ``meta['draw_scores']``, written when ``RunConfig.n_remeasure > 1``.  Records
+    from a single-draw run simply have nothing here, which is how the callers know not to
+    draw a range they cannot measure.
+    """
+    out: List[Optional[List[float]]] = []
+    for r in recs:
+        ds = ((r.get("meta") or {}) if isinstance(r, dict) else (getattr(r, "meta", {}) or {})).get("draw_scores")
+        vals = [float(v) for v in (ds or []) if v is not None and np.isfinite(v)]
+        out.append(vals if len(vals) > 1 else None)
+    return out
+
+
+def draw_ranges(ax, x, draws, color: str = "#8a8a8a", lw: float = 0.9, alpha: float = 0.7,
+                zorder: int = 2, label: Optional[str] = None) -> int:
+    """Vertical min-to-max bar for every trial that was scored over more than one draw.
+
+    The observed range, not a parametric interval: with three draws a +/- sd would be a
+    two-degree-of-freedom estimate dressed up as a confidence band, whereas min-max is
+    exactly what was measured.  Drawn under the points (``zorder`` below the scatter) and in
+    grey, so a trial's score still reads as the datum and the bar as its uncertainty.
+
+    Returns the number of bars drawn, so the caller can leave the legend alone when a run
+    had a single draw per trial and there is nothing to show.
+    """
+    xs, lo, hi, ns = [], [], [], []
+    for xi, vals in zip(np.atleast_1d(x), draws):
+        # sanitised here rather than trusted: a failed draw is recorded as None, and the
+        # live-display caller passes meta['draw_scores'] through untouched
+        v = [float(q) for q in (vals or []) if q is not None and np.isfinite(q)]
+        if len(v) < 2:
+            continue
+        xs.append(float(xi))
+        lo.append(float(min(v)))
+        hi.append(float(max(v)))
+        ns.append(len(v))
+    if not xs:
+        return 0
+    if label is None:
+        nmode = int(max(set(ns), key=ns.count))
+        label = f"draw range (min-max of {nmode})"
+    ax.vlines(xs, lo, hi, color=color, lw=lw, alpha=alpha, zorder=zorder, label=label)
+    return len(xs)
+
+
 # ----------------------------------------------------------------------------
 # trace
 # ----------------------------------------------------------------------------
@@ -140,6 +187,8 @@ def plot_trace(run_dir: str, annulus: int = 0, save: bool = True, ax=None) -> Fi
         n = np.array([int(r["index"]) + 1 for r in recs])
         y = np.array([_score(r) for r in recs])
         ph = [r.get("phase", "?") for r in recs]
+        # under the points: what the draws of each trial actually spanned
+        draw_ranges(ax, n, draw_scores_of(recs))
         for p in PHASE_ORDER + sorted(set(ph) - set(PHASE_ORDER)):
             m = np.array([q == p for q in ph])
             if not m.any():

@@ -239,3 +239,100 @@ def test_a_pa_span_between_5_and_20_degrees_no_longer_crashes_make_space():
     red = _fake_partitioned(["p"], np.linspace(0.0, 90.0, 40), nframes=40)
     sp = near.make_space(red, opt_framesel=False, k_klip_max=20, selection=None)
     assert "anglemax" in {p.base or p.name for p in sp.params}
+
+
+# ----------------------------------------------------------------------------
+# the draws as an error bar
+# ----------------------------------------------------------------------------
+def _axes():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    return plt.subplots()[1]
+
+
+def test_draw_scores_of_reads_the_meta_and_ignores_single_draws():
+    from klip_tpe.plots import draw_scores_of
+
+    got = draw_scores_of([{"meta": {"draw_scores": [4.0, 6.0, 5.0]}},
+                          {"meta": {"draw_scores": [5.0]}},          # one draw: no range to show
+                          {"meta": {"draw_scores": [3.0, None, 7.0]}},  # a failed draw drops out
+                          {"meta": {}},
+                          {}])
+    assert got == [[4.0, 6.0, 5.0], None, [3.0, 7.0], None, None]
+
+
+def test_draw_ranges_spans_min_to_max_and_no_ops_without_draws():
+    from klip_tpe.plots import draw_ranges
+
+    ax = _axes()
+    n = draw_ranges(ax, [1, 2, 3], [[4.0, 6.0, 5.0], None, [1.0, 2.0]])
+    assert n == 2, "one bar per trial that had more than one draw"
+    seg = [c for c in ax.collections if hasattr(c, "get_segments")][-1].get_segments()
+    spans = sorted((float(s[0][1]), float(s[1][1])) for s in seg)
+    assert spans == [(1.0, 2.0), (4.0, 6.0)], f"bars must span min..max, got {spans}"
+    # a single-draw run must add nothing at all -- no bar, no legend entry
+    ax2 = _axes()
+    assert draw_ranges(ax2, [1, 2], [None, None]) == 0
+    assert not ax2.collections
+    assert ax2.get_legend_handles_labels()[1] == []
+
+
+def test_draw_ranges_labels_the_draw_count_and_sits_under_the_points():
+    from klip_tpe.plots import draw_ranges
+
+    ax = _axes()
+    draw_ranges(ax, [1, 2], [[4.0, 6.0, 5.0], [4.5, 5.5, 5.0]])
+    labels = ax.get_legend_handles_labels()[1]
+    assert any("min-max of 3" in s for s in labels), labels
+    coll = [c for c in ax.collections if hasattr(c, "get_segments")][-1]
+    assert coll.get_zorder() < 3, "the bar must sit under the score points, not over them"
+
+
+def test_draw_ranges_tolerates_a_wholly_failed_trial():
+    from klip_tpe.plots import draw_ranges
+
+    ax = _axes()
+    assert draw_ranges(ax, [1, 2], [[None, None], [2.0, 4.0]]) == 1
+
+
+def test_the_panel_trace_draws_the_range_when_the_run_remeasured():
+    """Wiring check for the live panel: the bars come from AnnulusData.extra['draws'],
+    which annulus_from_run fills from each record's meta."""
+    from klip_tpe import display as dm
+
+    calls = []
+    orig = dm.__dict__.get("draw_ranges")
+
+    import klip_tpe.plots as pl
+    real = pl.draw_ranges
+
+    def spy(ax, x, draws, **kw):
+        calls.append([list(d) if d else None for d in draws])
+        return real(ax, x, draws, **kw)
+
+    pl.draw_ranges = spy
+    try:
+        ad = _min_annulus_data(dm, y=[4.0, 6.0], draws=[{"draw_scores": [3.0, 5.0]},
+                                                        {"draw_scores": [5.0, 7.0]}])
+        dm.panel_trace(_axes(), ad)
+    finally:
+        pl.draw_ranges = real
+        if orig is not None:
+            dm.__dict__["draw_ranges"] = orig
+    assert calls, "panel_trace did not consult draw_ranges"
+    assert calls[0] == [[3.0, 5.0], [5.0, 7.0]]
+
+
+def _min_annulus_data(dm, y, draws):
+    """Smallest AnnulusData panel_trace will accept."""
+    n = len(y)
+    return dm.AnnulusData(
+        run_name="t", annulus=0, nann=1, inrad=6.0, outrad=20.0, pxscale=0.11, fwhm=3.3,
+        params=[dm.ParamInfo("k_klip", "k_klip", 1, 10, "int", None, "reduction")],
+        partitions=["p"], X=np.zeros((n, 1)), y=np.array(y, float), phases=["tpe"] * n,
+        k_used=[5] * n, selected=[["p"]] * n, part_snr=[{}] * n, sources=[[]] * n,
+        per_source=[[]] * n, raw_per_source=[[]] * n, clean_per_source=[None] * n,
+        raw=np.array(y, float), wall=np.ones(n), contrast=np.full(n, 1e-4),
+        configs=[{}] * n, n_init=1, n_iter=n, gamma=0.25, metric_name="m", search_mode="tpe",
+        seed_default=False, extra={"draws": draws})

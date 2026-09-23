@@ -901,6 +901,16 @@ def panel_trace(ax, ad: AnnulusData, current: Optional[int] = None, compact: boo
         return
     ev = np.arange(1, n + 1)
     y = ad.y
+    # Under the points, when n_remeasure > 1: the min-to-max span of the draws the trial's
+    # score is the mean of.  Without it a panel shows a mean as if it were a measurement,
+    # and on this objective the draws span ~1.4 in S/N against a useful range of ~6.
+    try:
+        from .plots import draw_ranges
+        _dw = (ad.extra or {}).get("draws") or []
+        draw_ranges(ax, ev, [(d or {}).get("draw_scores") if isinstance(d, dict) else None
+                             for d in (_dw + [None] * max(0, n - len(_dw)))][:n])
+    except Exception:
+        pass
     for p in PHASE_ORDER + sorted(set(ad.phases) - set(PHASE_ORDER)):
         m = np.array([q == p for q in ad.phases]) & np.isfinite(y)
         if not m.any():

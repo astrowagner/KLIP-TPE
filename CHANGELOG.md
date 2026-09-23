@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — 2026-09-23 (the draws as an error bar)
+- **Every score plot now shows the min-to-max span of the draws** behind each trial when
+  `n_remeasure > 1`: the live panel's convergence trace (`panel_trace`) and the saved
+  figure (`plots.plot_trace`, hence the PDFs and `plot_all`).  Without it a panel presents a
+  mean as though it were a measurement, and on this objective the draws span ~1.4 in S/N
+  against a useful range of ~6 — the uncertainty is a large fraction of the axis and ought
+  to be on it.
+- The observed range, not `± sd`: with three draws a standard deviation is a
+  two-degree-of-freedom estimate dressed as a confidence band, whereas min-max is exactly
+  what was measured.  Drawn in grey beneath the points so the trial's score still reads as
+  the datum and the bar as its uncertainty, and labelled with the draw count
+  (`draw range (min-max of 3)`).
+- `plots.draw_ranges` / `plots.draw_scores_of` are shared by both callers (`display` imports
+  them lazily, since `plots` must not import `display`).  A single-draw run adds nothing at
+  all — no bar and no legend entry — and a wholly failed trial is skipped rather than
+  plotted at zero.
+
 ## Unreleased — 2026-09-23 (per-trial remeasurement; dead search dimensions removed)
 - **Search trials are scored as the mean of `RunConfig.n_remeasure` fresh source draws**
   (`Runner.evaluate_mean`), 3 by default on MIRI via `--n-remeasure`.  The objective's only
