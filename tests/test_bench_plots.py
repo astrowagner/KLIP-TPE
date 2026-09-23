@@ -99,8 +99,8 @@ def test_restart_resumes_interrupted_run(tmp_path):
 
     orig = r.checkpoint
 
-    def interrupt(final_annulus=False):
-        orig(final_annulus)
+    def interrupt(final_annulus=False, **kw):          # routine=... (held, flushed on the way out)
+        orig(final_annulus, **kw)
         if r.records_count >= 9:
             raise Stop
 

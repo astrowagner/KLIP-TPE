@@ -53,6 +53,24 @@ def test_stage_names_the_work_and_restarts_its_clock(tmp_path):
     assert b["stage_s"] < a["stage_s"] + 1.0
 
 
+def test_per_step_stages_wait_for_the_next_stamp(tmp_path):
+    """A stage that changes every evaluation must not rewrite the file itself: at ~1 s per
+    evaluation that outran Dropbox, which filed 115 conflicted copies of heartbeat.json in
+    20 minutes on H2K.  ``write=False`` makes it live at once -- the stall clock restarts --
+    and leaves it to the thread's next stamp; a change of phase is still written at once."""
+    hb = Heartbeat(str(tmp_path), period=5.0)              # no thread: stamps only when told
+    hb.stage("annulus 1 calibration", annulus=0)           # a phase: on disk at once
+    first = read(str(tmp_path))
+    for ev in range(1, 50):
+        hb.stage(f"annulus 1 eval {ev}/800 (tpe)", write=False, eval=ev)
+    assert read(str(tmp_path))["stage"] == "annulus 1 calibration"     # 49 steps, 0 writes
+    live = hb.snapshot()
+    assert live["stage"] == "annulus 1 eval 49/800 (tpe)" and live["eval"] == 49
+    assert live["stage_t0"] > first["stage_t0"]                       # the stall clock moved
+    hb.write()                                                         # the thread's stamp
+    assert read(str(tmp_path))["stage"] == "annulus 1 eval 49/800 (tpe)"
+
+
 def test_update_revises_details_without_restarting_the_stage_clock(tmp_path):
     hb = Heartbeat(str(tmp_path), period=5.0)
     hb.stage("annulus 1 eval 3/100 (tpe)")

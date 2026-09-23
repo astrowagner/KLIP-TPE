@@ -30,6 +30,7 @@
 #   ./rerun_paper.sh bench        E2 F2 G2 H2
 #   ./rerun_paper.sh A2 C         just those
 #   WORKERS=4 ./rerun_paper.sh    leave cores for another run on the same machine
+#   RUNS_DIR=~/klip_tpe_runs/paper ./rerun_paper.sh   write the stage directories there, not here
 #   SHOW=0 ./rerun_paper.sh       headless (panels still written to each run's steps/)
 #   FORCE=1 ./rerun_paper.sh A2   redo a stage that already finished.  The finished directory
 #                                 is retired to <dir>_superseded_<stamp> first -- a benchmark
@@ -92,14 +93,24 @@ case "${1:-}" in
   *)         STAGES=("$@") ;;
 esac
 
-# where each stage writes, so a finished one can be recognised
+# where each stage writes, so a finished one can be recognised.  RUNS_DIR (optional) moves
+# them all out of this folder -- run_demos.py, collect.py and figs.py read the same variable,
+# so the finished / live / retire checks below look where the stages actually write.  Worth
+# doing when this folder is synced: Dropbox files "conflicted copies" of a fast search's
+# rewrites by the hundred, and once put a stale checkpoint back under the real name.
+if [[ -n "${RUNS_DIR:-}" ]]; then
+  RUNS_DIR="${RUNS_DIR/#\~/$HOME}"
+  export RUNS_DIR
+  mkdir -p "$RUNS_DIR"
+fi
+ROOT="${RUNS_DIR:+${RUNS_DIR%/}/}"
 outdir() {
   case "$1" in
-    A2) echo A2_betapic ;;         B2) echo B2_betapic_groups ;;
-    C)  echo C_hd95086 ;;          D)  echo D_hip65426_pyklip ;;
-    DK) echo D_hip65426_klip ;;    H2K) echo H2_bench_jwst_klip ;;
-    E2) echo E2_bench ;;           F2) echo F2_bench_highdim ;;
-    G2) echo G2_bench_sphere ;;    H2) echo H2_bench_jwst_pyklip ;;
+    A2) echo "${ROOT}A2_betapic" ;;         B2) echo "${ROOT}B2_betapic_groups" ;;
+    C)  echo "${ROOT}C_hd95086" ;;          D)  echo "${ROOT}D_hip65426_pyklip" ;;
+    DK) echo "${ROOT}D_hip65426_klip" ;;    H2K) echo "${ROOT}H2_bench_jwst_klip" ;;
+    E2) echo "${ROOT}E2_bench" ;;           F2) echo "${ROOT}F2_bench_highdim" ;;
+    G2) echo "${ROOT}G2_bench_sphere" ;;    H2) echo "${ROOT}H2_bench_jwst_pyklip" ;;
     I2) echo "$RXJ_OUT" ;;
     *)  echo "" ;;
   esac

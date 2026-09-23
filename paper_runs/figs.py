@@ -31,6 +31,7 @@ from matplotlib.patches import Circle
 
 import collect as C
 import run_demos as R
+from klip_tpe.bench import read_records
 from klip_tpe.metrics import source_xy, star_center
 from klip_tpe.reducer import ReductionRequest
 
@@ -202,9 +203,10 @@ def fig_trace(s):
     for ax, t in zip(axes, tg):
         w = PRIMARY[t]
         run = os.path.join(OUT, s[w]["run"])
-        recs = [json.loads(l) for l in open(os.path.join(run, "results.jsonl"))]
         ia = s[w]["annuli"][0]["annulus"]
-        rec = [r for r in recs if r.get("annulus") == ia]
+        # every calibration segment, as before, but each evaluation once: a resume replays
+        # the evaluations after its checkpoint and re-logs them (bench.read_records)
+        rec = read_records(run, annulus=ia, last_segment=False)
         y = np.array([np.nan if r.get("score") is None else r["score"] for r in rec])
         warm = np.array([str(r.get("phase", "")).startswith(("warm", "seed", "explore")) for r in rec])
         n = np.arange(1, y.size + 1)
@@ -278,7 +280,7 @@ def fig_partition(s, key=None):
         return
     r = s[key]
     run = os.path.join(OUT, r["run"])
-    recs = [json.loads(l) for l in open(os.path.join(run, "results.jsonl"))]
+    recs = read_records(run, last_segment=False)          # each evaluation once (see fig_trace)
     parts = r["partitions"]
     sel = [set(str(x) for x in (rc.get("meta", {}).get("selected") or parts)) for rc in recs]
     y = np.array([np.nan if rc.get("score") is None else rc["score"] for rc in recs])

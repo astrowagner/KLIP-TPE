@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased — 2026-09-23 (runs that survive a synced folder)
+
+`paper_runs/` and the MIRI run directories live in Dropbox, and a fast search outran it.
+Twenty minutes into H2K (~1 s per evaluation) its slot held 115 conflicted copies of
+`heartbeat.json` and 49 of `checkpoint.json` (MIRI klip at ~3 s: 53; MIRI pyKLIP at ~30 s:
+none), and Dropbox had put its own older, online-only version back under the name
+`checkpoint.json` while the runner's newest save (800 evaluations, annulus done,
+param_verify recorded) sat in `checkpoint (… conflicted copy … 48).json`.  Every
+`results.jsonl` was intact; the exposure was a resume, which trusted the name.
+
+- **Resume takes the checkpoint furthest along.**  `klip_tpe.runner.load_checkpoint` reads
+  `checkpoint.json` and every sync-client copy beside it (`checkpoint (… conflicted copy
+  …).json`, `checkpoint 2.json`, `checkpoint (1).json`, `checkpoint.sync-conflict-…`) and
+  takes the one with the most evaluations (then annuli finished, hooks run, wall time; ties to
+  the real name), saying so when it is a copy.  `Runner.resume`, `Runner.extend`, every
+  auto-resume, and `bench`'s "resumable" all use it.  A test replays the H2K swap end to end:
+  with the old loader it resumes from the stale save and logs evaluations twice.
+- **Routine checkpoints are written at most every 10 s** (`Runner.CHECKPOINT_EVERY_S`).  The
+  save after each evaluation is still taken every time — serialised on the spot, so it is
+  exactly the state between two evaluations — but held when the last write was under 10 s
+  ago, and flushed on any exit: Ctrl-C and exceptions included, so a resume is as exact as
+  before (tested against an uninterrupted run: same evaluations, same scores).  Only a hard
+  kill loses the held save, and then a resume replays at most 10 s from the same RNG state,
+  whose re-logged records every reader drops (`figs.py` now reads through
+  `bench.read_records` like the rest).  Phase saves stay immediate: annulus ends, hooks,
+  segment starts, and validation candidates and trials, whose pickles pair with the RNG state.
+- **The heartbeat's per-step stages wait for the next stamp.**  `Heartbeat.stage(...,
+  write=False)` for the per-evaluation and per-validation-trial stages: live at once for the
+  stall check, on disk with the thread's next 5 s stamp.  Phase changes still write at once.
+- **`RUNS_DIR` moves the paper runs out of the synced folder.**  `run_demos.OUT` (and with it
+  `collect.py`'s summary and `figs.py`'s figures), `rerun_paper.sh`'s finished / live /
+  retire checks and `long_run.sh`'s progress ticker all follow it; `~` is expanded, I2 keeps
+  `RXJ_OUT`.  Default unchanged.  `run_miri.py --out` already takes any path.
+- Safe to land under running searches: they keep the modules they started with.  The one
+  late import, `bench` from `plots.load_run`, falls back to the old checkpoint test when the
+  process's `runner` predates `checkpoint_candidates`.
+
 ## Unreleased — 2026-09-23 (a head-to-head needs one contrast, and the run's own engine)
 
 - **`library_ablation.py --versus` paired two runs' injections by position only.**  Each run

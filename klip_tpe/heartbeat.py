@@ -106,14 +106,22 @@ class Heartbeat:
             self._check_stall()
 
     # -- what the run is doing ---------------------------------------------------------
-    def stage(self, stage: str, **kw: Any) -> None:
-        """Name the current stage and restart its clock (and so its stall warning)."""
+    def stage(self, stage: str, write: bool = True, **kw: Any) -> None:
+        """Name the current stage and restart its clock (and so its stall warning).
+
+        ``write=False`` is for stages that change every step -- one per evaluation, one per
+        validation trial: the new stage is live at once for the stall check, and reaches the
+        file with the thread's next stamp, at most ``period`` later.  Written immediately,
+        a fast run (~1 s evaluations) rewrote this file faster than a synced folder uploads
+        it, and Dropbox answered with a "conflicted copy" every few seconds (115 in 20 min
+        on H2K, 2026-09-23).  Changes of phase still write at once."""
         with self._lock:
             self._state["stage"] = str(stage)
             self._state["stage_t0"] = time.time()
             self._state.update(kw)
             self._warned = 0.0
-        self.write()
+        if write:
+            self.write()
 
     def update(self, **kw: Any) -> None:
         """Revise the details without restarting the stage clock."""

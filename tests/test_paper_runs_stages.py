@@ -82,8 +82,8 @@ def test_the_new_benchmark_stages_are_dispatchable(demos):
 def test_rerun_paper_runs_and_recognises_the_new_stages():
     sh = _text("rerun_paper.sh")
     assert "BENCH=(E2 F2 G2 H2)" in sh
-    assert "G2) echo G2_bench_sphere" in sh          # so a finished stage is skipped
-    assert "H2) echo H2_bench_jwst" in sh
+    assert _outdir("G2") == "G2_bench_sphere"         # so a finished stage is skipped
+    assert _outdir("H2") == "H2_bench_jwst_pyklip"
 
 
 def test_collect_and_figs_know_where_the_new_benches_land():
@@ -97,16 +97,58 @@ def test_collect_and_figs_know_where_the_new_benches_land():
     assert "G2_bench_sphere" in fig and "H2_bench_jwst_pyklip" in fig
 
 
-def test_the_nircam_stages_have_both_engines_in_their_own_directories(demos):
+def _outdir(stage, runs_dir=None, home=None):
+    """rerun_paper.sh's own outdir(), run by bash: its RUNS_DIR block and the function."""
+    import subprocess
+    sh = _text("rerun_paper.sh")
+    start = sh.index('if [[ -n "${RUNS_DIR:-}" ]]; then')
+    end = sh.index("\n}\n", sh.index("outdir() {", start)) + 3
+    env = {k: v for k, v in os.environ.items() if k != "RUNS_DIR"}
+    if runs_dir is not None:
+        env["RUNS_DIR"] = runs_dir
+    if home is not None:
+        env["HOME"] = home
+    out = subprocess.run(["bash", "-c", sh[start:end] + f"\nRXJ_OUT=/x/rxj; outdir {stage}"],
+                         env=env, capture_output=True, text=True, check=True)
+    return out.stdout.strip()
+
+
+def test_the_nircam_stages_have_both_engines_in_their_own_directories(demos, tmp_path):
     """D / H2 on pyKLIP and DK / H2K on the built-in engine, each into a directory nothing
-    older can be resumed from."""
+    older can be resumed from -- here, or under $RUNS_DIR."""
     dirs = demos.ENGINE_DIRS
     assert dirs["D"] == {"pyklip": "D_hip65426_pyklip", "klip": "D_hip65426_klip"}
     assert dirs["H2"] == {"pyklip": "H2_bench_jwst_pyklip", "klip": "H2_bench_jwst_klip"}
-    sh = " ".join(_text("rerun_paper.sh").split())
     for stage, d in (("D", "D_hip65426_pyklip"), ("DK", "D_hip65426_klip"),
                      ("H2", "H2_bench_jwst_pyklip"), ("H2K", "H2_bench_jwst_klip")):
-        assert f"{stage}) echo {d} ;;" in sh, stage
+        assert _outdir(stage) == d, stage
+        assert _outdir(stage, str(tmp_path / "runs") + "/") == str(tmp_path / "runs" / d), stage
+
+
+def test_runs_dir_moves_every_stage_directory_and_the_scripts_follow(tmp_path, monkeypatch):
+    """A synced folder cannot keep up with a fast search (Dropbox filed hundreds of
+    conflicted copies of H2K's checkpoint and heartbeat, and once put a stale checkpoint back
+    under the real name), so the stage directories can live elsewhere: $RUNS_DIR moves
+    run_demos.OUT -- and with it collect.py / figs.py, which read R.OUT -- and the shell
+    drivers' finished / live / retire checks look in the same place.  ~ is expanded on both
+    sides, and I2 keeps its own RXJ_OUT."""
+    def load():
+        spec = importlib.util.spec_from_file_location("paper_run_demos_runsdir",
+                                                      os.path.join(PAPER_RUNS, "run_demos.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("RUNS_DIR", "~/klip_tpe_runs/paper")
+    want = str(tmp_path / "home" / "klip_tpe_runs" / "paper")
+    assert load().OUT == want and os.path.isdir(want)
+    assert _outdir("H2K", "~/klip_tpe_runs/paper", home=str(tmp_path / "home")) == want + "/H2_bench_jwst_klip"
+    assert _outdir("I2", "~/klip_tpe_runs/paper") == "/x/rxj"
+    monkeypatch.delenv("RUNS_DIR")
+    assert load().OUT == os.path.abspath(PAPER_RUNS)
+    for script in ("collect.py", "figs.py"):
+        assert "OUT = R.OUT" in _text(script), script
+    assert 'os.environ.get("RUNS_DIR"' in _text("long_run.sh")        # its progress ticker too
 
 
 def test_the_bench_figure_orders_its_rows_by_dimension():

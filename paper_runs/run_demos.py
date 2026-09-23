@@ -16,7 +16,10 @@
 evaluations (``BENCH_NITER`` for the benchmark stages, ``ITER_SCALE`` to multiply each
 stage's own budget); see :func:`budget`.  ``long_run.sh`` drives all of them at once.
 
-Everything lands in ``/home/claude/paper_runs/<name>/``.
+Everything lands in ``<this folder>/<name>/``, or ``$RUNS_DIR/<name>/`` when set --
+``RUNS_DIR=~/klip_tpe_runs/paper python run_demos.py H2K`` -- which is the place for it when
+this folder is synced (Dropbox): see :data:`OUT`.  collect.py, figs.py, rerun_paper.sh and
+long_run.sh follow the same variable.
 """
 import os
 import sys
@@ -29,7 +32,14 @@ from klip_tpe import (CalibrationConfig, Param, RunConfig, Runner, ValidationCon
 from klip_tpe.instruments import generic
 from klip_tpe.reducer import Dataset
 
-OUT = os.path.dirname(os.path.abspath(__file__))
+#: Where every stage directory goes -- and so collect.py's summary.json and figs.py's
+#: figures, which read this same OUT: this folder, or ``$RUNS_DIR`` when it is set
+#: (rerun_paper.sh and long_run.sh read it too).  Point it outside a synced folder:
+#: Dropbox cannot keep up with a fast search's rewrites and files "conflicted copies" of
+#: them by the hundred, and once handed a stale checkpoint the real name (2026-09-23).
+OUT = os.path.abspath(os.path.expanduser(os.environ.get("RUNS_DIR", "").strip()
+                                         or os.path.dirname(os.path.abspath(__file__))))
+os.makedirs(OUT, exist_ok=True)
 BP = (0.452, 211.9)          # beta Pic b
 
 #: beta Pic's debris disk, as azimuthal wedges (centre PA, half-width) in degrees.

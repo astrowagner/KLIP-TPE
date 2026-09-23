@@ -28,7 +28,7 @@ Layout under ``out_dir``::
 
 Every run writes its own ``run_dir`` (results.jsonl, checkpoint.json, ...); a slot is
 *finished* when ``final_results.json`` exists and *resumable* when only
-``checkpoint.json`` does.
+``checkpoint.json`` does (or a file-sync client's copy of it: :func:`klip_tpe.runner.checkpoint_candidates`).
 """
 from __future__ import annotations
 
@@ -41,6 +41,17 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 import numpy as np
 
 from .runner import Runner
+
+try:
+    from .runner import checkpoint_candidates
+except ImportError:
+    # A process started before runner.py grew this (2026-09-23) keeps its old runner module
+    # in memory, and can still import THIS file for the first time late in its run
+    # (plots.load_run imports bench lazily).  Its old runner reads only checkpoint.json, so
+    # the old test is the consistent one there.
+    def checkpoint_candidates(run_dir: str) -> List[str]:
+        p = os.path.join(run_dir, "checkpoint.json")
+        return [p] if os.path.exists(p) else []
 
 __all__ = ["run_benchmark", "bench_convergence", "bench_status", "bench_restart", "summarize_bench",
            "read_summary", "read_records", "running_best", "slot_dir", "new_bench_tag",
@@ -229,7 +240,7 @@ def bench_status(out_dir: str, bench_tag: Optional[str] = None, modes: Sequence[
             st = "missing"
             if os.path.exists(os.path.join(d, "final_results.json")):
                 st = "finished"
-            elif os.path.exists(os.path.join(d, "checkpoint.json")):
+            elif checkpoint_candidates(d):           # checkpoint.json, or a synced copy of it
                 st = "resumable"
             if st != "missing" and n_iter is not None:
                 cfg = _run_config(d) or {}
@@ -244,7 +255,7 @@ def bench_status(out_dir: str, bench_tag: Optional[str] = None, modes: Sequence[
 def _run_slot(make_runner: MakeRunner, mode: str, seed: int, run_dir: str, bench_tag: str,
               n_iter: int, n_init: Optional[int], log) -> Runner:
     r = make_runner(mode, seed, run_dir)
-    if os.path.exists(os.path.join(run_dir, "checkpoint.json")):
+    if checkpoint_candidates(run_dir):
         # resume: config comes from the checkpoint by design; we only reuse the data objects
         r = Runner.resume(run_dir, r.reducer, r.objective, r.sampler, project=r.space.project,
                           throughput_fn=r.throughput_fn, log=r.log)

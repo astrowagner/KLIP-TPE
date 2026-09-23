@@ -269,8 +269,8 @@ def test_crash_resume_reproduces_uninterrupted_run(tmp_path):
     r = Runner(red, space, obj, samp, cfg, part_dir, log=QUIET)
     orig = r.checkpoint
 
-    def cp(final_annulus=False):
-        orig(final_annulus)
+    def cp(final_annulus=False, **kw):          # routine=... is held, then flushed
+        orig(final_annulus, **kw)
         if r.ia == 0 and r.history is not None and len(r.history) == 9:
             raise Boom
     r.checkpoint = cp
@@ -286,8 +286,8 @@ def test_crash_resume_reproduces_uninterrupted_run(tmp_path):
     assert "resumed" in logs[0] and r2.ia == 0 and len(r2.history) == 9 and r2._resumed
     orig2 = r2.checkpoint
 
-    def cp2(final_annulus=False):
-        orig2(final_annulus)
+    def cp2(final_annulus=False, **kw):          # routine=... is held, then flushed
+        orig2(final_annulus, **kw)
         if r2.ia == 1 and r2.history is not None and len(r2.history) == 3:
             raise Boom
     r2.checkpoint = cp2

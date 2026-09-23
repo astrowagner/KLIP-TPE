@@ -1,5 +1,6 @@
 """The run protocol: per annulus **calibrate -> search -> validate -> products**,
-with a checkpoint after every evaluation and crash-resume as a first-class
+with a checkpoint after every evaluation (written at most every
+``Runner.CHECKPOINT_EVERY_S``) and crash-resume as a first-class
 feature (``config lives in the checkpoint``: ``Runner.resume`` takes the run
 directory and the un-serialisable objects -- reducer, objective, sampler -- and
 nothing else, so a resumed run can never silently mix configurations).
@@ -9,7 +10,8 @@ Outputs in ``run_dir``::
     run_setup.txt / run_setup.json   full configuration, search space, defaults
     results.txt                      one row per evaluation (IDL-compatible layout)
     results.jsonl                    one JSON record per evaluation (positions, per-source S/N ...)
-    checkpoint.json                  search state (atomic; rewritten every evaluation)
+    checkpoint.json                  search state (atomic; taken every evaluation, written at most every
+                                     10 s and on any exit; resume also reads a sync client's copies of it)
     annulusNN/                       calibration log, validation table, winner record, FITS products,
                                      evalNNNN_setup.txt / calibNNNN_setup.txt / valid_candNN_setup.txt /
                                      final_setup.txt, verify_report.txt, verify_curve.txt, param_verify/
@@ -31,6 +33,7 @@ Protocol extensions over the plain loop (see the IDL spec, notes A/C):
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
 import pickle
@@ -52,7 +55,8 @@ from .positions import PositionSampler, n_sources_rule
 from .reducer import EvalImages, PartitionedReducer, Reducer, ReductionRequest
 from .space import Config, SearchSpace
 
-__all__ = ["RunConfig", "CalibrationConfig", "ValidationConfig", "EvalRecord", "AnnulusResult", "Runner", "RunCallback"]
+__all__ = ["RunConfig", "CalibrationConfig", "ValidationConfig", "EvalRecord", "AnnulusResult", "Runner", "RunCallback",
+           "load_checkpoint", "checkpoint_candidates"]
 
 SCAN_MODES = ("scan", "scan_rescore")
 
@@ -382,6 +386,80 @@ def _atomic_write(path: str, text: str) -> None:
     os.replace(tmp, path)
 
 
+def checkpoint_candidates(run_dir: str) -> List[str]:
+    """``checkpoint.json`` and every copy of it a file-sync client has made alongside --
+    ``checkpoint (<name>'s conflicted copy <date> N).json`` (Dropbox), ``checkpoint 2.json``
+    (macOS, iCloud), ``checkpoint (1).json`` (Google Drive), ``checkpoint.sync-conflict-...``
+    (Syncthing).  ``checkpoint.json`` first when it exists."""
+    main = os.path.join(run_dir, "checkpoint.json")
+    others = sorted(p for p in glob.glob(os.path.join(run_dir, "checkpoint*.json")) if p != main)
+    return ([main] if os.path.exists(main) else []) + others
+
+
+def _checkpoint_progress(st: Dict[str, Any]) -> Tuple[int, int, int, float]:
+    """How far a checkpoint had got: evaluations recorded, then annuli finished, then
+    post-annulus hooks run, then wall time -- each only ever grows within a run."""
+    hooks = st.get("hooks_done") or {}
+    n_hooks = sum(len(v) for v in hooks.values()) if isinstance(hooks, dict) else 0
+    return (int(st.get("records_count") or 0), int(st.get("ia") or 0) + (1 if st.get("annulus_done") else 0),
+            n_hooks, float(st.get("wall_s") or 0.0))
+
+
+def load_checkpoint(run_dir: str, log: Optional[Callable[[str], None]] = None
+                    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """The most advanced readable checkpoint of ``run_dir``: ``(state, path)``, or
+    ``(None, None)`` when there is none.
+
+    Not simply ``checkpoint.json``.  A synced folder can hand the real name to a stale
+    version: on 2026-09-23 Dropbox moved H2K's newest save (800 evaluations, annulus done,
+    param_verify recorded) into ``checkpoint (... conflicted copy ... 48).json`` and put an
+    older, online-only version back as ``checkpoint.json``.  A resume that trusted the name
+    would have gone back in time; one that could not read the placeholder would have started
+    the run over.  So every copy is read and the one furthest along wins -- which is also
+    right if a stale resume had happened in between, since its evaluations replay the same
+    configurations from the same RNG state.  Ties go to ``checkpoint.json``.
+    """
+    say = log or (lambda s: None)
+    main = os.path.join(run_dir, "checkpoint.json")
+    best, bad, main_key = None, [], None
+    for p in checkpoint_candidates(run_dir):
+        try:
+            with open(p) as f:
+                st = json.load(f)
+            if not (isinstance(st, dict) and all(k in st for k in ("config", "space", "rng_state", "ia"))):
+                raise ValueError("not a klip-tpe checkpoint")
+        except Exception as exc:
+            bad.append((os.path.basename(p), exc))
+            continue
+        key = _checkpoint_progress(st)
+        if p == main:
+            main_key = key
+        if best is None or key > best[0]:
+            best = (key, st, p)
+    for name, exc in bad:
+        say(f"  checkpoint: {name} unreadable ({exc!r}) -- skipped")
+    if best is None:
+        return None, None
+    if best[2] != main:
+        if main_key is not None:
+            was = f"at {main_key[0]} evaluations"
+        else:
+            was = "unreadable" if os.path.exists(main) else "missing"
+        say(f"  checkpoint: resuming from {os.path.basename(best[2])} ({best[0][0]} evaluations) -- "
+            f"checkpoint.json is {was}.  A file-sync client (Dropbox?) moved the newest save aside.")
+    res = os.path.join(run_dir, "results.jsonl")
+    if os.path.exists(res):
+        try:
+            with open(res) as f:
+                n_lines = sum(1 for _ in f)
+            if n_lines < best[0][0]:
+                say(f"  checkpoint: it counts {best[0][0]} evaluations but results.jsonl holds {n_lines} lines -- "
+                    f"that file may have been replaced by a sync client; the search resumes from the checkpoint")
+        except Exception:
+            pass
+    return best[1], best[2]
+
+
 def _write_fits(path: str, data: np.ndarray, header: Optional[Dict[str, Any]] = None,
                 history: Sequence[str] = ()) -> None:
     """FITS writer with the provenance header of :func:`klip_tpe.stitch.fits_header`."""
@@ -502,6 +580,8 @@ class Runner:
         self._pv_results: Dict[int, Dict[str, Any]] = {}       # param_verify outputs per annulus
         self._hooks_done: Dict[int, List[str]] = {}             # post-annulus hooks completed (checkpointed)
         self._last_final = False
+        self._ckpt_written = 0.0                                # when checkpoint.json was last written
+        self._ckpt_pending: Optional[str] = None                # a routine checkpoint held back (see checkpoint)
         #: proof of life, stamped from its own thread: the run's own files advance once per
         #: completed evaluation, which on a loaded machine cannot tell a slow reduction from
         #: a dead process.  See :mod:`klip_tpe.heartbeat`.
@@ -1476,7 +1556,7 @@ class Runner:
                          + f" raw={rec.raw_score if rec.raw_score is None else round(rec.raw_score,3)}"
                          f" best={bs:.3f}@{bi+1}  contrast={self.contrast:.2e}  reduce {rec.wall_s:.0f}s / loop {loop_s:.0f}s"
                          f"  ({elapsed/3600:.2f} h)")
-                self.checkpoint()
+                self.checkpoint(routine=True)
                 if c.stitch_every and c.stitch_every > 0 and (i + 1) % int(c.stitch_every) == 0:
                     self._guard("running stitch", self._running_stitch, ia)
                 t_loop = time.time()
@@ -1532,7 +1612,7 @@ class Runner:
                  and np.isfinite(f["wall"]) and f["wall"] > 0]
             med = float(np.median(w)) if w else None
             self.hb.stall_after(max(self.STALL_FLOOR, self.STALL_FACTOR * med) if med else None)
-            self.hb.stage(f"annulus {ia + 1} eval {ev}/{n_iter} ({phase})",
+            self.hb.stage(f"annulus {ia + 1} eval {ev}/{n_iter} ({phase})", write=False,
                           annulus=ia, eval=ev, n_eval=self.records_count)
         except Exception:
             pass
@@ -1546,7 +1626,7 @@ class Runner:
                 on_draw=lambda j, nd, r, i_, c_: self._on_draw(ia, j, nd, r, i_, c_))
             self._append(rec)
             self._set_best_images(rec, inj, clean)
-            self.checkpoint()
+            self.checkpoint()          # not routine: a new segment (annulus start, re-calibration)
             self._save_eval_images(rec, inj, clean)
             self._emit("on_eval", rec, inj, clean, True)
 
@@ -1602,7 +1682,7 @@ class Runner:
                 rlo, rhi = self._band(ia, cfg)
                 src = self.sampler.sample(self._nsrc(ia), rlo, rhi, self.rng, self.contrast)
                 self.hb.stage(f"annulus {ia + 1} validation: candidate {ci + 1}/{len(cands)} "
-                              f"trial {t + 1}/{vc.n_valid}", annulus=ia)
+                              f"trial {t + 1}/{vc.n_valid}", write=False, annulus=ia)
                 try:
                     inj = self._reduce(cfg, src, tag=f"a{ia+1}_val{ci}_t{t}")
                     r = self.objective.score_raw(inj.image, src, None if clean is None else clean.image,
@@ -1799,7 +1879,7 @@ class Runner:
                              f"score={rec.score if rec.score is None else round(rec.score,3)}"
                              f" raw={rec.raw_score if rec.raw_score is None else round(rec.raw_score,3)}"
                              f" best={nbs:.3f}@{nb+1}  (prior best eval {bi+1} re-scored)  {rec.wall_s:.0f}s")
-                    self.checkpoint()
+                    self.checkpoint(routine=True)
                     self._save_eval_images(rec, inj, clean)
                     self._emit("on_eval", rec, inj, clean, True)
                 self._search_annulus(ia, len(self.history))
@@ -2507,8 +2587,10 @@ class Runner:
         try:
             out = self._run()
         except BaseException:
+            self.flush_checkpoint()    # the last FINISHED evaluation, not the interrupted one
             self.hb.stop()             # keep the stage it died in: that is the diagnosis
             raise
+        self.flush_checkpoint()
         self.hb.stop("finished")
         return out
 
@@ -2723,7 +2805,28 @@ class Runner:
         return out
 
     # ---------------------------------------------------------------- checkpoint
-    def checkpoint(self, final_annulus: bool = False) -> None:
+    #: Seconds between ROUTINE checkpoints (the save after each evaluation).  Rewriting the
+    #: whole state after every evaluation of a fast run outran Dropbox: H2K (~1 s per
+    #: evaluation, 2026-09-23) collected 49 "conflicted copies" of a 200 kB checkpoint.json in
+    #: 20 minutes, and Dropbox once put its own older version back under the real name.
+    CHECKPOINT_EVERY_S = 10.0
+
+    def checkpoint(self, final_annulus: bool = False, routine: bool = False) -> None:
+        """Save the search state to ``checkpoint.json``.
+
+        ``routine`` marks the save after each evaluation.  It is taken every time --
+        serialised on the spot, so it is exactly the state between two evaluations -- but
+        written at most every :attr:`CHECKPOINT_EVERY_S` seconds; one still held when the run
+        stops, by Ctrl-C or an exception as much as by finishing, is written then
+        (:meth:`flush_checkpoint`), so a resume is as exact as it always was.  Only a hard
+        kill loses the held one, and then a resume replays those few seconds of evaluations
+        from the same RNG state -- the same configurations and draws -- while the readers of
+        ``results.jsonl`` keep the first record of each index.
+
+        Every other save is written at once: the end of an annulus, each post-annulus hook
+        (they are how a resume knows which hooks have run), and each validation candidate
+        and trial, whose pickles pair with the RNG state saved here.
+        """
         self._last_final = bool(final_annulus)
         st = {
             "version": self.CKPT_VERSION, "klip_tpe_version": __version__,
@@ -2738,7 +2841,30 @@ class Runner:
             "records_count": self.records_count,
             "hooks_done": {str(k): list(v) for k, v in self._hooks_done.items()},
         }
-        _atomic_write(os.path.join(self.run_dir, "checkpoint.json"), json.dumps(st, default=_json_default))
+        text = json.dumps(st, default=_json_default)
+        if routine and time.time() - getattr(self, "_ckpt_written", 0.0) < self.CHECKPOINT_EVERY_S:
+            self._ckpt_pending = text
+            return
+        self._write_checkpoint(text)
+
+    def _write_checkpoint(self, text: str) -> None:
+        _atomic_write(os.path.join(self.run_dir, "checkpoint.json"), text)
+        self._ckpt_written = time.time()
+        self._ckpt_pending = None
+
+    def flush_checkpoint(self) -> None:
+        """Write the routine checkpoint the throttle is holding, if any.  Never raises: it
+        runs on the way out of an interrupted run."""
+        text = getattr(self, "_ckpt_pending", None)
+        if text is None:
+            return
+        try:
+            self._write_checkpoint(text)
+        except Exception as exc:
+            try:
+                self.log(f"  (last checkpoint not written: {exc!r})")
+            except Exception:
+                pass
 
     def _load_history_jsonl(self, ia: int) -> Tuple[Optional[History], Optional[float]]:
         """Rebuild the search history of annulus ``ia`` from ``results.jsonl`` (the last
@@ -2863,14 +2989,11 @@ class Runner:
         """
         if self._resumed or self.resume_mode == "never":
             return
-        ck = os.path.join(self.run_dir, "checkpoint.json")
-        if not os.path.exists(ck):
+        if not checkpoint_candidates(self.run_dir):
             return
-        try:
-            with open(ck) as f:
-                st = json.load(f)
-        except Exception as exc:                       # a truncated checkpoint is not fatal
-            self.log(f"  checkpoint in {self.run_dir} unreadable ({exc!r}); starting fresh")
+        st, _ = load_checkpoint(self.run_dir, log=self.log)
+        if st is None:                                 # a truncated checkpoint is not fatal
+            self.log(f"  no readable checkpoint in {self.run_dir}; starting fresh")
             return
         self._apply_checkpoint(st, project=getattr(self.space, "project", None))
 
@@ -2881,9 +3004,11 @@ class Runner:
         space, contrast, RNG state and history come from the checkpoint -- no other
         keywords are accepted, by design.  Histories of already-completed annuli are
         reconstructed from ``results.jsonl`` on demand (:meth:`annulus_history`), so the
-        final stitch / verification of a resumed multi-annulus run is complete."""
-        with open(os.path.join(run_dir, "checkpoint.json")) as f:
-            st = json.load(f)
+        final stitch / verification of a resumed multi-annulus run is complete.  The
+        checkpoint is the furthest-along copy (:func:`load_checkpoint`)."""
+        st, _ = load_checkpoint(run_dir, log=log)
+        if st is None:
+            raise FileNotFoundError(f"no readable checkpoint in {run_dir} (checkpoint.json or a synced copy of it)")
         cfg = RunConfig.from_dict(st["config"])
         space = SearchSpace.from_dict(st["space"], project=project)
         r = cls(reducer, space, objective, sampler, cfg, run_dir, throughput_fn=throughput_fn, log=log,
@@ -2910,8 +3035,7 @@ class Runner:
                        log=log, callbacks=callbacks)
         if r.cfg.opt_width:
             raise ValueError("extend is not supported for opt_width runs")
-        with open(os.path.join(run_dir, "checkpoint.json")) as f:
-            st = json.load(f)
+        st, _ = load_checkpoint(run_dir)               # the copy resume() just chose
         ck_ia = int(st["ia"])
         ck_hist = None if st.get("history") is None else History.from_dict(st["history"])
         nann = max(r.cfg.nann, len(new_n_iter))
@@ -2920,40 +3044,44 @@ class Runner:
         forced = list(r.cfg.calibration.forced or [])
         forced += [0.0] * (r.cfg.nann - len(forced))
         r._extend_mode = True
-        for ia in range(r.cfg.nann):
-            tgt = targets[ia]
-            if tgt <= 0:
-                log(f"----- annulus {ia+1}: left untouched (extend target <= 0) -----")
-                continue
-            if ia == ck_ia and ck_hist is not None:
-                hist, contrast = ck_hist, float(st["contrast"])
-            else:
-                hist, contrast = r._load_history_jsonl(ia)
-            if hist is None or len(hist) == 0:
-                log(f"----- annulus {ia+1}: no prior evaluations -- running it fresh to {tgt} -----")
-                n_iter_list[ia] = tgt
+        try:
+            for ia in range(r.cfg.nann):
+                tgt = targets[ia]
+                if tgt <= 0:
+                    log(f"----- annulus {ia+1}: left untouched (extend target <= 0) -----")
+                    continue
+                if ia == ck_ia and ck_hist is not None:
+                    hist, contrast = ck_hist, float(st["contrast"])
+                else:
+                    hist, contrast = r._load_history_jsonl(ia)
+                if hist is None or len(hist) == 0:
+                    log(f"----- annulus {ia+1}: no prior evaluations -- running it fresh to {tgt} -----")
+                    n_iter_list[ia] = tgt
+                    r.cfg.n_iter = list(n_iter_list)
+                    r._extend_mode = False
+                    r.run_annulus(ia)
+                    r._extend_mode = True
+                    continue
+                res_old = r.results[ia] if ia < len(r.results) else None
+                if res_old is not None and res_old.contrast > 0:
+                    contrast = float(res_old.contrast)
+                if contrast is None or contrast <= 0:
+                    contrast = float(r.cfg.contrast0)
+                forced[ia] = float(contrast)
+                r.cfg.calibration.forced = list(forced)
+                kdef = None
+                if res_old is not None:
+                    kdef = res_old.winner_config.get("params", {}).get("k_klip")
+                if not kdef and isinstance(st.get("k_default"), (int, float)) and ia == ck_ia:
+                    kdef = st["k_default"]
+                nprev = len(hist)
+                mode = "validate" if tgt <= nprev else "continue"
+                n_iter_list[ia] = max(nprev, tgt)
                 r.cfg.n_iter = list(n_iter_list)
-                r._extend_mode = False
-                r.run_annulus(ia)
-                r._extend_mode = True
-                continue
-            res_old = r.results[ia] if ia < len(r.results) else None
-            if res_old is not None and res_old.contrast > 0:
-                contrast = float(res_old.contrast)
-            if contrast is None or contrast <= 0:
-                contrast = float(r.cfg.contrast0)
-            forced[ia] = float(contrast)
-            r.cfg.calibration.forced = list(forced)
-            kdef = None
-            if res_old is not None:
-                kdef = res_old.winner_config.get("params", {}).get("k_klip")
-            if not kdef and isinstance(st.get("k_default"), (int, float)) and ia == ck_ia:
-                kdef = st["k_default"]
-            nprev = len(hist)
-            mode = "validate" if tgt <= nprev else "continue"
-            n_iter_list[ia] = max(nprev, tgt)
-            r.cfg.n_iter = list(n_iter_list)
-            r.run_annulus(ia, extend={"mode": mode, "history": hist, "contrast": contrast,
-                                      "k_default": kdef or r.cfg.defaults.get("k_klip", 10)})
-        r.finish()
+                r.run_annulus(ia, extend={"mode": mode, "history": hist, "contrast": contrast,
+                                          "k_default": kdef or r.cfg.defaults.get("k_klip", 10)})
+            r.finish()
+        except BaseException:
+            r.flush_checkpoint()   # a held routine save: the last finished evaluation
+            raise
         return r

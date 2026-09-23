@@ -23,6 +23,7 @@
 #   ITER_SCALE=2 ./long_run.sh                double each stage's own budget instead
 #   DRY=1 ./long_run.sh                       print the plan and the projection, run nothing
 #   SHOW=0 ./long_run.sh                      headless (panels still written to steps/)
+#   RUNS_DIR=~/klip_tpe_runs/paper ./long_run.sh   stage directories there (outside a synced folder)
 #
 # The budgets reach the stages through $NITER / $BENCH_NITER / $ITER_SCALE, which
 # run_demos.budget() applies; n_init follows at each annulus' own warm-up fraction, so a
@@ -118,8 +119,9 @@ progress() {
   while sleep 600; do
     python3 - <<'PY' >> "$LOG" 2>/dev/null
 import glob, json, os, time
+root = os.path.expanduser(os.environ.get("RUNS_DIR", "").strip() or ".")
 newest, best = None, 0.0
-for p in glob.glob("*/heartbeat.json") + glob.glob("*/*/heartbeat.json"):
+for p in glob.glob(os.path.join(root, "*", "heartbeat.json")) + glob.glob(os.path.join(root, "*", "*", "heartbeat.json")):
     try:
         t = float(json.load(open(p)).get("t", 0))
     except Exception:

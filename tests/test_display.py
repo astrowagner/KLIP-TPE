@@ -314,8 +314,8 @@ def test_resume_mid_annulus_restores_display_history(tmp_path):
     class Boom(Exception):
         pass
 
-    def cp(final_annulus=False):
-        orig(final_annulus)
+    def cp(final_annulus=False, **kw):          # routine=... is held, then flushed
+        orig(final_annulus, **kw)
         if r.history is not None and len(r.history) == 3:
             raise Boom
     r.checkpoint = cp
@@ -356,8 +356,8 @@ def test_resume_restores_best_images(tmp_path):
     class Boom(Exception):
         pass
 
-    def cp(final_annulus=False):
-        orig(final_annulus)
+    def cp(final_annulus=False, **kw):          # routine=... is held, then flushed
+        orig(final_annulus, **kw)
         if r.history is not None and len(r.history) == 4:
             raise Boom
     r.checkpoint = cp

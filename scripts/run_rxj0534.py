@@ -400,8 +400,8 @@ def main(argv=None):
 
     # A check-pointed run in --out is continued automatically (Runner.resume_mode); --fresh
     # starts over, --resume insists there is something to continue.
-    ckpt = os.path.join(out, "checkpoint.json")
-    if a.resume and not os.path.exists(ckpt):
+    from klip_tpe.runner import checkpoint_candidates
+    if a.resume and not checkpoint_candidates(out):
         raise SystemExit(f"nothing to resume in {out} (no checkpoint.json) -- "
                          f"drop --resume to start it")
     runner = Runner(red, space, obj, samp, cfg, out, log=log, callbacks=callbacks,
