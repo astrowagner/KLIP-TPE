@@ -96,9 +96,10 @@ esac
 outdir() {
   case "$1" in
     A2) echo A2_betapic ;;         B2) echo B2_betapic_groups ;;
-    C)  echo C_hd95086 ;;          D)  echo D_hip65426 ;;
+    C)  echo C_hd95086 ;;          D)  echo D_hip65426_pyklip ;;
+    DK) echo D_hip65426_klip ;;    H2K) echo H2_bench_jwst_klip ;;
     E2) echo E2_bench ;;           F2) echo F2_bench_highdim ;;
-    G2) echo G2_bench_sphere ;;    H2) echo H2_bench_jwst ;;
+    G2) echo G2_bench_sphere ;;    H2) echo H2_bench_jwst_pyklip ;;
     I2) echo "$RXJ_OUT" ;;
     *)  echo "" ;;
   esac

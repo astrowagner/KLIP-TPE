@@ -578,7 +578,7 @@ def fig_bench():
     # ordered by searched dimension, so the ladder reads down the page.  The first two are
     # beta Pic, whose debris disk crosses the annulus they search; the last two are fields
     # with no scattered-light disk, which is what makes the trend a trend and not a target.
-    sets = [(_pick("H2_bench_jwst"), "HIP 65426, JWST/NIRCam\n5 searched dimensions (both rolls, searched mode)"),
+    sets = [(_pick("H2_bench_jwst_pyklip"), "HIP 65426, JWST/NIRCam\n5 searched dimensions (both rolls, searched mode + maxnumbasis)"),
             (_pick("E2_bench", "E_bench"), "beta Pic, VLT/NACO L'\n9 searched dimensions (one sequence)"),
             (_pick("G2_bench_sphere"), "HD 95086, SPHERE/IRDIS\n20 searched dimensions (K1 + K2)"),
             (_pick("F2_bench_highdim", "F_bench_highdim"), "beta Pic, VLT/NACO L'\n38 searched dimensions (four time groups)")]

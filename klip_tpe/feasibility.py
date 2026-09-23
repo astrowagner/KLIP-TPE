@@ -323,6 +323,57 @@ class ReferenceLibraryGuard:
         return {"name": "reference_library_guard", "n_min_ref": self.n_min_ref, "k_max": self.k_max}
 
 
+class PyKLIPLibraryGuard:
+    """Keep pyKLIP's own library dimensions live: ``k_klip <= maxnumbasis <= pool``.
+
+    pyKLIP keeps at most ``maxnumbasis`` references per target and sector, then clips the
+    KL truncation to the references it kept (``klip_math``: ``np.clip(numbasis - 1, 0,
+    tot_basis - 1)``).  Outside ``k_klip <= maxnumbasis <= pool`` one of the two therefore
+    does nothing, and draws that differ only there reduce identically -- the dead-dimension
+    failure the searched ``nkeep_*`` counts had on this backend, in miniature.  ``pool`` is
+    what ``mode`` makes available at this ``bin``: the other roll's binned frames (ADI), the
+    reference star's frames (RDI; the reference cube is not binned) or both (ADI+RDI).
+
+    Runs last, after :class:`ReferenceCountGuard`, so its cap on ``k_klip`` wins.
+    """
+
+    def __init__(self, n_alt: int, n_ref: int, default_mode: str = "ADI+RDI", k_max: int = 100):
+        self.n_alt, self.n_ref = int(n_alt), int(n_ref)
+        self.default_mode = str(default_mode)
+        self.k_max = int(k_max)
+
+    def pool(self, mode: str, bin_: float) -> int:
+        alt = int(np.ceil(self.n_alt / max(float(bin_), 1.0))) if self.n_alt else 0
+        m = str(mode).upper()
+        return {"ADI": alt, "RDI": self.n_ref}.get(m, alt + self.n_ref)
+
+    def __call__(self, x: np.ndarray, space: "SearchSpace", **_) -> np.ndarray:
+        names = [p.name for p in space.params]
+        if "maxnumbasis" not in names:
+            return x
+        x = np.asarray(x, float).copy()
+        if "mode" in names:
+            pm = space.params[names.index("mode")]
+            mode = pm.choices[int(np.clip(round(x[names.index("mode")]), 0, len(pm.choices) - 1))]
+        else:
+            mode = self.default_mode
+        bins = [x[i] for i, p in enumerate(space.params) if p.base == "bin" or p.name == "bin"]
+        pool = max(self.pool(mode, max(bins) if bins else 1.0), 1)
+        k = 1.0
+        for i, p in enumerate(space.params):
+            if p.base == "k_klip" or p.name == "k_klip":
+                x[i] = float(np.clip(x[i], p.lo, max(min(pool, self.k_max, p.hi), p.lo)))
+                k = max(k, x[i])
+        im = names.index("maxnumbasis")
+        pmn = space.params[im]
+        x[im] = float(np.clip(x[im], max(k, pmn.lo), max(min(pool, pmn.hi), pmn.lo)))
+        return x
+
+    def describe(self) -> Dict[str, Any]:
+        return {"name": "pyklip_library_guard", "n_alt": self.n_alt, "n_ref": self.n_ref,
+                "k_max": self.k_max}
+
+
 def compose(*projections):
     """Chain several projections into one (applied in order; each sees the previous
     output, so e.g. the reference-count census runs on the *executed* frame set)."""

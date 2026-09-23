@@ -66,7 +66,7 @@ def _args_for(run_setup: dict, data: str, workers, backend: str = "pyklip") -> o
              ann=[float(v) for v in run_setup["ann_edges"]], known=[(0.826, 150.2)],
              star_flux=None, flux_density_jy=None, mode="ADI+RDI", min_throughput=0.30,
              dead_zones=True, nan_dead_zones=False, destripe=None,
-             ref_target=["HIP-68245"], searched_library=(backend == "klip"), star_center=None,
+             ref_target=["HIP-68245"], searched_library=True, star_center=None,
              workers=workers)
     return type("A", (), a)()
 
@@ -79,7 +79,8 @@ def _x_from_params(space, params: dict, fallback) -> np.ndarray:
     x = np.asarray(fallback, float).copy()
     for i, k in enumerate(space.names):
         if k in params and params[k] is not None:
-            x[i] = float(params[k])
+            p = space.params[i]
+            x[i] = float(p.encode(params[k])) if p.kind == "categorical" else float(params[k])
     return x
 
 
@@ -109,6 +110,10 @@ def main(argv=None) -> int:
                          "'klip' does, so it is the one that tests whether the library matters")
     ap.add_argument("--seed", type=int, default=20260923)
     ap.add_argument("--out", default="library_ablation.json")
+    ap.add_argument("--versus", default=None, metavar="JSON",
+                    help="another run's output of this script, made with the same --seed and "
+                         "--n-draws: its winners are compared with these draw for draw (the "
+                         "injection positions are checked to be identical)")
     a = ap.parse_args(argv)
 
     def log(s):
@@ -160,12 +165,15 @@ def main(argv=None) -> int:
     lo_sel = np.array(space.lo, float)
     hi_sel = np.array(space.hi, float)
     live = "nkeep_altroll" in space.names and "nkeep_psfref" in space.names
+    native = "mode" in space.names and "maxnumbasis" in space.names
     if live:
         n_alt = int(hi_sel[space.names.index("nkeep_altroll")])
         n_ref = int(hi_sel[space.names.index("nkeep_psfref")])
     else:
         n_alt = n_ref = None
-        log(f"  {a.backend} does not apply a reference library: the library variants are skipped")
+    pool = int(hi_sel[space.names.index("maxnumbasis")]) if native else None
+    if not (live or native):
+        log(f"  {a.backend}: no searched library in this space -- the library variants are skipped")
     x_def = space.default_vector()
 
     out = {"run_dir": os.path.abspath(a.run_dir), "n_draws": a.n_draws, "seed": a.seed, "backend": a.backend,
@@ -177,22 +185,51 @@ def main(argv=None) -> int:
         runner.ia, runner.contrast = ia, float(fr["contrast"])
         xw = _x_from_params(space, fr["winner_config"]["params"], space.default_vector())
         zone = (float(fr["inrad"]), float(fr["outrad"]))
-        configs = {
-            "winner": (_vec(runner, xw), None),
-            "all": (_vec(runner, xw, nkeep_altroll=n_alt, nkeep_psfref=n_ref), None),
-            "rdi": (_vec(runner, xw, nkeep_altroll=0, nkeep_psfref=n_ref), None),
-            "adi": (_vec(runner, xw, nkeep_altroll=n_alt, nkeep_psfref=0), None),
-            # the idea itself: keep only the best-correlated part of a pool
-            "rdi_third": (_vec(runner, xw, nkeep_altroll=0, nkeep_psfref=n_ref // 3), None),
-            "ardi_half": (_vec(runner, xw, nkeep_altroll=n_alt // 2, nkeep_psfref=n_ref // 2), None),
-            "carter": (_vec(runner, x_def, nkeep_altroll=n_alt, nkeep_psfref=n_ref, **CARTER), None),
-            "carter_full": (_vec(runner, x_def, nkeep_altroll=n_alt, nkeep_psfref=n_ref, **CARTER),
-                            (IWA_AS / px, float(ann[-1]))),
+        # Library variants in each engine's own terms, everything else held at the winner.
+        # carter* always takes "everything": all frames of both pools, however expressed.
+        if live:                                  # built-in: one count per pool
+            lib = {"all": dict(nkeep_altroll=n_alt, nkeep_psfref=n_ref),
+                   "rdi": dict(nkeep_altroll=0, nkeep_psfref=n_ref),
+                   "adi": dict(nkeep_altroll=n_alt, nkeep_psfref=0),
+                   # the idea itself: keep only the best-correlated part of a pool
+                   "rdi_third": dict(nkeep_altroll=0, nkeep_psfref=n_ref // 3),
+                   "ardi_half": dict(nkeep_altroll=n_alt // 2, nkeep_psfref=n_ref // 2)}
+            every = lib["all"]
+        elif native:                              # pyKLIP: which pools, and how many of the best
+            lib = {"all": dict(mode="ADI+RDI", maxnumbasis=pool),
+                   "rdi": dict(mode="RDI", maxnumbasis=pool),
+                   "adi": dict(mode="ADI", maxnumbasis=pool),
+                   # what pyKLIP did unasked before maxnumbasis was searched: the k best
+                   "top_k": dict(mode="ADI+RDI", maxnumbasis=0)}
+            every = lib["all"]
+        else:
+            lib, every = {}, {}
+
+        def enc(over):
+            """Categorical values (``mode``) to their index; 0 maxnumbasis -> k_klip."""
+            out = {}
+            for k, v in over.items():
+                if k == "mode":
+                    pm = space.params[space.names.index("mode")]
+                    v = float(list(pm.choices).index(v))
+                out[k] = v
+            return out
+
+        def at(x, over):
+            over = enc(over)
+            if over.get("maxnumbasis") == 0:
+                x = np.asarray(x, float).copy()
+                over["maxnumbasis"] = float(x[space.names.index("k_klip")])
+            return _vec(runner, x, **over)
+
+        configs = {"winner": (_vec(runner, xw), None)}
+        for k, over in lib.items():
+            configs[k] = (at(xw, over), None)
+        configs.update({
+            "carter": (at(x_def, dict(every, **CARTER)), None),
+            "carter_full": (at(x_def, dict(every, **CARTER)), (IWA_AS / px, float(ann[-1]))),
             "default": (_vec(runner, x_def), None),
-        }
-        if not live:
-            for k in ("all", "rdi", "adi", "rdi_third", "ardi_half"):
-                configs.pop(k)
+        })
         if a.configs:
             configs = {k: v for k, v in configs.items() if k in a.configs}
         n = runner._nsrc(ia)
@@ -225,8 +262,8 @@ def main(argv=None) -> int:
                 raw.append(float(r_raw.score))
                 srch.append(float(r_srch.score))
                 walls.append(time.time() - t1)
-            p = {k: (int(v) if float(v).is_integer() else float(v)) for k, v in c.params.items()
-                 if k in space.names}
+            p = {k: (v if isinstance(v, str) else int(v) if float(v).is_integer() else float(v))
+                 for k, v in c.params.items() if k in space.names}
             rec["configs"][name] = {"params": p, "zone_override": zov, "raw": raw, "search": srch,
                                     "planet_snr": planet, "wall_clean_s": t_clean,
                                     "wall_inj_s": float(np.mean(walls))}
@@ -239,7 +276,35 @@ def main(argv=None) -> int:
         with open(a.out, "w") as f:
             json.dump(out, f, indent=1)
     log(f"wrote {a.out}")
+    if a.versus:
+        versus(out, json.load(open(a.versus)), log)
     return 0
+
+
+def versus(mine: dict, theirs: dict, log=print) -> None:
+    """Winner against winner, paired by draw: the head-to-head of two runs' answers.
+
+    Pairing needs the same injections, so the stored positions are compared first; with the
+    same seed and draw count they are the same, whichever engine reduced them."""
+    rng = np.random.default_rng(0)
+    log(f"head-to-head: {mine.get('backend')} ({mine['run_dir']}) vs "
+        f"{theirs.get('backend')} ({theirs['run_dir']})")
+    for A, B in zip(mine["annuli"], theirs["annuli"]):
+        if A["annulus"] != B["annulus"] or not np.allclose(np.asarray(A["draws"], float),
+                                                           np.asarray(B["draws"], float)):
+            log(f"  annulus {A['annulus']}: the injections differ -- not pairing")
+            continue
+        for stat in ("raw", "search"):
+            a = np.asarray(A["configs"]["winner"][stat], float)
+            b = np.asarray(B["configs"]["winner"][stat], float)
+            idx = rng.integers(0, a.size, (4000, a.size))
+            r = a[idx].mean(1) / b[idx].mean(1)
+            log(f"  annulus {A['annulus']} {stat:6s}: {a.mean():5.2f} vs {b.mean():5.2f}  "
+                f"x{a.mean() / b.mean():.3f} [{np.percentile(r, 16):.3f}, {np.percentile(r, 84):.3f}]  "
+                f"P(first better) {np.mean(a[idx].mean(1) > b[idx].mean(1)):.3f}")
+        pa, pb = A["configs"]["winner"]["planet_snr"], B["configs"]["winner"]["planet_snr"]
+        if pa is not None and pb is not None:
+            log(f"  annulus {A['annulus']} planet: {pa:.2f} vs {pb:.2f}")
 
 
 if __name__ == "__main__":

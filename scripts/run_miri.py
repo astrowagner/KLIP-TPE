@@ -214,24 +214,29 @@ def build(a, log):
             if nref < 2 or rolls.size < 2:
                 log(f"  library: NOT searched -- {nref} reference frame(s) and {rolls.size} "
                     f"roll(s); a ranked library needs a pool to rank")
-            else:
-                try:
-                    r0.set_reference_library(partition=part, ref_group="psfref",
-                                             n_min_ref=2, metric="cc")
-                except NotImplementedError as exc:
-                    # Refuse before any compute.  This used to be accepted on pyKLIP, which
-                    # then ignored the counts: run v6 searched them for 4 h and every library
-                    # from pure ADI to pure RDI reduced bit-identically.
-                    raise SystemExit(
-                        f"a searched reference library needs an engine that applies it, and "
-                        f"--backend {backend} does not.\n  {exc}\n"
-                        f"Either --backend klip (the built-in annular KLIP, which does), or "
-                        f"--no-searched-library to reduce with {backend}'s own {a.mode} library "
-                        f"-- which is what every {backend} run before this check did anyway.")
+            elif getattr(r0, "supports_reference_library", False):
+                # built-in engine: one count per pool, ranked per target frame
+                r0.set_reference_library(partition=part, ref_group="psfref",
+                                         n_min_ref=2, metric="cc")
                 log(f"  library: searched, ranked per target frame by cross-correlation -- "
                     f"nkeep_altroll over {int(ang.size)} science frames in {rolls.size} rolls "
                     f"({', '.join(f'{c}@{r}' for r, c in zip(rolls, counts))}), "
                     f"nkeep_psfref over {nref} reference frames; sum floored at 2")
+            elif hasattr(r0, "set_native_library"):
+                # pyKLIP: its own ranking, searched -- which pools, and how many of their
+                # most-correlated frames each target keeps per sector.  (The nkeep_* counts
+                # used to be accepted here and ignored: run v6 searched them for 4 h and
+                # every library from pure ADI to pure RDI reduced bit-identically.)
+                r0.set_native_library(partition=part, default_mode=a.mode)
+                nat = r0._native_lib
+                log(f"  library: searched through pyKLIP's own ranking -- mode over "
+                    f"{'/'.join(nat['modes'])} (default {nat['default_mode']}), maxnumbasis 1-"
+                    f"{nat['n_alt'] + nat['n_ref']} most-correlated frames per target and sector "
+                    f"({nat['n_alt']} other-roll + {nat['n_ref']} reference)")
+            else:
+                raise SystemExit(
+                    f"--backend {backend} can apply neither a searched library nor one of its "
+                    f"own; pass --no-searched-library to reduce with its fixed {a.mode} library.")
 
     ann = tuple(a.ann) if a.ann else default_annuli(red.fwhm, a.crop)
     if len(ann) < 2 or any(b <= c for c, b in zip(ann, ann[1:])):
@@ -326,9 +331,14 @@ def main(argv=None):
                          "radius. Preferred over --star-flux: it is a number you can cite")
     ap.add_argument("--mode", default="ADI+RDI")
     ap.add_argument("--backend", default="pyklip", choices=["pyklip", "klip"],
-                    help="PSF-subtraction engine. Only 'klip' (the built-in annular KLIP) applies "
-                         "the searched reference library; pyKLIP builds its own basis from the "
-                         "whole reference cube, so with it you must pass --no-searched-library")
+                    help="PSF-subtraction engine, and with it what the searched library is. "
+                         "pyklip: pyKLIP's own correlation ranking, searched as `mode` "
+                         "(ADI / RDI / ADI+RDI) and `maxnumbasis` (most-correlated frames kept per "
+                         "target and sector). klip: the built-in annular KLIP, searched as "
+                         "nkeep_altroll / nkeep_psfref (one count per pool)")
+    ap.add_argument("--no-liveness-check", dest="liveness", action="store_false",
+                    help="skip the pre-flight that reduces once per searched dimension and refuses "
+                         "to start if moving one alone changes nothing")
     ap.add_argument("--min-throughput", type=float, default=0.30,
                     help="pixels transmitting less than this are dead zones (default 0.30)")
     ap.add_argument("--no-dead-zones", "--no-mask-quadrants", dest="dead_zones",
@@ -403,6 +413,21 @@ def main(argv=None):
                     calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=3),
                     n_remeasure=1 if a.check else max(int(a.n_remeasure), 1),
                     verify=n_iter > 1, save_eval_images=False)
+
+    if getattr(a, "liveness", True) and not a.default_only:
+        # Moving each searched dimension alone must change the reduction.  A handful of
+        # reductions; the alternative is finding a dead dimension four hours later.
+        from klip_tpe.liveness import check_live_dimensions, dead_dimensions
+        probe = Runner(red, space, obj, samp,
+                       RunConfig(ann_edges=[float(v) for v in ann], n_iter=1, n_init=1, seed=a.seed,
+                                 calibration=CalibrationConfig(forced=[1e-4]), save_fits=False),
+                       os.path.join(out, "_liveness"), log=log)
+        log("liveness: moving each searched dimension alone, annulus 1")
+        dead = dead_dimensions(check_live_dimensions(probe, log=log))
+        if dead:
+            raise SystemExit(f"searched dimension(s) that change nothing: {dead} -- not starting a "
+                             f"search that would spend its budget on them (--no-liveness-check "
+                             f"to override)")
 
     if a.check:
         # The same call path the search takes.  Reducing one partition directly skips

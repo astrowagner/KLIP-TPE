@@ -89,9 +89,24 @@ def test_rerun_paper_runs_and_recognises_the_new_stages():
 def test_collect_and_figs_know_where_the_new_benches_land():
     col = _text("collect.py")
     assert '"G": ("G2_bench_sphere",)' in col
-    assert '"H": ("H2_bench_jwst",)' in col
+    # H2 on each engine, and never the old H2_bench_jwst, whose newest slots searched the
+    # nkeep counts pyKLIP ignored
+    assert '"H": (R.ENGINE_DIRS["H2"]["pyklip"],)' in col and '"HK": (R.ENGINE_DIRS["H2"]["klip"],)' in col
+    assert '("H2_bench_jwst",)' not in col
     fig = _text("figs.py")
-    assert "G2_bench_sphere" in fig and "H2_bench_jwst" in fig
+    assert "G2_bench_sphere" in fig and "H2_bench_jwst_pyklip" in fig
+
+
+def test_the_nircam_stages_have_both_engines_in_their_own_directories(demos):
+    """D / H2 on pyKLIP and DK / H2K on the built-in engine, each into a directory nothing
+    older can be resumed from."""
+    dirs = demos.ENGINE_DIRS
+    assert dirs["D"] == {"pyklip": "D_hip65426_pyklip", "klip": "D_hip65426_klip"}
+    assert dirs["H2"] == {"pyklip": "H2_bench_jwst_pyklip", "klip": "H2_bench_jwst_klip"}
+    sh = " ".join(_text("rerun_paper.sh").split())
+    for stage, d in (("D", "D_hip65426_pyklip"), ("DK", "D_hip65426_klip"),
+                     ("H2", "H2_bench_jwst_pyklip"), ("H2K", "H2_bench_jwst_klip")):
+        assert f"{stage}) echo {d} ;;" in sh, stage
 
 
 def test_the_bench_figure_orders_its_rows_by_dimension():
@@ -101,11 +116,11 @@ def test_the_bench_figure_orders_its_rows_by_dimension():
     over: HIP 65426 searches five dimensions, not eleven, so it is the *smallest* problem
     and belongs first.  The figure was fixed and this test was not, which is how it went red.
 
-    Still five, by a different route: n_ang, filter, k_klip and the two reference-library
-    counts.  ``bin`` is pinned (its range collapses to (1, 1) on four science frames) and
-    the ADI/RDI/ADI+RDI categorical was replaced by ``nkeep_altroll`` / ``nkeep_psfref``."""
+    Still the smallest: n_ang, filter, k_klip, and pyKLIP's own library -- ``mode`` and
+    ``maxnumbasis``.  ``bin`` is pinned (its range collapses to (1, 1) on four science
+    frames).  (For a day the library was the nkeep counts, which pyKLIP ignored.)"""
     fig = _text("figs.py")
-    order = [fig.index(d) for d in ("H2_bench_jwst", "E2_bench", "G2_bench_sphere", "F2_bench_highdim")]
+    order = [fig.index(d) for d in ("H2_bench_jwst_pyklip", "E2_bench", "G2_bench_sphere", "F2_bench_highdim")]
     assert order == sorted(order), order
 
 
@@ -136,6 +151,7 @@ def _capture(demos, monkeypatch):
                         lambda red, **kw: seen.update(space_kw=kw) or _FakeSpace())
     monkeypatch.setattr(demos.generic, "make_guard", lambda red, **kw: seen.update(guard_kw=kw))
     monkeypatch.setattr(demos, "Runner", lambda *a, **kw: seen.update(cfg=a[4]) or "RUNNER")
+    monkeypatch.setattr(demos, "preflight", lambda runner, what: None)
 
     import klip_tpe.bench as B
 
@@ -187,17 +203,18 @@ def test_max_drop_none_leaves_make_space_its_own_default(demos, monkeypatch, tmp
 
 def test_h2_searches_no_mode_categorical_and_no_angles(demos, monkeypatch, tmp_path):
     """H2 does not search angles (two frames per roll, so no field rotation to exploit) and
-    no longer searches an ADI/RDI/ADI+RDI categorical.
+    adds no dimension of its own.
 
-    The mode is now carried by the reference library's own counts, which `hip65426_objects`
-    installs on the reducer: ``nkeep_psfref = 0`` is ADI, ``nkeep_altroll = 0`` is RDI, and
-    either pool can contribute part of itself, which the categorical could not express.
-    Those arrive through ``reference_params()`` inside ``make_space``, not through
-    ``space.add``, so nothing should be added here at all."""
+    The library comes with the reducer ``hip65426_objects`` builds, through
+    ``reference_params()`` inside ``make_space``: pyKLIP's ``mode`` + ``maxnumbasis`` for H2,
+    the built-in engine's ``nkeep_altroll`` / ``nkeep_psfref`` for H2K.  Nothing should be
+    added here, and each stage must ask for its own engine."""
     seen = {}
     space = _FakeSpace()
+    engines = []
     monkeypatch.setattr(demos, "OUT", str(tmp_path))
-    monkeypatch.setattr(demos, "hip65426_objects", lambda: "JWST_REDUCER")
+    monkeypatch.setattr(demos, "hip65426_objects", lambda **k: engines.append(k.get("engine")) or "JWST_REDUCER")
+    monkeypatch.setattr(demos, "preflight", lambda runner, what: None)
     monkeypatch.setattr(demos.generic, "default_config", lambda red, known, **kw: ("OBJ", "SAMP"))
     monkeypatch.setattr(demos.generic, "make_space", lambda red, **kw: seen.update(kw) or space)
     monkeypatch.setattr(demos.generic, "make_guard", lambda red, **kw: None)
@@ -207,6 +224,8 @@ def test_h2_searches_no_mode_categorical_and_no_angles(demos, monkeypatch, tmp_p
                         lambda make_runner, modes, seeds, n_iter, n_init, bench_tag, out_dir, log:
                         make_runner("tpe", 0, out_dir))
     demos.run_H2()
+    demos.run_H2("klip")
+    assert engines == ["pyklip", "klip"], engines
     assert seen["search_angles"] is False
     assert [p.name for p in space.added] == [], (
         f"H2 should add no dimension of its own; got {[p.name for p in space.added]}")
@@ -454,6 +473,7 @@ def test_the_nircam_stages_remeasure_each_trial(demos, monkeypatch, tmp_path):
     monkeypatch.setattr(demos.generic, "make_space", lambda red, **kw: _FakeSpace())
     monkeypatch.setattr(demos.generic, "make_guard", lambda red, **kw: None)
     monkeypatch.setattr(demos, "Runner", lambda *a, **kw: seen.update(cfg=a[4]) or "RUNNER")
+    monkeypatch.setattr(demos, "preflight", lambda runner, what: None)
 
     import klip_tpe.bench as B
     monkeypatch.setattr(B, "run_benchmark",

@@ -44,7 +44,11 @@ import run_demos as R
 OUT = R.OUT
 TARGETS = {"A": ("A_betapic", "betapic", R.BP), "A2": ("A2_betapic", "betapic", R.BP),
            "B": ("B_betapic_groups", "betapic", R.BP), "B2": ("B2_betapic_groups", "betapic", R.BP),
-           "C": ("C_hd95086", "hd95086", R.HD), "D": ("D_hip65426", "hip65426", R.HIP)}
+           "C": ("C_hd95086", "hd95086", R.HD),
+           "D": (R.ENGINE_DIRS["D"]["pyklip"], "hip65426", R.HIP),
+           "DK": (R.ENGINE_DIRS["D"]["klip"], "hip65426", R.HIP),
+           # the mode-only pyKLIP run of 2026-09-20, before the library was searched at all
+           "D0": ("D_hip65426", "hip65426", R.HIP)}
 N_TRIALS = 8          # paired re-measurement sets per annulus (default, flat default, winner)
 
 #: Published contrast of the companion in each data set's own band -- the CHECK on each
@@ -99,8 +103,13 @@ def build(which):
         space = generic.make_space(red, k_klip_max=30)
         space.project = generic.make_guard(red, k_max=30)
         known = R.HD
-    elif which == "D":
-        red = R.hip65426_objects()
+    elif which in ("D", "DK"):
+        red = R.hip65426_objects(engine="pyklip" if which == "D" else "klip")
+        space = generic.make_space(red, k_klip_max=18, search_angles=False)
+        space.project = generic.make_guard(red, k_max=18, n_min_ref=4)
+        known = R.HIP
+    elif which == "D0":
+        red = R.hip65426_objects(engine="pyklip", library=False)
         space = generic.make_space(red, k_klip_max=18, search_angles=False)
         space.add(Param("mode", 0, 2, "categorical", choices=["ADI", "RDI", "ADI+RDI"], default="RDI",
                         doc="pyKLIP PSF-subtraction mode"))
@@ -367,7 +376,10 @@ def anchor(out, red=None, space=None, planet=None, x0=None):
 #: "paired" (fixed_sources=True) reruns of 2026-09-13/14 are the wrong ones.  Any bench
 #: directory produced in that window must be redone before it is collected.
 BENCH_DIRS = {"E": ("E2_bench", "E_bench"), "F": ("F2_bench_highdim", "F_bench_highdim"),
-              "G": ("G2_bench_sphere",), "H": ("H2_bench_jwst",)}
+              "G": ("G2_bench_sphere",),
+              # H2 on each engine.  Not falling back to the old H2_bench_jwst: its newest slots
+              # searched the nkeep counts pyKLIP ignored, and would be collected as H2.
+              "H": (R.ENGINE_DIRS["H2"]["pyklip"],), "HK": (R.ENGINE_DIRS["H2"]["klip"],)}
 
 
 def bench_dir(which):

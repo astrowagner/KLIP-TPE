@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased — 2026-09-23 (both libraries, and a check that every searched dimension is live)
+
+- **pyKLIP's own library, searched.**  `PyKLIPReducer.set_native_library` makes `mode`
+  (ADI / RDI / ADI+RDI) and `maxnumbasis` (how many of the most-correlated frames of those
+  pools each target keeps, per sector) searched dimensions, contributed through
+  `reference_params()` exactly as the built-in engine's counts are.  `maxnumbasis` now
+  reaches pyKLIP — it never did, so it was `k_klip` — and defaults to the space's `k_klip`
+  default, so the seeded configuration is what pyKLIP always did.  `PyKLIPLibraryGuard`
+  keeps `k_klip <= maxnumbasis <= pool(mode, bin)`: pyKLIP clips the KL count to the frames
+  it kept (`klip_math`), so outside that region one of the two changes nothing.
+- **Both engines, in both drivers.**  `run_miri.py --backend pyklip` searches `mode` +
+  `maxnumbasis`, `--backend klip` the two counts.  `run_demos.py`: D and H2 on pyKLIP, new
+  DK and H2K on the built-in engine, each into a directory nothing older can be resumed
+  from (`D_hip65426_pyklip`, `D_hip65426_klip`, `H2_bench_jwst_pyklip`,
+  `H2_bench_jwst_klip`), wired through `collect.py` (D, DK, and D0 for the valid mode-only
+  run of 2026-09-20; H, HK), `figs.py`, `rerun_paper.sh` and `long_run.sh`.  The old
+  `H2_bench_jwst` is no longer collected: its newest slots searched the dead counts.
+- **`klip_tpe.liveness.check_live_dimensions`, before every search.**  It moves each
+  searched dimension alone — after the space's guards, rejecting a move they undo or one that
+  drags another dimension along, so a difference is never credited to the wrong one —
+  reduces, and compares bit for bit.  `run_miri.py` (also under `--check`;
+  `--no-liveness-check` to skip) and D / DK / H2 / H2K refuse to start with a dimension that
+  changes nothing.  On the real data every searched dimension is live on both engines: six
+  for MIRI F1140C (6 s on pyKLIP, 2 s built-in), five for NIRCam D.  Run v6's configuration —
+  the counts on pyKLIP — comes back dead, and a test replays exactly that.
+- A dimension can be inert in one direction and live in another: pyKLIP's ADI+RDI keeping
+  its 3 best frames reduces exactly like ADI when all 3 come from the other roll, while RDI
+  from the same point does not.  So the check tries every candidate value before it calls a
+  point dead.
+- `scripts/library_ablation.py` handles both engines' libraries (pyKLIP variants: all / rdi
+  / adi / top_k), categorical parameters, and `--versus`, a paired head-to-head of two runs'
+  winners on identical injection draws (refused when the draws differ).  A first look at v6's
+  annulus 3, two draws only: pyKLIP keeping its 20 best-correlated frames scores 6.23 against
+  3.56 with all 99 — how many frames matters a great deal on pyKLIP's per-sector ranking,
+  where it barely did on the built-in engine's per-annulus one.
+
 ## Unreleased — 2026-09-23 (the searched library was never applied on pyKLIP)
 
 - **Retraction: `nkeep_altroll` / `nkeep_psfref` changed nothing on the pyKLIP backend** —

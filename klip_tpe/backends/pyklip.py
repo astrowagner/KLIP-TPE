@@ -128,6 +128,60 @@ class PyKLIPReducer(KLIPReducer):
         self.defaults.setdefault("corr_smooth", 1)
         self.defaults.setdefault("numthreads", 1)
         self.defaults.setdefault("minrot", 0.0)
+        #: pyKLIP's OWN reference selection, searched (:meth:`set_native_library`)
+        self._native_lib: Optional[Dict[str, Any]] = None
+
+    # -- pyKLIP's own library, searched ---------------------------------------------
+    def set_native_library(self, *, partition, modes: Sequence[str] = ("ADI", "RDI", "ADI+RDI"),
+                           default_mode: str = "ADI+RDI") -> None:
+        """Search pyKLIP's own reference selection instead of a fixed one.
+
+        pyKLIP 2.10 already ranks references: per target frame and per sector, its ADI+RDI
+        keeps the ``maxnumbasis`` most-correlated frames of the union of the other roll and
+        the reference library (``parallelized._klip_section_multifile_perfile``).  Left
+        unset, ``maxnumbasis`` is ``max(numbasis)`` -- ``k_klip`` -- so one number used to set
+        both the KL truncation and the library size.  This makes the library two searched
+        dimensions of its own:
+
+        * ``mode`` -- which pools (``ADI``: the other roll only, ``RDI``: the reference star
+          only, ``ADI+RDI``: both, ranked together);
+        * ``maxnumbasis`` -- how many of the most-correlated frames of those pools each
+          target keeps, decoupled from ``k_klip``.
+
+        It is the pyKLIP-native counterpart of :meth:`KLIPReducer.set_reference_library`,
+        which this backend cannot apply: one count across the chosen pools rather than one
+        per pool, but ranked per sector rather than per annulus.  ``partition`` labels the
+        roll of each science frame and sizes the other-roll pool.
+        """
+        part = np.asarray(list(partition))
+        n_sci = int(self.data.cube.shape[0])
+        if part.size != n_sci:
+            raise ValueError(f"native library: {part.size} partition labels for {n_sci} science frames")
+        _, counts = np.unique(part, return_counts=True)
+        n_ref = 0 if self.data.ref_cube is None else int(np.asarray(self.data.ref_cube).shape[0])
+        n_alt = int(min(n_sci - c for c in counts)) if counts.size > 1 else 0
+        ok = [m for m in modes
+              if not (("RDI" in m and n_ref == 0) or (m.startswith("ADI") and n_alt == 0))]
+        if not ok:
+            raise ValueError("native library: no mode has references (no reference star and one roll)")
+        if default_mode not in ok:
+            default_mode = ok[-1]
+        self._native_lib = {"n_alt": n_alt, "n_ref": n_ref, "modes": list(ok),
+                            "default_mode": str(default_mode)}
+
+    def reference_params(self):
+        """``mode`` and ``maxnumbasis`` when the native library is searched; never the
+        ``nkeep_*`` counts, which this backend cannot apply."""
+        s = getattr(self, "_native_lib", None)
+        if s is None:
+            return []
+        from ..space import Param, kgrid
+        pool = max(int(s["n_alt"] + s["n_ref"]), 1)
+        grid = sorted({float(v) for v in kgrid(pool)} | {float(pool)})
+        return [Param("mode", 0, len(s["modes"]) - 1, "categorical", choices=list(s["modes"]),
+                      default=s["default_mode"], doc="pyKLIP pools: ADI / RDI / ADI+RDI"),
+                Param("maxnumbasis", 1, pool, "int", grid=grid, default=None,
+                      doc="most-correlated frames kept per target and sector (pyKLIP maxnumbasis)")]
 
     def _subtract(self, bcube, bang, kp: KLIPParams, p, filt, req, mcube, ref_basis, fm_ref, meta):
         import pyklip.parallelized as par
@@ -165,6 +219,11 @@ class PyKLIPReducer(KLIPReducer):
         # frames with no motion at all -- the frame itself and, on a roll pair, its
         # same-roll twins -- and no others.
         movement = max(float(kp.angsep) * self.lam_over_d_px, MIN_MOVEMENT_PX)
+        # pyKLIP keeps at most maxnumbasis references and clips numbasis to what it kept, so a
+        # maxnumbasis below k_klip would quietly make k_klip inert; the guard keeps it above,
+        # and so does this.  None/0 = pyKLIP's own default, max(numbasis).
+        mnb = p.get("maxnumbasis")
+        mnb = None if mnb in (None, 0) else int(max(round(float(mnb)), int(kp.k_klip)))
         out = par.klip_parallelized(np.asarray(bcube, np.float32), centers, np.asarray(bang, float),
                                        np.ones(n), np.zeros(n, int), kp.inrad, OWA=kp.outrad, mode=mode,
                                        annuli=int(p["n_annuli"]), subsections=int(kp.n_ang), movement=movement,
@@ -172,7 +231,7 @@ class PyKLIPReducer(KLIPReducer):
                                        numthreads=int(p["numthreads"]) or None, minrot=float(p["minrot"]),
                                        maxrot=float(kp.anglemax), annuli_spacing=str(p["annuli_spacing"]),
                                        corr_smooth=float(p["corr_smooth"]), algo=str(p["algo"]), verbose=False,
-                                       **(psflib or {}))
+                                       maxnumbasis=mnb, **(psflib or {}))
         sub = np.asarray(out[0], np.float32)                  # (b, n, ny, nx), aligned, not derotated
         ct = p["comb_type"]
 
@@ -185,7 +244,8 @@ class PyKLIPReducer(KLIPReducer):
 
         imgs = [_combine(derotate(sub[b], bang, self.truenorth)) for b in range(sub.shape[0])]
         img = np.stack(imgs) if kp.k_scan else imgs[0]
-        return img, None, {"backend": "pyklip", "algo": p["algo"], "mode": mode, "movement_px": movement}
+        return img, None, {"backend": "pyklip", "algo": p["algo"], "mode": mode, "movement_px": movement,
+                           "maxnumbasis": mnb}
 
     def describe(self) -> Dict[str, Any]:
         d = super().describe()

@@ -40,7 +40,8 @@ from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-from ..feasibility import ReferenceLibraryGuard, FrameSelectionGuard, MinBinGuard, ReferenceCountGuard, compose
+from ..feasibility import (ReferenceLibraryGuard, PyKLIPLibraryGuard, FrameSelectionGuard, MinBinGuard,
+                           ReferenceCountGuard, compose)
 from ..injection import GaussianPSF, InjectionModel, TemplatePSF
 from ..metrics import MawetPeakSNR, Objective
 from ..positions import PositionSampler
@@ -326,6 +327,14 @@ def make_space(reducer: PartitionedReducer, min_bins: int = 8, **kw) -> SearchSp
         for pr in getattr(r, "reference_params", lambda: [])():
             if pr.name not in {q.name for q in space.params}:
                 space.add(pr)
+    # pyKLIP's maxnumbasis defaults to the default k_klip, so the seeded configuration keeps
+    # what pyKLIP always did unasked -- the k_klip most-correlated frames -- and a run with the
+    # library searched starts from the same point as one without.
+    # (Unconditionally: Param fills a missing default with its own grid midpoint.)
+    for p in space.params:
+        if p.name == "maxnumbasis":
+            kdef = next((q.default for q in space.params if q.base == "k_klip" or q.name == "k_klip"), None)
+            p.default = float(np.clip(kdef if kdef is not None else p.hi, p.lo, p.hi))
     return space
 
 
@@ -353,8 +362,13 @@ def make_guard(reducer: PartitionedReducer, n_min_ref: int = 10, ref_frac: float
     lib = None
     for r in reducer.reducers.values():
         spec = getattr(r, "_reflib_spec", None)
-        if spec is not None:
+        if spec is not None and getattr(r, "supports_reference_library", True):
             lib = ReferenceLibraryGuard(n_min_ref=int(spec.get("n_min_ref", 2)), k_max=k_max)
+            break
+        nat = getattr(r, "_native_lib", None)
+        if nat is not None:
+            lib = PyKLIPLibraryGuard(n_alt=nat["n_alt"], n_ref=nat["n_ref"],
+                                     default_mode=nat["default_mode"], k_max=k_max)
             break
     steps = [p for p in (mb, fs, ref, lib) if p is not None]
     return steps[0] if len(steps) == 1 else compose(*steps)

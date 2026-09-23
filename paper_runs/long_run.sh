@@ -80,9 +80,9 @@ NITER = int(os.environ["NITER"]); BENCH = int(os.environ["BENCH_NITER"])
 SCALE = float(os.environ["ITER_SCALE"])
 # stage -> (list of built-in per-annulus budgets, seconds/eval, benchmark slot count or 0)
 S = {"A2": ([400, 300, 300], 1.68, 0), "B2": ([400], 1.80, 0),
-     "C":  ([350, 300],      2.68, 0), "D":  ([200, 150], 3.26, 0),
+     "C":  ([350, 300],      2.68, 0), "D":  ([200, 150], 3.26, 0), "DK": ([200, 150], 3.26, 0),
      "E2": ([800], 1.05, 24), "F2": ([800], 1.06, 16),
-     "G2": ([800], 1.06, 32), "H2": ([800], 2.27, 16)}
+     "G2": ([800], 1.06, 32), "H2": ([800], 2.27, 16), "H2K": ([800], 2.27, 16)}
 tot = 0.0
 print("  stage   evaluations          projected")
 for s in sys.argv[1:]:

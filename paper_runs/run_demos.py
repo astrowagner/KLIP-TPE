@@ -4,10 +4,12 @@
     python run_demos.py A      # beta Pic, 3 annuli, single partition
     python run_demos.py B      # beta Pic split into 4 time groups (partition selection)
     python run_demos.py C      # HD 95086 IRDIS K1+K2, 2 annuli
-    python run_demos.py D      # HIP 65426 NIRCam F444W (RDI, searched mode)
+    python run_demos.py D      # HIP 65426 NIRCam F444W, pyKLIP: searched mode + maxnumbasis
+    python run_demos.py DK     # the same on the built-in engine: searched nkeep_altroll / nkeep_psfref
     python run_demos.py E      # benchmark: TPE / random / grid at matched budget (beta Pic)
     python run_demos.py G2     # the same benchmark on HD 95086  (SPHERE K1+K2, 20-D)
-    python run_demos.py H2     # the same benchmark on HIP 65426 (JWST 2 rolls,   5-D)
+    python run_demos.py H2     # the same benchmark on HIP 65426 (JWST 2 rolls), pyKLIP
+    python run_demos.py H2K    # ... on the built-in engine
 
 ``WORKERS=6 python run_demos.py G2`` caps the core budget; the default is every core.
 ``NITER=1000 python run_demos.py A2`` raises every annulus to at least that many
@@ -257,8 +259,16 @@ def run_C():
 
 
 # ---------------------------------------------------------------- HIP 65426 (JWST)
-def hip65426_objects(partition="all"):
+def hip65426_objects(partition="all", engine="pyklip", library=True):
     """Reducer for the ERS 1386 F444W rolls, on an absolute contrast axis.
+
+    ``engine`` picks the PSF subtraction and, with it, what the searched reference library
+    is (``library=True``): ``'pyklip'`` searches pyKLIP's own correlation ranking -- ``mode``
+    (ADI / RDI / ADI+RDI, default RDI) and ``maxnumbasis`` (most-correlated frames kept per
+    target and sector); ``'klip'`` is the built-in annular KLIP with ``nkeep_altroll`` /
+    ``nkeep_psfref``, one count per pool.  (Between 2026-09-22 and 09-23 the nkeep counts
+    were installed on pyKLIP, which ignored them -- see the CHANGELOG.)  ``library=False``
+    installs neither, for rebuilding a run that searched neither.
 
     The star cannot be measured off these frames -- HIP 65426 and the reference star phi Cen
     are both behind MASK335R in every exposure -- so both the flux scale and the star's
@@ -309,41 +319,48 @@ def hip65426_objects(partition="all"):
             f"grid there and set KLIP_TPE_DATA.  See docs/FLUX_CALIBRATION.md.  ({exc})"
         ) from exc
     model = stpsf_psf.library(grid, star_flux=sf)
-    red = sk.make_reducer(dsets, injection_model=model, mode="RDI", max_workers=workers(), log=log)
-    # A searched reference library rather than the fixed one, and it replaces the ADI / RDI /
-    # ADI+RDI categorical: nkeep_psfref = 0 is ADI, nkeep_altroll = 0 is RDI, and unlike the
-    # categorical either pool can contribute PART of itself.  This sequence has 2 science
-    # frames per roll and 18 phi Cen frames, so the ranges are [0, 4] and [0, 18] with their
-    # sum floored at 2 by ReferenceLibraryGuard.
-    if partition == "all" and len(red.reducers) == 1:
+    red = sk.make_reducer(dsets, injection_model=model, mode="RDI" if engine == "pyklip" else "ADI+RDI",
+                          backend=engine, max_workers=workers(), log=log)
+    # The searched library, in each engine's own terms.  This sequence has 2 science frames
+    # per roll and 18 phi Cen frames: on pyKLIP, maxnumbasis runs 1-20 over the union and mode
+    # picks the pools; on the built-in engine the counts run [0, 2] (the other roll) and
+    # [0, 18], their sum floored at 2 by ReferenceLibraryGuard.
+    if library and partition == "all" and len(red.reducers) == 1:
         r0 = next(iter(red.reducers.values()))
         nref = 0 if r0.data.ref_cube is None else int(np.shape(r0.data.ref_cube)[0])
         part = np.round(np.asarray(r0.data.angles, float), 1).astype(str)
         if nref >= 2 and np.unique(part).size >= 2:
-            try:
-                r0.set_reference_library(partition=part, ref_group="psfref",
-                                         n_min_ref=2, metric="cc")
-            except NotImplementedError as exc:
-                # Until 2026-09-23 this call succeeded on pyKLIP and the counts it added were
-                # ignored by every reduction, so D and H2 searched two dead dimensions and --
-                # because they replaced it -- lost the live ADI / RDI / ADI+RDI `mode` they had
-                # searched before.  Stop here rather than repeat that.
-                raise RuntimeError(
-                    "runs D and H2 ask for a searched reference library on the pyKLIP backend, "
-                    "which cannot apply one (" + str(exc) + ").  Choose one: put `mode` back as "
-                    "the searched categorical (what D and H2 searched before a9a4c3e, and live on "
-                    "pyKLIP), or build this reducer with sk.make_reducer(..., backend='klip') so "
-                    "nkeep_altroll / nkeep_psfref actually select frames.") from exc
-            log(f"  library: searched -- nkeep_altroll over {part.size} science frames in "
-                f"{np.unique(part).size} rolls, nkeep_psfref over {nref} reference frames")
+            if engine == "klip":
+                r0.set_reference_library(partition=part, ref_group="psfref", n_min_ref=2, metric="cc")
+                log(f"  library: searched -- nkeep_altroll over {part.size} science frames in "
+                    f"{np.unique(part).size} rolls, nkeep_psfref over {nref} reference frames")
+            else:
+                r0.set_native_library(partition=part, default_mode="RDI")
+                log(f"  library: pyKLIP's own ranking searched -- mode (default RDI) and "
+                    f"maxnumbasis over {r0._native_lib['n_alt']} other-roll + {nref} reference frames")
     return red
 
 
-def run_D():
-    red = hip65426_objects()
-    # No `mode` dimension: the library's nkeep_altroll / nkeep_psfref subsume it (0 in one
-    # pool IS the corresponding pure mode) and can also take part of a pool, which the
-    # categorical could not.
+#: The head-to-head: each NIRCam stage on both engines, into its own directory.  (The old
+#: D_hip65426 is a valid mode-only pyKLIP run from 2026-09-20; H2_bench_jwst's newest slots
+#: searched the dead nkeep counts and should be superseded or ignored.)
+ENGINE_DIRS = {"D": {"pyklip": "D_hip65426_pyklip", "klip": "D_hip65426_klip"},
+               "H2": {"pyklip": "H2_bench_jwst_pyklip", "klip": "H2_bench_jwst_klip"}}
+
+
+def preflight(runner, what):
+    """Refuse to start a search with a dimension that changes nothing (klip_tpe.liveness)."""
+    from klip_tpe.liveness import check_live_dimensions, dead_dimensions
+    log(f"{what}: liveness pre-flight, moving each searched dimension alone")
+    dead = dead_dimensions(check_live_dimensions(runner, log=log))
+    if dead:
+        raise SystemExit(f"{what}: searched dimension(s) that change nothing: {dead} -- not starting")
+
+
+def run_D(engine="pyklip"):
+    red = hip65426_objects(engine=engine)
+    # The library comes with the reducer: `mode` + `maxnumbasis` on pyKLIP, nkeep_altroll /
+    # nkeep_psfref on the built-in engine.
     space = generic.make_space(red, k_klip_max=18, search_angles=False)
     space.project = generic.make_guard(red, k_max=18, n_min_ref=4)
     obj, samp = generic.default_config(red, known=[HIP])
@@ -360,9 +377,10 @@ def run_D():
                     # the trade that on MIRI took the objective's sd from 0.84 to 0.48.
                     n_remeasure=3,
                     defaults={"k_klip": 10}, fm_curve=False, save_eval_images=False)
-    d = os.path.join(OUT, "D_hip65426")
-    Runner(red, space, obj, samp, cfg, d, log=log,
-           callbacks=[_display(d)]).run()
+    d = os.path.join(OUT, ENGINE_DIRS["D"][engine])
+    runner = Runner(red, space, obj, samp, cfg, d, log=log, callbacks=[_display(d)])
+    preflight(runner, f"D ({engine})")
+    runner.run()
 
 
 # ---------------------------------------------------------------- benchmark
@@ -445,7 +463,7 @@ def bench_modes(default):
 
 def _bench_hi(tag, groups, modes, k_max, max_drop, defaults, forced, ann_edges, out, seeds=range(8),
               n_iter=800, n_init=80, n_top=8, n_valid=15, make_red=None, known=None, n_sources=3,
-              add_params=None, search_angles=True, n_min_ref=5, n_remeasure=1):
+              add_params=None, search_angles=True, n_min_ref=5, n_remeasure=1, preflight_check=False):
     """The benchmark again, with enough statistical power to settle it.
 
     Run F reported TPE behind random after validation (9.34 +/- 0.57 vs 9.64 +/- 0.53,
@@ -495,6 +513,8 @@ def _bench_hi(tag, groups, modes, k_max, max_drop, defaults, forced, ann_edges, 
     # reuse the batch already in this directory, so relaunching after an interruption
     # resumes the check-pointed slots instead of starting a fresh batch beside them
     d = os.path.join(OUT, out)
+    if preflight_check:
+        preflight(make_runner("tpe", 0, os.path.join(d, "_liveness")), tag)
     tag_file = os.path.join(d, "bench_tag.txt")
     tag = open(tag_file).read().strip() if os.path.exists(tag_file) else None
     if tag:
@@ -589,8 +609,8 @@ def run_G2():
               make_red=hd95086_objects, known=[HD], n_sources=3, n_min_ref=10)
 
 
-def run_H2():
-    """HIP 65426, JWST/NIRCam F444W: both rolls in one partition, a searched ADI/RDI/ADI+RDI.
+def run_H2(engine="pyklip"):
+    """HIP 65426, JWST/NIRCam F444W: both rolls in one partition, a searched library.
 
     The other end of the range from beta Pic -- space, two frames per roll, a searched
     ADI/RDI/ADI+RDI mode, and a field with no disk at all.  Angles are not searched (run D
@@ -605,8 +625,10 @@ def run_H2():
     # (the whole PSF, companion included) against a 0.561 "optics transmission" that only
     # existed to hide that; and before it a forced 5.270e1 -- a "contrast" of 52.7, the
     # raw-detector-units axis of flux_unit = 1.0.  See docs/FLUX_CALIBRATION.md.
-    _bench_hi("H2", 1, ("tpe", "random"), 18, None, {"k_klip": 10}, 2.022e-04, [6, 20], "H2_bench_jwst",
-              make_red=hip65426_objects, known=[HIP], n_sources=2, search_angles=False, n_min_ref=2,
+    _bench_hi("H2" if engine == "pyklip" else "H2K", 1, ("tpe", "random"), 18, None, {"k_klip": 10}, 2.022e-04,
+              [6, 20], ENGINE_DIRS["H2"][engine],
+              make_red=lambda: hip65426_objects(engine=engine), known=[HIP], n_sources=2,
+              search_angles=False, n_min_ref=2 if engine == "klip" else 4, preflight_check=True,
               # 3 draws per trial, averaged.  A benchmark exists to separate TPE from random,
               # and on MIRI a single draw scatters with sd 0.84 against a ~6 range -- most of
               # what such a benchmark measures is that noise.  NIRCam reductions are ~2.2 s, so
@@ -614,10 +636,9 @@ def run_H2():
               # incomparable to E2/F2/G2 (space, radprof, library, source count), so nothing
               # further is lost by also fixing what it measures.
               n_remeasure=3,
-              # no `mode`: hip65426_objects now installs a searched reference library, and
-              # nkeep_altroll / nkeep_psfref subsume the categorical.  n_min_ref drops to 2
-              # because it is now the floor on the two counts' SUM (the basis size), not on
-              # an angular reference census.
+              # the library comes with the reducer (mode + maxnumbasis on pyKLIP, the two
+              # counts on the built-in engine).  n_min_ref: the angular reference census on
+              # pyKLIP (4, as before), the floor on the counts' SUM on the built-in engine (2).
               )
 
 
@@ -625,6 +646,7 @@ if __name__ == "__main__":
     which = sys.argv[1].upper() if len(sys.argv) > 1 else "A"
     t0 = time.time()
     {"A": run_A, "A2": run_A2, "B": run_B, "B2": run_B2, "C": run_C, "D": run_D,
+     "DK": lambda: run_D("klip"),
      "E": run_E, "F": run_F, "E2": run_E2, "F2": run_F2,
-     "G2": run_G2, "H2": run_H2}[which]()
+     "G2": run_G2, "H2": run_H2, "H2K": lambda: run_H2("klip")}[which]()
     log(f"{which} done in {(time.time() - t0) / 60:.1f} min")

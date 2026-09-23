@@ -496,16 +496,46 @@ def test_the_default_miri_annuli_leave_every_ring_its_noise_apertures():
 
 # ------------------------------------------- a searched library only on an engine that applies it
 
-def test_a_searched_library_on_pyklip_refuses_before_any_compute(tree, stub_stpsf, tmp_path):
-    """The default (a searched library) on the default engine (pyKLIP) used to be accepted,
-    and pyKLIP then ignored the counts: run v6 searched them for four hours and every
-    library from pure ADI to pure RDI reduced bit-identically.  Now it stops at build time
-    and says what to do instead."""
+def test_pyklip_searches_its_own_library_and_the_preflight_passes(tree, stub_stpsf, tmp_path):
+    """On pyKLIP the searched library is pyKLIP's own ranking -- `mode` and `maxnumbasis` --
+    never the nkeep_* counts it cannot apply (run v6 searched those for four hours to no
+    effect), and --check's liveness pre-flight shows every searched dimension moving the
+    reduction before anything is spent on it."""
     import run_miri
-    with pytest.raises(SystemExit, match="--backend klip") as e:
+    from klip_tpe.instruments import generic
+    run_miri, a = _args(data=str(tree), partition="all", searched_library=True)   # pyklip default
+    dsets, info, red, ann, obj, samp, m, px = run_miri.build(a, log=lambda *_: None)
+    names = generic.make_space(red, k_klip_max=4, search_angles=False).names
+    assert "mode" in names and "maxnumbasis" in names
+    assert not any(n.startswith("nkeep_") for n in names)
+    out = tmp_path / "pk"
+    rc = run_miri.main([f"--data={tree}", "--target=TARG", "--check", "--crop=40", "--partition=all",
+                        f"--out={out}", "--k-max=4", "--workers=1", "--star-flux=1"])
+    assert rc == 0
+    log = (out / "run.log").read_text()
+    assert "pyKLIP's own ranking" in log
+    for d in ("mode", "maxnumbasis", "k_klip"):
+        assert any(l.split("liveness:")[-1].split()[0] == d and " live " in l + " "
+                   for l in log.splitlines() if "liveness:" in l), d
+
+
+def test_a_dead_dimension_stops_the_run_before_it_starts(tree, stub_stpsf, tmp_path, monkeypatch):
+    """What should have happened to run v6: a searched dimension the reducer ignores is caught
+    by the pre-flight and the run refuses to start."""
+    import run_miri
+    from klip_tpe.instruments import generic
+    from klip_tpe.space import Param
+    real = generic.make_space
+
+    def with_a_dead_one(*a, **k):
+        sp = real(*a, **k)
+        sp.add(Param("nkeep_altroll", 0, 3, "int", default=3))     # what pyKLIP used to be handed
+        return sp
+
+    monkeypatch.setattr(generic, "make_space", with_a_dead_one)
+    with pytest.raises(SystemExit, match="nkeep_altroll"):
         run_miri.main([f"--data={tree}", "--target=TARG", "--check", "--crop=40", "--partition=all",
-                       f"--out={tmp_path / 'r'}", "--k-max=4", "--workers=1", "--star-flux=1"])
-    assert "--no-searched-library" in str(e.value)
+                       f"--out={tmp_path / 'dead'}", "--k-max=4", "--workers=1", "--star-flux=1"])
 
 
 def test_the_built_in_engine_takes_the_library_and_searches_it(tree, stub_stpsf):
