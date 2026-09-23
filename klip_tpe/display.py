@@ -89,7 +89,45 @@ TEXT_WIDTH = 72
 
 
 def _abbrev(name: str) -> str:
-    return COL_ABBREV.get(name, name[:6])
+    """Short column/label name.  The searched reference library's counts are
+    ``nkeep_<group>``; a bare six-character cut used to turn ``nkeep_altroll`` and
+    ``nkeep_psfref`` into the same ``nkeep_``, so the importance bars, the config table and
+    the ``k=v`` lines could not say which pool they meant.  They read ``nkalt`` / ``nkref``
+    (the IDL's own ``nkalt``), and any other group ``nk<first four letters>``."""
+    if name in COL_ABBREV:
+        return COL_ABBREV[name]
+    if name.startswith("nkeep_"):
+        grp = name[len("nkeep_"):]
+        return {"altroll": "nkalt", "psfref": "nkref"}.get(grp, "nk" + grp[:4])
+    return name[:6]
+
+
+def _abbrev_unique(names: Sequence[str]) -> List[str]:
+    """:func:`_abbrev` for a set of names shown together, with any collision resolved by
+    falling back to the full names of the colliding entries -- two parameters must never
+    share a label, whatever a future space calls them."""
+    short = [_abbrev(n) for n in names]
+    seen: Dict[str, int] = {}
+    for s in short:
+        seen[s] = seen.get(s, 0) + 1
+    return [n if seen[s] > 1 else s for n, s in zip(names, short)]
+
+
+def _fm_unavailable_note(desc: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The KLIP-FM cell's text when the reducer cannot forward-model at all, from its
+    ``describe()`` dict (as saved in ``run_setup.json``); None when a model will appear.
+
+    The cell used to read "(after 1st best)" whenever the image was missing, which on a
+    pyKLIP / VIP / spaceKLIP run means for ever: KLIP-FM exists only in the built-in engine,
+    so the promised model never arrives and the placeholder is still there on the finished
+    panel."""
+    if not isinstance(desc, dict) or desc.get("supports_fm", True):
+        return None
+    parts = desc.get("partitions") or {}
+    backs = sorted({str(v.get("backend") or v.get("name")) for v in parts.values()
+                    if isinstance(v, dict)} - {"None"}) if isinstance(parts, dict) else []
+    who = "/".join(backs) or str(desc.get("name") or "this")
+    return f"no KLIP-FM with the\n{who} backend\n(built-in engine only)"
 
 
 _RC = {"axes.spines.top": True, "axes.spines.right": True, "axes.grid": False,
@@ -504,7 +542,8 @@ class AnnulusData:
         glob = [b for b in self.bases if b not in rep_bases]
         lines = [label]
         if glob:
-            lines.append("  " + "  ".join(f"{_abbrev(b)}={_fmtval(params.get(b), 4)}" for b in glob))
+            lines.append("  " + "  ".join(f"{ab}={_fmtval(params.get(b), 4)}"
+                                          for b, ab in zip(glob, _abbrev_unique(glob))))
         if rep_bases and per:
             cols = rep_bases + ([] if "k_klip" in rep_bases or not isinstance(self.k_used[i], dict) else ["k"])
             w = max(4, max(len(str(p)) for p in self.partitions)) if self.partitions else 4
@@ -519,7 +558,7 @@ class AnnulusData:
                     else:
                         row.append(_fmtval(d.get(c, params.get(c)), 4))
                 table[str(pid)] = row
-            heads = [_abbrev(c) for c in cols]
+            heads = _abbrev_unique(cols)
             widths = [max(len(h), max((len(table[str(p)][k]) for p in self.partitions), default=1))
                       for k, h in enumerate(heads)]
             # wrap the columns into blocks that fit max_width: "  part " + cols + "  in"
@@ -539,7 +578,9 @@ class AnnulusData:
                     lines.append("  " + str(pid).ljust(w) + " " + " ".join(row[k].rjust(widths[k]) for k in blk)
                                  + (("   *" if str(pid) in sel else "   -") if bk == 0 else ""))
         elif not glob:
-            lines.append("  " + "  ".join(f"{_abbrev(k)}={_fmtval(v, 4)}" for k, v in list(params.items())[:8]))
+            items = list(params.items())[:8]
+            lines.append("  " + "  ".join(f"{ab}={_fmtval(v, 4)}"
+                                          for (k, v), ab in zip(items, _abbrev_unique([k for k, _ in items]))))
         return lines
 
 
@@ -1203,7 +1244,8 @@ def panel_importance_live(ax, ad: AnnulusData, cs: Optional[Dict[str, Any]] = No
         ax.barh(yb, imp[d], height=0.7, color="#1e90ff")
         ax.text(imp[d] + imax * 0.02, yb, f"{imp[d]:.2f}", va="center", fontsize=6)
     ax.set_yticks(range(1, nd + 1))
-    ax.set_yticklabels([_abbrev(names[d]) for d in order[::-1]], fontsize=7)   # short names: the cell is narrow
+    labels = _abbrev_unique(names)                                          # short, and never two alike
+    ax.set_yticklabels([labels[d] for d in order[::-1]], fontsize=7)        # the cell is narrow
     ax.set_xlim(0, imax * 1.18)
     ax.set_ylim(0.25, nd + 0.75)
     ax.set_xlabel("|corr| with S/N")
@@ -2089,6 +2131,9 @@ class StepImages:
     best_labels: Optional[List[Any]] = None        # per-source values that go with best_sources
     note: Optional[str] = None
     fm_image: Optional[np.ndarray] = None          # KLIP-FM response (preview at the best, or the winner's cross-check)
+    #: why ``fm_image`` will stay empty for the WHOLE run (a backend with no KLIP-FM), so the
+    #: cell can say so instead of promising a model "(after 1st best)" that never comes
+    fm_unavailable: Optional[str] = None
     fm_sources: Optional[List[Tuple[float, float, float]]] = None
     fm_label: str = "KLIP-FM response"
     cur_label: Optional[str] = None                # title prefix of the current cells (default "eval N")
@@ -2609,7 +2654,8 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
             draw_image(ax, images.fm_image, ad, "KLIP-FM model (best)", cmap, flatten=False, scale="symlog")
         else:
             ax.set_xticks([]); ax.set_yticks([])
-            ax.text(0.5, 0.5, "(after 1st best)", ha="center", va="center", transform=ax.transAxes, fontsize=6.5)
+            ax.text(0.5, 0.5, getattr(images, "fm_unavailable", None) or "(after 1st best)",
+                    ha="center", va="center", transform=ax.transAxes, fontsize=6.5)
         ax.set_title("KLIP-FM model (best)  [symlog]", fontsize=7.5)
         ax = _box(fig, xi0, chA0, xi0 + sqw, chA1)
         im_ok = images.inj_model is not None and np.ndim(images.inj_model) == 2 and np.isfinite(images.inj_model).any()
@@ -3164,6 +3210,11 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
     run = load_run(run_dir)
     out_dir = out_dir or os.path.join(run_dir, "steps")
     os.makedirs(out_dir, exist_ok=True)
+    try:
+        with open(os.path.join(run_dir, "run_setup.json")) as f:
+            fm_note = _fm_unavailable_note(json.load(f).get("reducer"))
+    except Exception:
+        fm_note = None
     from .plots import _annuli
     ias = list(annuli) if annuli is not None else _annuli(run)
     paths: List[str] = []
@@ -3188,7 +3239,7 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
             c_inj, c_clean = load_eval_images(run_dir, ia, i)
             e_inj, e_clean = load_eval_images(run_dir, ia, bi) if bi != i else (c_inj, c_clean)
             have = c_inj is not None
-            imgs = StepImages(cur_clean=c_clean, cur_inj=c_inj,
+            imgs = StepImages(fm_unavailable=fm_note, cur_clean=c_clean, cur_inj=c_inj,
                               best_inj=e_inj if e_inj is not None else b_inj,
                               best_clean=e_clean if e_clean is not None else b_clean, best_index=bi,
                               note=None if have else note, fm_image=b_fm if i == full.n - 1 else None)
@@ -3881,6 +3932,10 @@ class LiveDisplay(RunCallback):
                 self._setup = json.load(f)
         except Exception:
             self._setup = {"config": runner.cfg.to_dict(), "space": runner.space.to_dict(), "run_dir": runner.run_dir}
+        try:
+            self._fm_note = _fm_unavailable_note(runner.reducer.describe())
+        except Exception:
+            self._fm_note = None
         resumed = bool(getattr(runner, "_resumed", False))
         if not resumed:
             self._guard(runner, "intro", render_intro, dict(self._setup, run_dir=runner.run_dir),
@@ -4072,7 +4127,7 @@ class LiveDisplay(RunCallback):
             b_img = bimg.get("inj")
             self._inj_model = injected_model_image(runner, b_src, None if b_img is None else np.shape(b_img))
             self._inj_model_key = key
-        imgs = StepImages(cur_clean=cur_clean, cur_inj=cur_inj, best_inj=bimg.get("inj"), best_clean=bimg.get("clean"),
+        imgs = StepImages(fm_unavailable=getattr(self, "_fm_note", None), cur_clean=cur_clean, cur_inj=cur_inj, best_inj=bimg.get("inj"), best_clean=bimg.get("clean"),
                           best_index=int(bi), fm_image=fm_img, fm_sources=fm_src,
                           fm_label=f"KLIP-FM preview (best, eval {int(bi) + 1})", inj_model=self._inj_model,
                           **self._running_stitch(runner))
@@ -4172,7 +4227,7 @@ class LiveDisplay(RunCallback):
         # first.  Circle that image's own injections rather than the candidate's.
         b_src = [s.as_tuple() if hasattr(s, "as_tuple") else tuple(s)
                  for s in (bimg.get("sources") or [])] or None
-        imgs = StepImages(cur_clean=img_c, cur_inj=img_i, best_inj=bimg.get("inj"), best_clean=bimg.get("clean"),
+        imgs = StepImages(fm_unavailable=getattr(self, "_fm_note", None), cur_clean=img_c, cur_inj=img_i, best_inj=bimg.get("inj"), best_clean=bimg.get("clean"),
                           best_index=int(e), best_sources=b_src,
                           best_labels=(None if b_src is None else
                                        (list(ad.per_source[bimg["record"].index])
@@ -4268,7 +4323,7 @@ class LiveDisplay(RunCallback):
                 ps = list(bimg.get("per_source") or getattr(result, "per_source", None) or [])
                 b_lab = ps if len(ps) == len(b_src) else [None] * len(b_src)
             fm_src = [s.as_tuple() if hasattr(s, "as_tuple") else tuple(s) for s in (fm.get("sources") or [])] or None
-            imgs = StepImages(cur_clean=li.get("clean"), cur_inj=li.get("inj"), best_inj=bimg.get("inj"),
+            imgs = StepImages(fm_unavailable=getattr(self, "_fm_note", None), cur_clean=li.get("clean"), cur_inj=li.get("inj"), best_inj=bimg.get("inj"),
                               best_clean=bimg.get("clean"), best_index=int(result.winner_index),
                               best_sources=b_src, best_labels=b_lab,
                               note="annulus complete", fm_image=fm.get("fm_image"), fm_sources=fm_src,

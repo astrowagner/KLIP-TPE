@@ -138,6 +138,19 @@ class KLIPReducer(Reducer):
     name = "klip"
     supports_kscan = True
     supports_fm = True
+    #: A backend that overrides :meth:`_subtract` builds its own basis and does NOT apply a
+    #: searched reference library unless it declares it here.  pyKLIP, VIP and the custom
+    #: ``FunctionReducer`` all override it; pyKLIP in particular hands the WHOLE reference
+    #: cube to ``klip_parallelized`` and lets it pick.
+    _honours_reference_library = False
+
+    @property
+    def supports_reference_library(self) -> bool:
+        """True only where ``nkeep_<group>`` actually changes the reduction: the built-in
+        annular KLIP (whose ``_subtract`` passes ``kp.ref_lib`` / ``kp.ref_keep`` to
+        :func:`klip_tpe.klip.klip_annular`), or a backend that says it applies them."""
+        return (type(self)._subtract is KLIPReducer._subtract
+                or bool(getattr(type(self), "_honours_reference_library", False)))
 
     def __init__(self, data: Dataset, pxscale: float, lam_m: float, diam_m: float,
                  injection_model: Optional[InjectionModel] = None,
@@ -246,6 +259,19 @@ class KLIPReducer(Reducer):
         the IDL's own ``F430M_refmetrics_cc.fits`` and any difference in the result is a
         difference in the SELECTION, not in how two languages measure correlation.
         """
+        if not self.supports_reference_library:
+            # This used to succeed on every backend: the counts were added to the search
+            # space from here, and a backend with its own basis then ignored them.  GO 1386
+            # MIRI run v6 searched nkeep_altroll / nkeep_psfref for 600 evaluations on
+            # pyKLIP, and four libraries from pure ADI to pure RDI gave bit-identical scores
+            # on 40 common draws -- the "elected" counts were where TPE left two dead
+            # dimensions.  A searched library that is not applied must not be searchable.
+            raise NotImplementedError(
+                f"{type(self).__name__} ({self.name!r}) does not apply a searched reference "
+                f"library: its _subtract builds its own basis from the whole reference cube, "
+                f"so nkeep_* would be searched and change nothing.  Use the built-in engine "
+                f"(backend 'klip') for a searched library, or search this backend's own "
+                f"selection instead (pyKLIP: its ADI / RDI / ADI+RDI mode).")
         self._reflib_spec = {"partition": np.asarray(list(partition)), "groups": groups,
                              "metric": metric, "shift_px": int(shift_px),
                              "n_min_ref": int(n_min_ref), "min_keep": dict(min_keep or {}),
@@ -255,7 +281,7 @@ class KLIPReducer(Reducer):
 
     def reference_params(self):
         """The searched counts this reducer's library contributes to the space."""
-        if self._reflib_spec is None:
+        if self._reflib_spec is None or not self.supports_reference_library:
             return []
         return self._reflib_stub().params()
 

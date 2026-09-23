@@ -275,9 +275,14 @@ if HAVE_DATA and stpsf_psf.have_stpsf():
 # The photosphere is the right thing to use here: the only excess those authors report is
 # 3.5σ at 24 µm with `T_dust ≈ 300 K`, which contributes far less at 11 µm.
 #
-# **Then check it against something the recipe did not use.**  At `S = 0.0690 Jy`, Carter et
-# al.'s quoted ~2.7 µJy F1140C sensitivity is a contrast floor of 3.9e-5, against their ~2e-4
-# for the companion.  Those two hang together, and would not if `S` were wrong by a factor.
+# **Then check it against something the recipe did not use.**  Carter et al. (2023) Table 3
+# puts the companion at ΔF1140C = 8.264 ± 0.021 — a contrast of 4.95e-4 — and at
+# (7.40 ± 1.16) × 10⁻¹⁹ W m⁻² µm⁻¹, which is 31.5 µJy at 11.3 µm.  Divide one by the other
+# and *their* star comes out at 0.0637 Jy: our `S = 0.0690 Jy` is 8.3% higher, against their
+# ±3.5% on the stellar magnitude and our own ±5% — 1.3σ.  Their quoted background-limited
+# sensitivity of ~2.7 µJy is then a contrast floor of 3.9e-5, in line with the ~5e-5 their
+# contrast curve reaches beyond 3″.  (Do not mistake the ~2e-4 in their text for the planet:
+# that is their 5σ *limit* at 1″, and the planet is 2.5× brighter than it.)
 #
 # **And 1.0 is not a safe default for this.**  `make_reducer(star_flux=None)` becomes
 # `star_flux or 1.0`, which makes one unit of contrast worth *one count* against a cube whose
@@ -358,8 +363,11 @@ if HAVE_DATA and STAR_FLUX is not None:
 
 # %% [markdown]
 # On the real programme with `n_iter=1000` the calibration lands at S/N 5.08 for a contrast of
-# 3e-4 and settles at 2.27e-4 — which is within ~15% of the companion's own published
-# contrast, a pleasing accident that doubles as a sanity check on the flux scale.
+# 3e-4 and settles at 2.27e-4.  That number is a *sensitivity* — the contrast at which the
+# default configuration sees an injected source at S/N ≈ 5 — not a flux measurement, so it
+# says nothing about the flux scale on its own.  HIP 65426 b, at 4.95e-4 in Carter et al.'s
+# Table 3, sits 2.2× above it, which is what a clear detection at this separation should
+# look like.  The flux-scale check is the one in section 4.
 #
 # ## 7. Notes for real MIRI work
 #

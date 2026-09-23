@@ -29,7 +29,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 
 from ..injection import GaussianPSF, InjectionModel, TemplatePSF
-from ..reducer import Dataset, PartitionedReducer
+from ..reducer import Dataset, KLIPReducer, PartitionedReducer
 from .pyklip import PyKLIPReducer, dataset_from_pyklip
 
 __all__ = ["load_spaceklip", "load_calints", "make_reducer", "read_jwst_files", "JWST_DIAM",
@@ -937,9 +937,14 @@ def make_reducer(datasets: Dict[str, Dataset], pxscale: Optional[float] = None, 
                  mode: str = "ADI+RDI", weighting: str = "equal", max_workers=1, pool: str = "threads",
                  n_min_ref: int = 10,
                  fwhm_px: Optional[float] = None, outrad_cap: Optional[float] = None,
-                 stpsf_kw: Optional[Dict[str, Any]] = None,
+                 stpsf_kw: Optional[Dict[str, Any]] = None, backend: str = "pyklip",
                  log: Callable[[str], None] = print, **kw) -> PartitionedReducer:
-    """``PyKLIPReducer`` per roll.
+    """``PyKLIPReducer`` per roll (``backend='klip'``: the built-in annular KLIP instead).
+
+    ``backend='klip'`` is the only engine that applies a searched reference library
+    (``set_reference_library``: ``nkeep_altroll`` / ``nkeep_psfref``); pyKLIP builds its own
+    basis from the whole reference cube and refuses one.  ``mode`` maps onto the built-in
+    engine as ADI -> no reference cube, RDI -> ``rdi_mode='rdi'``, ADI+RDI -> ``'ardi'``.
 
     The injection model, in order of precedence: an ``injection_model`` you built
     yourself; ``psf='stpsf'``, which computes the **off-axis coronagraphic PSF of the
@@ -980,12 +985,21 @@ def make_reducer(datasets: Dict[str, Dataset], pxscale: Optional[float] = None, 
             model = GaussianPSF(fw, star_flux=star_flux or 1.0)
         ny = ds.cube.shape[-1]
         cap = outrad_cap or (ny / 2.0 - 2.0)
-        red = PyKLIPReducer(ds, pxscale=px, lam_m=lam, diam_m=diam_m, injection_model=model, fwhm_px=fw,
-                            outrad_cap=cap, defaults={"mode": mode if ds.ref_cube is not None else "ADI",
-                                                      "n_min_ref": n_min_ref, **kw})
+        eff_mode = mode if ds.ref_cube is not None else "ADI"
+        if str(backend).lower() == "klip":
+            m_up = str(eff_mode).upper()
+            red = KLIPReducer(ds, pxscale=px, lam_m=lam, diam_m=diam_m, injection_model=model, fwhm_px=fw,
+                              outrad_cap=cap, defaults={"use_rdi": "RDI" in m_up,
+                                                        "rdi_mode": "rdi" if m_up == "RDI" else "ardi",
+                                                        "n_min_ref": n_min_ref, **kw})
+        elif str(backend).lower() == "pyklip":
+            red = PyKLIPReducer(ds, pxscale=px, lam_m=lam, diam_m=diam_m, injection_model=model, fwhm_px=fw,
+                                outrad_cap=cap, defaults={"mode": eff_mode, "n_min_ref": n_min_ref, **kw})
+        else:
+            raise ValueError(f"backend must be 'pyklip' or 'klip', not {backend!r}")
         red.name = f"spaceklip_{pid}"
         reducers[pid] = red
-        log(f"  {pid}: pyklip {red.defaults['mode']}, lambda/D {lod:.2f} px, fwhm {fw:.2f} px, "
+        log(f"  {pid}: {str(backend).lower()} {eff_mode}, lambda/D {lod:.2f} px, fwhm {fw:.2f} px, "
             f"injection {model.name}")
     pr = PartitionedReducer(reducers, weighting=weighting, max_workers=max_workers, pool=pool)
     pr.name = "spaceklip"

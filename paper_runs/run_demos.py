@@ -320,8 +320,20 @@ def hip65426_objects(partition="all"):
         nref = 0 if r0.data.ref_cube is None else int(np.shape(r0.data.ref_cube)[0])
         part = np.round(np.asarray(r0.data.angles, float), 1).astype(str)
         if nref >= 2 and np.unique(part).size >= 2:
-            r0.set_reference_library(partition=part, ref_group="psfref",
-                                     n_min_ref=2, metric="cc")
+            try:
+                r0.set_reference_library(partition=part, ref_group="psfref",
+                                         n_min_ref=2, metric="cc")
+            except NotImplementedError as exc:
+                # Until 2026-09-23 this call succeeded on pyKLIP and the counts it added were
+                # ignored by every reduction, so D and H2 searched two dead dimensions and --
+                # because they replaced it -- lost the live ADI / RDI / ADI+RDI `mode` they had
+                # searched before.  Stop here rather than repeat that.
+                raise RuntimeError(
+                    "runs D and H2 ask for a searched reference library on the pyKLIP backend, "
+                    "which cannot apply one (" + str(exc) + ").  Choose one: put `mode` back as "
+                    "the searched categorical (what D and H2 searched before a9a4c3e, and live on "
+                    "pyKLIP), or build this reducer with sk.make_reducer(..., backend='klip') so "
+                    "nkeep_altroll / nkeep_psfref actually select frames.") from exc
             log(f"  library: searched -- nkeep_altroll over {part.size} science frames in "
                 f"{np.unique(part).size} rolls, nkeep_psfref over {nref} reference frames")
     return red

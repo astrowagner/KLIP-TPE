@@ -290,7 +290,8 @@ def test_check_refuses_a_radial_model_on_a_four_quadrant_mask(tree, stub_stpsf, 
     run_miri, a = _args(data=str(tree), out=str(tmp_path / "o"))
     with pytest.raises(SystemExit, match="azimuthal average"):
         run_miri.main([f"--data={tree}", "--target=TARG", "--check", "--crop=40",
-                       f"--out={tmp_path / 'o'}", "--k-max=4", "--workers=1", "--star-flux=1"])
+                       f"--out={tmp_path / 'o'}", "--k-max=4", "--workers=1", "--star-flux=1",
+                       "--no-searched-library"])
 
 
 def test_check_runs_the_whole_path_and_passes(tree, stub_stpsf, tmp_path):
@@ -298,7 +299,8 @@ def test_check_runs_the_whole_path_and_passes(tree, stub_stpsf, tmp_path):
     rc = None
     import run_miri
     rc = run_miri.main([f"--data={tree}", "--target=TARG", "--check", "--crop=40",
-                        f"--out={out}", "--k-max=4", "--workers=1", "--star-flux=1"])
+                        f"--out={out}", "--k-max=4", "--workers=1", "--star-flux=1",
+                        "--no-searched-library"])
     assert rc == 0
     log = (out / "run.log").read_text()
     assert "miri_library" in log
@@ -341,7 +343,8 @@ def test_panels_are_written_without_a_live_window(tree, stub_stpsf, tmp_path, mo
     monkeypatch.setattr("klip_tpe.display.LiveDisplay", FakeDisplay)
     out = tmp_path / "o"
     run_miri.main([f"--data={tree}", "--target=TARG", "--crop=40", f"--out={out}",
-                   "--k-max=4", "--workers=1", "--star-flux=1", "--n-iter=1", "--default-only"])
+                   "--k-max=4", "--workers=1", "--star-flux=1", "--n-iter=1", "--default-only",
+                   "--no-searched-library"])
     assert made, "no display was created without --show, so no panels are written"
     assert made["show"] is False and made["run_dir"] == str(out)
     assert "klip-tpe view --run-dir" in (out / "run.log").read_text()
@@ -354,7 +357,8 @@ def test_no_display_really_turns_the_panels_off(tree, stub_stpsf, tmp_path, monk
                         lambda *a, **k: made.append(k) or object())
     out = tmp_path / "o2"
     run_miri.main([f"--data={tree}", "--target=TARG", "--crop=40", f"--out={out}",
-                   "--k-max=4", "--workers=1", "--star-flux=1", "--n-iter=1", "--default-only", "--no-display"])
+                   "--k-max=4", "--workers=1", "--star-flux=1", "--n-iter=1", "--default-only", "--no-display",
+                   "--no-searched-library"])
     assert made == []
 
 
@@ -488,3 +492,28 @@ def test_the_default_miri_annuli_leave_every_ring_its_noise_apertures():
             worst = min(int(d.get("nclean", 0)) for d in det)
             assert worst >= 6, (f"annulus {ia + 1} [{a_in:.1f},{a_out:.1f}] with {n} sources "
                                 f"leaves only {worst} clean apertures (seed {seed})")
+
+
+# ------------------------------------------- a searched library only on an engine that applies it
+
+def test_a_searched_library_on_pyklip_refuses_before_any_compute(tree, stub_stpsf, tmp_path):
+    """The default (a searched library) on the default engine (pyKLIP) used to be accepted,
+    and pyKLIP then ignored the counts: run v6 searched them for four hours and every
+    library from pure ADI to pure RDI reduced bit-identically.  Now it stops at build time
+    and says what to do instead."""
+    import run_miri
+    with pytest.raises(SystemExit, match="--backend klip") as e:
+        run_miri.main([f"--data={tree}", "--target=TARG", "--check", "--crop=40", "--partition=all",
+                       f"--out={tmp_path / 'r'}", "--k-max=4", "--workers=1", "--star-flux=1"])
+    assert "--no-searched-library" in str(e.value)
+
+
+def test_the_built_in_engine_takes_the_library_and_searches_it(tree, stub_stpsf):
+    import run_miri
+    from klip_tpe.instruments import generic
+    run_miri, a = _args(data=str(tree), partition="all", backend="klip", searched_library=True)
+    dsets, info, red, ann, obj, samp, m, px = run_miri.build(a, log=lambda *_: None)
+    r0 = next(iter(red.reducers.values()))
+    assert type(r0).__name__ == "KLIPReducer" and r0.supports_reference_library
+    names = generic.make_space(red, k_klip_max=4, search_angles=False).names
+    assert "nkeep_altroll" in names and "nkeep_psfref" in names

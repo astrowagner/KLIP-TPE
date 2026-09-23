@@ -167,9 +167,13 @@ PHOTOMETRY = {
     # 3.5 sigma at 24 um (Chen et al. 2012) fitted with T_dust ~ 300 K, which contributes
     # far less at 11 um than at 24 and is marginal even there.
     #
-    # Cross-check, independent of the recipe: at S = 0.0690 Jy the paper's quoted F1140C
-    # sensitivity of ~2.7 uJy is a contrast floor of 3.9e-5, and the companion's ~2e-4 is
-    # 13.8 uJy -- the two hang together, and would not if S were wrong by a factor.
+    # Cross-check, independent of the recipe: Carter et al. (2023) Table 3 gives the companion
+    # at dF1140C = 8.264 +/- 0.021 (a contrast of 4.95e-4) and (7.40 +/- 1.16)e-19 W m^-2 um^-1,
+    # i.e. 31.5 uJy at 11.3 um -- which puts THEIR star at 0.0637 Jy.  This entry is 8.3%
+    # higher, against their +/-3.5% on m* and its own +/-5%: 1.3 sigma.  Their quoted
+    # background-limited sensitivity of ~2.7 uJy is then a contrast floor of 3.9e-5, in line
+    # with their ~5e-5 beyond 3".  (An earlier version of this note called ~2e-4 "the
+    # companion" -- that is their 5-sigma LIMIT at 1", and the companion is 2.5x brighter.)
     **{f"hip65426_{f.lower()}": {
         "flux_density_jy": s, "flux_density_err_frac": 0.05, "filter": f,
         "ref": "synthetic photometry: Planck(Teff=8600 K, Carter et al. 2023 PHOENIX fit) "
@@ -177,8 +181,9 @@ PHOTOMETRY = {
                "to the F444W entry above",
         "optics_transmission": 1.0,
         "optics_transmission_source": "PHOTMJSR of the coronagraphic mode already carries its optics",
-        "check": "Carter et al. (2023, ApJL 951, L20): ~2.7 uJy F1140C sensitivity -> a 3.9e-5 "
-                 "contrast floor, against their ~2e-4 for the companion",
+        "check": "Carter et al. (2023, ApJL 951, L20) Table 3, F1140C: dF1140C = 8.264 +/- 0.021 "
+                 "and 7.40e-19 W m^-2 um^-1 (31.5 uJy) imply a star of 0.0637 Jy, 8.3% below "
+                 "this entry (1.3 sigma); their ~2.7 uJy sensitivity is a 3.9e-5 contrast floor",
     } for f, s in (("F1065C", 0.07813), ("F1140C", 0.06899), ("F1550C", 0.03739))},
     # ---- HR 8799 through the same three MIRI filters (GO 1194, Boccaletti et al. 2024,
     # A&A 686, A33).  Computed from scratch rather than anchored, because this star has an

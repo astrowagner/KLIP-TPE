@@ -122,3 +122,47 @@ def test_roll_partitioning_cannot_feed_the_alternate_roll_pool():
     assert lib.eligible(0, lib.groups[0]).size == 0, (
         "a reducer holding a single roll can offer no alternate-roll reference -- which is "
         "why the MIRI driver defaults to --partition all")
+
+
+def test_the_library_changes_the_reduction():
+    """The property the whole feature rests on, and the one nothing tested: different counts
+    must give different images.  GO 1386 MIRI run v6 searched both counts for 600
+    evaluations on a backend that ignored them -- pure ADI, pure RDI and everything gave
+    bit-identical scores on 40 common draws -- and the space, the guard and the eligibility
+    tests above all passed throughout, because none of them reduces anything."""
+    from klip_tpe.reducer import ReductionRequest
+    red, r0, ang = _jwst_like()
+    base = dict(k_klip=3, inrad=3.0, outrad=9.0, bin=1, n_ang=1, filter=0, use_rdi=True)
+    imgs = {}
+    for label, (na, nr) in {"adi": (4, 0), "rdi": (0, 18), "all": (4, 18), "part": (2, 6)}.items():
+        res = r0.reduce(ReductionRequest(params=dict(base, nkeep_altroll=na, nkeep_psfref=nr)))
+        assert res.meta.get("rdi_mode") == "searched", res.meta.get("rdi_mode")
+        assert res.meta.get("ref_keep") == {"altroll": na, "psfref": nr}, res.meta.get("ref_keep")
+        imgs[label] = np.nan_to_num(np.asarray(res.image, float))
+    labels = sorted(imgs)
+    for i, a in enumerate(labels):
+        for b in labels[i + 1:]:
+            assert not np.array_equal(imgs[a], imgs[b]), f"{a} and {b} reduce identically"
+
+
+@pytest.mark.parametrize("modname,clsname", [("klip_tpe.backends.pyklip", "PyKLIPReducer"),
+                                             ("klip_tpe.backends.vip", "VIPReducer"),
+                                             ("klip_tpe.backends.custom", "FunctionReducer")])
+def test_backends_with_their_own_basis_refuse_a_library(modname, clsname):
+    """A backend that builds its own basis must refuse a searched library rather than accept
+    it, add the counts to the space, and ignore them.  Checked on a bare instance so the
+    test needs neither pyKLIP nor VIP installed: the refusal comes before anything else."""
+    import importlib
+    cls = getattr(importlib.import_module(modname), clsname)
+    r = object.__new__(cls)
+    assert r.supports_reference_library is False
+    with pytest.raises(NotImplementedError, match="does not apply a searched reference library"):
+        r.set_reference_library(partition=np.array(["a", "b"]))
+    r._reflib_spec = {"partition": np.array(["a", "b"])}          # even if set behind its back
+    assert r.reference_params() == []
+
+
+def test_the_built_in_engine_accepts_a_library():
+    red, r0, ang = _jwst_like()
+    assert r0.supports_reference_library is True
+    assert [p.name for p in r0.reference_params()] == ["nkeep_altroll", "nkeep_psfref"]

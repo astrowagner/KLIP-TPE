@@ -186,9 +186,10 @@ def build(a, log):
             "injections may land in them")
 
     star_flux = resolve_star_flux(a, info, m, log)
+    backend = getattr(a, "backend", "pyklip") or "pyklip"
     red = sk.make_reducer(dsets, pxscale=px, wavelength_m=m["lam_m"], diam_m=miri.DIAMETER_M,
                           psf="stpsf", star_flux=star_flux, max_workers=a.workers,
-                          mode=a.mode, log=log)
+                          mode=a.mode, backend=backend, log=log)
     lod = (m["lam_m"] / miri.DIAMETER_M) * 206265.0 / px
     log(f"lambda/D = {lod:.2f} px, FWHM = {red.fwhm:.2f} px")
 
@@ -214,8 +215,19 @@ def build(a, log):
                 log(f"  library: NOT searched -- {nref} reference frame(s) and {rolls.size} "
                     f"roll(s); a ranked library needs a pool to rank")
             else:
-                r0.set_reference_library(partition=part, ref_group="psfref",
-                                         n_min_ref=2, metric="cc")
+                try:
+                    r0.set_reference_library(partition=part, ref_group="psfref",
+                                             n_min_ref=2, metric="cc")
+                except NotImplementedError as exc:
+                    # Refuse before any compute.  This used to be accepted on pyKLIP, which
+                    # then ignored the counts: run v6 searched them for 4 h and every library
+                    # from pure ADI to pure RDI reduced bit-identically.
+                    raise SystemExit(
+                        f"a searched reference library needs an engine that applies it, and "
+                        f"--backend {backend} does not.\n  {exc}\n"
+                        f"Either --backend klip (the built-in annular KLIP, which does), or "
+                        f"--no-searched-library to reduce with {backend}'s own {a.mode} library "
+                        f"-- which is what every {backend} run before this check did anyway.")
                 log(f"  library: searched, ranked per target frame by cross-correlation -- "
                     f"nkeep_altroll over {int(ang.size)} science frames in {rolls.size} rolls "
                     f"({', '.join(f'{c}@{r}' for r, c in zip(rolls, counts))}), "
@@ -313,6 +325,10 @@ def main(argv=None):
                          "unit with the frames' PIXAR_SR and the injection library's own EE "
                          "radius. Preferred over --star-flux: it is a number you can cite")
     ap.add_argument("--mode", default="ADI+RDI")
+    ap.add_argument("--backend", default="pyklip", choices=["pyklip", "klip"],
+                    help="PSF-subtraction engine. Only 'klip' (the built-in annular KLIP) applies "
+                         "the searched reference library; pyKLIP builds its own basis from the "
+                         "whole reference cube, so with it you must pass --no-searched-library")
     ap.add_argument("--min-throughput", type=float, default=0.30,
                     help="pixels transmitting less than this are dead zones (default 0.30)")
     ap.add_argument("--no-dead-zones", "--no-mask-quadrants", dest="dead_zones",

@@ -1,5 +1,56 @@
 # Changelog
 
+## Unreleased — 2026-09-23 (the searched library was never applied on pyKLIP)
+
+- **Retraction: `nkeep_altroll` / `nkeep_psfref` changed nothing on the pyKLIP backend** —
+  which is every JWST run since the entry below that introduced them.
+  `set_reference_library` lives on the built-in `KLIPReducer` and adds the two counts to the
+  search space; `PyKLIPReducer._subtract` never used the basis they select, handing
+  `klip_parallelized` the whole reference cube every time.  MIRI F1140C run v6 searched both
+  for 600 evaluations.  Re-reduced on 40 common injection draws per annulus
+  (`scripts/library_ablation.py`), pure ADI (41, 0), pure RDI (0, 90), everything (41, 90)
+  and the elected counts give **bit-identical** scores in all three annuli, and the same
+  HIP 65426 b S/N.  The "RDI inside, ARDI outside" pattern was where TPE left two dead
+  dimensions, and their apparent importance in the panel is what an inert dimension picks
+  up as a search converges.
+- **NIRCam `run_D` / `H2` lost a live dimension to it.**  That entry replaced the `mode`
+  categorical — live on pyKLIP — with the two counts, and those stages build pyKLIP with
+  `mode="RDI"` fixed, so as configured they could not choose ADI / RDI / ADI+RDI at all.
+- **Guard.**  A backend that overrides `_subtract` now refuses `set_reference_library`
+  (`NotImplementedError`) and contributes no dimensions unless it declares
+  `_honours_reference_library`.  `run_miri.py` refuses at build time, before any
+  reduction, and names the two ways forward; `run_D` / `H2` stop with the same choice.
+  New tests: the built-in engine's reduction must *change* with the counts — the property
+  the feature rests on, which no earlier test reduced anything to check — and pyKLIP, VIP and
+  `FunctionReducer` must refuse.
+- **`spaceklip.make_reducer(backend="klip")`, `run_miri.py --backend klip`**: the built-in
+  annular KLIP with the STPSF 2-D injection model, the one engine that applies the library.
+- **pyKLIP was already ranking references.**  Per target frame and per sector, pyKLIP 2.10's
+  ADI+RDI keeps the `maxnumbasis` most-correlated frames of the union of both pools — and our
+  backend never set `maxnumbasis`, so it defaulted to `k_klip`.  On every pyKLIP run,
+  `k_klip` has been tuning a one-pool library size as well as the KL truncation.
+- **The first real test of the library** (built-in engine, v6's other parameters, 40 common
+  draws per annulus): *which* pool matters a great deal and *how many* frames much less.  The
+  other roll alone beats anything involving φ Cen by ×1.41 at 1.1–1.8″ (S/N 10.68 against
+  7.56 for every frame), ×1.14 at 2.6″ and ×1.20 at 3.3–3.6″; keeping the best-correlated
+  third of φ Cen instead of all 90 moves the injections by under 5%.  HIP 65426 b at 0.82″
+  reverses it — the roll moves it only 0.37 FWHM, so ADI takes 12.4 (top-third RDI) down to
+  4.9.  At the same parameters pyKLIP is much the stronger engine at 2.6–3.6″ (6.79 against
+  4.52), consistent with it re-ranking references per sector where the built-in library
+  ranks per annulus.
+- **What v6 does show** (pyKLIP, 40 common draws per annulus): its validated winners beat the
+  untuned default by ×1.37 at 1.1–1.8″, ×1.28 at 2.6″ and ×1.01 at 3.3–3.6″, and take
+  HIP 65426 b from S/N 9.3 to 12.2.  Its injection-calibrated 5σ curve (2.06e-4 at 0.99″,
+  5.0e-5 at 3.09″) sits on Carter et al. (2023)'s (~2e-4 at 1″, ~5e-5 beyond 3″) — at par,
+  not ahead, with the caveat that the two 5σ definitions differ.
+- Display: the library counts are labelled `nkalt` / `nkref` instead of both `nkeep_`, and
+  no two parameters can share a label any more; the KLIP-FM cell says why it is empty on a
+  backend without forward modelling instead of promising a model "(after 1st best)".
+- Carter et al. (2023) F1140C, corrected in `datasets.py` and tutorial 05: the companion is
+  ΔF1140C = 8.264 ± 0.021 (4.95e-4, 31.5 µJy), not the "~2e-4 / 13.8 µJy" quoted — that
+  was their 5σ *limit* at 1″.  Their Table 3 then implies a star of 0.0637 Jy, 8.3% below
+  ours (1.3σ), a real flux-scale check the old note missed.
+
 ## Unreleased — 2026-09-23 (a tutorial budget that can actually find something)
 
 A student ran tutorial 1, stopped at ~20 evaluations because nothing seemed to be happening,
