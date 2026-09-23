@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased — 2026-09-23 (the NIRCam stages remeasure too)
+- **`run_D` and `H2` now score each trial as the mean of 3 fresh draws**, as the MIRI driver
+  does.  They had `n_remeasure=3` on `CalibrationConfig` — the calibration's own, older
+  setting — while `RunConfig.n_remeasure` stayed at its default of 1, so every NIRCam trial
+  was a single measurement and the new error bars had nothing to draw.  That looked like a
+  plotting bug and was not; `draw_ranges` correctly adds nothing for a one-draw run.
+- A benchmark exists to separate TPE from random, and on MIRI a single draw scatters with
+  sd 0.84 against a useful range of ~6 — most of what such a benchmark measures is that
+  noise.  NIRCam reductions are **2.2 s** against MIRI's 22.6, so H2's 16 slots × 800
+  evaluations go from ~8 h to ~24 h.  This batch is already incomparable to E2/F2/G2 (search
+  space, radprof, the reference library, source count), so nothing further is lost by also
+  fixing what it measures.
+- `_bench_hi` takes `n_remeasure`, defaulting to **1**, so E2/F2/G2 are untouched until they
+  are re-run deliberately.  Pinned by a test, because the setting is easy to lose in a
+  refactor and its absence is invisible: the run completes, the panels just have no bars.
+
 ## Unreleased — 2026-09-23 (the draw bars went into a panel nothing draws)
 - **Fix: the error bars were added to `panel_trace`, which only `render_step_classic` calls.**
   The live window and the step PDFs go through `render_step` → `panel_convergence_idl`, so

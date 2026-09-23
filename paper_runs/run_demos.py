@@ -343,6 +343,10 @@ def run_D():
     cfg = RunConfig(ann_edges=[6, 20, 45], n_iter=n_iter, n_init=n_init, seed=14, n_sources=2,
                     validation=ValidationConfig(n_top=3, n_valid=5),
                     calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=3),
+                    # each trial scored as the mean of 3 fresh source draws, as MIRI does.
+                    # NIRCam reductions are ~2.2 s (MIRI is 22.6), so this is the cheap end of
+                    # the trade that on MIRI took the objective's sd from 0.84 to 0.48.
+                    n_remeasure=3,
                     defaults={"k_klip": 10}, fm_curve=False, save_eval_images=False)
     d = os.path.join(OUT, "D_hip65426")
     Runner(red, space, obj, samp, cfg, d, log=log,
@@ -429,7 +433,7 @@ def bench_modes(default):
 
 def _bench_hi(tag, groups, modes, k_max, max_drop, defaults, forced, ann_edges, out, seeds=range(8),
               n_iter=800, n_init=80, n_top=8, n_valid=15, make_red=None, known=None, n_sources=3,
-              add_params=None, search_angles=True, n_min_ref=5):
+              add_params=None, search_angles=True, n_min_ref=5, n_remeasure=1):
     """The benchmark again, with enough statistical power to settle it.
 
     Run F reported TPE behind random after validation (9.34 +/- 0.57 vs 9.64 +/- 0.53,
@@ -469,7 +473,7 @@ def _bench_hi(tag, groups, modes, k_max, max_drop, defaults, forced, ann_edges, 
         cfg = RunConfig(ann_edges=ann_edges, n_iter=n_iter, n_init=n_init, seed=seed, search_mode=mode,
                         n_sources=n_sources, validation=ValidationConfig(n_top=n_top, n_valid=n_valid),
                         calibration=CalibrationConfig(forced=_forced_list(forced, ann_edges)),
-                        defaults=defaults,
+                        defaults=defaults, n_remeasure=n_remeasure,
                         fm_curve=False, save_fits=False, save_eval_images=False, write_setup_files=False)
         # a display per slot, all blitting into the one shared window (see LiveDisplay._win):
         # a benchmark is the run you most want to watch and the one that had no window at all
@@ -591,6 +595,13 @@ def run_H2():
     # raw-detector-units axis of flux_unit = 1.0.  See docs/FLUX_CALIBRATION.md.
     _bench_hi("H2", 1, ("tpe", "random"), 18, None, {"k_klip": 10}, 2.022e-04, [6, 20], "H2_bench_jwst",
               make_red=hip65426_objects, known=[HIP], n_sources=2, search_angles=False, n_min_ref=2,
+              # 3 draws per trial, averaged.  A benchmark exists to separate TPE from random,
+              # and on MIRI a single draw scatters with sd 0.84 against a ~6 range -- most of
+              # what such a benchmark measures is that noise.  NIRCam reductions are ~2.2 s, so
+              # 16 slots x 800 evals goes from ~8 h to ~24 h.  This batch is already
+              # incomparable to E2/F2/G2 (space, radprof, library, source count), so nothing
+              # further is lost by also fixing what it measures.
+              n_remeasure=3,
               # no `mode`: hip65426_objects now installs a searched reference library, and
               # nkeep_altroll / nkeep_psfref subsume the categorical.  n_min_ref drops to 2
               # because it is now the floor on the two counts' SUM (the basis size), not on

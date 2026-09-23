@@ -434,3 +434,36 @@ def test_calibration_cannot_run_away_on_a_small_ring():
     src = open(os.path.join(os.path.dirname(HERE), "klip_tpe", "runner.py")).read()
     assert "walking again" in src and "could NOT be calibrated" in src
     assert 'info["uncalibrated"]' in src
+
+
+def test_the_nircam_stages_remeasure_each_trial(demos, monkeypatch, tmp_path):
+    """run_D and H2 score each trial as the mean of 3 fresh draws, as the MIRI driver does.
+
+    Not cosmetic: on MIRI a single draw scatters with sd 0.84 against a useful range of ~6,
+    and a benchmark that cannot separate that is measuring its own noise rather than the two
+    search strategies.  NIRCam reductions are ~2.2 s against MIRI's 22.6, so this is the
+    cheap end of the trade.  Pinned because the setting is easy to lose in a refactor and its
+    absence is invisible -- the run completes, the panels just have no error bars.
+    """
+    import inspect
+
+    seen = {}
+    monkeypatch.setattr(demos, "OUT", str(tmp_path))
+    monkeypatch.setattr(demos, "hip65426_objects", lambda *a, **k: "JWST_REDUCER")
+    monkeypatch.setattr(demos.generic, "default_config", lambda red, known, **kw: ("OBJ", "SAMP"))
+    monkeypatch.setattr(demos.generic, "make_space", lambda red, **kw: _FakeSpace())
+    monkeypatch.setattr(demos.generic, "make_guard", lambda red, **kw: None)
+    monkeypatch.setattr(demos, "Runner", lambda *a, **kw: seen.update(cfg=a[4]) or "RUNNER")
+
+    import klip_tpe.bench as B
+    monkeypatch.setattr(B, "run_benchmark",
+                        lambda make_runner, modes, seeds, n_iter, n_init, bench_tag, out_dir, log:
+                        make_runner("tpe", 0, out_dir))
+    demos.run_H2()
+    assert seen["cfg"].n_remeasure == 3, f"H2 got n_remeasure={seen['cfg'].n_remeasure}"
+
+    # run_D builds its own RunConfig rather than going through _bench_hi
+    assert "n_remeasure=3" in inspect.getsource(demos.run_D)
+
+    # and the default stays 1, so E2/F2/G2 are untouched until they are re-run deliberately
+    assert inspect.signature(demos._bench_hi).parameters["n_remeasure"].default == 1
