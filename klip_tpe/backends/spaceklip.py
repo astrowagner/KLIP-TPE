@@ -941,9 +941,10 @@ def make_reducer(datasets: Dict[str, Dataset], pxscale: Optional[float] = None, 
                  log: Callable[[str], None] = print, **kw) -> PartitionedReducer:
     """``PyKLIPReducer`` per roll (``backend='klip'``: the built-in annular KLIP instead).
 
-    ``backend='klip'`` is the only engine that applies a searched reference library
-    (``set_reference_library``: ``nkeep_altroll`` / ``nkeep_psfref``); pyKLIP builds its own
-    basis from the whole reference cube and refuses one.  ``mode`` maps onto the built-in
+    The reference library is searched in each engine's own terms: ``backend='klip'`` applies
+    ``set_reference_library`` (``nkeep_altroll`` / ``nkeep_psfref``, one count per pool),
+    which pyKLIP refuses; pyKLIP instead searches its own selection through
+    ``set_native_library`` (``mode`` + ``maxnumbasis``).  ``mode`` maps onto the built-in
     engine as ADI -> no reference cube, RDI -> ``rdi_mode='rdi'``, ADI+RDI -> ``'ardi'``.
 
     The injection model, in order of precedence: an ``injection_model`` you built

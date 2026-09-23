@@ -1,21 +1,28 @@
 #!/usr/bin/env python
 """What the searched reference library buys, measured on the run that chose it.
 
-A ``run_miri.py`` search picks ``nkeep_altroll`` (correlation-ranked frames kept from the
-other roll) and ``nkeep_psfref`` (from the reference star) per annulus, alongside the usual
-KLIP parameters.  This script asks how much that is worth, by rebuilding the finished run's
-exact setup -- same loader, reducer, space, objective, sampler, annuli and per-annulus
-contrast -- and scoring a set of configurations per annulus on COMMON injection draws: the
-same source positions in every configuration.  On these data one draw scatters by ~0.84 in
-S/N from the azimuth of the fakes alone, and most of that scatter is shared between
+A ``run_miri.py`` search tunes the reference library per annulus alongside the usual KLIP
+parameters, in the terms of the engine it ran on: on the built-in engine ``nkeep_altroll``
+(correlation-ranked frames kept from the other roll) and ``nkeep_psfref`` (from the
+reference star); on pyKLIP its own selection -- ``mode`` (which pools) and ``maxnumbasis``
+(how many of the most-correlated frames of those pools each target keeps, per sector).
+This script asks how much that is worth, by rebuilding the finished run's exact setup --
+same loader, reducer, space, objective, sampler, annuli and per-annulus contrast -- and
+scoring a set of configurations per annulus on COMMON injection draws: the same source
+positions in every configuration.  On these data one draw scatters by ~0.84 in S/N from
+the azimuth of the fakes alone, and most of that scatter is shared between
 configurations, so a paired comparison resolves differences an unpaired one would bury.
 
-Configurations, per annulus (the first four differ ONLY in the library):
+Configurations, per annulus (the library variants differ from the winner ONLY in the
+library, expressed in the engine's own terms):
 
   winner    the run's validated winner, tuned library and all
   all       the winner with both pools taken whole          -- ADI+RDI, "use everything"
-  rdi       the winner with the reference star only, whole  -- nkeep_altroll = 0
-  adi       the winner with the other roll only, whole      -- nkeep_psfref = 0
+  rdi       the winner with the reference star only, whole
+  adi       the winner with the other roll only, whole
+  rdi_third, ardi_half   (built-in engine) the best-correlated third of the reference
+            star; the best half of each pool
+  top_k     (pyKLIP) ADI+RDI keeping the k_klip best -- what pyKLIP does unasked
   carter    Carter et al. (2023)'s MIRI choices mapped into this space: every frame from
             both pools, no temporal binning, one azimuthal subsection, no high-pass,
             k = 6 -- reduced over the annulus' own zone
@@ -28,9 +35,27 @@ Every injected reduction is scored twice: ``score_search`` (what the search maxi
 ``s_inj - max(s_clean, 0)``) and ``score_raw`` (what validation reports).  HIP 65426 b's S/N
 is measured in each configuration's clean image where its zone contains the planet.
 
+The engine is the run's own unless ``--backend`` names the other, which makes it a
+cross-engine test: each winner at its other parameters, with that engine's library in its
+own terms.
+
 usage:
   python scripts/library_ablation.py --data ~/Data/JWST/hip65426_miri \\
       --run-dir miri_HIP-65426_F1140C_v6 --n-draws 10 --out ablation_F1140C_v6.json
+
+Two runs head to head (``--versus``) -- winner against winner, paired draw for draw -- need
+the same injections in both: the same positions (same ``--seed`` and ``--n-draws``) AND the
+same contrast.  Each run calibrated its own, so the second takes the first's with
+``--contrast-from``:
+
+  python scripts/library_ablation.py --data ~/Data/JWST/hip65426_miri \\
+      --run-dir miri_HIP-65426_F1140C_v7_pyklip --n-draws 40 \\
+      --out miri_HIP-65426_F1140C_v7_pyklip/library_ablation.json
+  python scripts/library_ablation.py --data ~/Data/JWST/hip65426_miri \\
+      --run-dir miri_HIP-65426_F1140C_v7_klip --n-draws 40 \\
+      --contrast-from miri_HIP-65426_F1140C_v7_pyklip \\
+      --out miri_HIP-65426_F1140C_v7_klip/library_ablation.json \\
+      --versus miri_HIP-65426_F1140C_v7_pyklip/library_ablation.json
 """
 from __future__ import annotations
 
@@ -59,9 +84,62 @@ PLANET = (0.823, 149.0)
 IWA_AS = 0.36                                   # FQPM1140C nominal inner working angle
 
 
+def _run_backend(full_setup: dict):
+    """The engine a finished run reduced with, from its ``run_setup.json``: pyKLIP writes its
+    name into the reducer's description and the built-in engine writes none, so a partition
+    without one is ``'klip'``.  None when no reducer (or a mix) was recorded."""
+    parts = (full_setup.get("reducer") or {}).get("partitions") or {}
+    names = {str(p.get("backend") or "klip") for p in parts.values() if isinstance(p, dict)}
+    return names.pop() if len(names) == 1 else None
+
+
+def _run_dims(full_setup: dict) -> list:
+    """The reduction dimensions the run searched, by name."""
+    sp = full_setup.get("space") or {}
+    ps = sp.get("params", []) if isinstance(sp, dict) else sp
+    return [p["name"] for p in ps if isinstance(p, dict) and p.get("role", "reduction") == "reduction"]
+
+
+def _space_check(run_dims, names, same_engine: bool):
+    """``(problems, notes)`` from comparing the dimensions a run searched with the rebuilt
+    space's.  On the run's own engine they must be the same: a winner is carried across BY
+    NAME, so a dimension only the run had would be dropped silently, and one only the rebuild
+    has would sit at its default -- the winner reduced would not be the winner.  On the other
+    engine the library dimensions differ by design, and that is only noted."""
+    names = list(names)
+    lost = [n for n in run_dims if n not in names]
+    extra = [n for n in names if n not in run_dims] if run_dims else []
+    if not (lost or extra):
+        return [], []
+    what = "; ".join(s for s in (f"only the run has {lost}" if lost else "",
+                                 f"only this rebuild has {extra}" if extra else "") if s)
+    if same_engine:
+        return [f"searched dimensions differ ({what}): the winners cannot be reproduced"], []
+    return [], [f"  cross-engine: {what} -- each winner keeps its other parameters, and this "
+                f"engine's library sits at its defaults"]
+
+
+def _contrasts_from(run_dir: str, setup: dict) -> list:
+    """Another run's calibrated contrast per annulus, to inject at here -- what pairing two
+    runs needs, since each calibrates its own and S/N scales with the injected flux.  Its
+    annuli must be this run's."""
+    with open(os.path.join(run_dir, "run_setup.json")) as f:
+        other = json.load(f)
+    other = other.get("config", other)
+    mine, theirs = np.asarray(setup["ann_edges"], float), np.asarray(other["ann_edges"], float)
+    if mine.shape != theirs.shape or not np.allclose(mine, theirs):
+        raise SystemExit(f"--contrast-from {run_dir}: its annuli {list(theirs)} are not this "
+                         f"run's {list(mine)}")
+    with open(os.path.join(run_dir, "final_results.json")) as f:
+        c = [float(fr["contrast"]) for fr in json.load(f)["annuli"]]
+    if len(c) != mine.size - 1:
+        raise SystemExit(f"--contrast-from {run_dir}: {len(c)} annuli finished, {mine.size - 1} needed")
+    return c
+
+
 def _args_for(run_setup: dict, data: str, workers, backend: str = "pyklip") -> object:
-    """``run_miri.build``'s argument object, mirroring the finished run (``backend`` aside:
-    only the built-in ``'klip'`` engine applies the library, so a real test of it needs that)."""
+    """``run_miri.build``'s argument object, mirroring the finished run (``backend`` may be
+    the other engine's: a cross-engine test)."""
     a = dict(data=data, target="HIP-65426", filter="F1140C", partition="all", crop=40, backend=backend,
              ann=[float(v) for v in run_setup["ann_edges"]], known=[(0.826, 150.2)],
              star_flux=None, flux_density_jy=None, mode="ADI+RDI", min_throughput=0.30,
@@ -104,10 +182,13 @@ def main(argv=None) -> int:
     ap.add_argument("--annuli", type=int, nargs="+", default=None, help="1-based; default all")
     ap.add_argument("--configs", nargs="+", default=None)
     ap.add_argument("--workers", default="auto")
-    ap.add_argument("--backend", default="pyklip", choices=["pyklip", "klip"],
-                    help="engine to reduce with.  The run's own was pyKLIP, which does NOT apply "
-                         "the library (the four library variants then reduce identically); "
-                         "'klip' does, so it is the one that tests whether the library matters")
+    ap.add_argument("--backend", default=None, choices=["pyklip", "klip"],
+                    help="engine to reduce with (default: the run's own).  The other one is a "
+                         "cross-engine test: each winner at its other parameters, with that "
+                         "engine's library in its own terms")
+    ap.add_argument("--contrast-from", default=None, metavar="RUN_DIR",
+                    help="inject at another run's calibrated contrast per annulus instead of "
+                         "this run's -- what --versus needs, since each run calibrates its own")
     ap.add_argument("--seed", type=int, default=20260923)
     ap.add_argument("--out", default="library_ablation.json")
     ap.add_argument("--versus", default=None, metavar="JSON",
@@ -124,6 +205,17 @@ def main(argv=None) -> int:
     setup = full_setup.get("config", full_setup)
     with open(os.path.join(a.run_dir, "final_results.json")) as f:
         final = json.load(f)["annuli"]
+    run_backend = _run_backend(full_setup)
+    if a.backend is None:
+        a.backend = run_backend or "pyklip"
+    log(f"engine: {a.backend}" + ("" if a.backend == run_backend else
+                                  f" -- the run reduced with {run_backend or 'an unrecorded engine'}"))
+    contrasts = [float(fr["contrast"]) for fr in final]
+    if a.contrast_from:
+        theirs = _contrasts_from(a.contrast_from, setup)
+        log(f"injecting at {a.contrast_from}'s contrasts {['%.3e' % c for c in theirs]} "
+            f"(this run calibrated {['%.3e' % c for c in contrasts]})")
+        contrasts = theirs
 
     dsets, info, red, ann, obj, samp, m, px = run_miri.build(_args_for(setup, a.data, a.workers, a.backend), log)
     space = generic.make_space(red, k_klip_max=40, max_drop=0, search_angles=False)
@@ -142,6 +234,11 @@ def main(argv=None) -> int:
     got_mask = None if pm is None else int(np.count_nonzero(pm))
     if want_mask is not None and got_mask != int(want_mask):
         problems.append(f"dead-zone mask {got_mask} px != run's {want_mask}")
+    dim_problems, dim_notes = _space_check(_run_dims(full_setup), space.names,
+                                           same_engine=(a.backend == run_backend))
+    problems += dim_problems
+    for s in dim_notes:
+        log(s)
     for fr in final:
         want = {k: v for k, v in fr["winner_config"]["params"].items() if k in space.names}
         xw_ = _x_from_params(space, fr["winner_config"]["params"], space.default_vector())
@@ -177,12 +274,13 @@ def main(argv=None) -> int:
     x_def = space.default_vector()
 
     out = {"run_dir": os.path.abspath(a.run_dir), "n_draws": a.n_draws, "seed": a.seed, "backend": a.backend,
+           "run_backend": run_backend, "contrast_from": a.contrast_from,
            "space": list(space.names), "pools": {"altroll": n_alt, "psfref": n_ref},
            "carter_mapping": CARTER, "annuli": []}
     annuli = [i - 1 for i in a.annuli] if a.annuli else list(range(len(final)))
     for ia in annuli:
         fr = final[ia]
-        runner.ia, runner.contrast = ia, float(fr["contrast"])
+        runner.ia, runner.contrast = ia, contrasts[ia]
         xw = _x_from_params(space, fr["winner_config"]["params"], space.default_vector())
         zone = (float(fr["inrad"]), float(fr["outrad"]))
         # Library variants in each engine's own terms, everything else held at the winner.
@@ -235,7 +333,8 @@ def main(argv=None) -> int:
         n = runner._nsrc(ia)
         rlo, rhi = runner._band(ia)
         log(f"=== annulus {ia + 1}: zone {zone[0]:.1f}-{zone[1]:.1f} px, {n} sources in "
-            f"{rlo:.3f}-{rhi:.3f}\", contrast {runner.contrast:.3e} (run: validated {fr['winner_score']:.3f})")
+            f"{rlo:.3f}-{rhi:.3f}\", contrast {runner.contrast:.3e} (run: validated "
+            f"{fr['winner_score']:.3f} at {float(fr['contrast']):.3e})")
         draws = [runner.sampler.sample(n, rlo, rhi, np.random.default_rng([a.seed, ia, d]), runner.contrast)
                  for d in range(a.n_draws)]
         rec = {"annulus": ia + 1, "zone_px": zone, "contrast": runner.contrast, "n_sources": n,
@@ -284,15 +383,28 @@ def main(argv=None) -> int:
 def versus(mine: dict, theirs: dict, log=print) -> None:
     """Winner against winner, paired by draw: the head-to-head of two runs' answers.
 
-    Pairing needs the same injections, so the stored positions are compared first; with the
-    same seed and draw count they are the same, whichever engine reduced them."""
+    Pairing needs the same injections: the same positions -- with the same seed and draw
+    count they are, whichever engine reduced them -- and the same contrast.  Each run
+    calibrates its own contrast and S/N scales with the injected flux, so two runs' own
+    contrasts would put the calibration into the ratio; one of the two must have been made
+    with ``--contrast-from`` the other's run directory."""
     rng = np.random.default_rng(0)
     log(f"head-to-head: {mine.get('backend')} ({mine['run_dir']}) vs "
         f"{theirs.get('backend')} ({theirs['run_dir']})")
-    for A, B in zip(mine["annuli"], theirs["annuli"]):
-        if A["annulus"] != B["annulus"] or not np.allclose(np.asarray(A["draws"], float),
-                                                           np.asarray(B["draws"], float)):
+    by_annulus = {B["annulus"]: B for B in theirs["annuli"]}
+    for A in mine["annuli"]:
+        B = by_annulus.get(A["annulus"])
+        if B is None:
+            log(f"  annulus {A['annulus']}: not in the other -- not pairing")
+            continue
+        da, db = np.asarray(A["draws"], float), np.asarray(B["draws"], float)
+        if da.shape != db.shape or not np.allclose(da, db):
             log(f"  annulus {A['annulus']}: the injections differ -- not pairing")
+            continue
+        ca, cb = A.get("contrast"), B.get("contrast")
+        if ca is None or cb is None or not np.isclose(float(ca), float(cb), rtol=1e-9, atol=0.0):
+            log(f"  annulus {A['annulus']}: injected at contrast {ca} vs {cb} -- not pairing "
+                f"(make one with --contrast-from the other's run directory)")
             continue
         for stat in ("raw", "search"):
             a = np.asarray(A["configs"]["winner"][stat], float)

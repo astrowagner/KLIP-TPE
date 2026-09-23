@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased — 2026-09-23 (a head-to-head needs one contrast, and the run's own engine)
+
+- **`library_ablation.py --versus` paired two runs' injections by position only.**  Each run
+  calibrates its own contrast per annulus, the ablation injects at its run's, and S/N scales
+  with the injected flux — so a pyKLIP-run-versus-klip-run ratio would have carried the two
+  calibrations inside it.  Measured on v6's annulus 3, built-in engine, same winner, same
+  positions: S/N 3.63 at the run's contrast and 6.33 at twice it, which `versus` would have
+  reported as a ×0.57 head-to-head.  Now `--contrast-from RUN_DIR` injects at another run's
+  contrasts (same annuli required), and `versus` refuses to pair unless positions AND
+  contrasts are identical; it also pairs by annulus number and refuses, rather than
+  crashes, on a different draw count.  Repeating a configuration at matched contrast gives
+  ×1.000 exactly.
+- **The engine defaults to the run's own.**  `--backend` defaulted to pyKLIP, and winners
+  are carried across by name — so a klip run ablated without `--backend klip` would have
+  dropped its `nkeep_*` silently and reduced "the winner" at pyKLIP's library defaults,
+  while a rebuild check that compared only the names both spaces had passed it.  On the
+  run's own engine the searched dimensions must now match exactly (v6 on pyKLIP is refused:
+  its dead counts have no counterpart); naming the other engine is a cross-engine test and
+  is noted as one.
+- The `make_reducer` docstring no longer says pyKLIP cannot search a library.
+
 ## Unreleased — 2026-09-23 (both libraries, and a check that every searched dimension is live)
 
 - **pyKLIP's own library, searched.**  `PyKLIPReducer.set_native_library` makes `mode`

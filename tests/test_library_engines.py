@@ -165,22 +165,72 @@ def test_liveness_passes_the_built_in_library(tmp_path):
 
 # ------------------------------------------------------------------ the head-to-head
 
-def test_versus_pairs_winners_only_on_identical_draws():
-    """Two runs' winners are compared draw for draw, and only when the injections match."""
+def _la():
     import os, sys
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
     import library_ablation as la
+    return la
+
+
+def test_versus_pairs_winners_only_on_identical_injections():
+    """Two runs' winners are compared draw for draw, and only when the injections match:
+    the same positions AND the same contrast.  Each run calibrates its own contrast, and S/N
+    scales with the injected flux -- pairing two runs' own contrasts would put their
+    calibrations into the ratio."""
+    la = _la()
     draws = [[[1.2, 30.0], [1.5, 210.0]]] * 4
 
-    def res(backend, scores, planet, dr=draws):
+    def res(backend, scores, planet, dr=draws, contrast=2.4e-4, annulus=1):
         return {"backend": backend, "run_dir": backend,
-                "annuli": [{"annulus": 1, "draws": dr,
+                "annuli": [{"annulus": annulus, "draws": dr, "contrast": contrast,
                             "configs": {"winner": {"raw": scores, "search": scores, "planet_snr": planet}}}]}
     logs = []
     la.versus(res("klip", [8.0, 8.2, 7.9, 8.1], 12.0), res("pyklip", [6.0, 6.1, 5.9, 6.2], 9.0), logs.append)
     assert any("x1.3" in l and "P(first better) 1.000" in l for l in logs), logs
     assert any("planet: 12.00 vs 9.00" in l for l in logs)
-    logs = []
-    moved = [[[1.2, 31.0], [1.5, 211.0]]] * 4
-    la.versus(res("klip", [8.0] * 4, None), res("pyklip", [6.0] * 4, None, moved), logs.append)
-    assert any("the injections differ -- not pairing" in l for l in logs)
+    for other, why in ((res("pyklip", [6.0] * 4, None, [[[1.2, 31.0], [1.5, 211.0]]] * 4),
+                        "the injections differ -- not pairing"),
+                       (res("pyklip", [6.0] * 3, None, draws[:3]), "the injections differ -- not pairing"),
+                       (res("pyklip", [6.0] * 4, None, contrast=3.25e-4), "--contrast-from"),
+                       (res("pyklip", [6.0] * 4, None, annulus=2), "not in the other")):
+        logs = []
+        la.versus(res("klip", [8.0] * 4, None), other, logs.append)
+        assert any(why in l for l in logs), (why, logs)
+        assert not any(" x" in l for l in logs), logs              # and no ratio was reported
+
+
+def test_ablation_follows_the_runs_own_engine_and_dimensions(tmp_path):
+    """Run on a klip run without --backend, the ablation used to rebuild it on pyKLIP and
+    carry the winners across by name: nkeep_* dropped silently, mode / maxnumbasis at their
+    defaults, and a rebuild check that only compared the names both had -- so it passed.
+    Now the engine defaults to the run's own, and on the same engine the searched dimensions
+    must match exactly."""
+    import json
+    la = _la()
+    assert la._run_backend({"reducer": {"partitions": {"sci": {"backend": "pyklip"}}}}) == "pyklip"
+    assert la._run_backend({"reducer": {"partitions": {"sci": {"name": "spaceklip_sci"}}}}) == "klip"
+    assert la._run_backend({}) is None
+    setup = {"space": {"params": [{"name": n, "role": "reduction"}
+                                  for n in ("bin", "n_ang", "filter", "k_klip", "nkeep_altroll", "nkeep_psfref")]}}
+    dims = la._run_dims(setup)
+    pk = ["bin", "n_ang", "filter", "k_klip", "mode", "maxnumbasis"]
+    assert la._space_check(dims, dims, same_engine=True) == ([], [])
+    probs, notes = la._space_check(dims, pk, same_engine=True)
+    assert probs and "nkeep_altroll" in probs[0] and "maxnumbasis" in probs[0] and not notes
+    probs, notes = la._space_check(dims, pk, same_engine=False)      # a deliberate cross-engine test
+    assert not probs and notes and "cross-engine" in notes[0]
+
+    # --contrast-from: the other run's calibrated contrasts, only for the same annuli
+    def run(d, edges, contrasts):
+        d.mkdir()
+        (d / "run_setup.json").write_text(json.dumps({"config": {"ann_edges": edges}}))
+        (d / "final_results.json").write_text(json.dumps({"annuli": [{"contrast": c} for c in contrasts]}))
+        return str(d)
+    edges = [6.7, 20.0, 26.9, 36.0]
+    other = run(tmp_path / "pyklip", edges, [2.4e-4, 1.1e-4, 8.0e-5])
+    assert la._contrasts_from(other, {"ann_edges": edges}) == [2.4e-4, 1.1e-4, 8.0e-5]
+    with pytest.raises(SystemExit, match="annuli"):
+        la._contrasts_from(other, {"ann_edges": [6.7, 20.0, 36.0]})
+    short = run(tmp_path / "unfinished", edges, [2.4e-4])
+    with pytest.raises(SystemExit, match="1 annuli finished, 3 needed"):
+        la._contrasts_from(short, {"ann_edges": edges})
