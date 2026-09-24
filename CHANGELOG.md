@@ -40,6 +40,18 @@
   other-roll frames (its top-2-correlated ADI+RDI reduces identically); the built-in
   engine's own search left a better library on the table in annulus 1 (its best third of the
   reference star beats its winner).  Results in `paper_runs/D_hip65426_{pyklip,klip}/`.
+- **The ablation has a live view.**  It called the reducer directly, so none of the search's
+  display callbacks fired and it ran blind.  `AblationDisplay`: per annulus, each
+  configuration's injected-source S/N draw by draw with its running mean ± standard error,
+  coloured by role (the run's winner, library variants, baselines — validated dark-surface
+  palette), the planet's S/N under each name rather than on the injected-S/N axis (14–17
+  against 4–8), the other run's winner as a dashed reference with `--versus` when the
+  injections match, the latest clean and injected reductions in the search display's own
+  stretch, and the paired result at the end.  On by default (`--no-show`), PNG beside
+  `--out` either way, written at most every 30 s (Dropbox); a display error turns it off
+  and never stops the ablation.  `versus()` now also returns its numbers, and `--plot JSON`
+  draws the same view for an ablation that has already finished (its S/N panels; an
+  ablation's reductions are not stored).
 
 ## Unreleased — 2026-09-23 (runs that survive a synced folder)
 

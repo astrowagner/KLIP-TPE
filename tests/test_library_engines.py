@@ -208,8 +208,10 @@ def test_versus_pairs_winners_only_on_identical_injections():
                 "annuli": [{"annulus": annulus, "draws": dr, "contrast": contrast,
                             "configs": {"winner": {"raw": scores, "search": scores, "planet_snr": planet}}}]}
     logs = []
-    la.versus(res("klip", [8.0, 8.2, 7.9, 8.1], 12.0), res("pyklip", [6.0, 6.1, 5.9, 6.2], 9.0), logs.append)
+    rows = la.versus(res("klip", [8.0, 8.2, 7.9, 8.1], 12.0), res("pyklip", [6.0, 6.1, 5.9, 6.2], 9.0), logs.append)
     assert any("x1.3" in l and "P(first better) 1.000" in l for l in logs), logs
+    assert len(rows) == 1 and rows[0]["annulus"] == 1 and rows[0]["planet"] == (12.0, 9.0)
+    assert rows[0]["raw"][0] > 1.3 and rows[0]["raw"][3] == 1.0
     assert any("planet: 12.00 vs 9.00" in l for l in logs)
     for other, why in ((res("pyklip", [6.0] * 4, None, [[[1.2, 31.0], [1.5, 211.0]]] * 4),
                         "the injections differ -- not pairing"),
@@ -302,3 +304,74 @@ def test_ablation_follows_the_runs_own_engine_and_dimensions(tmp_path):
     short = run(tmp_path / "unfinished", edges, [2.4e-4])
     with pytest.raises(SystemExit, match="1 annuli finished, 3 needed"):
         la._contrasts_from(short, {"ann_edges": edges})
+
+
+# ------------------------------------------------------------------ the live view
+
+def test_the_ablation_view_draws_headless_and_writes_its_png(tmp_path):
+    """No screen (CI, ssh, this test): no window, the same picture as a PNG, nothing raised --
+    with a versus reference, a planet, NaN scores and a missing image along the way."""
+    la = _la()
+    from klip_tpe.metrics import Source
+    png = str(tmp_path / "abl.png")
+    logs = []
+    disp = la.AblationDisplay(png, "library ablation  ·  test", show=None,
+                              versus={1: ("pyKLIP", 2.0e-4, 6.9, 0.2)}, log=logs.append)
+    disp.plan([(1, "annulus 1"), (2, "annulus 2")], 2 * 3 * 4,
+              {"px": 0.063, "fwhm": 2.3, "planet": (0.826, 150.2), "angle_convention": "pa"})
+    rng = np.random.default_rng(1)
+    for ann, contrast in ((1, 2.0e-4), (2, 5e-6)):
+        disp.start_annulus(ann, ["winner", "all", "default"], 3, (6.0, 20.0) if ann == 1 else (20.0, 45.0), contrast)
+        for name in ("winner", "all", "default"):
+            disp.clean(name, rng.normal(0, 1, (91, 91)), 14.2 if ann == 1 else None, {"k_klip": 2, "mode": "ADI"})
+            for d in range(3):
+                img = None if (ann, name, d) == (2, "all", 1) else rng.normal(0, 1, (91, 91))
+                disp.draw(name, d, float("nan") if d == 2 and name == "all" else 6.0 + d,
+                          img, [Source(0.9, 30.0 + 120 * k, contrast) for k in range(2)])
+            disp.config_done(name)
+    disp.finish(["built-in winner / pyKLIP winner, paired draws:", "annulus 1  x0.81 [0.75-0.87]  P(better) 0.002"])
+    assert disp.ok, logs
+    assert (tmp_path / "abl.png").stat().st_size > 20000
+    assert disp.n_done == disp.n_total == 24
+
+
+def test_a_failing_view_never_stops_the_ablation(tmp_path):
+    la = _la()
+    logs = []
+    disp = la.AblationDisplay(str(tmp_path / "x.png"), "t", show=None, log=logs.append)
+
+    def boom(fig):
+        raise RuntimeError("no fonts today")
+    disp._render = boom
+    disp.plan([(1, "annulus 1")], 1, {"px": 0.1, "fwhm": 3.0})      # must not raise
+    disp.start_annulus(1, ["winner"], 1, (6, 20), 1e-4)
+    disp.finish()
+    assert not disp.ok and sum("display: turned off" in l for l in logs) == 1, logs
+
+
+def test_configurations_are_coloured_by_role():
+    la = _la()
+    assert la._role("winner") == "winner"
+    assert {la._role(n) for n in ("all", "rdi", "adi", "top_k", "rdi_third", "ardi_half")} == {"library"}
+    assert {la._role(n) for n in ("default", "carter", "carter_full")} == {"baseline"}
+
+
+def test_a_finished_ablation_can_be_drawn_again(tmp_path):
+    """The pyKLIP half of the v7 head-to-head ran before the view existed: --plot draws the
+    same S/N panels from any finished output (with --versus, the reference and the pairing)."""
+    import json
+    la = _la()
+    draws = [[[1.2, 30.0], [1.5, 210.0]]] * 3
+
+    def res(backend, win):
+        return {"backend": backend, "run_dir": f"miri_{backend}", "n_draws": 3, "pxscale": 0.110327,
+                "annuli": [{"annulus": 1, "zone_px": [6.7, 20.0], "contrast": 2.76e-4, "draws": draws,
+                            "band_as": [1.1, 1.8],
+                            "configs": {"winner": {"raw": win, "search": win, "planet_snr": 7.8},
+                                        "all": {"raw": [5.0, 5.5, 6.0], "search": [5.0, 5.5, 6.0],
+                                                "planet_snr": None}}}]}
+    mine, theirs = tmp_path / "k.json", tmp_path / "p.json"
+    mine.write_text(json.dumps(res("klip", [9.0, 9.4, 8.8])))
+    theirs.write_text(json.dumps(res("pyklip", [6.1, 6.4, 5.9])))
+    assert la.main(["--plot", str(mine), "--versus", str(theirs), "--no-show"]) == 0
+    assert (tmp_path / "k.png").stat().st_size > 20000

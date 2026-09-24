@@ -39,6 +39,11 @@ The engine is the run's own unless ``--backend`` names the other, which makes it
 cross-engine test: each winner at its other parameters, with that engine's library in its
 own terms.
 
+A live window follows it (on by default; ``--no-show`` for none): per annulus, each
+configuration's S/N draw by draw with its running mean, the planet's S/N under each name,
+the other run's winner as a reference with ``--versus``, and the latest clean and injected
+reductions.  The same picture is saved next to ``--out`` as a PNG.
+
 usage:
   python scripts/library_ablation.py --data ~/Data/JWST/hip65426_miri \\
       --run-dir miri_HIP-65426_F1140C_v6 --n-draws 10 --out ablation_F1140C_v6.json
@@ -75,6 +80,7 @@ import json
 import os
 import sys
 import time
+from typing import Any, Dict, List
 
 import numpy as np
 
@@ -178,6 +184,285 @@ def _args_for(run_setup: dict, data: str, workers, backend: str = "pyklip") -> o
     return type("A", (), a)()
 
 
+# ------------------------------------------------------------------ the live view
+_SURFACE, _INK, _INK2, _MUTED, _GRID, _AXIS = "#1a1a19", "#ffffff", "#c3c2b7", "#898781", "#2c2c2a", "#383835"
+#: a configuration's ROLE carries the colour, not its name (nine names would outrun any
+#: palette): dark-surface categorical slots 1-2 of the reference palette, validated all-pairs
+#: with slot 3 (the other run's winner); baselines in neutral grey
+_ROLE_COLOR = {"winner": "#3987e5", "library": "#d95926", "baseline": "#898781"}
+_VERSUS_COLOR = "#199e70"
+_ENGINE_NAME = {"pyklip": "pyKLIP", "klip": "built-in"}
+
+
+def _role(name: str) -> str:
+    if name == "winner":
+        return "winner"
+    if name in ("default", "carter", "carter_full"):
+        return "baseline"
+    return "library"
+
+
+class AblationDisplay:
+    """Live window for an ablation, and the same picture saved as a PNG.
+
+    Top row, one panel per annulus: every configuration's injected-source S/N, draw by draw
+    (faint dots) with its running mean +/- standard error, HIP 65426 b's S/N in the
+    configuration's clean image (hollow star), and -- when the other run was injected at the
+    same contrast (``--versus``) -- that run's winner as a dashed reference.  Bottom row: the
+    latest clean and injected reductions (the search display's -1..5 sigma inferno stretch,
+    arcsec about the star) with the fakes circled and the planet marked, and progress.
+
+    The window is redrawn at most every ``every_s`` s and at the end of each configuration;
+    the PNG is written at the end of a configuration, at most every ``png_every_s`` s (run
+    folders live in Dropbox, which conflicts on fast rewrites).  Nothing here can stop the
+    ablation: the first error turns the display off with one log line.
+    """
+
+    def __init__(self, png: str, title: str, show="window", versus=None, log=print,
+                 every_s: float = 3.0, png_every_s: float = 30.0):
+        self.png, self.title, self.log = png, title, log
+        self.show = bool(show) and str(show).strip().lower() not in ("0", "off", "no", "none", "false")
+        self.versus = versus or {}        # annulus number -> (label, contrast, mean, sem)
+        self.every_s, self.png_every_s = float(every_s), float(png_every_s)
+        self.plan_ann: List[tuple] = []    # (annulus number, title) of every annulus to come
+        self.ann: Dict[int, dict] = {}
+        self.cur = self.last = None
+        self.clean_img = self.inj_img = None
+        self.src, self.params, self.draw_i = [], {}, -1
+        self.geom: Dict[str, Any] = {}
+        self.summary: List[str] = []
+        self.n_total = self.n_done = 0
+        self.t0 = time.time()
+        self._fig = None
+        self._t_draw = self._t_png = 0.0
+        self.ok = True
+        self.no_image = "--"               # what an empty image panel says
+
+    # -- what the ablation tells it -----------------------------------------------------
+    def plan(self, annuli: List[tuple], n_total: int, geom: Dict[str, Any]) -> None:
+        self.plan_ann, self.n_total, self.geom = list(annuli), int(n_total), dict(geom)
+        self._refresh(force=True)
+
+    def start_annulus(self, number: int, order: List[str], n_draws: int, zone_px, contrast: float) -> None:
+        self.ann[number] = {"order": list(order), "n_draws": int(n_draws), "zone": tuple(zone_px),
+                            "contrast": float(contrast),
+                            "data": {k: {"raw": [], "planet": None} for k in order}}
+        self.cur_ann = number
+        self._refresh(force=True)
+
+    def clean(self, name: str, img, planet_snr, params: Dict[str, Any]) -> None:
+        a = self.ann[self.cur_ann]
+        a["data"][name]["planet"] = planet_snr
+        self.cur = self.last = name
+        self.params, self.draw_i = dict(params), -1
+        self.clean_img, self.inj_img, self.src = img, None, []
+        self.n_done += 1
+        self._refresh()
+
+    def draw(self, name: str, d: int, score: float, img, sources) -> None:
+        self.ann[self.cur_ann]["data"][name]["raw"].append(float(score))
+        self.inj_img, self.src, self.draw_i = img, list(sources), d
+        self.n_done += 1
+        self._refresh()
+
+    def config_done(self, name: str) -> None:
+        self._refresh(force=True, png=True)
+
+    def finish(self, lines=()) -> None:
+        self.summary, self.cur = list(lines), None
+        self._refresh(force=True, png=True, final=True)
+
+    # -- drawing --------------------------------------------------------------------------
+    def _refresh(self, force: bool = False, png: bool = False, final: bool = False) -> None:
+        if not self.ok:
+            return
+        try:
+            now = time.time()
+            fig = self._figure()
+            if force or now - self._t_draw >= self.every_s:
+                self._render(fig)
+                self._t_draw = now
+                if self.show:
+                    fig.canvas.draw_idle()
+            if self.show:
+                fig.canvas.flush_events()       # keeps the window alive between reductions
+            if png and (final or now - self._t_png >= self.png_every_s):
+                fig.savefig(self.png, dpi=100, facecolor=_SURFACE)
+                self._t_png = now
+        except Exception as exc:
+            self.ok = False
+            self.log(f"  display: turned off after an error ({exc!r}); the ablation carries on")
+
+    def _gui(self) -> bool:
+        """The live display's backend choice (MacOSX / Qt / Tk); PNG only when none works."""
+        import matplotlib
+        matplotlib.rcParams["toolbar"] = "None"
+        cur = matplotlib.get_backend().lower()
+        forced = os.environ.get("KLIP_TPE_BACKEND")
+        if not forced and cur in ("macosx", "qtagg", "qt5agg", "tkagg", "gtk3agg", "gtk4agg", "wxagg"):
+            return True
+        prefer = (forced,) if forced else (("MacOSX", "QtAgg", "TkAgg") if sys.platform == "darwin"
+                                           else ("QtAgg", "TkAgg", "GTK3Agg"))
+        for cand in prefer:
+            try:
+                matplotlib.use(cand, force=True)
+                import matplotlib.pyplot as plt
+                plt.figure()
+                plt.close()
+                return True
+            except Exception:
+                continue
+        self.log(f"  display: no interactive matplotlib backend (MacOSX/Qt/Tk) -- the panel goes to {self.png} only")
+        return False
+
+    def _figure(self):
+        if self._fig is not None:
+            return self._fig
+        if self.show:
+            self.show = self._gui()
+        if self.show:
+            import matplotlib.pyplot as plt
+            plt.ion()
+            self._fig = plt.figure(figsize=(13.5, 7.8), dpi=100)
+            try:
+                self._fig.canvas.manager.set_window_title(self.title)
+            except Exception:
+                pass
+            plt.show(block=False)
+        else:
+            from matplotlib.backends.backend_agg import FigureCanvasAgg
+            from matplotlib.figure import Figure
+            self._fig = Figure(figsize=(13.5, 7.8), dpi=100)
+            FigureCanvasAgg(self._fig)
+        return self._fig
+
+    @staticmethod
+    def _style(ax) -> None:
+        ax.set_facecolor(_SURFACE)
+        for s in ax.spines.values():
+            s.set_color(_AXIS)
+        ax.tick_params(colors=_MUTED, labelsize=8)
+        ax.grid(axis="y", color=_GRID, lw=0.8)
+        ax.set_axisbelow(True)
+
+    def _render(self, fig) -> None:
+        import matplotlib.lines as mlines
+        fig.clf()
+        fig.patch.set_facecolor(_SURFACE)
+        k = max(len(self.plan_ann), 1)
+        gs = fig.add_gridspec(2, 1, height_ratios=[1.25, 1.0], hspace=0.42, left=0.05, right=0.985,
+                              top=0.90, bottom=0.07)
+        top = gs[0].subgridspec(1, k, wspace=0.18)
+        bot = gs[1].subgridspec(1, 3, width_ratios=[1, 1, 1.35], wspace=0.28)
+        fig.text(0.05, 0.965, self.title, color=_INK, fontsize=12, weight="bold", va="center")
+        for j, (number, label) in enumerate(self.plan_ann or [(0, "")]):
+            ax = fig.add_subplot(top[0, j])
+            self._style(ax)
+            ax.set_title(label, color=_INK, fontsize=9, loc="left")
+            if j == 0:
+                ax.set_ylabel("injected-source S/N", color=_INK2, fontsize=9)
+            rec = self.ann.get(number)
+            if rec is None:
+                ax.text(0.5, 0.5, "to come", ha="center", va="center", color=_MUTED, fontsize=9,
+                        transform=ax.transAxes)
+                ax.set_xticks([])
+                continue
+            order = rec["order"]
+            for x, name in enumerate(order):
+                col = _ROLE_COLOR[_role(name)]
+                v = np.asarray(rec["data"][name]["raw"], float)
+                v = v[np.isfinite(v)]
+                if v.size:
+                    jit = (np.random.default_rng(x).random(v.size) - 0.5) * 0.36   # stable as draws arrive
+                    ax.scatter(x + jit, v, s=10, color=col, alpha=0.5, linewidths=0, zorder=2)
+                    se = float(v.std(ddof=1) / np.sqrt(v.size)) if v.size > 1 else 0.0
+                    ax.errorbar([x], [float(v.mean())], yerr=[se], fmt="o", ms=8, color=col, mec=_SURFACE,
+                                mew=2, elinewidth=2, capsize=0, zorder=4)
+            vs = self.versus.get(number)
+            if vs and np.isclose(vs[1], rec["contrast"], rtol=1e-9, atol=0.0):
+                lab, _, m, se = vs
+                ax.axhline(m, color=_VERSUS_COLOR, lw=1.5, ls=(0, (4, 3)), zorder=1)
+                ax.text(len(order) - 0.45, m, f"{lab} winner {m:.2f} ", color=_INK2, fontsize=8, va="bottom", ha="right")
+            ax.set_xticks(range(len(order)))
+            # HIP 65426 b's S/N in each configuration's clean image, under its name: a different
+            # quantity on a different scale (14-17 against 4-8), so not on this axis
+            labs = []
+            for name in order:
+                pl = rec["data"][name]["planet"]
+                labs.append(name + (f"\nb {pl:.1f}" if pl is not None and np.isfinite(pl) else ""))
+            ax.set_xticklabels(labs, rotation=0, ha="center", color=_INK2, fontsize=7.5)
+            ax.set_xlim(-0.6, len(order) - 0.4)
+        handles = [mlines.Line2D([], [], color=_ROLE_COLOR[r], marker="o", ls="none", ms=7, label=t)
+                   for r, t in (("winner", "the run's winner"), ("library", "library variant"), ("baseline", "baseline"))]
+        if self.versus:
+            handles.append(mlines.Line2D([], [], color=_VERSUS_COLOR, ls=(0, (4, 3)), lw=1.5,
+                                         label="other run's winner (same injections)"))
+        leg = fig.legend(handles=handles, loc="upper right", ncol=len(handles), frameon=False, fontsize=8,
+                         bbox_to_anchor=(0.985, 0.985))
+        for t in leg.get_texts():
+            t.set_color(_INK2)
+        rec = self.ann.get(getattr(self, "cur_ann", None))
+        n_draws = rec["n_draws"] if rec else 0
+        self._image(fig.add_subplot(bot[0, 0]), self.clean_img, f"clean  ·  {self.cur or self.last or ''}", [])
+        dtitle = f"injected  ·  draw {self.draw_i + 1} of {n_draws}" if self.draw_i >= 0 else "injected"
+        self._image(fig.add_subplot(bot[0, 1]), self.inj_img, dtitle, self.src)
+        axt = fig.add_subplot(bot[0, 2])
+        axt.set_axis_off()
+        el = time.time() - self.t0
+        lines = []
+        if rec is not None and self.cur is not None:
+            order = rec["order"]
+            i = order.index(self.cur) + 1 if self.cur in order else 0
+            done_ann = [n for n, _ in self.plan_ann].index(self.cur_ann) + 1 if self.plan_ann else 1
+            lines.append(f"annulus {done_ann} of {len(self.plan_ann)}  ·  {self.cur} ({i} of {len(order)})")
+        if self.n_total:
+            left = (self.n_total - self.n_done) * el / max(self.n_done, 1)
+            lines.append(f"{self.n_done} of {self.n_total} reductions  ·  {el / 60:.0f} min so far"
+                         + (f"  ·  ~{left / 60:.0f} min left" if self.n_done and self.n_done < self.n_total else ""))
+        if self.params:
+            lines.append("  ".join(f"{k}={v}" for k, v in self.params.items()))
+        if self.summary:
+            lines += [""] + self.summary
+        axt.text(0.0, 1.0, "\n".join(lines), color=_INK2, fontsize=9, va="top", ha="left", family="monospace",
+                 transform=axt.transAxes, wrap=True)
+
+    def _image(self, ax, img, title: str, sources) -> None:
+        from klip_tpe.display import _crop_extent, _robust_sigma
+        ax.set_facecolor("#111111")
+        ax.set_title(title, color=_INK, fontsize=9, loc="left")
+        ax.tick_params(colors=_MUTED, labelsize=7)
+        for s in ax.spines.values():
+            s.set_color(_AXIS)
+        g = self.geom
+        if img is None or np.ndim(img) != 2 or not np.isfinite(img).any() or not g:
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.text(0.5, 0.5, self.no_image, ha="center", va="center", color=_MUTED, fontsize=8,
+                    transform=ax.transAxes)
+            return
+        px, fw = float(g["px"]), float(g["fwhm"])
+        zone = self.ann[self.cur_ann]["zone"] if getattr(self, "cur_ann", None) in self.ann else (0, min(img.shape) / 2)
+        sub, ext = _crop_extent(np.asarray(img, float), px, float(zone[1]) + 1.5 * fw)
+        s = _robust_sigma(sub)
+        ax.imshow(sub, origin="lower", extent=ext, cmap="inferno", vmin=-s, vmax=5 * s, interpolation="nearest")
+        import matplotlib.patches as mp
+        for r in zone:
+            ax.add_patch(mp.Circle((0, 0), float(r) * px, fill=False, color=_MUTED, lw=0.8, ls=(0, (3, 3))))
+        off = 90.0 if g.get("angle_convention", "pa") == "pa" else 0.0
+
+        def xy(rho, th):
+            t = np.deg2rad(float(th) + off)
+            return float(rho) * np.cos(t), float(rho) * np.sin(t)
+        for sname in sources:
+            ax.add_patch(mp.Circle(xy(sname.rho, sname.theta), 0.9 * fw * px, fill=False, color=_INK, lw=1.1))
+        pl = g.get("planet")
+        if pl is not None:
+            x, y = xy(*pl)
+            ax.add_patch(mp.Circle((x, y), 1.4 * fw * px, fill=False, color=_INK2, lw=1.0, ls=(0, (2, 2))))
+            ax.text(x, y + 1.6 * fw * px, "b", color=_INK2, fontsize=8, ha="center", va="bottom")
+        ax.set_xlabel("arcsec", color=_MUTED, fontsize=8)
+
+
 #: pixel scales that identify the instrument of a finished run (its run_setup.json records it)
 PXSCALE = {"miri": 0.1103, "nircam": 0.0630}
 
@@ -253,11 +538,70 @@ def _vec(runner, x, **over):
     return runner._project(x, is_random=False)
 
 
+def _versus_reference(th: dict) -> Dict[int, tuple]:
+    """Per annulus of another run's ablation: (engine label, contrast, winner mean, sem)."""
+    ref = {}
+    for A in th.get("annuli", []):
+        w = np.asarray(A.get("configs", {}).get("winner", {}).get("raw", []), float)
+        w = w[np.isfinite(w)]
+        if w.size:
+            ref[int(A["annulus"])] = (_ENGINE_NAME.get(th.get("backend"), str(th.get("backend"))),
+                                      float(A["contrast"]), float(w.mean()),
+                                      float(w.std(ddof=1) / np.sqrt(w.size)) if w.size > 1 else 0.0)
+    return ref
+
+
+def _plot_finished(a, log) -> int:
+    """``--plot``: the live view of a finished ablation, rebuilt from its output."""
+    j = json.load(open(a.plot))
+    th = json.load(open(a.versus)) if a.versus else None
+    png = os.path.splitext(a.plot)[0] + ".png"
+    disp = AblationDisplay(png, f"library ablation  ·  {os.path.basename(j.get('run_dir', a.plot))}  ·  "
+                                f"{_ENGINE_NAME.get(j.get('backend'), j.get('backend'))} engine",
+                           show=a.show, versus=_versus_reference(th) if th else {}, log=log)
+    disp.no_image = "reductions are not stored\nin an ablation's output"
+    px = j.get("pxscale")
+
+    def title(A):
+        z = A.get("zone_px") or (0, 0)
+        where = (f"{z[0] * px:.2f}-{z[1] * px:.2f}\"" if px else
+                 "injections at " + "-".join(f"{v:.2f}" for v in A.get("band_as", [])) + "\"")
+        return f"annulus {A['annulus']}  ·  {where}  ·  contrast {A['contrast']:.2e}"
+    disp.plan([(A["annulus"], title(A)) for A in j["annuli"]], 0, {})
+    for A in j["annuli"]:
+        disp.start_annulus(A["annulus"], list(A["configs"]), int(j.get("n_draws", 0)),
+                           tuple(A.get("zone_px") or (0, 0)), float(A["contrast"]))
+        for name, c in A["configs"].items():
+            disp.clean(name, None, c.get("planet_snr"), {})
+            for d, v in enumerate(c.get("raw", [])):
+                disp.draw(name, d, float(v) if v is not None else float("nan"), None, [])
+            disp.config_done(name)
+    lines = [f"from {os.path.basename(a.plot)} ({j.get('n_draws')} draws)"]
+    if th:
+        lines.append(f"{_ENGINE_NAME.get(j.get('backend'), j.get('backend'))} winner / "
+                     f"{_ENGINE_NAME.get(th.get('backend'), th.get('backend'))} winner, paired draws:")
+        for row in versus(j, th, log):
+            r, lo, hi, pb = row["raw"]
+            lines.append(f"annulus {row['annulus']}  x{r:.2f} [{lo:.2f}-{hi:.2f}]  P(better) {pb:.3f}")
+    disp.params = {}
+    disp.finish(lines)
+    log(f"wrote {png}")
+    if disp.show and disp.ok:
+        import matplotlib.pyplot as plt
+        plt.ioff()
+        plt.show()                                   # a finished picture: stay until closed
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--data", default=None, help="the MIRI calints directory (MIRI runs only)")
-    ap.add_argument("--run-dir", required=True,
+    ap.add_argument("--run-dir", default=None,
                     help="the finished run: a run_miri.py --out, or paper_runs' D_hip65426_pyklip / _klip")
+    ap.add_argument("--plot", default=None, metavar="JSON",
+                    help="draw the view of a FINISHED ablation from its output (the S/N panels; its "
+                         "images are not stored) to JSON's .png, show it, and exit.  --versus adds "
+                         "the other run's winner as the reference")
     ap.add_argument("--instrument", default="auto", choices=["auto", "miri", "nircam"],
                     help="how to rebuild the run: MIRI (run_miri.build) or NIRCam F444W "
                          "(paper_runs/run_demos.py's run_D).  auto: from the recorded pixel scale")
@@ -272,6 +616,11 @@ def main(argv=None) -> int:
     ap.add_argument("--contrast-from", default=None, metavar="RUN_DIR",
                     help="inject at another run's calibrated contrast per annulus instead of "
                          "this run's -- what --versus needs, since each run calibrates its own")
+    ap.add_argument("--show", nargs="?", const="window", default="window", metavar="MODE",
+                    help="live window (on by default; '0' or --no-show for none).  The same "
+                         "picture is written next to --out as a PNG either way")
+    ap.add_argument("--no-show", dest="show", action="store_const", const=None,
+                    help="no live window (the PNG is still written)")
     ap.add_argument("--seed", type=int, default=20260923)
     ap.add_argument("--out", default="library_ablation.json")
     ap.add_argument("--versus", default=None, metavar="JSON",
@@ -282,6 +631,11 @@ def main(argv=None) -> int:
 
     def log(s):
         print(f"[{time.strftime('%H:%M:%S')}] {s}", flush=True)
+
+    if a.plot:
+        return _plot_finished(a, log)
+    if not a.run_dir:
+        ap.error("--run-dir is required (or --plot JSON)")
 
     # Everything this needs must exist before the first of hours of reductions, not after.
     _need_finished_run(a.run_dir, "--run-dir")
@@ -371,8 +725,20 @@ def main(argv=None) -> int:
     out = {"run_dir": os.path.abspath(a.run_dir), "n_draws": a.n_draws, "seed": a.seed, "backend": a.backend,
            "run_backend": run_backend, "contrast_from": a.contrast_from,
            "space": list(space.names), "pools": {"altroll": n_alt, "psfref": n_ref},
-           "instrument": inst, "carter_mapping": CARTER if rb["carter"] else None, "annuli": []}
+           "instrument": inst, "pxscale": float(px),
+           "carter_mapping": CARTER if rb["carter"] else None, "annuli": []}
     annuli = [i - 1 for i in a.annuli] if a.annuli else list(range(len(final)))
+    # the other run's winner, per annulus, for the view
+    vref = _versus_reference(json.load(open(a.versus))) if a.versus else {}
+    disp = AblationDisplay(os.path.splitext(a.out)[0] + ".png",
+                           f"library ablation  ·  {os.path.basename(os.path.abspath(a.run_dir))}  ·  "
+                           f"{_ENGINE_NAME.get(a.backend, a.backend)} engine",
+                           show=a.show, versus=vref, log=log)
+    disp.plan([(ia + 1, f"annulus {ia + 1}  ·  {float(final[ia]['inrad']) * px:.2f}-"
+                        f"{float(final[ia]['outrad']) * px:.2f}\"  ·  contrast {contrasts[ia]:.2e}")
+               for ia in annuli], 0,
+              {"px": px, "fwhm": float(red.fwhm), "planet": planet,
+               "angle_convention": getattr(red, "angle_convention", "pa")})
     for ia in annuli:
         fr = final[ia]
         runner.ia, runner.contrast = ia, contrasts[ia]
@@ -433,11 +799,16 @@ def main(argv=None) -> int:
             f"{fr['winner_score']:.3f} at {float(fr['contrast']):.3e})")
         draws = [runner.sampler.sample(n, rlo, rhi, np.random.default_rng([a.seed, ia, d]), runner.contrast)
                  for d in range(a.n_draws)]
+        if not disp.n_total:
+            disp.n_total = len(annuli) * len(configs) * (1 + a.n_draws)
+        disp.start_annulus(ia + 1, list(configs), a.n_draws, zone, runner.contrast)
         rec = {"annulus": ia + 1, "zone_px": zone, "contrast": runner.contrast, "n_sources": n,
                "band_as": [rlo, rhi], "run_validated": fr["winner_score"],
                "draws": [[(s.rho, s.theta) for s in src] for src in draws], "configs": {}}
         for name, (x, zov) in configs.items():
             c = space.decode(x)
+            p = {k: (v if isinstance(v, str) else int(v) if float(v).is_integer() else float(v))
+                 for k, v in c.params.items() if k in space.names}
             t0 = time.time()
             clean = runner._reduce(c, None, tag=f"abl_a{ia + 1}_{name}_clean", zone=zov)
             t_clean = time.time() - t0
@@ -447,6 +818,7 @@ def main(argv=None) -> int:
                     planet_snr = float(obj.metric.per_source(clean.image, None, [planet[0]], [planet[1]])[0])
                 except Exception as exc:
                     log(f"   planet S/N failed: {exc!r}")
+            disp.clean(name, clean.image, planet_snr, p)
             raw, srch, walls = [], [], []
             for d, src in enumerate(draws):
                 t1 = time.time()
@@ -457,8 +829,7 @@ def main(argv=None) -> int:
                 raw.append(float(r_raw.score))
                 srch.append(float(r_srch.score))
                 walls.append(time.time() - t1)
-            p = {k: (v if isinstance(v, str) else int(v) if float(v).is_integer() else float(v))
-                 for k, v in c.params.items() if k in space.names}
+                disp.draw(name, d, float(r_raw.score), inj.image, src)
             rec["configs"][name] = {"params": p, "zone_override": zov, "raw": raw, "search": srch,
                                     "planet_snr": planet_snr, "wall_clean_s": t_clean,
                                     "wall_inj_s": float(np.mean(walls))}
@@ -467,16 +838,29 @@ def main(argv=None) -> int:
                 f"({np.mean(walls):.1f} s/reduction)")
             with open(a.out, "w") as f:                  # checkpoint after every configuration
                 json.dump(out | {"annuli": out["annuli"] + [rec]}, f, indent=1)
+            disp.config_done(name)
         out["annuli"].append(rec)
         with open(a.out, "w") as f:
             json.dump(out, f, indent=1)
     log(f"wrote {a.out}")
+    lines = []
     if a.versus:
-        versus(out, json.load(open(a.versus)), log)
+        th = json.load(open(a.versus))
+        lines.append(f"{_ENGINE_NAME.get(a.backend, a.backend)} winner / "
+                     f"{_ENGINE_NAME.get(th.get('backend'), th.get('backend'))} winner, paired draws:")
+        for row in versus(out, th, log):
+            r, lo, hi, pb = row["raw"]
+            lines.append(f"annulus {row['annulus']}  x{r:.2f} [{lo:.2f}-{hi:.2f}]  P(better) {pb:.3f}")
+            if "planet" in row:
+                lines.append(f"           planet b {row['planet'][0]:.1f} vs {row['planet'][1]:.1f}")
+        if len(lines) == 1:
+            lines.append("no annulus could be paired -- the log says why")
+    disp.finish(lines)
+    log(f"wrote {disp.png}")
     return 0
 
 
-def versus(mine: dict, theirs: dict, log=print) -> None:
+def versus(mine: dict, theirs: dict, log=print) -> List[Dict[str, Any]]:
     """Winner against winner, paired by draw: the head-to-head of two runs' answers.
 
     Pairing needs the same injections: the same positions -- with the same seed and draw
@@ -485,6 +869,7 @@ def versus(mine: dict, theirs: dict, log=print) -> None:
     contrasts would put the calibration into the ratio; one of the two must have been made
     with ``--contrast-from`` the other's run directory."""
     rng = np.random.default_rng(0)
+    rows: List[Dict[str, Any]] = []
     log(f"head-to-head: {mine.get('backend')} ({mine['run_dir']}) vs "
         f"{theirs.get('backend')} ({theirs['run_dir']})")
     by_annulus = {B["annulus"]: B for B in theirs["annuli"]}
@@ -502,17 +887,23 @@ def versus(mine: dict, theirs: dict, log=print) -> None:
             log(f"  annulus {A['annulus']}: injected at contrast {ca} vs {cb} -- not pairing "
                 f"(make one with --contrast-from the other's run directory)")
             continue
+        row = {"annulus": A["annulus"]}
         for stat in ("raw", "search"):
             a = np.asarray(A["configs"]["winner"][stat], float)
             b = np.asarray(B["configs"]["winner"][stat], float)
             idx = rng.integers(0, a.size, (4000, a.size))
             r = a[idx].mean(1) / b[idx].mean(1)
+            p_better = float(np.mean(a[idx].mean(1) > b[idx].mean(1)))
+            row[stat] = (float(a.mean() / b.mean()), float(np.percentile(r, 16)), float(np.percentile(r, 84)), p_better)
             log(f"  annulus {A['annulus']} {stat:6s}: {a.mean():5.2f} vs {b.mean():5.2f}  "
                 f"x{a.mean() / b.mean():.3f} [{np.percentile(r, 16):.3f}, {np.percentile(r, 84):.3f}]  "
-                f"P(first better) {np.mean(a[idx].mean(1) > b[idx].mean(1)):.3f}")
+                f"P(first better) {p_better:.3f}")
         pa, pb = A["configs"]["winner"]["planet_snr"], B["configs"]["winner"]["planet_snr"]
         if pa is not None and pb is not None:
+            row["planet"] = (float(pa), float(pb))
             log(f"  annulus {A['annulus']} planet: {pa:.2f} vs {pb:.2f}")
+        rows.append(row)
+    return rows
 
 
 if __name__ == "__main__":
