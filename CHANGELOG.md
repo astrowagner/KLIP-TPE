@@ -26,6 +26,20 @@
   and as a single value.
 - These were the three slow-suite failures noted on 2026-09-23 (they failed identically
   before that day's changes).
+- **`library_ablation.py` does NIRCam too** (`--instrument`, read from the run's pixel scale
+  by default).  A NIRCam run is rebuilt by `run_demos`'s own `run_D` recipe, needs no
+  `--data`, and leaves out the Carter et al. configurations, which encode their MIRI
+  reduction and the 4QPM's inner working angle.  The ablation now also injects the run's own
+  `n_sources` — it had always used the rule, which matched MIRI v7 (recorded `None`) by luck
+  and would not have matched D's 2.
+- **D vs DK, head to head** (40 paired draws per annulus, both engines injected at one
+  contrast, done both ways): pyKLIP's winner beats the built-in engine's in annulus 1
+  (injections at 0.92″) by ×1.12–1.13 at either engine's contrast, and in annulus 2 (2.18″)
+  ties at pyKLIP's fainter contrast (×0.98 [0.94, 1.02]) and wins ×1.13 at klip's.  HIP 65426 b
+  in annulus 1: S/N 16.7 vs 14.0.  pyKLIP's winning library is pure ADI with its two
+  other-roll frames (its top-2-correlated ADI+RDI reduces identically); the built-in
+  engine's own search left a better library on the table in annulus 1 (its best third of the
+  reference star beats its winner).  Results in `paper_runs/D_hip65426_{pyklip,klip}/`.
 
 ## Unreleased — 2026-09-23 (runs that survive a synced folder)
 

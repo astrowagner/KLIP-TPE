@@ -56,6 +56,17 @@ same contrast.  Each run calibrated its own, so the second takes the first's wit
       --contrast-from miri_HIP-65426_F1140C_v7_pyklip \\
       --out miri_HIP-65426_F1140C_v7_klip/library_ablation.json \\
       --versus miri_HIP-65426_F1140C_v7_pyklip/library_ablation.json
+
+NIRCam F444W (paper_runs' D on pyKLIP, DK on the built-in engine) the same way; the
+instrument is read from the run's pixel scale, and no --data is needed (run_demos loads its
+own cubes).  The Carter et al. configurations are MIRI's and are left out:
+
+  python scripts/library_ablation.py --run-dir paper_runs/D_hip65426_pyklip --n-draws 40 \\
+      --out paper_runs/D_hip65426_pyklip/library_ablation.json
+  python scripts/library_ablation.py --run-dir paper_runs/D_hip65426_klip --n-draws 40 \\
+      --contrast-from paper_runs/D_hip65426_pyklip \\
+      --out paper_runs/D_hip65426_klip/library_ablation.json \\
+      --versus paper_runs/D_hip65426_pyklip/library_ablation.json
 """
 from __future__ import annotations
 
@@ -167,6 +178,48 @@ def _args_for(run_setup: dict, data: str, workers, backend: str = "pyklip") -> o
     return type("A", (), a)()
 
 
+#: pixel scales that identify the instrument of a finished run (its run_setup.json records it)
+PXSCALE = {"miri": 0.1103, "nircam": 0.0630}
+
+
+def _instrument(full_setup: dict, asked: str = "auto") -> str:
+    """``asked`` unless it is ``'auto'``, else the instrument whose pixel scale the run
+    recorded (MIRI 0.110"/px, NIRCam long-wave 0.063"/px)."""
+    if asked != "auto":
+        return asked
+    px = full_setup.get("pxscale")
+    for name, ref in PXSCALE.items():
+        if px is not None and abs(float(px) - ref) < 0.01:
+            return name
+    raise SystemExit(f"cannot tell the instrument from the run's pixel scale ({px}); pass --instrument")
+
+
+def _rebuild(inst: str, setup: dict, a, log) -> dict:
+    """The finished run's reducer, space, objective, sampler and annuli, built by the code
+    that built the run: ``run_miri.build`` for MIRI, ``run_demos``'s ``run_D`` recipe for
+    NIRCam (``hip65426_objects``, ``k_klip_max=18``, ``n_min_ref=4``, the planet as a known
+    source).  ``carter``: whether the Carter et al. (2023) mapping applies -- it encodes their
+    MIRI reduction and the 4QPM's inner working angle, so not on NIRCam."""
+    if inst == "miri":
+        dsets, info, red, ann, obj, samp, m, px = run_miri.build(_args_for(setup, a.data, a.workers, a.backend), log)
+        space = generic.make_space(red, k_klip_max=40, max_drop=0, search_angles=False)
+        space.project = generic.make_guard(red, k_max=40)
+        return dict(red=red, ann=ann, obj=obj, samp=samp, px=px, space=space, planet=PLANET, carter=True)
+    if inst == "nircam":
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "paper_runs"))
+        if str(a.workers) not in ("auto", "", "None"):
+            os.environ["WORKERS"] = str(a.workers)       # run_demos.workers() reads it
+        import run_demos as R                             # noqa: E402
+        red = R.hip65426_objects(engine=a.backend)
+        space = generic.make_space(red, k_klip_max=18, search_angles=False)
+        space.project = generic.make_guard(red, k_max=18, n_min_ref=4)
+        obj, samp = generic.default_config(red, known=[R.HIP])
+        ann = [float(v) for v in setup["ann_edges"]]
+        return dict(red=red, ann=ann, obj=obj, samp=samp, px=float(red.pxscale), space=space,
+                    planet=tuple(R.HIP), carter=False)
+    raise SystemExit(f"unknown instrument {inst!r}")
+
+
 def _differs(a, b) -> bool:
     """Parameter values compared as the space holds them: a categorical (pyKLIP's ``mode``,
     ``"ADI+RDI"``) by equality, a number to 1e-9."""
@@ -202,8 +255,12 @@ def _vec(runner, x, **over):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--data", required=True)
-    ap.add_argument("--run-dir", required=True, help="the finished run_miri.py output directory")
+    ap.add_argument("--data", default=None, help="the MIRI calints directory (MIRI runs only)")
+    ap.add_argument("--run-dir", required=True,
+                    help="the finished run: a run_miri.py --out, or paper_runs' D_hip65426_pyklip / _klip")
+    ap.add_argument("--instrument", default="auto", choices=["auto", "miri", "nircam"],
+                    help="how to rebuild the run: MIRI (run_miri.build) or NIRCam F444W "
+                         "(paper_runs/run_demos.py's run_D).  auto: from the recorded pixel scale")
     ap.add_argument("--n-draws", type=int, default=10)
     ap.add_argument("--annuli", type=int, nargs="+", default=None, help="1-based; default all")
     ap.add_argument("--configs", nargs="+", default=None)
@@ -250,10 +307,12 @@ def main(argv=None) -> int:
             f"(this run calibrated {['%.3e' % c for c in contrasts]})")
         contrasts = theirs
 
-    dsets, info, red, ann, obj, samp, m, px = run_miri.build(_args_for(setup, a.data, a.workers, a.backend), log)
-    space = generic.make_space(red, k_klip_max=40, max_drop=0, search_angles=False)
-    space.project = generic.make_guard(red, k_max=40)
-    log(f"space: {space.names}")
+    inst = _instrument(full_setup, a.instrument)
+    if inst == "miri" and not a.data:
+        raise SystemExit("--data (the MIRI calints directory) is required for a MIRI run")
+    rb = _rebuild(inst, setup, a, log)
+    red, ann, obj, samp, px, space, planet = (rb[k] for k in ("red", "ann", "obj", "samp", "px", "space", "planet"))
+    log(f"instrument: {inst};  space: {space.names}")
 
     # A comparison against a run is only as good as the rebuild of that run.  Refuse to
     # spend hours of reductions on a setup that differs from the one the winners came from.
@@ -289,6 +348,9 @@ def main(argv=None) -> int:
                     calibration=CalibrationConfig(forced=[1e-4]), n_remeasure=1,
                     inject_inset_fwhm=float(setup.get("inject_inset_fwhm", 1.0)),
                     pair_area_midpoint=bool(setup.get("pair_area_midpoint", True)),
+                    # the run's own source count -- NIRCam D injected 2, where the rule would
+                    # give more; a MIRI run that left it to the rule records None
+                    n_sources=setup.get("n_sources"),
                     save_fits=False, save_eval_images=False, fm_curve=False, verify=False)
     runner = Runner(red, space, obj, samp, cfg, os.path.join(a.run_dir, "_ablation"), log=log)
 
@@ -309,7 +371,7 @@ def main(argv=None) -> int:
     out = {"run_dir": os.path.abspath(a.run_dir), "n_draws": a.n_draws, "seed": a.seed, "backend": a.backend,
            "run_backend": run_backend, "contrast_from": a.contrast_from,
            "space": list(space.names), "pools": {"altroll": n_alt, "psfref": n_ref},
-           "carter_mapping": CARTER, "annuli": []}
+           "instrument": inst, "carter_mapping": CARTER if rb["carter"] else None, "annuli": []}
     annuli = [i - 1 for i in a.annuli] if a.annuli else list(range(len(final)))
     for ia in annuli:
         fr = final[ia]
@@ -357,8 +419,9 @@ def main(argv=None) -> int:
         for k, over in lib.items():
             configs[k] = (at(xw, over), None)
         configs.update({
-            "carter": (at(x_def, dict(every, **CARTER)), None),
-            "carter_full": (at(x_def, dict(every, **CARTER)), (IWA_AS / px, float(ann[-1]))),
+            **({"carter": (at(x_def, dict(every, **CARTER)), None),
+                "carter_full": (at(x_def, dict(every, **CARTER)), (IWA_AS / px, float(ann[-1])))}
+               if rb["carter"] else {}),
             "default": (_vec(runner, x_def), None),
         })
         if a.configs:
@@ -378,10 +441,10 @@ def main(argv=None) -> int:
             t0 = time.time()
             clean = runner._reduce(c, None, tag=f"abl_a{ia + 1}_{name}_clean", zone=zov)
             t_clean = time.time() - t0
-            planet = None
-            if zone[0] * px <= PLANET[0] <= zone[1] * px or zov is not None:
+            planet_snr = None
+            if zone[0] * px <= planet[0] <= zone[1] * px or zov is not None:
                 try:
-                    planet = float(obj.metric.per_source(clean.image, None, [PLANET[0]], [PLANET[1]])[0])
+                    planet_snr = float(obj.metric.per_source(clean.image, None, [planet[0]], [planet[1]])[0])
                 except Exception as exc:
                     log(f"   planet S/N failed: {exc!r}")
             raw, srch, walls = [], [], []
@@ -397,10 +460,10 @@ def main(argv=None) -> int:
             p = {k: (v if isinstance(v, str) else int(v) if float(v).is_integer() else float(v))
                  for k, v in c.params.items() if k in space.names}
             rec["configs"][name] = {"params": p, "zone_override": zov, "raw": raw, "search": srch,
-                                    "planet_snr": planet, "wall_clean_s": t_clean,
+                                    "planet_snr": planet_snr, "wall_clean_s": t_clean,
                                     "wall_inj_s": float(np.mean(walls))}
             log(f"   {name:11s} {p}  raw {np.nanmean(raw):5.2f}  search {np.nanmean(srch):5.2f}"
-                f"  planet {'--' if planet is None else f'{planet:5.2f}'}  "
+                f"  planet {'--' if planet_snr is None else f'{planet_snr:5.2f}'}  "
                 f"({np.mean(walls):.1f} s/reduction)")
             with open(a.out, "w") as f:                  # checkpoint after every configuration
                 json.dump(out | {"annuli": out["annuli"] + [rec]}, f, indent=1)

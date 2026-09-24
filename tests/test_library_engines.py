@@ -247,6 +247,26 @@ def test_ablation_says_why_when_a_run_is_not_finished(tmp_path):
     assert msg.startswith("--versus") and "make that one first" in msg, msg
 
 
+def test_ablation_tells_miri_from_nircam_and_asks_for_what_each_needs(tmp_path):
+    """The NIRCam D / DK head-to-head uses the same script: the instrument comes from the
+    run's recorded pixel scale (MIRI 0.110"/px, NIRCam long-wave 0.063"/px), NIRCam needs no
+    --data (run_demos loads its own cubes), and MIRI still does."""
+    import json
+    la = _la()
+    assert la._instrument({"pxscale": 0.110327}) == "miri"
+    assert la._instrument({"pxscale": 0.0625953}) == "nircam"
+    assert la._instrument({"pxscale": 0.0625953}, "miri") == "miri"          # explicit wins
+    with pytest.raises(SystemExit, match="--instrument"):
+        la._instrument({"pxscale": 0.0272})                                   # NACO: not ours
+    run = tmp_path / "miri_run"
+    run.mkdir()
+    (run / "run_setup.json").write_text(json.dumps({"pxscale": 0.110327, "config": {"ann_edges": [6.7, 20.0]},
+                                                    "reducer": {"partitions": {"sci": {"backend": "pyklip"}}}}))
+    (run / "final_results.json").write_text(json.dumps({"annuli": [{"contrast": 2.7e-4}]}))
+    with pytest.raises(SystemExit, match="--data"):
+        la.main(["--run-dir", str(run)])
+
+
 def test_ablation_follows_the_runs_own_engine_and_dimensions(tmp_path):
     """Run on a klip run without --backend, the ablation used to rebuild it on pyKLIP and
     carry the winners across by name: nkeep_* dropped silently, mode / maxnumbasis at their
