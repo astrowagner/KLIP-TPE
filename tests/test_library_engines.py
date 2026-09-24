@@ -62,6 +62,29 @@ def test_pyklip_guard_keeps_k_and_maxnumbasis_live(mode, bin_, k, mnb, want_k, w
     assert y[1] <= y[3] <= g.pool(mode, bin_)
 
 
+def test_take_everything_survives_the_grid_snap():
+    """Run v7's ablation asked for "all" at bin 9 and reduced with 90 of the 95 frames: the
+    guard clipped maxnumbasis to the pool (95) and the sanitize after it snapped that to the
+    grid neighbour below.  Clipping to the first grid point at or above the pool keeps
+    "everything" reachable -- pyKLIP keeps min(maxnumbasis, pool) -- and leaves interior
+    values (a winner's 25, 70) alone."""
+    grid = sorted({float(v) for v in kgrid(131)} | {131.0})
+    sp = SearchSpace([Param("bin", 1, 10, "int", default=10),
+                      Param("k_klip", 1, 40, "int", grid=kgrid(40), default=6),
+                      Param("mode", 0, 2, "categorical", choices=["ADI", "RDI", "ADI+RDI"], default="ADI+RDI"),
+                      Param("maxnumbasis", 1, 131, "int", grid=grid, default=6)])
+    g = PyKLIPLibraryGuard(n_alt=41, n_ref=90)
+
+    def proj(bin_, mode, mnb, k=20):
+        x = np.array([bin_, k, ["ADI", "RDI", "ADI+RDI"].index(mode), mnb], float)
+        return sp.sanitize(g(sp.sanitize(x), sp))
+    y = proj(9, "ADI+RDI", 131)
+    assert y[3] >= g.pool("ADI+RDI", 9) == 95 and y[3] == 100
+    assert proj(9, "RDI", 131)[3] == 90 and proj(9, "ADI", 131)[3] == 5 == proj(9, "ADI", 131)[1]
+    assert proj(1, "ADI+RDI", 131)[3] == 131
+    assert proj(9, "ADI+RDI", 70)[3] == 70 and proj(4, "ADI+RDI", 25)[3] == 25
+
+
 # ------------------------------------------------------------------ pyKLIP's own library, searched
 
 def _pk_reducer(ds):

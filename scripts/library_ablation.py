@@ -167,6 +167,14 @@ def _args_for(run_setup: dict, data: str, workers, backend: str = "pyklip") -> o
     return type("A", (), a)()
 
 
+def _differs(a, b) -> bool:
+    """Parameter values compared as the space holds them: a categorical (pyKLIP's ``mode``,
+    ``"ADI+RDI"``) by equality, a number to 1e-9."""
+    if isinstance(a, str) or isinstance(b, str):
+        return str(a) != str(b)
+    return abs(float(a) - float(b)) > 1e-9
+
+
 def _x_from_params(space, params: dict, fallback) -> np.ndarray:
     """A vector for ``space`` from named parameters, falling back to ``fallback`` for any
     dimension the parameters do not name.  The run's winners were recorded in the space it
@@ -268,7 +276,7 @@ def main(argv=None) -> int:
         want = {k: v for k, v in fr["winner_config"]["params"].items() if k in space.names}
         xw_ = _x_from_params(space, fr["winner_config"]["params"], space.default_vector())
         got = {k: v for k, v in space.decode(xw_).params.items() if k in space.names}
-        if any(abs(float(got[k]) - float(want[k])) > 1e-9 for k in want):
+        if any(_differs(got[k], want[k]) for k in want):
             problems.append(f"annulus {fr['annulus'] + 1}: winner decodes to {got}, run had {want}")
     if problems:
         for p in problems:

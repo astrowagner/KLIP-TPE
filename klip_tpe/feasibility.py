@@ -333,6 +333,9 @@ class PyKLIPLibraryGuard:
     failure the searched ``nkeep_*`` counts had on this backend, in miniature.  ``pool`` is
     what ``mode`` makes available at this ``bin``: the other roll's binned frames (ADI), the
     reference star's frames (RDI; the reference cube is not binned) or both (ADI+RDI).
+    On a gridded ``maxnumbasis`` the upper bound is the first grid point at or above ``pool``
+    (every such value means "all of them"), so the grid snap that follows cannot pull "take
+    everything" below the pool.
 
     Runs last, after :class:`ReferenceCountGuard`, so its cap on ``k_klip`` wins.
     """
@@ -366,7 +369,18 @@ class PyKLIPLibraryGuard:
                 k = max(k, x[i])
         im = names.index("maxnumbasis")
         pmn = space.params[im]
-        x[im] = float(np.clip(x[im], max(k, pmn.lo), max(min(pool, pmn.hi), pmn.lo)))
+        top = min(pool, pmn.hi)
+        # pyKLIP keeps min(maxnumbasis, pool) frames, so every value >= pool means "all of
+        # them".  When the grid does not hold the pool itself -- a binned pool, 95 at bin 9 --
+        # clip to the first grid point AT OR ABOVE it: clipped to the pool, the sanitize that
+        # follows snapped it to a grid neighbour below (90), and "take everything" was out of
+        # reach at every bin but 1.
+        grid = getattr(pmn, "grid", None)
+        if grid is not None and len(grid):
+            above = [float(g) for g in grid if float(g) >= top]
+            if above:
+                top = min(above)
+        x[im] = float(np.clip(x[im], max(k, pmn.lo), max(top, pmn.lo)))
         return x
 
     def describe(self) -> Dict[str, Any]:

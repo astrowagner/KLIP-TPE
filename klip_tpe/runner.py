@@ -195,7 +195,7 @@ class RunConfig:
     grid_axes: Optional[List[str]] = None
     seed: Optional[int] = None
     contrast0: float = 3e-5
-    n_sources: Any = None                 # None -> per-annulus rule; an int everywhere; a list per annulus
+    n_sources: Any = None                 # None / 0 -> per-annulus rule; an int everywhere; a list per annulus (0 / None entries -> the rule)
     #: Fresh-position measurements per SEARCH trial, averaged into one score (1 = the IDL's
     #: single draw).  Not to be confused with ``CalibrationConfig.n_remeasure``, which is the
     #: same idea applied to the calibration trials and the k-scan only.
@@ -707,10 +707,12 @@ class Runner:
     def _nsrc(self, ia: int) -> int:
         ns = self.cfg.n_sources
         if isinstance(ns, (list, tuple, np.ndarray)):
-            # per annulus, the last entry repeating (like n_iter / n_init); a 0 or None entry
-            # hands that annulus back to the rule
-            v = ns[min(ia, len(ns) - 1)] if len(ns) else None
-            ns = None if v is None else int(v)
+            # per annulus, the last entry repeating (like n_iter / n_init)
+            ns = ns[min(ia, len(ns) - 1)] if len(ns) else None
+        # 0 or None hands the annulus back to the rule -- in a list, as documented, and as a
+        # single value too.  A 0 used to be taken literally: the annulus asked for no sources,
+        # the ring-survival loop below had nothing to try, and none were injected.
+        ns = int(ns) if ns else None
         if ia in self._nsrc_cache:
             return self._nsrc_cache[ia]
         a_in, a_out = self._zone(ia, None)

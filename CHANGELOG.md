@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased — 2026-09-24 (the v7 ablation, and two source-count regressions)
+
+- **`library_ablation.py` crashed on the first pyKLIP-native run.**  Its rebuild check compared
+  every winner parameter as a float, and v7 is the first run whose space holds a categorical
+  (`mode = "ADI+RDI"`): `ValueError: could not convert string to float`.  Categoricals now
+  compare by equality.  The whole v7 chain — pyKLIP ablation, klip ablation with
+  `--contrast-from`, `--versus` — was then run end to end on the real runs before handing it
+  back.
+- **"Take everything" was out of reach on pyKLIP at any bin but 1.**  `PyKLIPLibraryGuard`
+  clipped `maxnumbasis` to the pool (95 at bin 9), and the sanitize after it snapped that to
+  the grid neighbour below (90).  pyKLIP keeps `min(maxnumbasis, pool)` frames, so the guard
+  now clips to the first grid point at or above the pool (100): every search state and the
+  ablation's "all" variant can use every frame.  Interior values — every v7 winner — are
+  unchanged, so the finished runs rebuild exactly.
+- **RX J0534 injected 2 sources, not 3.**  On 2026-09-22 (471c017) the NIRCam limit of two —
+  a small coronagraphic field, where simultaneous sources perturb each other's basis — was
+  also applied to `run_rxj0534.py`'s `--n-sources` default, with NIRCam's reason in its help.
+  RX J0534 is LMIRCam, and three is its documented choice (three plus the planet leave the
+  noise ring ~13 apertures).  Restored.  No run was made with the wrong default: every
+  directory under `~/klip_tpe_runs/rxj0534` predates it.
+- **A 0 in a per-annulus `n_sources` injected nothing.**  The documented meaning is "this
+  annulus uses the rule", but only `None` was converted; `[0, 3]` asked annulus 1 for zero
+  sources and the ring-survival loop had nothing to try.  0 now means the rule, in a list
+  and as a single value.
+- These were the three slow-suite failures noted on 2026-09-23 (they failed identically
+  before that day's changes).
+
 ## Unreleased — 2026-09-23 (runs that survive a synced folder)
 
 `paper_runs/` and the MIRI run directories live in Dropbox, and a fast search outran it.
