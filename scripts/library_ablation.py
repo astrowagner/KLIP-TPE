@@ -354,7 +354,7 @@ class AblationDisplay:
                               top=0.90, bottom=0.07)
         top = gs[0].subgridspec(1, k, wspace=0.18)
         bot = gs[1].subgridspec(1, 3, width_ratios=[1, 1, 1.35], wspace=0.28)
-        fig.text(0.05, 0.965, self.title, color=_INK, fontsize=12, weight="bold", va="center")
+        title = fig.text(0.05, 0.965, self.title, color=_INK, fontsize=12, weight="bold", va="center")
         for j, (number, label) in enumerate(self.plan_ann or [(0, "")]):
             ax = fig.add_subplot(top[0, j])
             self._style(ax)
@@ -382,14 +382,23 @@ class AblationDisplay:
             if vs and np.isclose(vs[1], rec["contrast"], rtol=1e-9, atol=0.0):
                 lab, _, m, se = vs
                 ax.axhline(m, color=_VERSUS_COLOR, lw=1.5, ls=(0, (4, 3)), zorder=1)
-                ax.text(len(order) - 0.45, m, f"{lab} winner {m:.2f} ", color=_INK2, fontsize=8, va="bottom", ha="right")
+                ax.text(len(order) - 0.45, m, f"{lab} winner {m:.2f} ", color=_INK2, fontsize=8, va="bottom",
+                        ha="right", zorder=5,                # readable over the last column's draws
+                        bbox=dict(facecolor=_SURFACE, edgecolor="none", alpha=0.8, pad=1.0))
+                lo, hi = ax.get_ylim()                   # the line and its label inside the frame
+                if m + 0.07 * (hi - lo) > hi:
+                    ax.set_ylim(lo, m + 0.07 * (hi - lo))
             ax.set_xticks(range(len(order)))
             # HIP 65426 b's S/N in each configuration's clean image, under its name: a different
-            # quantity on a different scale (14-17 against 4-8), so not on this axis
+            # quantity on a different scale (14-17 against 4-8), so not on this axis.  Names
+            # break at their "_" -- nine one-line names ran into each other on MIRI (rdi_third
+            # into ardi_half) -- and the planet is then always the third line, level across.
+            two = any("_" in n for n in order)
             labs = []
             for name in order:
+                nm = name.replace("_", "\n", 1) if "_" in name else name + ("\n" if two else "")
                 pl = rec["data"][name]["planet"]
-                labs.append(name + (f"\nb {pl:.1f}" if pl is not None and np.isfinite(pl) else ""))
+                labs.append(nm + (f"\nb {pl:.1f}" if pl is not None and np.isfinite(pl) else ""))
             ax.set_xticklabels(labs, rotation=0, ha="center", color=_INK2, fontsize=7.5)
             ax.set_xlim(-0.6, len(order) - 0.4)
         handles = [mlines.Line2D([], [], color=_ROLE_COLOR[r], marker="o", ls="none", ms=7, label=t)
@@ -401,6 +410,14 @@ class AblationDisplay:
                          bbox_to_anchor=(0.985, 0.985))
         for t in leg.get_texts():
             t.set_color(_INK2)
+        try:                                   # a long run name ran the title into the legend
+            rr = fig.canvas.get_renderer()
+            for size in (11, 10, 9, 8):
+                if title.get_window_extent(rr).x1 < leg.get_window_extent(rr).x0 - 10:
+                    break
+                title.set_fontsize(size)
+        except Exception:
+            pass
         rec = self.ann.get(getattr(self, "cur_ann", None))
         n_draws = rec["n_draws"] if rec else 0
         self._image(fig.add_subplot(bot[0, 0]), self.clean_img, f"clean  ·  {self.cur or self.last or ''}", [])
@@ -417,7 +434,8 @@ class AblationDisplay:
             lines.append(f"annulus {done_ann} of {len(self.plan_ann)}  ·  {self.cur} ({i} of {len(order)})")
         if self.n_total:
             left = (self.n_total - self.n_done) * el / max(self.n_done, 1)
-            lines.append(f"{self.n_done} of {self.n_total} reductions  ·  {el / 60:.0f} min so far"
+            lines.append(f"{self.n_done} of {self.n_total} reductions  ·  {el / 60:.0f} min"
+                         + (" so far" if self.n_done < self.n_total else "")
                          + (f"  ·  ~{left / 60:.0f} min left" if self.n_done and self.n_done < self.n_total else ""))
         if self.params:
             lines.append("  ".join(f"{k}={v}" for k, v in self.params.items()))
@@ -560,7 +578,8 @@ def _plot_finished(a, log) -> int:
                                 f"{_ENGINE_NAME.get(j.get('backend'), j.get('backend'))} engine",
                            show=a.show, versus=_versus_reference(th) if th else {}, log=log)
     disp.no_image = "reductions are not stored\nin an ablation's output"
-    px = j.get("pxscale")
+    # outputs from before the scale was recorded still say which instrument they were
+    px = j.get("pxscale") or PXSCALE.get(j.get("instrument"))
 
     def title(A):
         z = A.get("zone_px") or (0, 0)

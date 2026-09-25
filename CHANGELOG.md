@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased — 2026-09-25 (the MIRI head-to-head, and collecting what the paper reads)
+
+- **MIRI v7, head to head** (40 paired draws per annulus, both engines injected at pyKLIP's
+  calibrated contrast): the built-in engine's winner beats pyKLIP's by ×1.33 [1.29, 1.37] in
+  annulus 1 (0.74–2.21″; better on 39 of 40 draws), and pyKLIP's is ahead by ×1.06 in annulus
+  2 (2.21–2.96″) and ×1.07 in annulus 3 (2.96–3.97″).  HIP 65426 b: S/N 13.4 against 7.8.
+  Only this direction was run; on NIRCam one annulus' verdict changed with the contrast.
+  Results beside each run in `miri_HIP-65426_F1140C_v7_{pyklip,klip}/library_ablation.json`.
+- **What the searched library buys there.**  pyKLIP: ×1.5 over taking every frame in annuli
+  2–3 and nothing in annulus 1 (×0.99), but its own unsearched choice — keep the k best —
+  comes within 2–4 % of the searched `maxnumbasis` everywhere.  Built-in engine: ×1.25–1.41
+  over everything in every annulus, and the other roll alone matches its winner in annulus 1
+  (×1.00).  Carter et al. (2023)'s MIRI choices, mapped into this space and scored with this
+  metric (not their pipeline or their S/N), come out ×2.0–2.7 below either winner on the
+  injections, and b at 5.4–5.5 against 7.8 and 13.4.
+- **`python3 collect.py` skipped the runs the figures read.**  Its default was `A C D B`: A and
+  B are the runs from before 2026-09-14, whose directories are gone, so it refreshed C and D,
+  printed two tracebacks and left A2 and B2 as they were.  It now collects everything the
+  paper reads (`PAPER`: A2 B2 C D DK E F G H HK), and a target whose run is missing or
+  unfinished is one line, not a traceback.  `collect.py D` and `DK` were run end to end.
+- **The ablation view, from the v7 pictures.**  Nine configurations ran `rdi_third` into
+  `ardi_half`: names now break at their `_`, with the planet level on the third line.  A long
+  run name ran the title into the legend: the title shrinks to fit.  The reference line's
+  label sits inside the frame on a backing that reads over the last column.  `--plot` of an
+  output from before the pixel scale was recorded takes it from the instrument, so the zone
+  is shown rather than the injection band; a finished run says how long it took, not "so far".
+- **The synced-folder fix held.**  After it and the cleanup, the last eight hours of H2 and
+  both MIRI ablations left 6 conflicted copies, in one slot within 12 s; before it, dozens to
+  hundreds a day.
+
 ## Unreleased — 2026-09-24 (the v7 ablation, and two source-count regressions)
 
 - **`library_ablation.py` crashed on the first pyKLIP-native run.**  Its rebuild check compared

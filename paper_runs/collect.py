@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """Collect the numbers the paper quotes from the runs in this directory.
 
-    python collect.py A C D B E        # any subset; updates summary.json
+    python collect.py                  # everything the paper reads (PAPER, at the bottom)
+    python collect.py D DK H HK        # or any subset; each updates its entry in summary.json
 
 Every "default -> optimized" number comes from one comparison made the same way.  For
 each annulus the *seeded default* -- the very vector the run started from: the space's
@@ -401,16 +402,34 @@ def collect_bench(sub="E_bench"):
     return out
 
 
+#: What ``python collect.py`` collects when no target is named: everything the paper's
+#: numbers and figures read -- the four searched runs (A2, B2, C, and D on pyKLIP), D on the
+#: built-in engine, and the benchmarks, H2 on both engines.  Until 2026-09-25 the default
+#: was A C D B: A and B are the runs from before 2026-09-14, whose directories are gone, so
+#: it refreshed C and D, printed two tracebacks and left the A2 and B2 the figures read as
+#: they were.
+PAPER = ("A2", "B2", "C", "D", "DK", "E", "F", "G", "H", "HK")
+
+
 if __name__ == "__main__":
-    which = [w.upper() for w in sys.argv[1:]] or ["A", "C", "D", "B"]
+    which = [w.upper() for w in sys.argv[1:]] or list(PAPER)
     out = os.path.join(OUT, "summary.json")
     old = json.load(open(out)) if os.path.exists(out) else {}
+    done = []
     for w in which:
+        if w not in TARGETS and w not in BENCH_DIRS:
+            log(f"{w}: not a target ({' '.join(TARGETS)}) or a benchmark ({' '.join(BENCH_DIRS)}) -- skipped")
+            continue
+        if w in TARGETS and not os.path.exists(os.path.join(OUT, TARGETS[w][0], "final_results.json")):
+            log(f"{w}: {TARGETS[w][0]} has no final_results.json (not run, or not finished) -- "
+                f"skipped, its entry in summary.json left as it was")
+            continue
         try:
             old[w] = (collect_bench(bench_dir(w)) if w in BENCH_DIRS else collect(w))
+            done.append(w)
         except Exception as exc:
             import traceback
             traceback.print_exc()
             log(f"{w}: FAILED {exc!r}")
         json.dump(old, open(out, "w"), indent=1)
-    log(f"wrote {out}")
+    log(f"wrote {out}: {' '.join(done)}" if done else "nothing collected; summary.json unchanged")

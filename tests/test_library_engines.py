@@ -375,3 +375,36 @@ def test_a_finished_ablation_can_be_drawn_again(tmp_path):
     theirs.write_text(json.dumps(res("pyklip", [6.1, 6.4, 5.9])))
     assert la.main(["--plot", str(mine), "--versus", str(theirs), "--no-show"]) == 0
     assert (tmp_path / "k.png").stat().st_size > 20000
+
+
+def test_the_view_fits_nine_names_a_long_title_and_an_old_output(tmp_path, monkeypatch):
+    """What the v7 pictures showed: MIRI's nine configurations ran rdi_third into ardi_half,
+    a long run name ran the title into the legend, and an output from before the pixel
+    scale was recorded gave its injection band where the zone belongs."""
+    import json
+    la = _la()
+    names = ["winner", "all", "rdi", "adi", "rdi_third", "ardi_half", "carter", "carter_full", "default"]
+    cfg = {n: {"raw": [5.0, 5.5, 6.0], "search": [5.0, 5.5, 6.0], "planet_snr": 7.8 if n == "winner" else None}
+           for n in names}
+    old = {"backend": "pyklip", "run_dir": "miri_HIP-65426_F1140C_v7_pyklip_and_then_some", "n_draws": 3,
+           "instrument": "miri",                          # no "pxscale": written before it was
+           "annuli": [{"annulus": 1, "zone_px": [6.68, 20.05], "contrast": 2.76e-4, "band_as": [1.11, 1.84],
+                       "draws": [[[1.2, 30.0], [1.5, 210.0]]] * 3, "configs": cfg}]}
+    p = tmp_path / "old.json"
+    p.write_text(json.dumps(old))
+    seen = {}
+    real = la.AblationDisplay.finish
+
+    def finish(self, lines=()):
+        real(self, lines)
+        seen["disp"] = self
+    monkeypatch.setattr(la.AblationDisplay, "finish", finish)
+    assert la.main(["--plot", str(p), "--no-show"]) == 0
+    disp = seen["disp"]
+    assert disp.plan_ann[0][1].startswith('annulus 1  ·  0.74-2.21"')
+    fig = disp._fig
+    labs = [t.get_text() for t in fig.axes[0].get_xticklabels()]
+    assert labs[4:6] == ["rdi\nthird", "ardi\nhalf"] and labs[7] == "carter\nfull"
+    assert labs[0] == "winner\n\nb 7.8"                   # the planet on the third line, level
+    rr = fig.canvas.get_renderer()
+    assert fig.texts[0].get_window_extent(rr).x1 < fig.legends[0].get_window_extent(rr).x0

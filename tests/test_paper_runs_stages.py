@@ -97,6 +97,35 @@ def test_collect_and_figs_know_where_the_new_benches_land():
     assert "G2_bench_sphere" in fig and "H2_bench_jwst_pyklip" in fig
 
 
+def test_collect_with_no_arguments_collects_what_the_figures_read():
+    """``python3 collect.py && python3 figs.py`` is what the drivers say to run once the
+    stages finish.  Its default was A C D B -- two runs whose directories are gone -- so it
+    refreshed C and D, printed two tracebacks, and left the A2 and B2 the figures read."""
+    col = _text("collect.py")
+    names = re.findall(r'"(\w+)"', re.search(r"^PAPER = \((.*?)\)$", col, re.M).group(1))
+    assert "or list(PAPER)" in col
+    fig = _text("figs.py")
+    read = set(re.findall(r':\s*"(\w+)"', re.search(r"^PRIMARY = \{(.*?)\}$", fig, re.M).group(1)))
+    read |= {"B2"}                                       # fig_partition / fig_frametags
+    assert read <= set(names), read - set(names)
+    assert {"DK", "H", "HK"} <= set(names)               # both engines' D and H2
+    for w in names:                                      # each a target or a benchmark
+        assert f'"{w}": (' in col, w
+
+
+def test_collect_skips_a_run_that_is_not_there_in_one_line(tmp_path):
+    import subprocess
+    env = dict(os.environ, RUNS_DIR=str(tmp_path), PYTHONPATH=os.path.dirname(PAPER_RUNS))
+    r = subprocess.run([sys.executable, "collect.py", "A", "x"], cwd=PAPER_RUNS, env=env,
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    assert "Traceback" not in r.stdout + r.stderr
+    assert "A: A_betapic has no final_results.json" in r.stdout
+    assert "X: not a target" in r.stdout
+    assert "nothing collected; summary.json unchanged" in r.stdout
+    assert not os.path.exists(tmp_path / "summary.json")
+
+
 def _outdir(stage, runs_dir=None, home=None):
     """rerun_paper.sh's own outdir(), run by bash: its RUNS_DIR block and the function."""
     import subprocess
