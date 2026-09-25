@@ -32,6 +32,16 @@
   current — beside bars of the eight.  The curves now come from the slots the summary counts
   (`bench.summary_run_dirs`, which `python -m klip_tpe.bench` uses too); only E2 had retired
   slots, and its bars and every collected number are unchanged.  Rerun `figs.py`.
+- **E2's grid arm ran 800 evaluations; tpe and random ran 1000.**  The arm was retired and
+  re-run on 2026-09-20 with the command `supersede_bench_mode.py` printed —
+  `BENCH_MODES=grid python3 paper_runs/run_demos.py E2` — which leaves out the
+  `BENCH_NITER=1000` that `long_run.sh` had run the batch under, so the stage fell back to
+  its own 800.  The convergence panel shows it (the grid curve stops at 800), and the bars
+  compare grid's validated winners at 800 with the others' at 1000.  The tool now prints the
+  budget of the arms the re-run will be compared with (and knows H2's per-engine
+  directories), and `run_benchmark` refuses to run a slot into a batch whose rows are at
+  another `n_iter`/`n_init` — a resume with nothing left to run still only reads.  The E2
+  results themselves are unchanged: re-running the arm at 1000 is a separate decision.
 - **Figure legibility, from the regenerated set.**  f7: with H2 on top its bars filled the
   panel and the key sat on them — the panels now leave headroom for the key and the gap
   labels.  f6: the key moved under the row, off β Pic's inner curves.  f12: the seeded

@@ -1,9 +1,14 @@
-"""A batch's figures draw the slots its summary counts, and only those."""
+"""A batch is one budget, and its figures draw the slots its summary counts, and only those."""
 from __future__ import annotations
 
+import importlib.util
 import os
 
+import pytest
+
 from klip_tpe import bench
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _row(tag, mode, seed, annulus, run_dir):
@@ -39,3 +44,49 @@ def test_summary_run_dirs_leaves_out_retired_and_foreign_slots(tmp_path):
     assert bench.summary_run_dirs(str(out), "bench_0") == [str(out / "bench_0_tpe_s0")]
     assert bench.summary_run_dirs(str(out), "bench_2") == [str(moved)]  # the recorded path
     assert bench.summary_run_dirs(str(tmp_path / "nowhere")) == []
+
+
+def _never(mode, seed, run_dir):
+    raise AssertionError(f"ran {mode} s{seed}")
+
+
+def test_a_batch_is_extended_only_at_its_own_budget(tmp_path):
+    """E2's grid arm was re-run -- after ``supersede_bench_mode.py`` retired it -- without the
+    ``BENCH_NITER=1000`` the batch ran under, and ran 800 evaluations beside tpe and random at
+    1000.  A slot about to run at another budget than the batch's rows is now refused."""
+    out = tmp_path / "E2_bench"
+    out.mkdir()
+    (out / "bench_tag.txt").write_text("bench_1\n")
+    bench._append_summary(str(out), [_row("bench_1", m, s, 0, str(out / f"bench_1_{m}_s{s}"))
+                                     for m in ("tpe", "random") for s in (0, 1)])   # n_iter 10, n_init 2
+    q = lambda s: None
+    with pytest.raises(ValueError, match=r"n_iter=10, n_init=2.*grid s0, grid s1.*n_iter=8.*BENCH_NITER=10"):
+        bench.run_benchmark(_never, ("grid",), (0, 1), n_iter=8, n_init=2, bench_tag="bench_1",
+                            out_dir=str(out), log=q)
+    with pytest.raises(ValueError, match="n_init=3"):
+        bench.run_benchmark(_never, ("grid",), (0,), n_iter=10, n_init=3, bench_tag="bench_1",
+                            out_dir=str(out), log=q)
+    # resuming a batch with nothing left to run only reads it, whatever the call asks
+    assert bench.run_benchmark(_never, ("tpe", "random"), (0, 1), n_iter=8, n_init=2,
+                               bench_tag="bench_1", out_dir=str(out), log=q) == []
+
+
+def test_supersede_says_which_budget_to_rerun_at(tmp_path, capsys):
+    spec = importlib.util.spec_from_file_location("supersede_bench_mode",
+                                                  os.path.join(ROOT, "scripts", "supersede_bench_mode.py"))
+    sup = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sup)
+    out = tmp_path / "E2_bench"
+    out.mkdir()
+    (out / "bench_tag.txt").write_text("bench_1\n")
+    for m in ("tpe", "grid"):
+        (out / f"bench_1_{m}_s0").mkdir()
+    bench._append_summary(str(out), [
+        dict(_row("bench_1", "tpe", 0, 0, str(out / "bench_1_tpe_s0")), n_iter=1000, n_init=100),
+        dict(_row("bench_1", "grid", 0, 0, str(out / "bench_1_grid_s0")), n_iter=800, n_init=80)])
+    assert sup.main([str(out), "grid"]) == 0
+    said = capsys.readouterr().out
+    assert "BENCH_NITER=1000 BENCH_MODES=grid python3 paper_runs/run_demos.py E2" in said
+    assert "the retired arm ran n_iter 800; the rest of the batch 1000" in said
+    assert bench.summary_run_dirs(str(out)) == [str(out / "bench_1_tpe_s0")]
+    assert [n for n in os.listdir(out) if n.startswith("bench_1_grid_s0_superseded_")]

@@ -94,9 +94,25 @@ def main(argv=None):
             f.writelines(keep)
 
     stage = {"E2_bench": "E2", "F2_bench_highdim": "F2", "G2_bench_sphere": "G2",
-             "H2_bench_jwst": "H2"}.get(os.path.basename(d), "<stage>")
-    print(f"\ndone. Re-run just that arm, keeping the batch tag:\n"
-          f"  BENCH_MODES={a.mode} python3 paper_runs/run_demos.py {stage}")
+             "H2_bench_jwst_pyklip": "H2", "H2_bench_jwst_klip": "H2K"}.get(os.path.basename(d), "<stage>")
+    # ... and at the budget of the arms it will be compared with.  Printed without it, E2's
+    # grid arm was re-run at the stage's default 800 evaluations beside tpe and random at the
+    # 1000 long_run.sh had set.
+    def budgets(lines):
+        return sorted({int(f[4]) for f in (ln.split() for ln in lines)
+                       if f and not f[0].startswith("#") and f[0] == tag and len(f) > 4})
+    others, own = budgets(keep), budgets(moved)
+    target = others or own
+    env = f"BENCH_NITER={target[-1]} " if len(target) == 1 else ""
+    print(f"\ndone. Re-run just that arm, keeping the batch tag and its budget"
+          f"{f' (n_iter {target[0]})' if len(target) == 1 else ''}:\n"
+          f"  {env}BENCH_MODES={a.mode} python3 paper_runs/run_demos.py {stage}")
+    if own and others and own != others:
+        print(f"  (the retired arm ran n_iter {'/'.join(map(str, own))}; the rest of the batch "
+              f"{'/'.join(map(str, others))})")
+    if len(others) > 1:
+        print(f"  (the arms left in this batch disagree on n_iter -- {'/'.join(map(str, others))} -- "
+              f"so the re-run will be refused until they agree; see bench_summary.txt)")
     return 0
 
 

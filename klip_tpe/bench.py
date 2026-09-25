@@ -307,7 +307,24 @@ def run_benchmark(make_runner: MakeRunner, modes: Sequence[str] = ("tpe", "rando
         bench_tag = new_bench_tag()
     with open(os.path.join(out_dir, "bench_tag.txt"), "w") as f:
         f.write(bench_tag + "\n")
-    done = {(r["mode"], r["seed"]) for r in read_summary(out_dir, bench_tag)}
+    recorded = read_summary(out_dir, bench_tag)
+    done = {(r["mode"], r["seed"]) for r in recorded}
+    # One batch, one budget: its arms are compared at the n_iter they share.  E2's grid arm
+    # was re-run (after supersede_bench_mode.py) without the BENCH_NITER=1000 the batch had
+    # run under, and so ran 800 evaluations beside tpe and random at 1000.  Refuse before
+    # running a slot; finished and summarised ones are only read, whatever this call asks.
+    to_run = [(m, int(s)) for m in modes for s in seeds if (m, int(s)) not in done
+              and not os.path.exists(os.path.join(slot_dir(out_dir, bench_tag, m, s), "final_results.json"))]
+    if to_run and recorded:
+        had_it = sorted({int(r["n_iter"]) for r in recorded})
+        had_in = sorted({int(r["n_init"]) for r in recorded})
+        if had_it != [int(n_iter)] or (n_init is not None and had_in != [int(n_init)]):
+            raise ValueError(
+                f"batch {bench_tag} in {out_dir} was run at n_iter={'/'.join(map(str, had_it))}, "
+                f"n_init={'/'.join(map(str, had_in))}; this call would run {len(to_run)} slot(s) "
+                f"({', '.join(f'{m} s{s}' for m, s in to_run[:4])}{'...' if len(to_run) > 4 else ''}) "
+                f"at n_iter={n_iter}, n_init={n_init}.  A batch compares its arms at one budget: ask "
+                f"for the batch's (paper_runs: BENCH_NITER={had_it[-1]}), or start a new batch.")
     rows: List[Dict[str, Any]] = []
     for mode in modes:
         for seed in seeds:
