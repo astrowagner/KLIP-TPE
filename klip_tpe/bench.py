@@ -54,7 +54,7 @@ except ImportError:
         return [p] if os.path.exists(p) else []
 
 __all__ = ["run_benchmark", "bench_convergence", "bench_status", "bench_restart", "summarize_bench",
-           "read_summary", "read_records", "running_best", "slot_dir", "new_bench_tag",
+           "read_summary", "summary_run_dirs", "read_records", "running_best", "slot_dir", "new_bench_tag",
            "SUMMARY_COLUMNS", "make_synthetic_bench", "main"]
 
 SUMMARY_COLUMNS = ["bench_tag", "mode", "seed", "annulus", "n_iter", "n_init",
@@ -191,6 +191,24 @@ def read_summary(out_dir: str, bench_tag: Optional[str] = None) -> List[Dict[str
             if bench_tag == "all" or row["bench_tag"] == bench_tag:
                 rows.append(row)
     return rows
+
+
+def summary_run_dirs(out_dir: str, bench_tag: Optional[str] = None) -> List[str]:
+    """The slot directories a batch's summary rows came from -- what its figures should draw.
+
+    Found under ``out_dir`` as it is now (``slot_dir``), so a moved batch still resolves;
+    the absolute ``run_dir`` a row recorded is the fallback.  Globbing ``bench_*_*_s*``
+    instead also picks up other tags' slots and the ones ``scripts/supersede_bench_mode.py``
+    renamed ``..._sN_superseded_<date>``: the paper's E2 panel drew 16 grid seeds, 8 of them
+    retired, beside a bar chart of the 8 that count."""
+    out: List[str] = []
+    for r in read_summary(out_dir, bench_tag):
+        d = slot_dir(out_dir, r["bench_tag"], r["mode"], r["seed"])
+        if not os.path.isdir(d) and os.path.isdir(r["run_dir"]):
+            d = r["run_dir"]
+        if os.path.isdir(d) and d not in out:
+            out.append(d)
+    return sorted(out)
 
 
 def _current_tag(out_dir: str) -> Optional[str]:
@@ -514,8 +532,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         rows = run_benchmark(mk, modes, seeds, a.n_iter, a.n_init, tag, a.out_dir, log)
     print(f"injection contrast (forced, sub-threshold): {mk.contrast:.3e}")
     summarize_bench(a.out_dir, tag)
-    dirs = sorted({r["run_dir"] for r in read_summary(a.out_dir, tag)})
-    curves = bench_convergence(dirs)
+    curves = bench_convergence(summary_run_dirs(a.out_dir, tag))
     from .plots import plot_bench_convergence
     png = os.path.join(a.out_dir, f"fig_bench_conv_{tag}.png")
     plot_bench_convergence(curves, out_path=png, title=f"{tag}: running best search score (upward-biased)")

@@ -113,6 +113,26 @@ def test_collect_with_no_arguments_collects_what_the_figures_read():
         assert f'"{w}": (' in col, w
 
 
+def test_the_bench_figure_draws_only_the_slots_its_bars_count():
+    """A glob of ``bench_*_*_s*`` also found E2's retired grid slots (``..._superseded_<date>``):
+    "grid (16 seeds)" in the convergence panel beside 8 validated bars."""
+    fig = _text("figs.py")
+    assert "bench_*_*_s*" not in fig
+    assert "bench_convergence(summary_run_dirs(d))" in fig
+
+
+def test_figure_parameters_print_as_the_runs_do(tmp_path):
+    """collect stores the seeded default's parameters as floats: f12 titled it k=9.0, b=7.0,
+    f=12.0 beside a winner's k=17, b=1, f=8."""
+    import subprocess
+    env = dict(os.environ, RUNS_DIR=str(tmp_path), PYTHONPATH=os.path.dirname(PAPER_RUNS))
+    r = subprocess.run([sys.executable, "-c", "import figs; print([figs._num(v) for v in "
+                        "(9.0, 17, 0.25, 'ADI+RDI', None)])"],
+                       cwd=PAPER_RUNS, env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip().splitlines()[-1] == "['9', '17', '0.25', 'ADI+RDI', None]"
+
+
 def test_collect_skips_a_run_that_is_not_there_in_one_line(tmp_path):
     import subprocess
     env = dict(os.environ, RUNS_DIR=str(tmp_path), PYTHONPATH=os.path.dirname(PAPER_RUNS))

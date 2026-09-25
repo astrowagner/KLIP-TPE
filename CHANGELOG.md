@@ -26,6 +26,18 @@
   label sits inside the frame on a backing that reads over the last column.  `--plot` of an
   output from before the pixel scale was recorded takes it from the instrument, so the zone
   is shown rather than the injection band; a finished run says how long it took, not "so far".
+- **The bench figure drew E2's retired grid arm.**  `figs.py` found the convergence curves by
+  globbing `bench_*_*_s*`, which also matches the slots `supersede_bench_mode.py` renamed
+  `..._sN_superseded_<date>`: the E2 panel said "grid (16 seeds)" — eight retired, eight
+  current — beside bars of the eight.  The curves now come from the slots the summary counts
+  (`bench.summary_run_dirs`, which `python -m klip_tpe.bench` uses too); only E2 had retired
+  slots, and its bars and every collected number are unchanged.  Rerun `figs.py`.
+- **Figure legibility, from the regenerated set.**  f7: with H2 on top its bars filled the
+  panel and the key sat on them — the panels now leave headroom for the key and the gap
+  labels.  f6: the key moved under the row, off β Pic's inner curves.  f12: the seeded
+  default printed as k=9.0, b=7.0, f=12.0 beside the winner's k=17, b=1, f=8, and the
+  injected sources' S/N labels, green, vanished on the map's dark blue — integers now print
+  as integers, and the labels have a white edge.
 - **The synced-folder fix held.**  After it and the cleanup, the last eight hours of H2 and
   both MIRI ablations left 6 conflicted copies, in one slot within 12 s; before it, dozens to
   hundreds a day.

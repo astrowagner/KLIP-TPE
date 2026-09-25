@@ -27,6 +27,7 @@ warnings.filterwarnings("ignore")
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib import patheffects
 from matplotlib.patches import Circle
 
 import collect as C
@@ -105,6 +106,12 @@ def snr_map(img, fwhm, known=None, px=None, excl_fwhm=1.5):
 
 #: the companion marker, dark enough to read on a white background
 PLANET_EC = "#0b5394"
+
+
+def _num(v):
+    """A parameter as the other panels print it: 9, not 9.0 (collect stores the seeded
+    default's parameters as floats, the runs' winners keep their integers)."""
+    return f"{v:g}" if isinstance(v, (int, float)) and not isinstance(v, bool) else v
 
 
 def _img_kw(lo, hi, snr=False):
@@ -266,8 +273,11 @@ def fig_contrast(s):
         ax.set_xlabel("separation (arcsec)")
         ax.grid(alpha=.25, which="both")
     axes[0].set_ylabel(r"5$\sigma$ contrast")
-    axes[0].legend(frameon=False, fontsize=6)
     fig.tight_layout()
+    # one key under the row: inside the first panel it sat on beta Pic's inner curves
+    h, lab = axes[0].get_legend_handles_labels()
+    fig.legend(h, lab, loc="upper center", bbox_to_anchor=(0.5, 0.0), ncol=len(lab), frameon=False,
+               fontsize=6.5)
     fig.savefig(os.path.join(FIG, "f6_contrast.pdf"))
     plt.close(fig)
     print("  f6_contrast.pdf")
@@ -530,8 +540,8 @@ def fig_paramcompare(s, key="A2"):
         sg = 1.4826 * np.median(np.abs(v - np.median(v)))
         axes[0, j].set_facecolor("white")
         axes[0, j].imshow(img, origin="lower", **_img_kw(-2 * sg, 6 * sg))
-        axes[0, j].set_title(f"{lab}\n$k$={prm.get('k_klip')}, $b$={prm.get('bin')}, "
-                             f"$f$={prm.get('filter')}", fontsize=6.5)
+        axes[0, j].set_title(f"{lab}\n$k$={_num(prm.get('k_klip'))}, $b$={_num(prm.get('bin'))}, "
+                             f"$f$={_num(prm.get('filter'))}", fontsize=6.5)
         m = snr_map(img, red.fwhm, known=[tuple(r["planet"])], px=red.pxscale)
         axes[1, j].set_facecolor("white")
         axes[1, j].imshow(m, origin="lower", **_img_kw(-3, 8, snr=True))
@@ -544,7 +554,8 @@ def fig_paramcompare(s, key="A2"):
         for x, y, v_ in zip(xs, ys, sn):
             axes[1, j].add_patch(Circle((x, y), 1.6 * red.fwhm, fill=False, ec="#0b8043", lw=0.9))
             axes[1, j].text(x, y + 2.2 * red.fwhm, f"{v_:.1f}", color="#0b8043", fontsize=6.5,
-                            ha="center")
+                            ha="center",           # a white edge: green on the map's dark blue was lost
+                            path_effects=[patheffects.withStroke(linewidth=2.0, foreground="white")])
         # the real companion, marked but never injected on and never scored
         for ax_ in (axes[0, j], axes[1, j]):
             ax_.add_patch(Circle((px_[0], py_[0]), 1.6 * red.fwhm, fill=False, ec=PLANET_EC,
@@ -567,8 +578,7 @@ def fig_paramcompare(s, key="A2"):
 def fig_bench():
     """The benchmark at both dimensionalities: convergence (upward-biased search score)
     and what survives validation."""
-    import glob
-    from klip_tpe.bench import bench_convergence, read_summary, summarize_bench
+    from klip_tpe.bench import bench_convergence, read_summary, summarize_bench, summary_run_dirs
     # first directory that has rows; see the naming warning on collect.BENCH_DIRS -- the
     # *_unpaired_20260913/ archives are the ones that used the reference objective
     def _pick(*subs):
@@ -594,7 +604,9 @@ def fig_bench():
                              gridspec_kw={"width_ratios": [2, 1]}, squeeze=False)
     summ_all = {}
     for row, (d, lab) in enumerate(sets):
-        curves = bench_convergence(sorted(glob.glob(os.path.join(d, "bench_*_*_s*"))))
+        # the slots the bars count, and only those: a glob also drew E2's eight retired
+        # grid slots (..._sN_superseded_<date>) -- "grid (16 seeds)" beside 8 bars
+        curves = bench_convergence(summary_run_dirs(d))
         rows = read_summary(d)
         summ = summarize_bench(d, log=lambda m: None)
         summ_all[os.path.basename(d)] = summ
@@ -632,8 +644,13 @@ def fig_bench():
         ax[1].set_xticks(x); ax[1].set_xticklabels(ms)
         ax[1].set_ylabel("median injected S/N")
         ax[1].set_title("search vs validated (gap = winner's curse)", fontsize=7)
+        # headroom for the gap labels and, on the first row, the key -- with H2 on top its
+        # bars filled the panel and the key sat on them
+        top = np.nanmax(np.r_[sr, np.asarray(v) + np.asarray(e)])
+        if np.isfinite(top) and top > 0:
+            ax[1].set_ylim(0, top * (1.42 if row == 0 else 1.18))
         if row == 0:
-            ax[1].legend(frameon=False, fontsize=6.5)
+            ax[1].legend(frameon=False, fontsize=6.5, loc="upper center", ncol=2)
         ax[1].grid(alpha=.25, axis="y")
     json.dump(summ_all, open(os.path.join(OUT, "bench_summary.json"), "w"), indent=1)
     fig.tight_layout()
