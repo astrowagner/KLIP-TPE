@@ -110,11 +110,24 @@ def snr_map(img, fwhm, known=None, px=None, excl_fwhm=1.5):
         sg = 1.4826 * np.median(np.abs(v - med))
         if sg > 0:
             out[m] = (a[m] - med) / sg
+    # the smoothing spreads the zone into the zero-filled pixels around it; those rings are
+    # not data, and the panels leave them gray as the images do
+    out[~np.isfinite(img)] = np.nan
     return out
 
 
-#: the companion marker, dark enough to read on a white background
-PLANET_EC = "#0b5394"
+#: The paper's images use two color maps only: inferno for intensity, viridis for S/N and the
+#: other signed or fractional maps.  Markers must read on both: the companion is cyan, the
+#: injected sources white, each with a thin black edge for the bright end of the maps.
+PLANET_EC = "#00e5ff"
+INJ_EC = "white"
+#: pixels outside the reduced zone
+NAN_FACE = "0.85"
+
+
+def _edge(lw=1.0):
+    """A thin black edge under a marker or label, for the bright (yellow) end of the maps."""
+    return [patheffects.withStroke(linewidth=lw + 1.0, foreground="k")]
 
 
 def _num(v):
@@ -124,34 +137,26 @@ def _num(v):
 
 
 def _img_kw(lo, hi, snr=False):
-    """Colour mapping for an image panel, on a WHITE background.
-
-    A printed page should not be a field of black ink, and a reader should be able to see
-    where the data are zero.  Intensity panels therefore use a sequential white-to-black
-    map; signed panels (matched-filter S/N, the parameter-verification maps) use a
-    diverging map centred on zero, so that zero is white, sources are red and
-    over-subtraction is blue.  ``NaN`` outside the optimized annulus stays the axes'
-    white."""
-    from matplotlib.colors import Normalize, TwoSlopeNorm
-    if snr:
-        if lo < 0 < hi:
-            return dict(cmap="RdBu_r", norm=TwoSlopeNorm(vcenter=0.0, vmin=lo, vmax=hi))
-        if hi <= 0:
-            return dict(cmap="Blues_r", norm=Normalize(vmin=lo, vmax=hi))
-        return dict(cmap="Reds", norm=Normalize(vmin=max(lo, 0.0), vmax=hi))
-    return dict(cmap="Greys", norm=Normalize(vmin=lo, vmax=hi))
+    """Color mapping for an image panel: inferno for intensity, viridis for matched-filter
+    S/N and the parameter-verification maps.  ``NaN`` (outside the reduced zone) shows the
+    axes' light gray, NAN_FACE, which neither map contains."""
+    from matplotlib.colors import Normalize
+    return dict(cmap="viridis" if snr else "inferno", norm=Normalize(vmin=lo, vmax=hi))
 
 
-def _show(ax, img, px, planet, title, vlim=None, box_as=None, snr=False):
+def _show(ax, img, px, planet, title, vlim=None, box_as=None, snr=False, mark_as=0.12):
+    """One image panel, arcsec on both axes; the companion ringed at radius ``mark_as``
+    (arcsec), which should clear the PSF core (MIRI passes ~0.8 FWHM)."""
     ny, nx = img.shape
     cx, cy = star_center(img.shape)
     ext = [(-0.5 - cx) * px, (nx - 0.5 - cx) * px, (-0.5 - cy) * px, (ny - 0.5 - cy) * px]
     v = img[np.isfinite(img)]
     lo, hi = vlim or np.nanpercentile(v, [1.0, 99.6])
-    ax.set_facecolor("white")
+    ax.set_facecolor(NAN_FACE)
     ax.imshow(img, origin="lower", extent=ext, **_img_kw(lo, hi, snr))
     xs, ys = source_xy([planet[0]], [planet[1]], 1.0, 0.0, 0.0)
-    ax.add_patch(Circle((xs[0], ys[0]), 0.12, fill=False, ec=PLANET_EC, lw=1.0))
+    ax.add_patch(Circle((xs[0], ys[0]), mark_as, fill=False, ec=PLANET_EC, lw=1.0,
+                        path_effects=_edge(1.0)))
     # x = cx + r cos(PA+90) in this codebase, so East is -x: plotted with x increasing
     # rightward the frame is ALREADY North up, East left.  Do not flip it again.
     if box_as:
@@ -162,16 +167,16 @@ def _show(ax, img, px, planet, title, vlim=None, box_as=None, snr=False):
     return lo, hi
 
 
-def compass(ax, frac=0.16, color="0.15", lw=1.0):
+def compass(ax, frac=0.16, color="w", lw=1.0):
     """N/E arrows in the corner -- North is +y, East is -x (see _show).  Drawn in axes
-    fractions with a white stroke so they read on both bright and dark backgrounds.
+    fractions, white with a thin black edge, so they read on both ends of the maps.
 
     Upper right, i.e. north-west of the star: the one quadrant clear of all three companions
     (beta Pic b to the south-west, HD 95086 b and HIP 65426 b to the south-east) and of the
     beta Pic disk (PA 29/209 deg).  At the lower left, where it sat until 2026-09-26, its N
     arrow ran through HD 95086 b and HIP 65426 b in f5."""
     import matplotlib.patheffects as pe
-    stroke = [pe.withStroke(linewidth=1.8, foreground="w")]
+    stroke = [pe.withStroke(linewidth=1.8, foreground="k")]
     ox, oy = 0.86, 0.70
     for dx, dy, lab in ((0.0, frac, "N"), (-frac, 0.0, "E")):
         ar = ax.annotate("", xy=(ox + dx, oy + dy), xytext=(ox, oy), xycoords="axes fraction",
@@ -180,7 +185,7 @@ def compass(ax, frac=0.16, color="0.15", lw=1.0):
                                          shrinkA=0, shrinkB=0))
         ar.arrow_patch.set_path_effects(stroke)
         ax.text(ox + 1.45 * dx, oy + 1.45 * dy, lab, color=color, fontsize=6.5,
-                ha="center", va="center", transform=ax.transAxes).set_path_effects(stroke)
+                ha="center", va="center", transform=ax.transAxes).set_path_effects(_edge(0.2))
 
 
 # --------------------------------------------------------------------- f5 gallery
@@ -456,11 +461,12 @@ def fig_stitch(s, key="A2"):
     sg = 1.4826 * np.nanmedian(np.abs(img[out & np.isfinite(img)] -
                                       np.nanmedian(img[out & np.isfinite(img)])))
     ext = [(-0.5 - cx) * px, (nx - 0.5 - cx) * px, (-0.5 - cy) * px, (ny - 0.5 - cy) * px]
-    ax[0].set_facecolor("white")
-    ax[0].imshow(img, origin="lower", extent=ext, cmap="Greys",
+    ax[0].set_facecolor(NAN_FACE)
+    ax[0].imshow(img, origin="lower", extent=ext, cmap="inferno",
                  norm=SymLogNorm(linthresh=3 * sg, vmin=-6 * sg, vmax=120 * sg, base=10))
     xs, ys = source_xy([planet[0]], [planet[1]], 1.0, 0.0, 0.0)
-    ax[0].add_patch(Circle((xs[0], ys[0]), 0.12, fill=False, ec=PLANET_EC, lw=1.0))
+    ax[0].add_patch(Circle((xs[0], ys[0]), 0.12, fill=False, ec=PLANET_EC, lw=1.0,
+                           path_effects=_edge(1.0)))
     ax[0].set_xlim(-box, box); ax[0].set_ylim(-box, box)
     ax[0].set_title("optimized stitched reduction", fontsize=7.5)
     ax[0].set_xticks([]); ax[0].set_yticks([])
@@ -469,7 +475,7 @@ def fig_stitch(s, key="A2"):
         compass(a_)
     for a in r["annuli"][1:]:
         for axx in ax:
-            axx.add_patch(Circle((0, 0), a["inrad_as"], fill=False, ec="0.45", lw=0.5, ls=":"))
+            axx.add_patch(Circle((0, 0), a["inrad_as"], fill=False, ec="w", lw=0.6, ls=":"))
     fig.tight_layout()
     fig.savefig(os.path.join(FIG, "f9_stitch.pdf"))
     plt.close(fig)
@@ -572,12 +578,12 @@ def fig_paramcompare(s, key="A2"):
         img = red.reduce(ReductionRequest(params=prm, injections=srcs)).image
         v = img[np.isfinite(img)]
         sg = 1.4826 * np.median(np.abs(v - np.median(v)))
-        axes[0, j].set_facecolor("white")
+        axes[0, j].set_facecolor(NAN_FACE)
         axes[0, j].imshow(img, origin="lower", **_img_kw(-2 * sg, 6 * sg))
         axes[0, j].set_title(f"{lab}\n$k$={_num(prm.get('k_klip'))}, $b$={_num(prm.get('bin'))}, "
                              f"$f$={_num(prm.get('filter'))}", fontsize=6.5)
         m = snr_map(img, red.fwhm, known=[tuple(r["planet"])], px=red.pxscale)
-        axes[1, j].set_facecolor("white")
+        axes[1, j].set_facecolor(NAN_FACE)
         axes[1, j].imshow(m, origin="lower", **_img_kw(-3, 8, snr=True))
         from klip_tpe.metrics import source_xy, star_center
         cx, cy = star_center(img.shape)
@@ -586,16 +592,16 @@ def fig_paramcompare(s, key="A2"):
         px_, py_ = source_xy([r["planet"][0]], [r["planet"][1]], red.pxscale, cx, cy)
         sn = _mm.per_source(img, None, [s_.rho for s_ in srcs], [s_.theta for s_ in srcs])
         for x, y, v_ in zip(xs, ys, sn):
-            axes[1, j].add_patch(Circle((x, y), 1.6 * red.fwhm, fill=False, ec="#0b8043", lw=0.9))
-            axes[1, j].text(x, y + 2.2 * red.fwhm, f"{v_:.1f}", color="#0b8043", fontsize=6.5,
-                            ha="center",           # a white edge: green on the map's dark blue was lost
-                            path_effects=[patheffects.withStroke(linewidth=2.0, foreground="white")])
+            axes[1, j].add_patch(Circle((x, y), 1.6 * red.fwhm, fill=False, ec=INJ_EC, lw=0.9,
+                                        path_effects=_edge(0.9)))
+            axes[1, j].text(x, y + 2.2 * red.fwhm, f"{v_:.1f}", color=INJ_EC, fontsize=6.5,
+                            ha="center", path_effects=_edge(1.0))
         # the real companion, marked but never injected on and never scored
         for ax_ in (axes[0, j], axes[1, j]):
             ax_.add_patch(Circle((px_[0], py_[0]), 1.6 * red.fwhm, fill=False, ec=PLANET_EC,
-                                 lw=0.9, ls=(0, (3, 2))))
+                                 lw=0.9, ls=(0, (3, 2)), path_effects=_edge(0.9)))
         axes[0, j].text(px_[0], py_[0] + 2.2 * red.fwhm, "b", color=PLANET_EC, fontsize=6.5,
-                        ha="center")
+                        ha="center", path_effects=_edge(1.0))
         c0 = (img.shape[1] - 1) / 2.0
         h = 1.12 * a["outrad_px"]
         for ax in (axes[0, j], axes[1, j]):

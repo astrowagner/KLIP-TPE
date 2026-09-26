@@ -146,3 +146,22 @@ def test_miri_figure_uses_the_ablation_rebuild():
     refuses a setup that does not reproduce the run."""
     src = _text("miri_fig.py")
     assert 'LA._rebuild("miri"' in src and "LA._x_from_params(" in src and "LA.CARTER" in src
+
+
+def test_miri_figure_shows_the_zone_inside_the_annulus():
+    """f13 runs from the inner working angle out.  The default and the winners were scored
+    over the annulus only; inside it they are reduced once more with the same parameters and
+    the annulus' bins, for display, and joined at the annulus' inner edge."""
+    src = _text("miri_fig.py")
+    assert 'zone=(iwa, float(fr["inrad"]))' in src and "with _binned_as(red," in src
+    assert 'out = (rr < r["iwa"]) | (rr > r["outrad"])' in src
+
+
+def test_image_figures_use_inferno_and_viridis():
+    """Two color maps for every image panel: inferno for intensity, viridis for S/N and the
+    parameter-verification maps.  Until 2026-09-26 they were white-to-black and red/white/blue."""
+    for name in ("figs.py", "miri_fig.py"):
+        src = _text(name)
+        for cm in ("RdBu", "Greys", '"Reds"', "Blues", "bwr", "coolwarm", "seismic", "TwoSlopeNorm"):
+            assert cm not in src, (name, cm)
+    assert 'cmap="viridis" if snr else "inferno"' in _text("figs.py")
