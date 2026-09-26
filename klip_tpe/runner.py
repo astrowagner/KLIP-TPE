@@ -278,6 +278,19 @@ class RunConfig:
     partition_weighting: Optional[str] = None
     fm_curve: bool = True
     fm_preview: bool = True              # live KLIP-FM preview at each new best (IDL: 'after 1st best')
+    #: Known sources to take out of the frames before EVERY reduction the run makes --
+    #: ``[(rho_arcsec, pa_deg, contrast), ...]``, each injected with the negative of its
+    #: contrast (:mod:`klip_tpe.companion`; fit the values there, in a reference-star
+    #: configuration).  Declaring a companion ``known`` keeps injections 1.5 FWHM away and
+    #: drops noise apertures within 1.5 FWHM of it, which is enough on the ground, where
+    #: speckles dominate its outer light.  It is not enough when the speckle floor is far
+    #: below the companion: on JWST/NIRCam, HIP 65426 b's light, spread by the reduction over
+    #: its KLIP sector, set the metric's ring scatter at 5-14x the companion-free value
+    #: across the whole inner annulus and ~2x at 2.2" -- the search then learned to suppress
+    #: the companion rather than the star.  Removing it first keeps it out of the basis, the
+    #: rings and the score.  Only the positive injections are ever scored; the known-source
+    #: exclusions still apply, to the residual.  Empty (the default) changes nothing.
+    subtract_known: List[Tuple[float, float, float]] = field(default_factory=list)
 
     def per_annulus(self, val, ia: int) -> int:
         if isinstance(val, (list, tuple, np.ndarray)):
@@ -840,6 +853,10 @@ class Runner:
         return Config(dict(d.get("params", {})), per, sel, x)
 
     # -------------------------------------------------------------- reduction
+    def _known_negatives(self) -> List[Source]:
+        """``RunConfig.subtract_known`` as negative injections."""
+        return [Source(float(r), float(p), -abs(float(c))) for r, p, c in (self.cfg.subtract_known or [])]
+
     def _reduce(self, cfg: Config, sources: Optional[Sequence[Source]], k_scan: bool = False,
                 tag: str = "", zone: Optional[Tuple[float, float]] = None,
                 fm_sources: Optional[Sequence[Source]] = None, extras: bool = False) -> EvalImages:
@@ -866,6 +883,12 @@ class Runner:
             # of the very sources it is about to score (KLIP-FM is undefined under k_scan;
             # a reducer without it falls back to the numerical FM, see Runner._fm_for)
             fm_sources = sources
+        # known sources taken out of the frames (RunConfig.subtract_known): appended here, the
+        # one place every reduction of the run passes through, and never seen by a caller --
+        # each scores the list it passed in
+        neg = self._known_negatives()
+        if neg:
+            sources = list(sources or []) + neg
         if isinstance(self.reducer, PartitionedReducer):
             return self.reducer.reduce_config(cfg2, sources, k_scan, tag, fm_sources=fm_sources, extras=extras)
         res = self.reducer.reduce(ReductionRequest(cfg2.params, sources, k_scan, tag, fm_sources=fm_sources,

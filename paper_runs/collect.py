@@ -22,13 +22,31 @@ Until 2026-09-17 the "default" here was ``space.default_vector()`` unprojected -
 1.923 lambda/D and anglemax 26 deg, which the guard rewrites to 0 / the PA span before any
 run sees them -- and the winner was the validated score from a different set of draws.
 
-Independently we measure the real companion in both clean images (Mawet small-sample
-matched-filter S/N), which is a check on a real source that no injection can fake.
+Independently we measure the real companion in both configurations, a check on a real source
+that no injection can fake.  Both are reduced WITH the companion, through the path the run's
+own reductions take (Runner._reduce: the annulus zone, each partition's own parameter block).
+Until 2026-09-26 the default went through ``red.reduce(ReductionRequest(params))``, which gives
+every partition the global -- channel-AVERAGED -- parameters: HD 95086's K1 and K2 are seeded
+with slightly different ``angsep``, enough to change which frames serve as references, and its
+companion measured 17.5 in a configuration the run never used (16.7 in its own).  The winner
+is reduced afresh the same way rather than read from ``best_clean.fits``, which a run that
+subtracts the companion (RunConfig.subtract_known) writes without it.
+
+Two companion S/N are recorded.  ``planet_snr_*`` is the run's search metric on the clean
+image, kept for continuity.  ``companion_fm_*`` is the one the paper quotes: the companion is
+fitted and cancelled by a negative injection (klip_tpe.companion), its S/N is its own reduced
+image over the ring scatter of the companion-free image.  The metric does worse on a bright
+companion three ways, each configuration-dependent: its de-spiking clips the companion's core,
+the companion's own light beyond the 1.5-FWHM exclusion enters the noise ring (on NIRCam it set
+the ring scatter at 5-14x the companion-free value), and at small separations a handful of
+apertures make the scatter depend on where they fall.  On 2026-09-26 the metric gave NIRCam's
+winners 12.1 -> 16.7 (pyKLIP) for a companion whose forward-model S/N falls from 164 to 107.
 """
 import json
 import os
 import sys
 import time
+from dataclasses import replace
 
 import numpy as np
 from astropy.io import fits
@@ -37,7 +55,6 @@ from klip_tpe import RunConfig, ValidationConfig
 from klip_tpe.instruments import generic
 from klip_tpe.metrics import MawetPeakSNR, Source
 from klip_tpe.products import noise_profile
-from klip_tpe.reducer import ReductionRequest
 from klip_tpe.runner import Runner
 
 import run_demos as R
@@ -48,6 +65,9 @@ TARGETS = {"A": ("A_betapic", "betapic", R.BP), "A2": ("A2_betapic", "betapic", 
            "C": ("C_hd95086", "hd95086", R.HD),
            "D": (R.ENGINE_DIRS["D"]["pyklip"], "hip65426", R.HIP),
            "DK": (R.ENGINE_DIRS["D"]["klip"], "hip65426", R.HIP),
+           # D / DK with HIP 65426 b taken out of the frames first (run_demos.hip65426b_negfc)
+           "D2": (R.ENGINE_DIRS["D2"]["pyklip"], "hip65426", R.HIP),
+           "D2K": (R.ENGINE_DIRS["D2"]["klip"], "hip65426", R.HIP),
            # the mode-only pyKLIP run of 2026-09-20, before the library was searched at all
            "D0": ("D_hip65426", "hip65426", R.HIP)}
 N_TRIALS = 8          # paired re-measurement sets per annulus (default, flat default, winner)
@@ -118,8 +138,8 @@ def build(which):
         space = generic.make_space(red, k_klip_max=30)
         space.project = generic.make_guard(red, k_max=30)
         known = R.HD
-    elif which in ("D", "DK"):
-        red = R.hip65426_objects(engine="pyklip" if which == "D" else "klip")
+    elif which in ("D", "DK", "D2", "D2K"):
+        red = R.hip65426_objects(engine="pyklip" if which in ("D", "D2") else "klip")
         space = generic.make_space(red, k_klip_max=18, search_angles=False)
         space.project = generic.make_guard(red, k_max=18, n_min_ref=4)
         known = R.HIP
@@ -141,6 +161,34 @@ def build(which):
     obj, samp = generic.default_config(red, known=[known], forbidden_pa=fpa, pixel_mask=pmask,
                                        flatten=run_flatten(which))
     return red, space, obj, samp
+
+
+_BUILT = {}
+
+
+def built(which):
+    """``build(which)``, once per process (figs.py asks for several images of one run)."""
+    if which not in _BUILT:
+        _BUILT[which] = build(which)
+    return _BUILT[which]
+
+
+def clean_image(which, a, x):
+    """The clean reduction of search vector ``x`` over the annulus of record ``a`` (a
+    summary.json annulus), with the companion PRESENT, through the path the run's own
+    reductions take (Runner._reduce: the run's zone, each partition's own block) -- what the
+    figures show beside the S/N collect measured on the same images."""
+    d = TARGETS[which][0]
+    with open(os.path.join(OUT, d, "run_setup.json")) as f:
+        setup = json.load(f)["config"]
+    red, space, obj, samp = built(which)
+    cfg = RunConfig(ann_edges=list(setup.get("ann_edges") or [a["inrad_px"], a["outrad_px"]]), n_iter=1, n_init=1,
+                    seed=0, n_sources=int(setup.get("n_sources", 3) or 3), defaults=dict(setup.get("defaults") or {}),
+                    validation=ValidationConfig(n_top=1, n_valid=1), save_fits=False, save_eval_images=False,
+                    write_setup_files=False)
+    runner = Runner(red, space, obj, samp, cfg, os.path.join(OUT, f"_default_{which}"), log=lambda s: None)
+    runner.ia, runner.contrast = int(a["annulus"]), float(a["contrast"])
+    return np.asarray(runner._reduce(space.decode(np.asarray(x, float)), None, tag="figure").image, float)
 
 
 def run_vector(x, run_params, space):
@@ -176,9 +224,49 @@ def run_vector(x, run_params, space):
 
 def planet_snr(img, red, planet, metric=None):
     """The companion's S/N, measured with the run's own metric when given -- its noise ring
-    then has the same exclusions as every score the search ranked on (the disk, for beta Pic)."""
+    then has the same exclusions as every score the search ranked on (the disk, for beta Pic).
+    Kept for continuity; the paper quotes :func:`companion_fm` (see the module docstring)."""
     m = metric or MawetPeakSNR(pxscale=red.pxscale, fwhm=red.fwhm, kernel_fn=red.matched_filter_kernel)
     return float(m.per_source(img, None, [planet[0]], [planet[1]])[0])
+
+
+def companion_fm(runner0, cfg, red, obj, rho, pa, c_guess, fit_position=False, log=None):
+    """The companion's forward-model S/N in configuration ``cfg`` (klip_tpe.companion).
+
+    Each selected partition is reduced on its own, with the companion present and cancelled
+    by a negative injection at the contrast fitted in that partition -- a channel may see a
+    different contrast (HD 95086 b is brighter in K2 than in K1) -- and the partitions are
+    combined as the partitioned reducer combines them.  ``runner0`` must not subtract the
+    companion itself (RunConfig.subtract_known empty).  With ``fit_position`` the first
+    partition's fit also refines the position, which the rest then use."""
+    from klip_tpe.companion import companion_snr, fit_negative_companion
+    from klip_tpe.reducer import combine_stack
+    from klip_tpe.space import Config
+    sel = list(cfg.selected)
+    m = obj.metric
+    ac = getattr(red, "angle_convention", "pa")
+    per, pos = {}, (float(rho), float(pa))
+    for i, pid in enumerate(sel):
+        one = Config(dict(cfg.params), dict(cfg.per_partition), [pid], cfg.x) if len(sel) > 1 else cfg
+
+        def fn(s, one=one):
+            return np.asarray(runner0._reduce(one, s, tag="companion_fm").image, float)
+        clean = fn(None)
+        f = fit_negative_companion(fn, pos[0], pos[1], float(c_guess), red.fwhm, red.pxscale, angle_convention=ac,
+                                   fit_position=bool(fit_position and i == 0), clean=clean, log=log)
+        pos = (f["rho"], f["pa"]) if (fit_position and i == 0) else pos
+        per[pid] = dict(fit=f, clean=clean, removed=fn([Source(pos[0], pos[1], -f["contrast"])]))
+    wfn = getattr(red, "partition_weight", lambda p: 1.0)
+    w = np.array([wfn(p) for p in sel], float)
+    clean = combine_stack(np.stack([per[p]["clean"] for p in sel]), w)
+    removed = combine_stack(np.stack([per[p]["removed"] for p in sel]), w)
+    r = companion_snr(None, pos[0], pos[1], 0.0, red.fwhm, red.pxscale, m.kernel([pos[0]]),
+                      pixel_mask=m.pixel_mask, angle_convention=ac, clean=clean, removed=removed)
+    return {"snr": r["snr"], "snr_band": r["snr_band"], "signal": r["signal"], "sigma": r["sigma"],
+            "sigma_range": list(r["sigma_range"]), "n_ap": r["n_ap"], "rho_as": pos[0], "pa_deg": pos[1],
+            "contrast": {str(p): per[p]["fit"]["contrast"] for p in sel},
+            "removed_fraction": {str(p): per[p]["fit"]["removed_fraction"] for p in sel},
+            "metric_on_clean": float(m.per_source(clean, None, [pos[0]], [pos[1]])[0])}
 
 
 def sigma_curve(img, red, rin_px, rout_px, known):
@@ -213,6 +301,15 @@ def collect(which, n_trials=N_TRIALS):
     k_flat = int(seeded.get("k_klip", 10) or 10)
     tmp = os.path.join(OUT, f"_default_{which}")
     x0_by_ann = {}
+    # the companion the run took out of its frames, if any: the paired re-measurement below
+    # scores the run's own objective, so it subtracts it too; the companion's own
+    # measurement and the figures reduce without it
+    sub = [tuple(float(v) for v in t) for t in (setup.get("subtract_known") or [])]
+    out["subtract_known"] = [list(t) for t in sub]
+    rho_c = planet[0]
+    c_guess = float(ANCHOR.get(tag, (1e-4,))[0])
+    fm_pos = None
+    plain_by_ann = {}
     for a in fr["annuli"]:
         ia, rin, rout = a["annulus"], a["inrad"], a["outrad"]
         contrast = a["contrast"]
@@ -232,10 +329,15 @@ def collect(which, n_trials=N_TRIALS):
                         n_iter=1, n_init=1, seed=99 + ia,
                         n_sources=int(setup.get("n_sources", 3)), defaults=dict(seeded),
                         validation=ValidationConfig(n_top=1, n_valid=n_trials),
-                        save_fits=False, save_eval_images=False, write_setup_files=False)
+                        save_fits=False, save_eval_images=False, write_setup_files=False,
+                        subtract_known=list(sub))
         runner = Runner(red, space, obj, samp, cfg, tmp, log=lambda s: None)
         runner.ia = ia
         runner.contrast = contrast
+        # the same, keeping the companion in the frames: its own measurement and the images
+        runner0 = Runner(red, space, obj, samp, replace(cfg, subtract_known=[]), tmp, log=lambda s: None)
+        runner0.ia = ia
+        runner0.contrast = contrast
         # the run's own source count: the ring-survival check that sets it probes placements
         # seeded by the run's seed, so under this runner's seed it could decide differently
         # (A2's innermost annulus came out 2 sources at 0.258" against the run's 3 at 0.245")
@@ -287,13 +389,29 @@ def collect(which, n_trials=N_TRIALS):
             rec["gain"] = None
         rec["gain_vs_validated"] = ((rec["winner_score"] / rec["default_score"])
                                     if np.isfinite(rec["default_score"]) and rec["default_score"] > 0 else None)
-        # --- the real companion, and the noise profile, in both clean images
-        p0 = dict(space.decode(x0).params, inrad=rin, outrad=rout)
-        img0 = red.reduce(ReductionRequest(params=p0)).image
+        # --- the real companion, and the noise profile, in both clean images: reduced with the
+        # companion present, through the run's own path (zone, per-partition blocks)
+        cfg0 = space.decode(x0)
+        cfgw = None if x_win is None else space.decode(x_win)
+        plain_by_ann[ia] = (runner0, cfg0)
+        p0 = dict(cfg0.params, inrad=rin, outrad=rout)
+        img0 = np.asarray(runner0._reduce(cfg0, None, tag="collect_default").image, float)
+        img1 = None if cfgw is None else np.asarray(runner0._reduce(cfgw, None, tag="collect_winner").image, float)
         best = os.path.join(run, f"annulus{ia + 1:02d}", "best_clean.fits")
-        img1 = np.asarray(fits.getdata(best), float) if os.path.exists(best) else None
+        if img1 is not None and not sub and os.path.exists(best):
+            f_img = np.asarray(fits.getdata(best), float)
+            both = np.isfinite(f_img) & np.isfinite(img1)
+            dev = float(np.nanmax(np.abs(f_img[both] - img1[both])) / np.nanstd(img1[both])) if both.any() else np.nan
+            rec["winner_vs_best_clean_sigma"] = dev
+            if not np.isfinite(dev) or dev > 0.05:
+                log(f"  ** ann {ia + 1}: the winner re-reduced differs from the run's best_clean.fits by "
+                    f"{dev:.3g} sigma -- the package changed since the run?")
         rec["default_params"] = {k: (v if isinstance(v, (str, bool)) else float(v))
                                  for k, v in p0.items()}
+        rec["default_per_partition"] = {str(p): {k: (v if isinstance(v, (str, bool)) else float(v))
+                                                 for k, v in d.items()} for p, d in cfg0.per_partition.items()}
+        rec["default_x"] = [float(v) for v in x0]
+        rec["winner_x_space"] = None if x_win is None else [float(v) for v in x_win]
         # an annulus whose calibration never reached the S/N window is not on the usual
         # scale -- neither its injected S/N nor its 5-sigma curve -- so say so here rather
         # than letting a number into the table that looks like the others
@@ -311,6 +429,23 @@ def collect(which, n_trials=N_TRIALS):
                     f"{contrast:.3e}); its S/N and c5 are not comparable with the other annuli")
         rec["planet_snr_default"] = planet_snr(img0, red, planet, obj.metric)
         rec["planet_snr_optimized"] = None if img1 is None else planet_snr(img1, red, planet, obj.metric)
+        # the forward-model S/N, in the annulus that holds the companion: the default's fit also
+        # refines the companion's position, which the winner's then uses
+        if rin * red.pxscale <= rho_c <= rout * red.pxscale:
+            try:
+                fm0 = companion_fm(runner0, cfg0, red, obj, planet[0], planet[1], c_guess, fit_position=True, log=log)
+                fm_pos = (fm0["rho_as"], fm0["pa_deg"])
+                rec["companion_fm_default"] = fm0
+                if cfgw is not None:
+                    rec["companion_fm_optimized"] = companion_fm(runner0, cfgw, red, obj, fm_pos[0], fm_pos[1],
+                                                                 float(np.median(list(fm0["contrast"].values()))),
+                                                                 log=log)
+                log(f"  ann {ia + 1}: companion forward-model S/N {fm0['snr']:.1f} -> "
+                    f"{rec.get('companion_fm_optimized', {}).get('snr', float('nan')):.1f} "
+                    f"(metric {rec['planet_snr_default']:.1f} -> {rec['planet_snr_optimized'] or float('nan'):.1f}); "
+                    f"fitted contrast {fm0['contrast']}")
+            except Exception as exc:
+                log(f"  ann {ia + 1}: companion forward-model S/N failed: {exc!r}")
         r0, s0 = sigma_curve(img0, red, rin, rout, planet)
         rec["sigma_default"] = {"r_as": r0, "sigma": s0}
         if img1 is not None:
@@ -328,9 +463,10 @@ def collect(which, n_trials=N_TRIALS):
             f"{-1 if rec['planet_snr_optimized'] is None else rec['planet_snr_optimized']:.1f}")
         out["annuli"].append(rec)
 
-    rho_c = planet[0]
     ia_c = next((a["annulus"] for a in out["annuli"] if a["inrad_as"] <= rho_c <= a["outrad_as"]), None)
-    anchor(out, red, space, planet, x0=x0_by_ann.get(ia_c))
+    r0 = plain_by_ann.get(ia_c)
+    anchor(out, red, planet, None if not isinstance(r0, tuple) else
+           (lambda s, r0=r0: np.asarray(r0[0]._reduce(r0[1], s, tag="anchor").image, float)))
     st = os.path.join(run, "klip_stitched.fits")
     if os.path.exists(st):
         out["stitched_planet_snr"] = planet_snr(np.asarray(fits.getdata(st), float), red, planet, obj.metric)
@@ -369,7 +505,7 @@ def read_curves(run):
     return {"curves": blocks}
 
 
-def anchor(out, red=None, space=None, planet=None, x0=None):
+def anchor(out, red=None, planet=None, reduce0=None):
     """Check the contrast axis against the companion's published contrast (see ANCHOR), and
     rescale onto it only when ANCHOR_APPLY=1.
 
@@ -379,13 +515,15 @@ def anchor(out, red=None, space=None, planet=None, x0=None):
     with each fake's matched-filter peak read in (injected - clean) and the companion's in
     the radial-profile-subtracted clean image: same reduction, same separation, same kernel,
     so the KLIP throughput cancels.  The S/N values are recorded alongside for the record;
-    they are NOT used for the scale (see the note above ANCHOR).  ``x0`` is the companion
-    annulus' seeded default as :func:`collect` measured it (projected, at the run's k)."""
+    they are NOT used for the scale (see the note above ANCHOR).  ``reduce0(sources)`` reduces
+    the companion annulus' seeded default as :func:`collect` measured it, companion present,
+    through the run's own path (before 2026-09-26: ``red.reduce(params)``, the channel-averaged
+    parameters on a two-channel run)."""
     from klip_tpe.metrics import mawet_peak_snr, radprof
     pub, ref = ANCHOR.get(out["target"], (None, None))
     out["anchor_reference"] = ref
     out["flux_scale_applied"] = 1.0
-    if pub is None or red is None:
+    if pub is None or red is None or reduce0 is None:
         return
     rho, pa = planet
     a = next((a for a in out["annuli"] if a["inrad_as"] <= rho <= a["outrad_as"]), None)
@@ -393,11 +531,9 @@ def anchor(out, red=None, space=None, planet=None, x0=None):
         out["flux_scale"] = None
         return
     c = float(a["contrast"])
-    x0 = space.default_vector() if x0 is None else x0
-    p0 = dict(space.decode(x0).params, inrad=a["inrad_px"], outrad=a["outrad_px"])
-    clean = red.reduce(ReductionRequest(params=p0)).image
+    clean = reduce0(None)
     srcs = [Source(rho, (pa + d) % 360.0, c) for d in (90.0, 180.0, 270.0)]
-    img = red.reduce(ReductionRequest(params=p0, injections=srcs)).image
+    img = reduce0(srcs)
     ker = red.matched_filter_kernel(rho)
     ac = red.angle_convention if hasattr(red, "angle_convention") else "pa"
     _, dc = mawet_peak_snr(radprof(clean), [rho], [pa], red.pxscale, red.fwhm, kernel=ker,
@@ -468,12 +604,13 @@ def collect_bench(sub="E_bench"):
 
 
 #: What ``python collect.py`` collects when no target is named: everything the paper's
-#: numbers and figures read -- the four searched runs (A2, B2, C, and D on pyKLIP), D on the
-#: built-in engine, and the benchmarks, H2 on both engines.  Until 2026-09-25 the default
-#: was A C D B: A and B are the runs from before 2026-09-14, whose directories are gone, so
-#: it refreshed C and D, printed two tracebacks and left the A2 and B2 the figures read as
-#: they were.
-PAPER = ("A2", "B2", "C", "D", "DK", "E", "F", "G", "H", "HK")
+#: numbers and figures read -- the searched runs (A2, B2, C; NIRCam as D2 / D2K, with the
+#: companion taken out of the frames, and as D / DK, the runs that kept it), and the
+#: benchmarks, H2 on both engines.  Until 2026-09-25 the default was A C D B: A and B are the
+#: runs from before 2026-09-14, whose directories are gone, so it refreshed C and D, printed
+#: two tracebacks and left the A2 and B2 the figures read as they were.  A target whose run
+#: has not finished is skipped with a note.
+PAPER = ("A2", "B2", "C", "D", "DK", "D2", "D2K", "E", "F", "G", "H", "HK")
 
 
 if __name__ == "__main__":

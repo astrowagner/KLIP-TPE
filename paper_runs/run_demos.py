@@ -6,6 +6,8 @@
     python run_demos.py C      # HD 95086 IRDIS K1+K2, 2 annuli
     python run_demos.py D      # HIP 65426 NIRCam F444W, pyKLIP: searched mode + maxnumbasis
     python run_demos.py DK     # the same on the built-in engine: searched nkeep_altroll / nkeep_psfref
+    python run_demos.py D2     # D with HIP 65426 b taken out of the frames first (the paper's NIRCam run)
+    python run_demos.py D2K    # ... on the built-in engine (both fit b once: hip65426b_negfc)
     python run_demos.py E      # benchmark: TPE / random / grid at matched budget (beta Pic)
     python run_demos.py G2     # the same benchmark on HD 95086  (SPHERE K1+K2, 20-D)
     python run_demos.py H2     # the same benchmark on HIP 65426 (JWST 2 rolls), pyKLIP
@@ -21,6 +23,7 @@ Everything lands in ``<this folder>/<name>/``, or ``$RUNS_DIR/<name>/`` when set
 this folder is synced (Dropbox): see :data:`OUT`.  collect.py, figs.py, rerun_paper.sh and
 long_run.sh follow the same variable.
 """
+import json
 import os
 import sys
 import time
@@ -366,7 +369,58 @@ def hip65426_objects(partition="all", engine="pyklip", library=True):
 #: D_hip65426 is a valid mode-only pyKLIP run from 2026-09-20; H2_bench_jwst's newest slots
 #: searched the dead nkeep counts and should be superseded or ignored.)
 ENGINE_DIRS = {"D": {"pyklip": "D_hip65426_pyklip", "klip": "D_hip65426_klip"},
+               # D with HIP 65426 b taken out of the frames first (RunConfig.subtract_known)
+               "D2": {"pyklip": "D2_hip65426_pyklip_sub", "klip": "D2_hip65426_klip_sub"},
                "H2": {"pyklip": "H2_bench_jwst_pyklip", "klip": "H2_bench_jwst_klip"}}
+
+#: Where the negative-fake-companion fit of HIP 65426 b is kept, so both engines (and a
+#: re-run) subtract the same values.
+NEGFC_HIP = os.path.join(OUT, "_negfc", "hip65426b.json")
+
+
+def hip65426b_negfc(refit=False):
+    """HIP 65426 b on this axis -- position and contrast -- fitted once by the negative-fake-
+    companion method (klip_tpe.companion) in pyKLIP's seeded default over run D's inner
+    annulus.  That default is RDI: its reference library is the reference star, which does
+    not hold the companion, so the reduction is linear in the companion's flux and the fit is
+    unbiased.  (Fitted in a basis built from the other roll -- ADI, which holds the companion
+    -- the contrast comes out ~15% higher, because it absorbs that configuration's own
+    subtraction of a bright source.)  Both engines use one injection model, so one fit
+    serves both.
+
+    Why subtract at all: in runs D and DK the companion's light, spread by the reduction over
+    its KLIP sector, set the metric's ring scatter at 5-14x the companion-free value across
+    the inner annulus and ~2x at 2.2", far beyond the 1.5-FWHM known-source exclusion.  The
+    searches optimized that: with the companion removed, their winners are no better than
+    the seeded default (outer annulus) or worse (inner)."""
+    if os.path.exists(NEGFC_HIP) and not refit:
+        with open(NEGFC_HIP) as f:
+            return json.load(f)
+    from klip_tpe.companion import fit_negative_companion
+    red = hip65426_objects(engine="pyklip")
+    space = generic.make_space(red, k_klip_max=18, search_angles=False)
+    space.project = generic.make_guard(red, k_max=18, n_min_ref=4)
+    obj, samp = generic.default_config(red, known=[HIP], flatten=False)
+    cfg = RunConfig(ann_edges=[6, 20, 45], n_iter=1, n_init=1, seed=14, n_sources=2, defaults={"k_klip": 10},
+                    validation=ValidationConfig(n_top=1, n_valid=1), save_fits=False, save_eval_images=False,
+                    write_setup_files=False, fm_curve=False)
+    runner = Runner(red, space, obj, samp, cfg, os.path.join(OUT, "_negfc", "_runner"), log=lambda s: None)
+    runner.ia, runner.contrast = 0, 1e-4
+    c0 = space.decode(runner._project(runner._default_vector(10), is_random=False))
+    if c0.params.get("mode") != "RDI":
+        raise SystemExit(f"HIP 65426 b must be fitted in an RDI basis, got mode {c0.params.get('mode')!r}")
+    log(f"fitting HIP 65426 b by negative injection in pyKLIP's seeded default "
+        f"({ {k: c0.params[k] for k in ('mode', 'maxnumbasis', 'k_klip', 'filter')} }), zone 6-20 px")
+    fit = fit_negative_companion(lambda s: np.asarray(runner._reduce(c0, s, tag="negfc").image, float),
+                                 HIP[0], HIP[1], 3.3e-4, red.fwhm, red.pxscale,
+                                 angle_convention=red.angle_convention, log=log)
+    fit.update(engine="pyklip", zone_px=[6, 20],
+               config={k: (v if isinstance(v, str) else float(v)) for k, v in c0.params.items()},
+               date=time.strftime("%Y-%m-%d"))
+    os.makedirs(os.path.dirname(NEGFC_HIP), exist_ok=True)
+    with open(NEGFC_HIP, "w") as f:
+        json.dump(fit, f, indent=1)
+    return fit
 
 
 def preflight(runner, what):
@@ -378,7 +432,16 @@ def preflight(runner, what):
         raise SystemExit(f"{what}: searched dimension(s) that change nothing: {dead} -- not starting")
 
 
-def run_D(engine="pyklip"):
+def run_D(engine="pyklip", subtract=False):
+    """``subtract=True`` is stage D2 / D2K: the same search with HIP 65426 b taken out of the
+    frames before every reduction (hip65426b_negfc), into its own directory."""
+    extra, key = {}, "D"
+    if subtract:
+        f = hip65426b_negfc()
+        extra["subtract_known"] = [(float(f["rho"]), float(f["pa"]), float(f["contrast"]))]
+        key = "D2"
+        log(f"D2 ({engine}): subtracting HIP 65426 b, contrast {f['contrast']:.4e} at "
+            f"{f['rho']:.4f}\" PA {f['pa']:.2f} ({NEGFC_HIP})")
     red = hip65426_objects(engine=engine)
     # The library comes with the reducer: `mode` + `maxnumbasis` on pyKLIP, nkeep_altroll /
     # nkeep_psfref on the built-in engine.
@@ -397,10 +460,10 @@ def run_D(engine="pyklip"):
                     # NIRCam reductions are ~2.2 s (MIRI is 22.6), so this is the cheap end of
                     # the trade that on MIRI took the objective's sd from 0.84 to 0.48.
                     n_remeasure=3,
-                    defaults={"k_klip": 10}, fm_curve=False, save_eval_images=False)
-    d = os.path.join(OUT, ENGINE_DIRS["D"][engine])
+                    defaults={"k_klip": 10}, fm_curve=False, save_eval_images=False, **extra)
+    d = os.path.join(OUT, ENGINE_DIRS[key][engine])
     runner = Runner(red, space, obj, samp, cfg, d, log=log, callbacks=[_display(d)])
-    preflight(runner, f"D ({engine})")
+    preflight(runner, f"{key} ({engine})")
     runner.run()
 
 
@@ -675,6 +738,8 @@ if __name__ == "__main__":
     t0 = time.time()
     {"A": run_A, "A2": run_A2, "B": run_B, "B2": run_B2, "C": run_C, "D": run_D,
      "DK": lambda: run_D("klip"),
+     "D2": lambda: run_D("pyklip", subtract=True), "D2K": lambda: run_D("klip", subtract=True),
+     "NEGFC": lambda: hip65426b_negfc(refit=True),
      "E": run_E, "F": run_F, "E2": run_E2, "F2": run_F2,
      "G2": run_G2, "H2": run_H2, "H2K": lambda: run_H2("klip")}[which]()
     log(f"{which} done in {(time.time() - t0) / 60:.1f} min")

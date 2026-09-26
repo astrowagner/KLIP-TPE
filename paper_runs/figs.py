@@ -46,8 +46,16 @@ plt.rcParams.update({"font.size": 8, "axes.titlesize": 8.5, "axes.labelsize": 8,
                      "xtick.labelsize": 7, "ytick.labelsize": 7, "legend.fontsize": 7,
                      "figure.dpi": 150, "savefig.bbox": "tight"})
 
-# which run is the primary demonstration of each target
-PRIMARY = {"betapic": "A2", "hd95086": "C", "hip65426": "D"}
+# which run is the primary demonstration of each target.  NIRCam is D2: run D with HIP 65426 b
+# taken out of the frames first (collect.py, run_demos.hip65426b_negfc); D until D2 is collected.
+PRIMARY = {"betapic": "A2", "hd95086": "C", "hip65426": "D2"}
+FALLBACK = {"D2": "D"}
+
+
+def prim(s, t):
+    """The run that stands for target ``t`` in summary ``s`` (PRIMARY, else its FALLBACK)."""
+    w = PRIMARY[t]
+    return w if w in s else (FALLBACK.get(w) if FALLBACK.get(w) in s else None)
 NICE = {"betapic": r"$\beta$ Pic b (VLT/NACO $L'$)",
         "hd95086": "HD 95086 b (VLT/SPHERE $K1K2$)",
         "hip65426": "HIP 65426 b (JWST/NIRCam F444W)"}
@@ -57,25 +65,54 @@ def summary():
     return json.load(open(os.path.join(OUT, "summary.json")))
 
 
-def default_image(which, a):
-    """The seeded-default reduction over one annulus -- the configuration collect.py scored
-    (``default_params``: the run's seed at its k-scan k, through the reference-count guard) --
-    cached as FITS under a name that carries those parameters.
-
-    Until 2026-09-26 this reduced ``space.default_vector()`` unprojected, at the space's own
-    k, under a cache name that ignored the parameters: f5's default panel showed a
-    configuration no run started from, captioned with the S/N collect measured on another."""
+def _cached_clean(which, a, x, kind):
+    """``collect.clean_image`` of search vector ``x`` over annulus ``a`` -- the companion
+    present, the run's own reduction path -- cached as FITS under a name that carries the
+    vector and the zone."""
     import hashlib
-    prm = dict(a["default_params"], inrad=a["inrad_px"], outrad=a["outrad_px"])
-    prm.pop("width", None)
-    key = hashlib.md5(json.dumps(prm, sort_keys=True, default=str).encode()).hexdigest()[:10]
-    p = os.path.join(CACHE, f"{which}_a{a['annulus'] + 1}_{key}.fits")
+    key = hashlib.md5(json.dumps([list(map(float, x)), a["inrad_px"], a["outrad_px"]]).encode()).hexdigest()[:10]
+    p = os.path.join(CACHE, f"{which}_a{a['annulus'] + 1}_{kind}_{key}.fits")
     if os.path.exists(p):
         return np.asarray(fits.getdata(p), float)
-    red, _, _, _ = C.build(which)
-    img = red.reduce(ReductionRequest(params=prm)).image
+    img = C.clean_image(which, a, x)
     fits.writeto(p, np.asarray(img, np.float32), overwrite=True)
     return np.asarray(img, float)
+
+
+def default_image(which, a):
+    """The seeded-default reduction over one annulus -- the configuration collect.py scored
+    (``default_x``: the run's seed at its k-scan k, through the reference-count guard), reduced
+    as collect reduced it for the companion's S/N.
+
+    Until 2026-09-26 this reduced ``default_params`` with ``red.reduce(params)``, which gives
+    every partition the global, channel-AVERAGED parameters: HD 95086's default panel showed a
+    configuration the run never used.  Before that it reduced ``space.default_vector()``
+    unprojected, at the space's own k, under a cache name that ignored the parameters."""
+    if a.get("default_x") is None:
+        raise KeyError(f"{which}: summary.json predates default_x -- re-run collect.py {which}")
+    return _cached_clean(which, a, a["default_x"], "default")
+
+
+def winner_image(which, a):
+    """The validated winner over one annulus, reduced the same way as :func:`default_image` --
+    companion present.  Not ``best_clean.fits``: a run that subtracts the companion
+    (RunConfig.subtract_known) writes its products without it."""
+    if a.get("winner_x_space") is None:
+        raise KeyError(f"{which}: summary.json predates winner_x_space -- re-run collect.py {which}")
+    return _cached_clean(which, a, a["winner_x_space"], "winner")
+
+
+def _snr_txt(v):
+    """16.1, but 164: a JWST companion's S/N needs no decimal."""
+    return "--" if v is None or not np.isfinite(v) else (f"{v:.0f}" if abs(v) >= 30 else f"{v:.1f}")
+
+
+def companion_snr_of(a, which):
+    """The companion S/N the paper quotes for an annulus record: the forward-model value
+    (collect.companion_fm), or the search metric's for a summary that predates it."""
+    fm = a.get(f"companion_fm_{which}") or {}
+    v = fm.get("snr")
+    return float(v) if v is not None else a.get(f"planet_snr_{which}")
 
 
 def snr_map(img, fwhm, known=None, px=None, excl_fwhm=1.5):
@@ -190,24 +227,23 @@ def compass(ax, frac=0.16, color="w", lw=1.0):
 
 # --------------------------------------------------------------------- f5 gallery
 def fig_gallery(s):
-    tg = [t for t in PRIMARY if PRIMARY[t] in s]
+    tg = [t for t in PRIMARY if prim(s, t)]
     fig, axes = plt.subplots(len(tg), 3, figsize=(7.1, 2.45 * len(tg)))
     axes = np.atleast_2d(axes)
     for row, t in enumerate(tg):
-        w = PRIMARY[t]
+        w = prim(s, t)
         r = s[w]
         px, planet = r["pxscale"], r["planet"]
         # the annulus that contains the companion
         a = min(r["annuli"], key=lambda a: abs(0.5 * (a["inrad_as"] + a["outrad_as"]) - planet[0])
                 if not (a["inrad_as"] <= planet[0] <= a["outrad_as"]) else -1)
         img0 = default_image(w, a)
-        img1 = np.asarray(fits.getdata(os.path.join(
-            OUT, r["run"], f"annulus{a['annulus'] + 1:02d}", "best_clean.fits")), float)
+        img1 = winner_image(w, a)
         box = 1.25 * a["outrad_as"]
         _show(axes[row, 0], img0, px, planet,
-              f"default   S/N {a['planet_snr_default']:.1f}", box_as=box)
+              f"default   S/N {_snr_txt(companion_snr_of(a, 'default'))}", box_as=box)
         _show(axes[row, 1], img1, px, planet,
-              f"optimized   S/N {a['planet_snr_optimized']:.1f}", box_as=box)
+              f"optimized   S/N {_snr_txt(companion_snr_of(a, 'optimized'))}", box_as=box)
         m = snr_map(img1, r["fwhm_px"], known=[planet], px=px)
         _show(axes[row, 2], m, px, planet, "optimized S/N map", vlim=(-4, 6), box_as=box, snr=True)
         axes[row, 0].set_ylabel(NICE[t], fontsize=7.5)
@@ -223,11 +259,11 @@ def fig_gallery(s):
 
 # --------------------------------------------------------------------- f2 traces
 def fig_trace(s):
-    tg = [t for t in PRIMARY if PRIMARY[t] in s]
+    tg = [t for t in PRIMARY if prim(s, t)]
     fig, axes = plt.subplots(1, len(tg), figsize=(7.1, 2.4), sharey=False)
     axes = np.atleast_1d(axes)
     for ax, t in zip(axes, tg):
-        w = PRIMARY[t]
+        w = prim(s, t)
         run = os.path.join(OUT, s[w]["run"])
         ia = s[w]["annuli"][0]["annulus"]
         # every calibration segment, as before, but each evaluation once: a resume replays
@@ -267,11 +303,11 @@ def fig_trace(s):
 
 # --------------------------------------------------------------------- f6 contrast
 def fig_contrast(s):
-    tg = [t for t in PRIMARY if PRIMARY[t] in s]
+    tg = [t for t in PRIMARY if prim(s, t)]
     fig, axes = plt.subplots(1, len(tg), figsize=(7.1, 2.5))
     axes = np.atleast_1d(axes)
     for ax, t in zip(axes, tg):
-        w = PRIMARY[t]
+        w = prim(s, t)
         r = s[w]
         cur = r.get("curves") or {}
         fs = float(r.get("flux_scale_applied") or 1.0)  # 1.0 unless collect ran with ANCHOR_APPLY=1

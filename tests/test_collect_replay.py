@@ -120,14 +120,32 @@ def test_collect_rebuilds_the_objective_the_run_searched():
 
 
 def test_f5_shows_the_default_it_captions():
-    """f5 captions its default panel with collect's ``planet_snr_default``, measured on the
-    projected seed at the k-scan's k.  The panel reduced ``space.default_vector()`` unprojected
-    at the space's own k, cached under a name without the parameters, so a re-collect could
-    never refresh it."""
+    """f5 captions its panels with the companion S/N collect measured, on the images it shows.
+    The default panel once reduced ``space.default_vector()`` unprojected at the space's own k,
+    cached under a name without the parameters; then ``default_params`` through
+    ``red.reduce(params)``, which gives every partition the channel-averaged parameters (HD
+    95086's K1 and K2 differ in angsep).  Both panels now come from collect.clean_image -- the
+    run's own reduction path -- keyed on the search vector, and the winner is not read from
+    best_clean.fits, which a run that subtracts the companion writes without it."""
     src = _text("figs.py")
-    assert "def default_image(which, a):" in src
-    assert 'prm = dict(a["default_params"], inrad=a["inrad_px"], outrad=a["outrad_px"])' in src
+    assert "def default_image(which, a):" in src and "def winner_image(which, a):" in src
+    assert 'a["default_x"]' in src and 'a["winner_x_space"]' in src and "C.clean_image(" in src
     assert "hexdigest()" in src and "space.decode(space.default_vector())" not in src
+    gal = src[src.index("def fig_gallery"):src.index("def fig_trace")]
+    assert "best_clean.fits" not in gal and "companion_snr_of(a, " in gal
+
+
+def test_collect_measures_the_companion_on_the_runs_own_reduction_path():
+    """Default and winner go through Runner._reduce (the zone, each partition's own block),
+    with the companion present; the paired re-measurement subtracts it when the run did; the
+    paper's companion S/N is the forward-model one (klip_tpe.companion)."""
+    col = _text("collect.py")
+    assert "red.reduce(ReductionRequest" not in col.split('"""', 2)[2]      # outside the docstring
+    assert 'runner0._reduce(cfg0, None, tag="collect_default")' in col
+    assert 'runner0._reduce(cfgw, None, tag="collect_winner")' in col
+    assert "subtract_known=list(sub)" in col and "replace(cfg, subtract_known=[])" in col
+    assert "def companion_fm(" in col and 'rec["companion_fm_default"]' in col and 'rec["companion_fm_optimized"]' in col
+    assert '"D2": (R.ENGINE_DIRS["D2"]["pyklip"]' in col and '"D2K": (R.ENGINE_DIRS["D2"]["klip"]' in col
 
 
 def test_companion_tests_rebuild_each_runs_objective():
