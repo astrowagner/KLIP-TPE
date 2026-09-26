@@ -680,7 +680,7 @@ def fig_bench():
                            xytext=(0, 3), ha="center", fontsize=6)
         ax[1].set_xticks(x); ax[1].set_xticklabels([name.get(m, m) for m in ms])
         ax[1].set_ylabel("median injected S/N")
-        ax[1].set_title(f"search vs validated{bar_note} (gap = winner's curse)", fontsize=7)
+        ax[1].set_title(f"search vs validated{bar_note} (gap = inflation)", fontsize=7)
         # headroom for the gap labels and, on the first row, the key -- with H2 on top its
         # bars filled the panel and the key sat on them
         top = np.nanmax(np.r_[sr, np.asarray(v) + np.asarray(e)])
