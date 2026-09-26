@@ -57,14 +57,23 @@ def summary():
     return json.load(open(os.path.join(OUT, "summary.json")))
 
 
-def default_image(which, ia, rin, rout):
-    """The seeded-default reduction over one annulus, cached as FITS."""
-    p = os.path.join(CACHE, f"{which}_a{ia + 1}.fits")
+def default_image(which, a):
+    """The seeded-default reduction over one annulus -- the configuration collect.py scored
+    (``default_params``: the run's seed at its k-scan k, through the reference-count guard) --
+    cached as FITS under a name that carries those parameters.
+
+    Until 2026-09-26 this reduced ``space.default_vector()`` unprojected, at the space's own
+    k, under a cache name that ignored the parameters: f5's default panel showed a
+    configuration no run started from, captioned with the S/N collect measured on another."""
+    import hashlib
+    prm = dict(a["default_params"], inrad=a["inrad_px"], outrad=a["outrad_px"])
+    prm.pop("width", None)
+    key = hashlib.md5(json.dumps(prm, sort_keys=True, default=str).encode()).hexdigest()[:10]
+    p = os.path.join(CACHE, f"{which}_a{a['annulus'] + 1}_{key}.fits")
     if os.path.exists(p):
         return np.asarray(fits.getdata(p), float)
-    red, space, _, _ = C.build(which)
-    img = red.reduce(ReductionRequest(params=dict(space.decode(space.default_vector()).params,
-                                                  inrad=rin, outrad=rout))).image
+    red, _, _, _ = C.build(which)
+    img = red.reduce(ReductionRequest(params=prm)).image
     fits.writeto(p, np.asarray(img, np.float32), overwrite=True)
     return np.asarray(img, float)
 
@@ -155,10 +164,15 @@ def _show(ax, img, px, planet, title, vlim=None, box_as=None, snr=False):
 
 def compass(ax, frac=0.16, color="0.15", lw=1.0):
     """N/E arrows in the corner -- North is +y, East is -x (see _show).  Drawn in axes
-    fractions with a white stroke so they read on both bright and dark backgrounds."""
+    fractions with a white stroke so they read on both bright and dark backgrounds.
+
+    Upper right, i.e. north-west of the star: the one quadrant clear of all three companions
+    (beta Pic b to the south-west, HD 95086 b and HIP 65426 b to the south-east) and of the
+    beta Pic disk (PA 29/209 deg).  At the lower left, where it sat until 2026-09-26, its N
+    arrow ran through HD 95086 b and HIP 65426 b in f5."""
     import matplotlib.patheffects as pe
     stroke = [pe.withStroke(linewidth=1.8, foreground="w")]
-    ox, oy = 0.30, 0.10
+    ox, oy = 0.86, 0.70
     for dx, dy, lab in ((0.0, frac, "N"), (-frac, 0.0, "E")):
         ar = ax.annotate("", xy=(ox + dx, oy + dy), xytext=(ox, oy), xycoords="axes fraction",
                          textcoords="axes fraction",
@@ -181,7 +195,7 @@ def fig_gallery(s):
         # the annulus that contains the companion
         a = min(r["annuli"], key=lambda a: abs(0.5 * (a["inrad_as"] + a["outrad_as"]) - planet[0])
                 if not (a["inrad_as"] <= planet[0] <= a["outrad_as"]) else -1)
-        img0 = default_image(w, a["annulus"], a["inrad_px"], a["outrad_px"])
+        img0 = default_image(w, a)
         img1 = np.asarray(fits.getdata(os.path.join(
             OUT, r["run"], f"annulus{a['annulus'] + 1:02d}", "best_clean.fits")), float)
         box = 1.25 * a["outrad_as"]

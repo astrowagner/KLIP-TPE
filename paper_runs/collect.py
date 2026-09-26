@@ -83,6 +83,20 @@ def log(m):
     print(f"[{time.strftime('%H:%M:%S')}] {m}", flush=True)
 
 
+def run_flatten(which):
+    """Whether the run's metric subtracted the radial profile.  The default flipped to False
+    on 2026-09-22; the runs made before it (A2, B2, C and the E2/F2/G2 benchmarks) optimized
+    and validated with it on, and their run_setup.json records it -- re-scoring them with the
+    new default measures a different objective from the one they were searched on."""
+    d = TARGETS[which][0]
+    try:
+        with open(os.path.join(OUT, d, "run_setup.json")) as f:
+            m = json.load(f).get("objective", {}).get("metric", {})
+    except (OSError, ValueError):
+        return False
+    return bool(m.get("flatten", True))      # absent: a run from before the key was recorded
+
+
 def build(which):
     """(reducer, space, objective, sampler) exactly as the run built them, so 'default'
     means the very vector the run was seeded with."""
@@ -118,12 +132,52 @@ def build(which):
         known = R.HIP
     else:
         raise ValueError(which)
-    obj, samp = generic.default_config(red, known=[known])
+    # The run's own objective.  The beta Pic runs forbid the disk's position angles to the
+    # injections and mask its pixels out of the noise rings (run_demos.bp_disk); until
+    # 2026-09-26 this built the objective without them, so A2/B2's paired re-measurement put
+    # sources on the disk and counted the disk as noise -- a different objective from the one
+    # the search optimized (A2's first annulus re-measured at 8.2 a winner that validated 14.3).
+    fpa, pmask = R.bp_disk(red) if which in ("A", "A2", "B", "B2") else ((), None)
+    obj, samp = generic.default_config(red, known=[known], forbidden_pa=fpa, pixel_mask=pmask,
+                                       flatten=run_flatten(which))
     return red, space, obj, samp
 
 
-def planet_snr(img, red, planet):
-    m = MawetPeakSNR(pxscale=red.pxscale, fwhm=red.fwhm, kernel_fn=red.matched_filter_kernel)
+def run_vector(x, run_params, space):
+    """A vector the run recorded, in THIS space's layout, matched by parameter name.
+
+    ``run_params`` is the ``space.params`` list of the run's run_setup.json.  The layout can
+    differ from the space ``build`` makes today: make_space now pins a dimension whose range
+    has collapsed to a point instead of searching it, so B2 (made before that) carries
+    ``bin_g1..bin_g4 : [1, 1]`` -- 38 entries against today's 34 -- and decoding its winner
+    position by position read n_ang as filter, filter as angsep, ..., and the last group's
+    k_klip as a drop slot (it came out as g1, g2, g4 with n_ang 1, filter 6, k 3 in g1, a
+    configuration the run never evaluated).  A run dimension this space lacks has to be
+    pinned here at the value the run held it at; a dimension this space has and the run
+    lacked cannot be reconstructed at all."""
+    names = [p["name"] for p in run_params]
+    x = [float(v) for v in x]
+    if len(names) != len(x):
+        raise ValueError(f"run vector has {len(x)} entries for {len(names)} recorded parameters")
+    got = dict(zip(names, x))
+    missing = [n for n in space.names if n not in got]
+    if missing:
+        raise ValueError(f"the run did not search {missing}; its vectors cannot be rebuilt here")
+    fixed = dict(getattr(space, "fixed", {}) or {})
+    for p, v in zip(run_params, x):
+        if p["name"] in space.names:
+            continue
+        base = p.get("base") or p["name"]
+        if base not in fixed or float(fixed[base]) != v:
+            raise ValueError(f"run dimension {p['name']} = {v} is neither searched nor pinned "
+                             f"at that value here (fixed: {fixed.get(base)})")
+    return np.asarray([got[n] for n in space.names], float)
+
+
+def planet_snr(img, red, planet, metric=None):
+    """The companion's S/N, measured with the run's own metric when given -- its noise ring
+    then has the same exclusions as every score the search ranked on (the disk, for beta Pic)."""
+    m = metric or MawetPeakSNR(pxscale=red.pxscale, fwhm=red.fwhm, kernel_fn=red.matched_filter_kernel)
     return float(m.per_source(img, None, [planet[0]], [planet[1]])[0])
 
 
@@ -140,7 +194,9 @@ def collect(which, n_trials=N_TRIALS):
     fr = json.load(open(os.path.join(run, "final_results.json")))
     log(f"{which}: {len(fr['annuli'])} annuli from {d}")
     red, space, obj, samp = build(which)
-    setup = json.load(open(os.path.join(run, "run_setup.json")))["config"]
+    setup_all = json.load(open(os.path.join(run, "run_setup.json")))
+    setup = setup_all["config"]
+    run_params = (setup_all.get("space") or {}).get("params")
     out = {"run": d, "target": tag, "planet": list(planet), "pxscale": red.pxscale,
            "fwhm_px": red.fwhm, "partitions": [str(p) for p in red.partitions()],
            "n_frames": {str(p): int(r.data.nframes) for p, r in red.reducers.items()},
@@ -180,11 +236,20 @@ def collect(which, n_trials=N_TRIALS):
         runner = Runner(red, space, obj, samp, cfg, tmp, log=lambda s: None)
         runner.ia = ia
         runner.contrast = contrast
+        # the run's own source count: the ring-survival check that sets it probes placements
+        # seeded by the run's seed, so under this runner's seed it could decide differently
+        # (A2's innermost annulus came out 2 sources at 0.258" against the run's 3 at 0.245")
+        n_run = len(a.get("winner_sources") or [])
+        if n_run:
+            runner._nsrc_cache[ia] = n_run
         # the Runner seeds the PROJECTED default: reference-count guard applied (angsep,
         # anglemax, k cap), exactly as _reset_history does
         x0 = runner._project(runner._default_vector(k_seed), is_random=False)
         x_flat = runner._project(runner._default_vector(k_flat), is_random=False)
-        x_win = np.asarray(a["winner_x"], float) if a.get("winner_x") is not None else None
+        x_win = None
+        if a.get("winner_x") is not None:
+            x_win = (run_vector(a["winner_x"], run_params, space) if run_params
+                     else np.asarray(a["winner_x"], float))
         x0_by_ann[ia] = x0
         cands = {"default": x0, "winner": x_win}
         if k_flat != k_seed:
@@ -244,8 +309,8 @@ def collect(which, n_trials=N_TRIALS):
             if rec["uncalibrated"]:
                 log(f"  ** ann {ia + 1} was NOT calibrated (default S/N {cal.get('snr')} at "
                     f"{contrast:.3e}); its S/N and c5 are not comparable with the other annuli")
-        rec["planet_snr_default"] = planet_snr(img0, red, planet)
-        rec["planet_snr_optimized"] = None if img1 is None else planet_snr(img1, red, planet)
+        rec["planet_snr_default"] = planet_snr(img0, red, planet, obj.metric)
+        rec["planet_snr_optimized"] = None if img1 is None else planet_snr(img1, red, planet, obj.metric)
         r0, s0 = sigma_curve(img0, red, rin, rout, planet)
         rec["sigma_default"] = {"r_as": r0, "sigma": s0}
         if img1 is not None:
@@ -268,7 +333,7 @@ def collect(which, n_trials=N_TRIALS):
     anchor(out, red, space, planet, x0=x0_by_ann.get(ia_c))
     st = os.path.join(run, "klip_stitched.fits")
     if os.path.exists(st):
-        out["stitched_planet_snr"] = planet_snr(np.asarray(fits.getdata(st), float), red, planet)
+        out["stitched_planet_snr"] = planet_snr(np.asarray(fits.getdata(st), float), red, planet, obj.metric)
     out.update(read_curves(run))
     return out
 
