@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import sys
 import time
@@ -50,10 +51,12 @@ def main(argv=None):
     d = os.path.abspath(os.path.expanduser(a.out_dir))
     tag = a.tag or current_tag(d)
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    prefix = f"{tag}_{a.mode}_s"
+    # the arm's live slots only: a prefix match also took the slots an earlier retirement had
+    # renamed (..._s0_superseded_20260920_150534) and stamped them a second time
+    live = re.compile(rf"{re.escape(tag)}_{re.escape(a.mode)}_s\d+")
 
     slots = sorted(n for n in os.listdir(d)
-                   if n.startswith(prefix) and os.path.isdir(os.path.join(d, n)))
+                   if live.fullmatch(n) and os.path.isdir(os.path.join(d, n)))
     if not slots:
         raise SystemExit(f"no {a.mode!r} slots for batch {tag} in {d} -- nothing to do")
 

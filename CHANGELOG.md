@@ -40,8 +40,15 @@
   compare grid's validated winners at 800 with the others' at 1000.  The tool now prints the
   budget of the arms the re-run will be compared with (and knows H2's per-engine
   directories), and `run_benchmark` refuses to run a slot into a batch whose rows are at
-  another `n_iter`/`n_init` — a resume with nothing left to run still only reads.  The E2
-  results themselves are unchanged: re-running the arm at 1000 is a separate decision.
+  another `n_iter`/`n_init` — a resume with nothing left to run still only reads.  Re-run at
+  1000 on 2026-09-25: grid validates at 6.62 ± 0.29 (6.56 at 800), against random 6.91 ± 0.35
+  and TPE 7.91 ± 0.30; paired by seed, TPE leads grid by +1.28 ± 0.17 and random by +1.00 ±
+  0.07, 8 of 8 seeds each.  All 24 E2 rows are now at one budget.
+- **`supersede_bench_mode.py` re-stamped slots it had already retired.**  It took every
+  directory starting `<tag>_<mode>_s`, which includes `..._s0_superseded_20260920_150534`:
+  retiring E2's 800-evaluation grid arm renamed the arm retired on 09-20 a second time
+  (`..._superseded_20260920_150534_superseded_20260925_095843`).  It now takes the live slots
+  only (`<tag>_<mode>_sN`); the eight double-stamped directories were renamed back.
 - **Figure legibility, from the regenerated set.**  f7: with H2 on top its bars filled the
   panel and the key sat on them — the panels now leave headroom for the key and the gap
   labels.  f6: the key moved under the row, off β Pic's inner curves.  f12: the seeded

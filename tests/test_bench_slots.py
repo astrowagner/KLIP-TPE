@@ -81,6 +81,8 @@ def test_supersede_says_which_budget_to_rerun_at(tmp_path, capsys):
     (out / "bench_tag.txt").write_text("bench_1\n")
     for m in ("tpe", "grid"):
         (out / f"bench_1_{m}_s0").mkdir()
+    earlier = out / "bench_1_grid_s0_superseded_20260920_150534"     # retired once already
+    earlier.mkdir()
     bench._append_summary(str(out), [
         dict(_row("bench_1", "tpe", 0, 0, str(out / "bench_1_tpe_s0")), n_iter=1000, n_init=100),
         dict(_row("bench_1", "grid", 0, 0, str(out / "bench_1_grid_s0")), n_iter=800, n_init=80)])
@@ -89,4 +91,8 @@ def test_supersede_says_which_budget_to_rerun_at(tmp_path, capsys):
     assert "BENCH_NITER=1000 BENCH_MODES=grid python3 paper_runs/run_demos.py E2" in said
     assert "the retired arm ran n_iter 800; the rest of the batch 1000" in said
     assert bench.summary_run_dirs(str(out)) == [str(out / "bench_1_tpe_s0")]
-    assert [n for n in os.listdir(out) if n.startswith("bench_1_grid_s0_superseded_")]
+    # the live slot is retired; the one an earlier retirement renamed keeps its name (E2's
+    # 2026-09-20 slots were stamped a second time on 09-25 by a prefix match)
+    assert earlier.is_dir()
+    retired = sorted(n for n in os.listdir(out) if n.startswith("bench_1_grid_s0_"))
+    assert len(retired) == 2 and all(n.count("_superseded_") == 1 for n in retired), retired
