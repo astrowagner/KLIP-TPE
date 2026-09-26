@@ -128,3 +128,21 @@ def test_f5_shows_the_default_it_captions():
     assert "def default_image(which, a):" in src
     assert 'prm = dict(a["default_params"], inrad=a["inrad_px"], outrad=a["outrad_px"])' in src
     assert "hexdigest()" in src and "space.decode(space.default_vector())" not in src
+
+
+def test_companion_tests_rebuild_each_runs_objective():
+    """The paper's companion tests (beta Pic b at its own brightness, HD 95086 b's noise ring,
+    HIP 65426 b in F1140C) re-score configurations the way collect.py does: the run's own
+    objective, the winner mapped by parameter name, the raw validation metric."""
+    src = _text("companion_tests.py")
+    assert src.count("C.build(which)") == 2 and src.count("C.run_vector(") == 2
+    assert "raw_only=True" in src and 'LA._rebuild("miri"' in src
+    assert 'float(s["flux_scale"]) * C.ANCHOR["betapic"][0]' in src, \
+        "beta Pic b is injected at its contrast as this axis measures it"
+
+
+def test_miri_figure_uses_the_ablation_rebuild():
+    """f13 must show the configurations Table 3 scores: rebuilt by library_ablation, which
+    refuses a setup that does not reproduce the run."""
+    src = _text("miri_fig.py")
+    assert 'LA._rebuild("miri"' in src and "LA._x_from_params(" in src and "LA.CARTER" in src

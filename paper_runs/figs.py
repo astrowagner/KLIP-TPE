@@ -241,9 +241,13 @@ def fig_trace(s):
         ax.set_title(NICE[t], fontsize=7.5)
         ax.set_xlabel("evaluation")
         ax.grid(alpha=.25)
-    axes[0].set_ylabel("median injected S/N (clean-subtracted)")
-    axes[0].legend(loc="lower right", frameon=False, fontsize=6)
-    fig.tight_layout()
+    axes[0].set_ylabel("median injected S/N")
+    # one key for the three panels, below them: inside the first panel it sat on the beta Pic
+    # points, which fill the lower right of that panel
+    h, lab = axes[0].get_legend_handles_labels()
+    fig.legend(h, lab, loc="lower center", ncol=len(lab), frameon=False, fontsize=6.5,
+               bbox_to_anchor=(0.5, 0.0))
+    fig.tight_layout(rect=(0, 0.07, 1, 1))
     fig.savefig(os.path.join(FIG, "f2_trace.pdf"))
     plt.close(fig)
     print("  f2_trace.pdf")
