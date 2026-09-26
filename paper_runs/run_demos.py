@@ -33,6 +33,14 @@ from klip_tpe.instruments import generic
 from klip_tpe.reducer import Dataset
 
 #: Where every stage directory goes -- and so collect.py's summary.json and figs.py's
+#: The NACO and SPHERE runs and benchmarks of the paper were made while the metric flattened
+#: by default (radial-profile subtraction); klip-tpe 17a32d2 (2026-09-22) turned the default
+#: off.  Pinned here, so a stage re-run today scores on the metric its paper numbers used:
+#: the 2026-09-25 re-run of E2's grid arm took the new default beside TPE and random arms
+#: that had flattened, and had to be run again.  The JWST stages were made after the change
+#: and pin False.
+FLATTEN_GROUND = True
+
 #: figures, which read this same OUT: this folder, or ``$RUNS_DIR`` when it is set
 #: (rerun_paper.sh and long_run.sh read it too).  Point it outside a synced folder:
 #: Dropbox cannot keep up with a fast search's rewrites and files "conflicted copies" of
@@ -181,7 +189,8 @@ def run_A():
     space = generic.make_space(red, k_klip_max=30)
     space.project = generic.make_guard(red, k_max=30)
     fpa, pmask = bp_disk(red)
-    obj, samp = generic.default_config(red, known=[BP], forbidden_pa=fpa, pixel_mask=pmask)
+    obj, samp = generic.default_config(red, known=[BP], forbidden_pa=fpa, pixel_mask=pmask,
+                                       flatten=FLATTEN_GROUND)
     n_iter, n_init = budget([400, 300, 300], [80, 60, 60])
     cfg = RunConfig(ann_edges=[8, 16, 26, 40], n_iter=n_iter, n_init=n_init, seed=11,
                     validation=ValidationConfig(n_top=3, n_valid=5), n_sources=3,
@@ -201,7 +210,8 @@ def run_A2():
     space = generic.make_space(red, k_klip_max=30)
     space.project = generic.make_guard(red, k_max=30)
     fpa, pmask = bp_disk(red)
-    obj, samp = generic.default_config(red, known=[BP], forbidden_pa=fpa, pixel_mask=pmask)
+    obj, samp = generic.default_config(red, known=[BP], forbidden_pa=fpa, pixel_mask=pmask,
+                                       flatten=FLATTEN_GROUND)
     n_iter, n_init = budget([400, 300, 300], [80, 60, 60])
     cfg = RunConfig(ann_edges=[6, 12, 24, 40], n_iter=n_iter, n_init=n_init, seed=11,
                     validation=ValidationConfig(n_top=3, n_valid=5), n_sources=3,
@@ -220,7 +230,8 @@ def run_B():
     space = generic.make_space(red, k_klip_max=12, max_drop=2)
     space.project = generic.make_guard(red, k_max=12, n_min_ref=5)
     fpa, pmask = bp_disk(red)
-    obj, samp = generic.default_config(red, known=[BP], forbidden_pa=fpa, pixel_mask=pmask)
+    obj, samp = generic.default_config(red, known=[BP], forbidden_pa=fpa, pixel_mask=pmask,
+                                       flatten=FLATTEN_GROUND)
     n_iter, n_init = budget(400, 80)
     cfg = RunConfig(ann_edges=[8, 22], n_iter=n_iter, n_init=n_init, seed=12, n_sources=3,
                     validation=ValidationConfig(n_top=3, n_valid=5),
@@ -257,7 +268,7 @@ def run_C():
     red = hd95086_objects()
     space = generic.make_space(red, k_klip_max=30)
     space.project = generic.make_guard(red, k_max=30)
-    obj, samp = generic.default_config(red, known=[HD])
+    obj, samp = generic.default_config(red, known=[HD], flatten=FLATTEN_GROUND)
     n_iter, n_init = budget([350, 300], [70, 60])
     cfg = RunConfig(ann_edges=[20, 45, 75], n_iter=n_iter, n_init=n_init, seed=13, n_sources=3,
                     validation=ValidationConfig(n_top=3, n_valid=5),
@@ -373,7 +384,7 @@ def run_D(engine="pyklip"):
     # nkeep_psfref on the built-in engine.
     space = generic.make_space(red, k_klip_max=18, search_angles=False)
     space.project = generic.make_guard(red, k_max=18, n_min_ref=4)
-    obj, samp = generic.default_config(red, known=[HIP])
+    obj, samp = generic.default_config(red, known=[HIP], flatten=False)
     n_iter, n_init = budget([200, 150], [40, 30])
     # 2, not 4: NIRCam's coronagraphic field is small enough that four sources at one
     # contrast perturb the KLIP basis each other sees.  The Mawet ring still holds 9 clean
@@ -399,7 +410,8 @@ def run_E():
     dsets, sf, inst = betapic_dataset(1)
     red = generic.make_reducer(dsets, star_flux=sf, max_workers=workers(), log=lambda s: None, **inst)
     fpa, pmask = bp_disk(red)
-    obj, samp = generic.default_config(red, known=[BP], forbidden_pa=fpa, pixel_mask=pmask)
+    obj, samp = generic.default_config(red, known=[BP], forbidden_pa=fpa, pixel_mask=pmask,
+                                       flatten=FLATTEN_GROUND)
 
     def make_runner(mode, seed, run_dir):
         space = generic.make_space(red, k_klip_max=30)
@@ -424,7 +436,8 @@ def run_F():
     red = generic.make_reducer(dsets, star_flux=sf, max_workers=workers(), log=lambda s: None,
                                partition_label="group", **inst)
     fpa, pmask = bp_disk(red)
-    obj, samp = generic.default_config(red, known=[BP], forbidden_pa=fpa, pixel_mask=pmask)
+    obj, samp = generic.default_config(red, known=[BP], forbidden_pa=fpa, pixel_mask=pmask,
+                                       flatten=FLATTEN_GROUND)
 
     def make_runner(mode, seed, run_dir):
         space = generic.make_space(red, k_klip_max=12, max_drop=2)
@@ -473,7 +486,8 @@ def bench_modes(default):
 
 def _bench_hi(tag, groups, modes, k_max, max_drop, defaults, forced, ann_edges, out, seeds=range(8),
               n_iter=800, n_init=80, n_top=8, n_valid=15, make_red=None, known=None, n_sources=3,
-              add_params=None, search_angles=True, n_min_ref=5, n_remeasure=1, preflight_check=False):
+              add_params=None, search_angles=True, n_min_ref=5, n_remeasure=1, preflight_check=False,
+              flatten=None):
     """The benchmark again, with enough statistical power to settle it.
 
     Run F reported TPE behind random after validation (9.34 +/- 0.57 vs 9.64 +/- 0.53,
@@ -500,7 +514,8 @@ def _bench_hi(tag, groups, modes, k_max, max_drop, defaults, forced, ann_edges, 
     red = make_red()
     kn = list(known if known is not None else [BP])
     fpa, pmask = bp_disk(red) if kn == [BP] else ((), None)     # only beta Pic has the disk
-    obj, samp = generic.default_config(red, known=kn, forbidden_pa=fpa, pixel_mask=pmask)
+    obj, samp = generic.default_config(red, known=kn, forbidden_pa=fpa, pixel_mask=pmask,
+                                       **({} if flatten is None else {"flatten": flatten}))
 
     def make_runner(mode, seed, run_dir):
         # max_drop=None: leave make_space's own default, which is what the matching science
@@ -551,7 +566,8 @@ def run_F2():
     # calibration" -- a number from before ff20c4b moved star_flux from the template's own sum
     # (4.3491) to VIP's published 3.3268e6.  On today's axis 2.087e-3 injects a 168-count peak,
     # a source nearly three times brighter than beta Pic b, and every configuration detects it.
-    _bench_hi("F2", 4, ("tpe", "random"), 12, 2, {"k_klip": 5}, 3.0e-4, [8, 22], "F2_bench_highdim")
+    _bench_hi("F2", 4, ("tpe", "random"), 12, 2, {"k_klip": 5}, 3.0e-4, [8, 22], "F2_bench_highdim",
+              flatten=FLATTEN_GROUND)
 
 
 def run_E2():
@@ -561,7 +577,8 @@ def run_E2():
     # peak -- about twice beta Pic b.  The archived E2_bench / F2_bench_highdim results were
     # produced on the old axis: their optimisation is valid (every configuration saw the same
     # injections) but their contrast labels are not comparable with anything measured now.
-    _bench_hi("E2", 1, ("tpe", "random", "grid"), 30, 0, {"k_klip": 10}, 3.0e-4, [8, 22], "E2_bench")
+    _bench_hi("E2", 1, ("tpe", "random", "grid"), 30, 0, {"k_klip": 10}, 3.0e-4, [8, 22], "E2_bench",
+              flatten=FLATTEN_GROUND)
 
 
 # -- the same benchmark on the other two data sets --------------------------------------
@@ -616,7 +633,7 @@ def run_G2():
     # recorded 5.88 and 5.40.
     _bench_hi("G2", 1, ("tpe", "random"), 30, None, {"k_klip": 10}, (1.112e-5, 4.773e-6),
               [20, 36, 66], "G2_bench_sphere",
-              make_red=hd95086_objects, known=[HD], n_sources=3, n_min_ref=10)
+              make_red=hd95086_objects, known=[HD], n_sources=3, n_min_ref=10, flatten=FLATTEN_GROUND)
 
 
 def run_H2(engine="pyklip"):
@@ -639,6 +656,7 @@ def run_H2(engine="pyklip"):
               [6, 20], ENGINE_DIRS["H2"][engine],
               make_red=lambda: hip65426_objects(engine=engine), known=[HIP], n_sources=2,
               search_angles=False, n_min_ref=2 if engine == "klip" else 4, preflight_check=True,
+              flatten=False,
               # 3 draws per trial, averaged.  A benchmark exists to separate TPE from random,
               # and on MIRI a single draw scatters with sd 0.84 against a ~6 range -- most of
               # what such a benchmark measures is that noise.  NIRCam reductions are ~2.2 s, so

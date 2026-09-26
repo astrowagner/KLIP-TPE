@@ -163,3 +163,60 @@ def test_compose_chains_projections():
     p2 = lambda x, space, **kw: x + 1
     f = compose(p1, None, p2)
     np.testing.assert_array_equal(f(np.array([9.0, 2.0]), sp), [6.0, 3.0])
+
+
+# --------------------------------------------------------------- frame-selection snapping
+def _fs_space(replicate, parts):
+    """bin, k and the three frame-selection thresholds; replicated per partition or shared.
+    A shared space still names its partitions, as generic.make_space does for one sequence."""
+    block = [Param("bin", 1, 4, "int", default=1), Param("corr_thresh", 0.0, 1.0, "float", default=0.9),
+             Param("noise_max", 0.3, 3.0, "float", default=1.5),
+             Param("coronoise_max", 0.3, 3.0, "float", default=1.5), Param("k_klip", 1, 10, "int", default=3)]
+    sp = SearchSpace()
+    if replicate:
+        sp.replicate(block, parts, name_fmt="{base}_{pid}")
+    else:
+        for b in block:
+            sp.add(b)
+        sp.partitions = list(parts)
+    return sp
+
+
+def _guard(nf=20):
+    from klip_tpe.feasibility import FrameSelectionGuard
+    rng = np.random.default_rng(0)
+    tags = {"corrs": np.full(nf, 0.99), "noises": 1.0 + 0.05 * rng.standard_normal(nf),
+            "coronoise": 1.0 + 0.05 * rng.standard_normal(nf)}
+    return FrameSelectionGuard(tags_fn=lambda pid: tags, nframes_fn=lambda pid: nf)
+
+
+def test_frame_selection_guard_snaps_a_shared_space():
+    """A single sequence: ``space.partitions == ['seq']`` but its thresholds carry
+    ``partition=None``.  noise_max = 0.3 keeps no frame, so the reducer refuses the cut and the
+    triplet must be recorded at the no-cut corner.  Until 2026-09-26 nothing was snapped here
+    (the single-sequence beta Pic run logged 0 of 3030 evaluations at the corner)."""
+    sp = _fs_space(False, ["seq"])
+    g = _guard()
+    x = np.array([1, 0.5, 0.3, 1.0, 3], float)          # bin, corr, noise, coro, k
+    y = g(x.copy(), sp)
+    assert g.last_snapped == 1
+    assert y[1] == 0.0 and y[2] == 3.0 and y[3] == 3.0    # the no-cut corner
+    assert y[0] == 1 and y[4] == 3                       # nothing else moves
+    x2 = np.array([1, 0.5, 1.02, 3.0, 3], float)         # drops the noisier frames: it acts
+    y2 = g(x2.copy(), sp)
+    assert g.last_snapped == 0 and np.array_equal(y2, x2)
+
+
+def test_frame_selection_guard_snaps_only_the_partition_whose_cut_did_not_act():
+    sp = _fs_space(True, ["g1", "g2"])
+    g = _guard()
+    names = list(sp.names)
+    x = np.zeros(len(names))
+    for n, v in (("bin_g1", 1), ("k_klip_g1", 3), ("bin_g2", 1), ("k_klip_g2", 3),
+                 ("corr_thresh_g1", 0.5), ("noise_max_g1", 0.3), ("coronoise_max_g1", 1.0),
+                 ("corr_thresh_g2", 0.5), ("noise_max_g2", 1.02), ("coronoise_max_g2", 3.0)):
+        x[names.index(n)] = v
+    y = g(x.copy(), sp)
+    assert g.last_snapped == 1
+    assert y[names.index("noise_max_g1")] == 3.0 and y[names.index("corr_thresh_g1")] == 0.0
+    assert y[names.index("noise_max_g2")] == 1.02 and y[names.index("corr_thresh_g2")] == 0.5

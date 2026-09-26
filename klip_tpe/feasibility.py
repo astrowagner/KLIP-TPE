@@ -196,26 +196,47 @@ class FrameSelectionGuard:
                                     int(round(params.get("k_klip", 1))))
         return not bool(keep.all())
 
+    _BASES = ("corr_thresh", "noise_max", "coronoise_max")
+
     def __call__(self, x: np.ndarray, space: SearchSpace, **_) -> np.ndarray:
         bases = space.bases
-        if not any(b in bases for b in ("corr_thresh", "noise_max", "coronoise_max")):
+        if not any(b in bases for b in self._BASES):
             return x
         x = np.asarray(x, float).copy()
         cfg = space.decode(x)
         parts = space.partitions or [None]
-        n_snapped = 0
-        for pid in parts:
-            params = cfg.params_for(pid) if pid is not None else cfg.params
-            if self.acted(pid, params):
-                continue
-            dims = space.dims_of_partition(pid) if pid is not None else \
-                [i for i in space.reduction_dims if space.params[i].partition is None]
+
+        def snap(dims):
             for i in dims:
                 b = space.params[i].base
                 if b == "corr_thresh":
                     x[i] = space.params[i].lo
                 elif b in ("noise_max", "coronoise_max"):
                     x[i] = space.params[i].hi
+
+        # Thresholds a partition owns (a replicated block) are snapped when that partition's
+        # cut did not act.  Thresholds the partitions SHARE -- every non-replicated space,
+        # including the one-partition space ``generic.make_space`` builds for a single
+        # sequence, whose params carry ``partition=None`` although ``space.partitions`` names
+        # the sequence -- are snapped only when the cut acted in NO partition.  Until
+        # 2026-09-26 the shared case looked only at ``dims_of_partition(pid)``, found nothing,
+        # and snapped nothing while counting a snap: the single-sequence beta Pic search
+        # recorded 0 of 3030 evaluations at the no-cut corner, inert triplets included.
+        shared = [i for i in space.reduction_dims
+                  if space.params[i].partition is None and space.params[i].base in self._BASES]
+        n_snapped, acted_any = 0, False
+        for pid in parts:
+            params = cfg.params_for(pid) if pid is not None else cfg.params
+            if self.acted(pid, params):
+                acted_any = True
+                continue
+            own = [i for i in (space.dims_of_partition(pid) if pid is not None else [])
+                   if space.params[i].base in self._BASES]
+            if own:
+                snap(own)
+                n_snapped += 1
+        if shared and not acted_any:
+            snap(shared)
             n_snapped += 1
         self.last_snapped = n_snapped
         return x

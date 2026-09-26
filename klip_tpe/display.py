@@ -1088,7 +1088,7 @@ def panel_marginals(fig, spec, ad: AnnulusData, current: Optional[int] = None, n
             ax.set_xticks(range(len(p0.choices)))
             ax.set_xticklabels([str(c) for c in p0.choices], rotation=30, fontsize=6)
     pos = spec.get_position(fig)
-    fig.text(pos.x0, pos.y1, f"marginals: all evals (grey) vs top {ad.gamma:.0%} by search score (blue); "
+    fig.text(pos.x0, pos.y1, f"marginals: all evals (gray) vs top {ad.gamma:.0%} by search score (blue); "
              "best solid, current dashed", fontsize=7.5, va="top")
 
 
@@ -1153,7 +1153,7 @@ def _evtick(n: int) -> int:
 def panel_inclusion(ax, ad: AnnulusData, colorbar: bool = True):
     """near2m_nspanel / nightmap top: inclusion matrix eval x partition, cells coloured
     by the eval's search score (failed = hatched)."""
-    ax.set_title("partition inclusion (colour = search score)", loc="left")
+    ax.set_title("partition inclusion (color = search score)", loc="left")
     ax.grid(False)
     if not ad.multi:
         ax.text(0.5, 0.5, "single partition -- selection not searched", ha="center", va="center", transform=ax.transAxes)
@@ -1254,7 +1254,7 @@ def panel_importance_live(ax, ad: AnnulusData, cs: Optional[Dict[str, Any]] = No
 def panel_partition_effect(ax, ad: AnnulusData):
     """near2m_npanel: per partition, the scores of evals that included it (dark) vs
     excluded it (grey) with group means."""
-    ax.set_title("partition effect (dark = included, grey = excluded)", loc="left")
+    ax.set_title("partition effect (dark = included, gray = excluded)", loc="left")
     v = ad.valid
     if not ad.multi or not v.any():
         ax.text(0.5, 0.5, "n/a", ha="center", va="center", transform=ax.transAxes)
@@ -1583,7 +1583,7 @@ def draw_corner(fig, cs: Dict[str, Any], ad: AnnulusData, title: str, rect=(0.06
     cax.tick_params(labelsize=6, pad=1)
     fig.text(x0 + 0.29 * w, y0 + h + 0.034, "search score\n(upward-biased)", fontsize=6.5, ha="right", va="center")
     fig.text(x0, y0 + h + 0.085, title, fontsize=9, va="bottom")
-    leg = (f"metric: {ad.metric_name}.  colour = search score, filled = guided, hollow = warm-up;  square = best,\n"
+    leg = (f"metric: {ad.metric_name}.  color = search score, filled = guided, hollow = warm-up;  square = best,\n"
            "dashed = current, triangle = validation candidate, star = validated winner")
     fig.text(x0, y0 + h + 0.052, leg, fontsize=6.5, va="bottom", color=_grey("#444444", "#bbbbbb"))
 
@@ -1723,7 +1723,7 @@ def draw_walk(fig, cs: Dict[str, Any], ad: AnnulusData, title: str, rect=(0.07, 
             else:
                 ax.set_ylabel(names[i], fontsize=7.5)
     fig.text(x0, y0 + h + 0.03, title, fontsize=9, va="bottom")
-    fig.text(x0, y0 + h + 0.005, "grey = random step, blue = guided step, orange = running-best path, square = last eval",
+    fig.text(x0, y0 + h + 0.005, "gray = random step, blue = guided step, orange = running-best path, square = last eval",
              fontsize=6.5, color="#444444")
 
 
@@ -1831,7 +1831,7 @@ def _parhist_page(fig, ad: AnnulusData, cs: Dict[str, Any], title: str, current:
     cp = None if current is None else ad.eval_point(current, cs)
     rnd = np.array([_is_random_phase(ad.phases[e]) for e in ev])
     fig.text(0.008, 0.978, title, fontsize=9)
-    fig.text(0.008, 0.952, "red = best value, dashed = current; open grey = warm-up, filled = guided", fontsize=7.5)
+    fig.text(0.008, 0.952, "red = best value, dashed = current; open gray = warm-up, filled = guided", fontsize=7.5)
     for k in range(d):
         gs, r = inner[k // nrow], k % nrow
         v = X[:, k]
@@ -2465,7 +2465,7 @@ def panel_contrast_idl(ax, curves, contrast: float, placeholder: Optional[str] =
         if any("KLIP-FM" in lab for lab, cc, _ in curves if cc):
             ax.text(0.98, 0.04, "green dashed = KLIP-FM", transform=ax.transAxes, ha="right", color="#3cb44b", fontsize=6.5)
         if any(lab.startswith(("this eval", "eval ")) for lab, cc, _ in curves if cc):
-            ax.text(0.98, 0.12, "grey dashed = this eval", transform=ax.transAxes, ha="right", color="#8a8a8a", fontsize=6.5)
+            ax.text(0.98, 0.12, "gray dashed = this eval", transform=ax.transAxes, ha="right", color="#8a8a8a", fontsize=6.5)
     else:
         msg = placeholder or "after first best..."
         ax.text(0.5, 0.5, msg, ha="center", va="center", transform=ax.transAxes, fontsize=6.5, color="#888888", wrap=True)
@@ -2918,10 +2918,10 @@ def render_paracoord(ad: AnnulusData, out_pdf: str, max_lines: int = 3000) -> st
                 ax.axvline(j, color="k", lw=0.5, alpha=0.4)
             ax.set_xticks(xs)
             ax.set_xticklabels(cs["names"], rotation=45, ha="right", fontsize=8)
-            ax.set_ylim(-0.02, 1.02); ax.set_ylabel("normalised parameter value")
+            ax.set_ylim(-0.02, 1.02); ax.set_ylabel("normalized parameter value")
             sm = cm.ScalarMappable(norm=norm, cmap="viridis"); sm.set_array([])
             fig.colorbar(sm, ax=ax, pad=0.01).set_label("search score")
-            ax.set_title(f"{ad.run_name}  annulus {ad.annulus + 1}  {label}: parallel coordinates (colour = score)", fontsize=9)
+            ax.set_title(f"{ad.run_name}  annulus {ad.annulus + 1}  {label}: parallel coordinates (color = score)", fontsize=9)
             ax.legend(loc="upper right", fontsize=8)
             fig.tight_layout()
             pdf.savefig(fig)

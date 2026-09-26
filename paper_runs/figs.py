@@ -228,13 +228,20 @@ def fig_trace(s):
         # every calibration segment, as before, but each evaluation once: a resume replays
         # the evaluations after its checkpoint and re-logs them (bench.read_records)
         rec = read_records(run, annulus=ia, last_segment=False)
-        y = np.array([np.nan if r.get("score") is None else r["score"] for r in rec])
+        # The raw median injected S/N, the statistic the dashed default and the validated star
+        # are measured on.  The search ranks on the clean-subtracted score, which sits ~0.5
+        # below it; plotting that against the raw star put the star above the running best
+        # and hid the winner's curse the panel is meant to show.
+        y = np.array([np.nan if r.get("raw_score", r.get("score")) is None
+                      else r.get("raw_score", r.get("score")) for r in rec], float)
         warm = np.array([str(r.get("phase", "")).startswith(("warm", "seed", "explore")) for r in rec])
         n = np.arange(1, y.size + 1)
         run_best = np.fmax.accumulate(np.where(np.isfinite(y), y, -np.inf))
-        ax.plot(n[warm], y[warm], "o", ms=2.0, mfc="none", mec="0.6", mew=0.5, label="warm-up")
-        ax.plot(n[~warm], y[~warm], "o", ms=2.0, color="#1f77b4", label="TPE")
-        ax.plot(n, np.where(np.isfinite(run_best), run_best, np.nan), "k-", lw=1.2, label="running best")
+        ax.plot(n[warm], y[warm], "o", ms=2.0, mfc="none", mec="0.6", mew=0.5,
+                label="random draws")
+        ax.plot(n[~warm], y[~warm], "o", ms=2.0, color="#1f77b4", label="TPE and local moves")
+        ax.plot(n, np.where(np.isfinite(run_best), run_best, np.nan), "k-", lw=1.2,
+                label="running maximum")
         a0 = s[w]["annuli"][0]
         ax.axhline(a0["default_score"], color="crimson", ls="--", lw=0.9, label="seeded default")
         ax.plot([n[-1]], [a0["winner_score"]], "*", ms=9, color="darkorange", label="validated")
@@ -319,7 +326,7 @@ def fig_partition(s, key=None):
     ax[0].set_yticks(range(len(parts)))
     ax[0].set_yticklabels(parts)
     ax[0].set_xlabel("evaluation")
-    ax[0].set_title("group inclusion (colour = injected S/N)", fontsize=7.5)
+    ax[0].set_title("group inclusion (color = injected S/N)", fontsize=7.5)
     fig.colorbar(im, ax=ax[0], pad=0.01).set_label("median S/N", fontsize=6.5)
     win = set(r["annuli"][0]["selected"])
     for j, p in enumerate(parts):
@@ -376,6 +383,11 @@ def fig_paramverify(s, key="A2"):
 
 
 # --------------------------------------------------------------------- copies
+#: how the rebuilt books title a run (they otherwise print its directory name)
+BOOK_TITLE = {"B2_betapic_groups": r"$\beta$ Pic, four time groups", "A2_betapic": r"$\beta$ Pic",
+              "C_hd95086": "HD 95086", "D_hip65426_pyklip": "HIP 65426 (NIRCam, pyKLIP)"}
+
+
 def rebuild_books(run, ia0):
     """Re-render the corner and parameter-history books from the run's records.
 
@@ -392,6 +404,10 @@ def rebuild_books(run, ia0):
     except Exception as e:                      # a partial run still gets the old copy
         print(f"  (books not rebuilt: {type(e).__name__}: {e})")
         return
+    # the books title themselves with the run's directory and metric identifiers; the paper's
+    # copies name the data set and the statistic instead
+    ad.run_name = BOOK_TITLE.get(os.path.basename(os.path.normpath(run)), ad.run_name)
+    ad.metric_name = "matched-filter S/N"
     render_corner(ad, os.path.join(d, "corner.pdf"))
     render_parhist_book(ad, os.path.join(d, "parhist.pdf"))
 
@@ -608,20 +624,23 @@ def fig_bench():
     # ordered by searched dimension, so the ladder reads down the page.  The first two are
     # beta Pic, whose debris disk crosses the annulus they search; the last two are fields
     # with no scattered-light disk, which is what makes the trend a trend and not a target.
-    sets = [(_pick("H2_bench_jwst_pyklip"), "HIP 65426, JWST/NIRCam\n5 searched dimensions (both rolls, searched mode + maxnumbasis)"),
-            (_pick("E2_bench", "E_bench"), "beta Pic, VLT/NACO L'\n9 searched dimensions (one sequence)"),
-            (_pick("G2_bench_sphere"), "HD 95086, SPHERE/IRDIS\n20 searched dimensions (K1 + K2)"),
-            (_pick("F2_bench_highdim", "F_bench_highdim"), "beta Pic, VLT/NACO L'\n38 searched dimensions (four time groups)")]
-    sets = [(d, lab) for d, lab in sets if os.path.exists(os.path.join(d, "bench_summary.txt"))]
+    # The convergence curves are annulus 1 (bench_convergence's default); the bars pool every
+    # annulus of the batch, as the paper's table does.  Only SPHERE has two, so it says so.
+    sets = [(_pick("H2_bench_jwst_pyklip"), "HIP 65426, JWST/NIRCam, pyKLIP\n5 searched dimensions (both rolls, searched mode + maxnumbasis)", ""),
+            (_pick("E2_bench", "E_bench"), r"$\beta$ Pic, VLT/NACO $L'$" + "\n9 searched dimensions (one sequence)", ""),
+            (_pick("G2_bench_sphere"), "HD 95086, VLT/SPHERE IRDIS\n20 searched dimensions (K1 + K2), inner annulus", ", both annuli"),
+            (_pick("F2_bench_highdim", "F_bench_highdim"), r"$\beta$ Pic, VLT/NACO $L'$" + "\n38 searched dimensions (four time groups)", "")]
+    sets = [s_ for s_ in sets if os.path.exists(os.path.join(s_[0], "bench_summary.txt"))]
     if not sets:
         return
     col = {"tpe": "#1f77b4", "random": "#ff7f0e", "grid": "#2ca02c"}
+    name = {"tpe": "TPE", "random": "random", "grid": "grid"}
     # four rows at the two-row height would not fit a page with its caption
     row_h = 2.6 if len(sets) <= 2 else 2.05
     fig, axes = plt.subplots(len(sets), 2, figsize=(7.1, row_h * len(sets)),
                              gridspec_kw={"width_ratios": [2, 1]}, squeeze=False)
     summ_all = {}
-    for row, (d, lab) in enumerate(sets):
+    for row, (d, lab, bar_note) in enumerate(sets):
         # the slots the bars count, and only those: a glob also drew E2's eight retired
         # grid slots (..._sN_superseded_<date>) -- "grid (16 seeds)" beside 8 bars
         curves = bench_convergence(summary_run_dirs(d))
@@ -633,7 +652,7 @@ def fig_bench():
             A = np.asarray(c["curves"], float)
             x = np.asarray(c["n"], float)
             ax[0].plot(x, np.nanmean(A, axis=0), "-", color=col.get(m), lw=1.4,
-                       label=f"{m} ({A.shape[0]} seeds)")
+                       label=f"{name.get(m, m)} ({A.shape[0]} seeds)")
             if A.shape[0] > 1:
                 ax[0].fill_between(x, np.nanmin(A, axis=0), np.nanmax(A, axis=0),
                                    color=col.get(m), alpha=.15, lw=0)
@@ -659,9 +678,9 @@ def fig_bench():
         for xi, (a_, b_) in enumerate(zip(sr, v)):
             ax[1].annotate(f"{a_ - b_:+.1f}", (xi, max(a_, b_)), textcoords="offset points",
                            xytext=(0, 3), ha="center", fontsize=6)
-        ax[1].set_xticks(x); ax[1].set_xticklabels(ms)
+        ax[1].set_xticks(x); ax[1].set_xticklabels([name.get(m, m) for m in ms])
         ax[1].set_ylabel("median injected S/N")
-        ax[1].set_title("search vs validated (gap = winner's curse)", fontsize=7)
+        ax[1].set_title(f"search vs validated{bar_note} (gap = winner's curse)", fontsize=7)
         # headroom for the gap labels and, on the first row, the key -- with H2 on top its
         # bars filled the panel and the key sat on them
         top = np.nanmax(np.r_[sr, np.asarray(v) + np.asarray(e)])
