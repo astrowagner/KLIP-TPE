@@ -15,9 +15,9 @@
 # <dir>_superseded_<stamp> instead of resuming it, and the per-stage resume.  Everything
 # here does is set the budget, keep the window open, and say how long it will take.
 #
-#   ./long_run.sh                 everything: A2 B2 C D, then E2 F2 G2 H2
-#   ./long_run.sh science         A2 B2 C D only  (~5 h -- the paper's numbers)
-#   ./long_run.sh bench           E2 F2 G2 H2 only (~38 h -- the strategy comparison)
+#   ./long_run.sh                 everything: A2 B2 C D2, then E2 F2 G2 H3
+#   ./long_run.sh science         A2 B2 C D2 only  (~5 h -- the paper's numbers)
+#   ./long_run.sh bench           E2 F2 G2 H3 only (~38 h -- the strategy comparison)
 #   NITER=1500 ./long_run.sh science          deeper science budget
 #   BENCH_NITER=1500 ./long_run.sh bench      deeper benchmark budget
 #   ITER_SCALE=2 ./long_run.sh                double each stage's own budget instead
@@ -59,9 +59,9 @@ export WORKERS="${WORKERS:-auto}"
 export FORCE="${FORCE:-1}"
 
 case "${1:-}" in
-  "")      STAGES=(A2 B2 C D E2 F2 G2 H2) ;;
-  science) STAGES=(A2 B2 C D) ;;
-  bench)   STAGES=(E2 F2 G2 H2) ;;
+  "")      STAGES=(A2 B2 C D2 E2 F2 G2 H3) ;;
+  science) STAGES=(A2 B2 C D2) ;;
+  bench)   STAGES=(E2 F2 G2 H3) ;;
   *)       STAGES=("$@") ;;
 esac
 # I2 (the LMIRCam run) is deliberately not in the default set: it is days of compute on a
@@ -83,7 +83,10 @@ SCALE = float(os.environ["ITER_SCALE"])
 S = {"A2": ([400, 300, 300], 1.68, 0), "B2": ([400], 1.80, 0),
      "C":  ([350, 300],      2.68, 0), "D":  ([200, 150], 3.26, 0), "DK": ([200, 150], 3.26, 0),
      "E2": ([800], 1.05, 24), "F2": ([800], 1.06, 16),
-     "G2": ([800], 1.06, 32), "H2": ([800], 2.27, 16), "H2K": ([800], 2.27, 16)}
+     "G2": ([800], 1.06, 32), "H2": ([800], 2.27, 16), "H2K": ([800], 2.27, 16),
+     # b subtracted: the same reductions plus one negative injection each; H3K adds the grid arm
+     "D2": ([200, 150], 3.26, 0), "D2K": ([200, 150], 3.26, 0),
+     "H3": ([800], 2.27, 16), "H3K": ([800], 2.27, 24)}
 tot = 0.0
 print("  stage   evaluations          projected")
 for s in sys.argv[1:]:

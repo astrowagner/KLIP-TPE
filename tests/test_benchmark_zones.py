@@ -135,6 +135,9 @@ def test_every_forced_bench_contrast_is_on_the_current_flux_axis():
     calls = "\n".join(l for l in src.splitlines() if "_bench_hi(" in l or "forced=[" in l)
     for stale in ("1.31e-3", "2.087e-3", "5.899e-9", "5.270e1", "7.946e-6, 6.201e-6", "2.324e-04", "1.740e-04", "1.637e-04"):
         assert stale not in calls, f"pre-fix constant {stale} is still being passed"
+    # H3 (H2 with HIP 65426 b subtracted) passes its measured contrast by name
+    assert re.search(r"^H3_CONTRAST = 1\.497e-05$", src, re.M), "H3: the contrast measured with b subtracted"
+    assert re.search(r'_bench_hi\(\s*"H3".*?H3_CONTRAST, \[6, 20\]', src, re.S), "H3: edges [6, 20]"
     # the superseded single-annulus E and F use the same measured value
     assert src.count("forced=[3.0e-4]") == 2, "run_E and run_F carry the measured contrast too"
     assert "forced=[1.31e-3]" not in src and "forced=[2.087e-3]" not in src

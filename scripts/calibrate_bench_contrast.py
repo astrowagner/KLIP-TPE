@@ -5,6 +5,8 @@
     TQDM_DISABLE=1 python scripts/calibrate_bench_contrast.py F2
     TQDM_DISABLE=1 python scripts/calibrate_bench_contrast.py G2 [--edges 20 36 66]
     TQDM_DISABLE=1 python scripts/calibrate_bench_contrast.py G2 --forced 7.946e-6 6.201e-6 --edges 20 45 75   # control
+    TQDM_DISABLE=1 python scripts/calibrate_bench_contrast.py H3                  # HIP 65426 b subtracted
+    TQDM_DISABLE=1 python scripts/calibrate_bench_contrast.py H3 --engine klip --forced <c>   # the other engine at it
 
 ``_bench_hi`` forces one contrast per annulus so that every slot of a benchmark sees an
 identical problem.  Each of those constants was once a science run's calibration -- and a
@@ -34,8 +36,10 @@ import tempfile
 
 _HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _HERE)
-for _p in (os.path.join(_HERE, "paper_runs"), os.path.join(os.path.dirname(_HERE), "paper_runs")):
-    if os.path.isdir(_p):
+# the repo's own paper_runs first: inserting each at 0 used to let a paper_runs/ beside the
+# repo (an old copy, say) shadow it
+for _p in (os.path.join(os.path.dirname(_HERE), "paper_runs"), os.path.join(_HERE, "paper_runs")):
+    if os.path.isdir(_p) and os.path.exists(os.path.join(_p, "run_demos.py")):
         sys.path.insert(0, _p)
 
 from klip_tpe import CalibrationConfig, RunConfig, Runner, ValidationConfig, datasets
@@ -50,11 +54,16 @@ BENCH = {
                n_sources=3, n_min_ref=5,  search_angles=True,  target="betapic"),
     "G2": dict(groups=1, k_max=30, max_drop=None, defaults={"k_klip": 10}, edges=[20, 36, 66],
                n_sources=3, n_min_ref=10, search_angles=True,  target="hd95086"),
-    # H2's space carries pyKLIP's `mode` (ADI / RDI / ADI+RDI) as run_H2 adds it; the default
-    # configuration the calibration measures at is mode=RDI, k=10, the fakes' KLIP throughput
-    # included.  Needs the STPSF grid (cached is enough) -- see run_demos.hip65426_objects.
+    # H2's space carries the searched library the reducer brings (pyKLIP: `mode` ADI / RDI /
+    # ADI+RDI and `maxnumbasis`; make_space adds them); the default configuration the
+    # calibration measures at is mode=RDI, k=10, the fakes' KLIP throughput included.  Needs
+    # the STPSF grid (cached is enough) -- see run_demos.hip65426_objects.
     "H2": dict(groups=1, k_max=18, max_drop=None, defaults={"k_klip": 10}, edges=[6, 20],
                n_sources=2, n_min_ref=4,  search_angles=False, target="hip65426"),
+    # H3: H2 with HIP 65426 b taken out of every reduction (run_demos.hip65426b_negfc), as
+    # run_H3 does.  One number for both engines, measured on pyKLIP as H2's was.
+    "H3": dict(groups=1, k_max=18, max_drop=None, defaults={"k_klip": 10}, edges=[6, 20],
+               n_sources=2, n_min_ref=4,  search_angles=False, target="hip65426", subtract=True),
 }
 
 
@@ -66,6 +75,8 @@ def main(argv=None):
     ap.add_argument("--forced", type=float, nargs="+", default=None,
                     help="measure median S/N at these contrasts (one per annulus) instead of solving")
     ap.add_argument("--keep", default=None, help="keep the scratch run directory here")
+    ap.add_argument("--engine", choices=("pyklip", "klip"), default="pyklip",
+                    help="HIP 65426 benches only: the PSF-subtraction engine (n_min_ref follows run_H2/H3)")
     a = ap.parse_args(argv)
     B = BENCH[a.bench]
     edges = list(a.edges) if a.edges else list(B["edges"])
@@ -88,10 +99,18 @@ def main(argv=None):
         fpa, pmask = (), None
         px = datasets.INSTRUMENT["sphere_hd95086"]["pxscale"]
     else:
-        red = R.hip65426_objects()
+        red = R.hip65426_objects(engine=a.engine)
         known = [R.HIP]
         fpa, pmask = (), None
         px = next(iter(red.reducers.values())).pxscale
+        if a.engine == "klip":
+            B = dict(B, n_min_ref=2)                   # the floor on the counts' sum, as run_H2/H3
+    subtract = []
+    if B.get("subtract"):
+        f = R.hip65426b_negfc()
+        subtract = [(float(f["rho"]), float(f["pa"]), float(f["contrast"]))]
+        log(f"subtracting HIP 65426 b from every reduction: contrast {f['contrast']:.4e} at "
+            f"{f['rho']:.4f}\" PA {f['pa']:.2f}")
     r0 = next(iter(red.reducers.values()))
     log(f"\n{a.bench}: {B['target']} groups={B['groups']}  star_flux/flux_unit = "
         f"{getattr(r0.model, 'flux_unit', float('nan')):.4e}  edges {edges}")
@@ -103,17 +122,16 @@ def main(argv=None):
 
     kw = {} if B["max_drop"] is None else {"max_drop": B["max_drop"]}
     space = generic.make_space(red, k_klip_max=B["k_max"], search_angles=B["search_angles"], **kw)
-    if B["target"] == "hip65426":                       # as run_H2 adds it
-        from klip_tpe import Param
-        space.add(Param("mode", 0, 2, "categorical", choices=["ADI", "RDI", "ADI+RDI"], default="RDI",
-                        doc="pyKLIP PSF-subtraction mode"))
     space.project = generic.make_guard(red, k_max=B["k_max"], n_min_ref=B["n_min_ref"])
-    obj, samp = generic.default_config(red, known=known, forbidden_pa=fpa, pixel_mask=pmask)
+    # the metric's flattening as the stage pins it: on for the ground-based benches
+    # (run_demos.FLATTEN_GROUND), off for the JWST ones
+    flatten = R.FLATTEN_GROUND if B["target"] in ("betapic", "hd95086") else False
+    obj, samp = generic.default_config(red, known=known, forbidden_pa=fpa, pixel_mask=pmask, flatten=flatten)
     cfg = RunConfig(ann_edges=edges, n_iter=1, n_init=1, seed=a.seed, search_mode="tpe",
                     n_sources=B["n_sources"], validation=ValidationConfig(n_top=1, n_valid=1),
                     calibration=CalibrationConfig(forced=(list(a.forced) if a.forced else [0.0] * nann)),
                     defaults=B["defaults"], fm_curve=False, save_fits=False,
-                    save_eval_images=False, write_setup_files=False)
+                    save_eval_images=False, write_setup_files=False, subtract_known=subtract)
     d = a.keep or tempfile.mkdtemp(prefix=f"{a.bench.lower()}cal_")
     try:
         r = Runner(red, space, obj, samp, cfg, d, log=log)

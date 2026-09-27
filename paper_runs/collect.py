@@ -579,9 +579,11 @@ def anchor(out, red=None, planet=None, reduce0=None):
 #: directory produced in that window must be redone before it is collected.
 BENCH_DIRS = {"E": ("E2_bench", "E_bench"), "F": ("F2_bench_highdim", "F_bench_highdim"),
               "G": ("G2_bench_sphere",),
-              # H2 on each engine.  Not falling back to the old H2_bench_jwst: its newest slots
-              # searched the nkeep counts pyKLIP ignored, and would be collected as H2.
-              "H": (R.ENGINE_DIRS["H2"]["pyklip"],), "HK": (R.ENGINE_DIRS["H2"]["klip"],)}
+              # H3 on each engine: H2 with HIP 65426 b subtracted (2026-09-27).  Not falling back
+              # to H2: b's light set its noise ring, and H2K's scores came from the searched-
+              # library cache that handed one reduction another's frames.  (Nor to the old
+              # H2_bench_jwst, whose newest slots searched the nkeep counts pyKLIP ignored.)
+              "H": (R.ENGINE_DIRS["H3"]["pyklip"],), "HK": (R.ENGINE_DIRS["H3"]["klip"],)}
 
 
 def bench_dir(which):

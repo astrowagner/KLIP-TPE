@@ -668,7 +668,8 @@ def fig_bench():
     # with no scattered-light disk, which is what makes the trend a trend and not a target.
     # The convergence curves are annulus 1 (bench_convergence's default); the bars pool every
     # annulus of the batch, as the paper's table does.  Only SPHERE has two, so it says so.
-    sets = [(_pick("H2_bench_jwst_pyklip"), "HIP 65426, JWST/NIRCam, pyKLIP\n5 searched dimensions (both rolls, searched mode + maxnumbasis)", ""),
+    # NIRCam is H3 (HIP 65426 b subtracted, 2026-09-27) and nothing older: H2's noise ring was b's light
+    sets = [(_pick("H3_bench_jwst_pyklip_sub"), "HIP 65426, JWST/NIRCam, pyKLIP, b subtracted\n5 searched dimensions (both rolls, searched mode + maxnumbasis)", ""),
             (_pick("E2_bench", "E_bench"), r"$\beta$ Pic, VLT/NACO $L'$" + "\n9 searched dimensions (one sequence)", ""),
             (_pick("G2_bench_sphere"), "HD 95086, VLT/SPHERE IRDIS\n20 searched dimensions (K1 + K2), inner annulus", ", both annuli"),
             (_pick("F2_bench_highdim", "F_bench_highdim"), r"$\beta$ Pic, VLT/NACO $L'$" + "\n38 searched dimensions (four time groups)", "")]

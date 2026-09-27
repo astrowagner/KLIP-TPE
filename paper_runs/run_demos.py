@@ -12,6 +12,8 @@
     python run_demos.py G2     # the same benchmark on HD 95086  (SPHERE K1+K2, 20-D)
     python run_demos.py H2     # the same benchmark on HIP 65426 (JWST 2 rolls), pyKLIP
     python run_demos.py H2K    # ... on the built-in engine
+    python run_demos.py H3     # H2 with HIP 65426 b taken out of the frames (the paper's NIRCam benchmark)
+    python run_demos.py H3K    # ... on the built-in engine, with the grid arm
 
 ``WORKERS=6 python run_demos.py G2`` caps the core budget; the default is every core.
 ``NITER=1000 python run_demos.py A2`` raises every annulus to at least that many
@@ -371,7 +373,9 @@ def hip65426_objects(partition="all", engine="pyklip", library=True):
 ENGINE_DIRS = {"D": {"pyklip": "D_hip65426_pyklip", "klip": "D_hip65426_klip"},
                # D with HIP 65426 b taken out of the frames first (RunConfig.subtract_known)
                "D2": {"pyklip": "D2_hip65426_pyklip_sub", "klip": "D2_hip65426_klip_sub"},
-               "H2": {"pyklip": "H2_bench_jwst_pyklip", "klip": "H2_bench_jwst_klip"}}
+               "H2": {"pyklip": "H2_bench_jwst_pyklip", "klip": "H2_bench_jwst_klip"},
+               # H2 on D2's objective: HIP 65426 b subtracted
+               "H3": {"pyklip": "H3_bench_jwst_pyklip_sub", "klip": "H3_bench_jwst_klip_sub"}}
 
 #: Where the negative-fake-companion fit of HIP 65426 b is kept, so both engines (and a
 #: re-run) subtract the same values.
@@ -550,7 +554,7 @@ def bench_modes(default):
 def _bench_hi(tag, groups, modes, k_max, max_drop, defaults, forced, ann_edges, out, seeds=range(8),
               n_iter=800, n_init=80, n_top=8, n_valid=15, make_red=None, known=None, n_sources=3,
               add_params=None, search_angles=True, n_min_ref=5, n_remeasure=1, preflight_check=False,
-              flatten=None):
+              flatten=None, subtract=None):
     """The benchmark again, with enough statistical power to settle it.
 
     Run F reported TPE behind random after validation (9.34 +/- 0.57 vs 9.64 +/- 0.53,
@@ -592,7 +596,9 @@ def _bench_hi(tag, groups, modes, k_max, max_drop, defaults, forced, ann_edges, 
                         n_sources=n_sources, validation=ValidationConfig(n_top=n_top, n_valid=n_valid),
                         calibration=CalibrationConfig(forced=_forced_list(forced, ann_edges)),
                         defaults=defaults, n_remeasure=n_remeasure,
-                        fm_curve=False, save_fits=False, save_eval_images=False, write_setup_files=False)
+                        fm_curve=False, save_fits=False, save_eval_images=False, write_setup_files=False,
+                        # known companions taken out of every reduction (RunConfig.subtract_known)
+                        subtract_known=[tuple(float(v) for v in t) for t in (subtract or [])])
         # a display per slot, all blitting into the one shared window (see LiveDisplay._win):
         # a benchmark is the run you most want to watch and the one that had no window at all
         cbs = [_display(run_dir, every=25)] if show_mode() else []
@@ -733,6 +739,40 @@ def run_H2(engine="pyklip"):
               )
 
 
+#: H3's injection contrast on the ABSOLUTE axis, with HIP 65426 b subtracted: measured by
+#: ``scripts/calibrate_bench_contrast.py H3`` on 2026-09-27 (pyKLIP, seeded default: mode RDI,
+#: k = 10; median S/N 4.59 over the 6-20 px zone) and used on both engines, as H2's 2.022e-04
+#: was (the built-in engine's seeded default gives median S/N 4.92 at it).  H2's number does
+#: not carry over: b's light set the ring scatter there, and without it a source 13x fainter
+#: reaches the same S/N.
+H3_CONTRAST = 1.497e-05
+
+
+def run_H3(engine="pyklip"):
+    """H2 on D2's objective: HIP 65426 b taken out of every reduction first.
+
+    H2 and H2K kept b in the frames, excluded only from the peak search; its light, spread
+    over its KLIP sector, set the ring scatter across most of the 6-20 px zone (run_demos.
+    hip65426b_negfc), so what they compared the strategies on was mostly how well a
+    configuration suppressed b.  H2K's scores also came from the searched-library cache that
+    handed one reduction another's frames (fixed 2026-09-27).  Everything else is H2's:
+    space, guard, budget, seeds, validation, three draws per trial.  The built-in engine
+    carries the grid arm, as H2K did.
+    """
+    if H3_CONTRAST is None:
+        raise SystemExit("H3_CONTRAST is not set: run scripts/calibrate_bench_contrast.py H3 first")
+    f = hip65426b_negfc()
+    sub = [(float(f["rho"]), float(f["pa"]), float(f["contrast"]))]
+    log(f"H3 ({engine}): subtracting HIP 65426 b, contrast {f['contrast']:.4e} at "
+        f"{f['rho']:.4f}\" PA {f['pa']:.2f}; injections at {H3_CONTRAST:.4e}")
+    _bench_hi("H3" if engine == "pyklip" else "H3K", 1,
+              ("tpe", "random") if engine == "pyklip" else ("tpe", "random", "grid"),
+              18, None, {"k_klip": 10}, H3_CONTRAST, [6, 20], ENGINE_DIRS["H3"][engine],
+              make_red=lambda: hip65426_objects(engine=engine), known=[HIP], n_sources=2,
+              search_angles=False, n_min_ref=2 if engine == "klip" else 4, preflight_check=True,
+              flatten=False, n_remeasure=3, subtract=sub)
+
+
 if __name__ == "__main__":
     which = sys.argv[1].upper() if len(sys.argv) > 1 else "A"
     t0 = time.time()
@@ -741,5 +781,6 @@ if __name__ == "__main__":
      "D2": lambda: run_D("pyklip", subtract=True), "D2K": lambda: run_D("klip", subtract=True),
      "NEGFC": lambda: hip65426b_negfc(refit=True),
      "E": run_E, "F": run_F, "E2": run_E2, "F2": run_F2,
-     "G2": run_G2, "H2": run_H2, "H2K": lambda: run_H2("klip")}[which]()
+     "G2": run_G2, "H2": run_H2, "H2K": lambda: run_H2("klip"),
+     "H3": run_H3, "H3K": lambda: run_H3("klip")}[which]()
     log(f"{which} done in {(time.time() - t0) / 60:.1f} min")

@@ -74,27 +74,33 @@ def test_rerun_paper_exports_workers_and_show_to_the_stage():
 
 def test_the_new_benchmark_stages_are_dispatchable(demos):
     src = _text("run_demos.py")
-    for stage in ("G2", "H2"):
+    for stage in ("G2", "H2", "H3"):
         assert hasattr(demos, f"run_{stage}"), stage
         assert f'"{stage}": run_{stage}' in src, stage
+    assert '"H3K": lambda: run_H3("klip")' in src
 
 
 def test_rerun_paper_runs_and_recognises_the_new_stages():
     sh = _text("rerun_paper.sh")
-    assert "BENCH=(E2 F2 G2 H2)" in sh
+    assert "BENCH=(E2 F2 G2 H3)" in sh and "SCIENCE=(A2 B2 C D2 I2)" in sh
     assert _outdir("G2") == "G2_bench_sphere"         # so a finished stage is skipped
     assert _outdir("H2") == "H2_bench_jwst_pyklip"
+    for stage, d in (("D2", "D2_hip65426_pyklip_sub"), ("D2K", "D2_hip65426_klip_sub"),
+                     ("H3", "H3_bench_jwst_pyklip_sub"), ("H3K", "H3_bench_jwst_klip_sub")):
+        assert _outdir(stage) == d, stage
 
 
 def test_collect_and_figs_know_where_the_new_benches_land():
     col = _text("collect.py")
     assert '"G": ("G2_bench_sphere",)' in col
-    # H2 on each engine, and never the old H2_bench_jwst, whose newest slots searched the
-    # nkeep counts pyKLIP ignored
-    assert '"H": (R.ENGINE_DIRS["H2"]["pyklip"],)' in col and '"HK": (R.ENGINE_DIRS["H2"]["klip"],)' in col
-    assert '("H2_bench_jwst",)' not in col
+    # H3 on each engine (HIP 65426 b subtracted), with no fallback to H2 -- whose noise ring
+    # was b's light, and whose built-in-engine scores came from the searched-library cache
+    # bug -- nor to the old H2_bench_jwst, whose newest slots searched the nkeep counts
+    # pyKLIP ignored
+    assert '"H": (R.ENGINE_DIRS["H3"]["pyklip"],)' in col and '"HK": (R.ENGINE_DIRS["H3"]["klip"],)' in col
+    assert '("H2_bench_jwst",)' not in col and 'ENGINE_DIRS["H2"]' not in col
     fig = _text("figs.py")
-    assert "G2_bench_sphere" in fig and "H2_bench_jwst_pyklip" in fig
+    assert "G2_bench_sphere" in fig and "H3_bench_jwst_pyklip_sub" in fig and "H2_bench_jwst" not in fig
 
 
 def test_collect_with_no_arguments_collects_what_the_figures_read():
@@ -168,6 +174,8 @@ def test_the_nircam_stages_have_both_engines_in_their_own_directories(demos, tmp
     dirs = demos.ENGINE_DIRS
     assert dirs["D"] == {"pyklip": "D_hip65426_pyklip", "klip": "D_hip65426_klip"}
     assert dirs["H2"] == {"pyklip": "H2_bench_jwst_pyklip", "klip": "H2_bench_jwst_klip"}
+    assert dirs["D2"] == {"pyklip": "D2_hip65426_pyklip_sub", "klip": "D2_hip65426_klip_sub"}
+    assert dirs["H3"] == {"pyklip": "H3_bench_jwst_pyklip_sub", "klip": "H3_bench_jwst_klip_sub"}
     for stage, d in (("D", "D_hip65426_pyklip"), ("DK", "D_hip65426_klip"),
                      ("H2", "H2_bench_jwst_pyklip"), ("H2K", "H2_bench_jwst_klip")):
         assert _outdir(stage) == d, stage
@@ -211,7 +219,7 @@ def test_the_bench_figure_orders_its_rows_by_dimension():
     ``maxnumbasis``.  ``bin`` is pinned (its range collapses to (1, 1) on four science
     frames).  (For a day the library was the nkeep counts, which pyKLIP ignored.)"""
     fig = _text("figs.py")
-    order = [fig.index(d) for d in ("H2_bench_jwst_pyklip", "E2_bench", "G2_bench_sphere", "F2_bench_highdim")]
+    order = [fig.index(d) for d in ("H3_bench_jwst_pyklip_sub", "E2_bench", "G2_bench_sphere", "F2_bench_highdim")]
     assert order == sorted(order), order
 
 
@@ -322,6 +330,43 @@ def test_h2_searches_no_mode_categorical_and_no_angles(demos, monkeypatch, tmp_p
         f"H2 should add no dimension of its own; got {[p.name for p in space.added]}")
 
 
+def test_h3_is_h2_with_the_companion_subtracted(demos, monkeypatch, tmp_path):
+    """H3 / H3K: H2's protocol on D2's objective.  Every slot's RunConfig carries the
+    negative-companion fit of HIP 65426 b (run_demos.hip65426b_negfc) in subtract_known, the
+    injections sit at H3's own calibrated contrast, and the built-in engine carries the grid
+    arm as H2K did.  Without a measured contrast the stage refuses to start."""
+    seen = []
+    arms = []
+    monkeypatch.setattr(demos, "OUT", str(tmp_path))
+    monkeypatch.setattr(demos, "hip65426_objects", lambda **k: "JWST_REDUCER")
+    monkeypatch.setattr(demos, "preflight", lambda runner, what: None)
+    monkeypatch.setattr(demos.generic, "default_config", lambda red, known, **kw: ("OBJ", "SAMP"))
+    monkeypatch.setattr(demos.generic, "make_space", lambda red, **kw: _FakeSpace())
+    monkeypatch.setattr(demos.generic, "make_guard", lambda red, **kw: None)
+    monkeypatch.setattr(demos, "Runner", lambda *a, **kw: seen.append(a[4]) or "RUNNER")
+    monkeypatch.setattr(demos, "hip65426b_negfc", lambda refit=False: {"rho": 0.8175, "pa": 150.09, "contrast": 3.61e-4})
+    import klip_tpe.bench as B
+    monkeypatch.setattr(B, "run_benchmark",
+                        lambda make_runner, modes, seeds, n_iter, n_init, bench_tag, out_dir, log:
+                        arms.append((tuple(modes), os.path.basename(out_dir))) or make_runner(modes[0], 0, out_dir))
+    monkeypatch.setattr(demos, "H3_CONTRAST", None)
+    with pytest.raises(SystemExit, match="calibrate_bench_contrast"):
+        demos.run_H3()
+    monkeypatch.setattr(demos, "H3_CONTRAST", 3.3e-5)
+    demos.run_H3()
+    demos.run_H3("klip")
+    assert arms == [(("tpe", "random"), "H3_bench_jwst_pyklip_sub"),
+                    (("tpe", "random", "grid"), "H3_bench_jwst_klip_sub")], arms
+    for cfg in seen:
+        assert [tuple(t) for t in cfg.subtract_known] == [(0.8175, 150.09, 3.61e-4)]
+        assert list(cfg.calibration.forced) == [3.3e-5] and cfg.n_remeasure == 3
+        assert list(cfg.ann_edges) == [6, 20] and cfg.n_sources == 2
+    # and the stages that do not subtract still do not
+    seen.clear()
+    demos.run_H2()
+    assert seen[0].subtract_known == []
+
+
 # ------------------------------------------------------------------ the live window
 
 def test_show_mode_reads_the_environment(demos, monkeypatch):
@@ -378,7 +423,7 @@ def test_the_live_window_is_shared_across_displays():
 
 def test_lmircam_is_a_science_stage_with_its_own_driver():
     sh = _text("rerun_paper.sh")
-    assert "SCIENCE=(A2 B2 C D I2)" in sh
+    assert "SCIENCE=(A2 B2 C D2 I2)" in sh
     assert "run_rxj0534.py" in sh                        # it keeps its companion-ring guards
     assert 'I2) echo "$RXJ_OUT"' in sh                   # so a finished one is recognised
 

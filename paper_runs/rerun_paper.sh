@@ -25,9 +25,9 @@
 # ones.  Keep them.
 #
 # Usage
-#   ./rerun_paper.sh              science runs then benchmarks (A2 B2 C D E2 F2 G2 H2)
-#   ./rerun_paper.sh science      A2 B2 C D
-#   ./rerun_paper.sh bench        E2 F2 G2 H2
+#   ./rerun_paper.sh              science runs then benchmarks (A2 B2 C D2 I2 E2 F2 G2 H3)
+#   ./rerun_paper.sh science      A2 B2 C D2 I2
+#   ./rerun_paper.sh bench        E2 F2 G2 H3
 #   ./rerun_paper.sh A2 C         just those
 #   WORKERS=4 ./rerun_paper.sh    leave cores for another run on the same machine
 #   RUNS_DIR=~/klip_tpe_runs/paper ./rerun_paper.sh   write the stage directories there, not here
@@ -46,9 +46,12 @@
 # or, inside a benchmark, whichever slot -- is running.
 #
 # The four benchmark stages are the same protocol on four problems -- beta Pic 9-D (E2) and
-# 38-D (F2), HD 95086 20-D (G2), HIP 65426 5-D (H2) -- so the TPE-vs-random question is
+# 38-D (F2), HD 95086 20-D (G2), HIP 65426 5-D (H3) -- so the TPE-vs-random question is
 # answered as a trend across dimension and instrument rather than on one target.  E2 and F2
-# search an annulus that beta Pic's debris disk runs through; G2 and H2 do not.
+# search an annulus that beta Pic's debris disk runs through; G2 and H3 do not.  The NIRCam
+# stages are D2 and H3 since 2026-09-27: D and H2 with HIP 65426 b taken out of the frames,
+# whose light had set their noise ring (run_demos.hip65426b_negfc).  D2K / H3K are the same
+# on the built-in engine.
 #
 # WORKERS is a real cap as of 2026-09-14.  It had always been exported here and
 # run_demos.py never read it -- every reducer said max_workers="auto", meaning every core --
@@ -83,8 +86,8 @@ fi
 # NIRCam (D) and LMIRCam (I2).  I2 goes last because it is the long one -- a 5000-evaluation
 # four-night LMIRCam search is days, where the other four are hours -- so the short stages
 # are finished and collectable before it starts.
-SCIENCE=(A2 B2 C D I2)
-BENCH=(E2 F2 G2 H2)
+SCIENCE=(A2 B2 C D2 I2)
+BENCH=(E2 F2 G2 H3)
 
 case "${1:-}" in
   "")        STAGES=("${SCIENCE[@]}" "${BENCH[@]}") ;;
@@ -109,6 +112,8 @@ outdir() {
     A2) echo "${ROOT}A2_betapic" ;;         B2) echo "${ROOT}B2_betapic_groups" ;;
     C)  echo "${ROOT}C_hd95086" ;;          D)  echo "${ROOT}D_hip65426_pyklip" ;;
     DK) echo "${ROOT}D_hip65426_klip" ;;    H2K) echo "${ROOT}H2_bench_jwst_klip" ;;
+    D2) echo "${ROOT}D2_hip65426_pyklip_sub" ;;  D2K) echo "${ROOT}D2_hip65426_klip_sub" ;;
+    H3) echo "${ROOT}H3_bench_jwst_pyklip_sub" ;; H3K) echo "${ROOT}H3_bench_jwst_klip_sub" ;;
     E2) echo "${ROOT}E2_bench" ;;           F2) echo "${ROOT}F2_bench_highdim" ;;
     G2) echo "${ROOT}G2_bench_sphere" ;;    H2) echo "${ROOT}H2_bench_jwst_pyklip" ;;
     I2) echo "$RXJ_OUT" ;;
