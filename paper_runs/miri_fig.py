@@ -69,6 +69,35 @@ class _binned_as:
 #: Table 3's other two rows, measured for the companion but not drawn
 TABLE_ONLY = (("pyklip", "carter"), ("klip", "default"))
 
+#: HIP 65426 b in F1140C by negative injection, kept so the figure and companion_tests.py
+#: subtract and measure the same values (as run_demos.NEGFC_HIP does for F444W)
+NEGFC_F1140C = os.path.join(RUNS, "_negfc", "hip65426b_f1140c.json")
+
+
+def miri_negfc(runner, space, red, px, log=print, refit=False):
+    """HIP 65426 b's position and contrast in F1140C, fitted once by negative injection in
+    pyKLIP's reference-star (RDI) basis over every reference frame -- a basis that does not
+    hold the companion -- and cached in :data:`NEGFC_F1140C`.  ``runner``/``space`` must be the
+    pyKLIP v7 run's.  Returns ``(rho, pa, contrast)``.  The fit leaves ~16% of the stamp's
+    energy (NIRCam: 0.4%): the template matches this companion less well."""
+    if os.path.exists(NEGFC_F1140C) and not refit:
+        with open(NEGFC_F1140C) as f:
+            d = json.load(f)
+        return float(d["rho"]), float(d["pa"]), float(d["contrast"])
+    from klip_tpe.companion import fit_negative_companion
+    if "maxnumbasis" not in space.names:
+        raise ValueError("the F1140C companion is fitted in pyKLIP's RDI basis: pass the pyKLIP run's runner")
+    pool = int(np.asarray(space.hi, float)[space.names.index("maxnumbasis")])
+    choices = list(space.params[space.names.index("mode")].choices)
+    c_rdi = space.decode(LA._vec(runner, space.default_vector(), mode=float(choices.index("RDI")), maxnumbasis=pool))
+    f = fit_negative_companion(lambda s_: np.asarray(runner._reduce(c_rdi, s_, tag="fig_negfc").image, float),
+                               LA.PLANET[0], LA.PLANET[1], 4.95e-4, red.fwhm, px,
+                               angle_convention=red.angle_convention, max_evals=30, log=log)
+    os.makedirs(os.path.dirname(NEGFC_F1140C), exist_ok=True)
+    with open(NEGFC_F1140C, "w") as fh:
+        json.dump(dict(f, engine="pyklip", mode="RDI", maxnumbasis=pool), fh, indent=1)
+    return float(f["rho"]), float(f["pa"]), float(f["contrast"])
+
 
 def reduce_all(log=print, inner=True, companion=True):
     """Clean reductions of the inner annulus (and Carter's single zone), per panel; with
@@ -114,12 +143,7 @@ def reduce_all(log=print, inner=True, companion=True):
             xs["carter"] = (LA._vec(runner, x_def, **every), None)
             if companion and pos is None:
                 # the companion's position and contrast, once, in a basis that does not hold it
-                c_rdi = space.decode(LA._vec(runner, x_def, mode=float(choices.index("RDI")), maxnumbasis=pool))
-                f = fit_negative_companion(
-                    lambda s_: np.asarray(runner._reduce(c_rdi, s_, tag="fig_negfc").image, float),
-                    LA.PLANET[0], LA.PLANET[1], 4.95e-4, red.fwhm, px, angle_convention=red.angle_convention,
-                    max_evals=30, log=log)
-                pos = (f["rho"], f["pa"], f["contrast"])
+                pos = miri_negfc(runner, space, red, px, log=log)
         for name, (x, zone) in xs.items():
             if (engine, name) not in want:
                 continue

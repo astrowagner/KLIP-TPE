@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """The companion tests of the paper's Section 3: what the searched optimum does to a real source.
 
-    python3 companion_tests.py                    # all four; each is skipped if its inputs are missing
+    python3 companion_tests.py                    # all five; each is skipped if its inputs are missing
     python3 companion_tests.py betapic hd95086    # or any subset
 
 betapic   beta Pic b loses S/N in A2's middle-annulus winner while injected sensitivity there
@@ -17,10 +17,14 @@ nircam    runs D / DK kept HIP 65426 b in the frames: the metric's ring scatter 
           without it, and the paired default-vs-winner comparison with it in the data and taken
           out (run_demos.hip65426b_negfc), at each annulus' calibrated contrast and, inside
           1.25", at the contrast D2 calibrated without it.  40 common draws.
-miri      HIP 65426 b at F1140C sits at 0.82", inside the injection band of the inner annulus
+miri      HIP 65426 b at F1140C sits at 0.82", inward of the injection band of the inner annulus
           (sources at 1.2-1.75").  Inject at 0.823" at each run's calibrated contrast and at the
           companion's (Carter et al. 2023: dF1140C = 8.264 -> 4.95e-4), default vs winner, on
           both engines.  Needs MIRI_DATA and MIRI_RUNS as for miri_fig.py.
+miri_light  does the companion set the F1140C noise, as it did in F444W?  Per engine: the
+          metric's ring scatter with it in the frames and taken out (miri_fig.miri_negfc), and
+          the paired default-vs-winner comparison at the run's calibrated contrast with it in
+          and out, 20 common draws in the run's own band.  Same inputs as miri.
 
 Every test rebuilds the run's own objective (collect.build / library_ablation._rebuild) and
 re-scores with its own metric.  Results go to companion_tests.json beside this file.
@@ -223,6 +227,73 @@ def test_miri(n_draws=10):
     return out
 
 
+def test_miri_light(n_draws=20, radii=(0.6, 0.84, 1.1, 1.5, 1.9)):
+    """HIP 65426 b's light in the MIRI runs (kept in the frames): ring scatter in/out and the
+    paired comparison in/out, on both engines -- the NIRCam test (``test_nircam``) for F1140C."""
+    from dataclasses import replace
+    from klip_tpe.companion import ring_sigma
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
+    import library_ablation as LA
+    import miri_fig as M
+    out = {}
+    pos = None
+    for engine in ("pyklip", "klip"):
+        run_dir = os.path.join(M.RUNS, f"miri_HIP-65426_F1140C_v7_{engine}")
+        with open(os.path.join(run_dir, "run_setup.json")) as f:
+            setup = json.load(f)["config"]
+        with open(os.path.join(run_dir, "final_results.json")) as f:
+            fr = json.load(f)["annuli"][0]
+        a = type("A", (), dict(data=M.DATA, workers="auto", backend=engine))()
+        rb = LA._rebuild("miri", setup, a, lambda s_: None)
+        red, ann, obj, samp, px, space = (rb[k] for k in ("red", "ann", "obj", "samp", "px", "space"))
+        m = obj.metric
+        cfg = RunConfig(ann_edges=[float(v) for v in ann], n_iter=1, n_init=1, seed=21,
+                        validation=ValidationConfig(n_top=1, n_valid=1),
+                        calibration=CalibrationConfig(forced=[float(fr["contrast"])]), n_remeasure=1,
+                        n_sources=setup.get("n_sources"), save_fits=False, save_eval_images=False,
+                        fm_curve=False, verify=False)
+        runner = Runner(red, space, obj, samp, cfg, os.path.join(run_dir, "_light"), log=lambda s_: None)
+        runner.ia, runner.contrast = 0, float(fr["contrast"])
+        if pos is None:
+            pos = M.miri_negfc(runner, space, red, px)       # pyKLIP comes first; cached after
+        neg = [Source(pos[0], pos[1], -pos[2])]
+        x_def = space.default_vector()
+        cand = {"default": LA._vec(runner, x_def),
+                "winner": LA._vec(runner, LA._x_from_params(space, fr["winner_config"]["params"], x_def))}
+        res = {"contrast": float(fr["contrast"]), "negfc": list(pos), "radii": list(radii)}
+        for name, x in cand.items():
+            c = space.decode(x)
+            ims = [np.asarray(runner._reduce(c, s_, tag=f"light_{name}").image, float) for s_ in (None, neg)]
+            sig = [[float(ring_sigma(im, r, pos[1] + 180.0, red.fwhm, px, m.kernel([r]), pixel_mask=m.pixel_mask,
+                                     angle_convention=red.angle_convention, exclude=[(pos[0], pos[1])])["sigma"])
+                    for im in ims] for r in radii]
+            res[f"{name}_sigma_in_out"] = sig
+            print(f"miri_light {engine:6s} {name:8s} ring scatter in/out: " +
+                  "  ".join(f"{r}\": {si / so:.2f}" for r, (si, so) in zip(radii, sig)), flush=True)
+        # paired, with the companion in and taken out (every reduction, as D2 does)
+        runner_out = Runner(red, space, obj, samp, replace(cfg, subtract_known=[tuple(pos)]),
+                            os.path.join(run_dir, "_light_sub"), log=lambda s_: None)
+        runner_out.ia, runner_out.contrast = 0, float(fr["contrast"])
+        lo, hi = runner._band(0)
+        rng = np.random.default_rng(5)
+        draws = [samp.sample(runner._nsrc(0), lo, hi, rng, float(fr["contrast"])) for _ in range(n_draws)]
+        for lab, rn in (("in", runner), ("removed", runner_out)):
+            sc = {k: [] for k in cand}
+            for src in draws:
+                for k, x in cand.items():
+                    r, _, _ = rn.evaluate(x, "default", contrast=float(fr["contrast"]), sources=src, raw_only=True)
+                    sc[k].append(float(r.raw_score))
+            d, w = np.array(sc["default"]), np.array(sc["winner"])
+            res[f"paired_{lab}"] = {"default": d.tolist(), "winner": w.tolist(), "band_as": [lo, hi],
+                                    "ratio_of_medians": float(np.median(w) / np.median(d)),
+                                    "winner_better": int((w > d).sum())}
+            print(f"miri_light {engine:6s} paired, companion {lab:8s}: default {np.median(d):.2f}  winner "
+                  f"{np.median(w):.2f}  x{np.median(w) / np.median(d):.2f}  winner better {int((w > d).sum())}/{n_draws}",
+                  flush=True)
+        out[engine] = res
+    return out
+
+
 def test_nircam(n_draws=40):
     """HIP 65426 b's light in runs D / DK (NIRCam, companion kept in the frames).
 
@@ -297,7 +368,8 @@ def test_nircam(n_draws=40):
     return out
 
 
-TESTS = {"betapic": test_betapic, "hd95086": test_hd95086, "miri": test_miri, "nircam": test_nircam}
+TESTS = {"betapic": test_betapic, "hd95086": test_hd95086, "miri": test_miri, "miri_light": test_miri_light,
+         "nircam": test_nircam}
 
 if __name__ == "__main__":
     which = [w.lower() for w in sys.argv[1:]] or list(TESTS)
