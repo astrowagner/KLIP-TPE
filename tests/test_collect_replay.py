@@ -150,13 +150,14 @@ def test_collect_measures_the_companion_on_the_runs_own_reduction_path():
 
 def test_companion_tests_rebuild_each_runs_objective():
     """The paper's companion tests (beta Pic b at its own brightness, HD 95086 b's noise ring,
-    HIP 65426 b in F1140C) re-score configurations the way collect.py does: the run's own
-    objective, the winner mapped by parameter name, the raw validation metric."""
+    HIP 65426 b in F1140C and in F444W) re-score configurations the way collect.py does: the
+    run's own objective, the winner mapped by parameter name, the raw validation metric."""
     src = _text("companion_tests.py")
-    assert src.count("C.build(which)") == 2 and src.count("C.run_vector(") == 2
+    assert src.count("C.build(which)") == 3 and src.count("C.run_vector(") == 3
     assert "raw_only=True" in src and 'LA._rebuild("miri"' in src
-    assert 'float(s["flux_scale"]) * C.ANCHOR["betapic"][0]' in src, \
-        "beta Pic b is injected at its contrast as this axis measures it"
+    assert '"companion_fm_default"' in src and 'fm["contrast"]' in src, \
+        "beta Pic b's brightness is its negative-companion fit, not flux_scale x published"
+    assert "Source(rho_b, pa, cc)]" in src, "one source per reduction"
 
 
 def test_miri_figure_uses_the_ablation_rebuild():

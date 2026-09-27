@@ -62,9 +62,10 @@ same contrast.  Each run calibrated its own, so the second takes the first's wit
       --out miri_HIP-65426_F1140C_v7_klip/library_ablation.json \\
       --versus miri_HIP-65426_F1140C_v7_pyklip/library_ablation.json
 
-NIRCam F444W (paper_runs' D on pyKLIP, DK on the built-in engine) the same way; the
-instrument is read from the run's pixel scale, and no --data is needed (run_demos loads its
-own cubes).  The Carter et al. configurations are MIRI's and are left out:
+NIRCam F444W (paper_runs' D on pyKLIP, DK on the built-in engine; D2 / D2K, which take HIP
+65426 b out of the frames first, likewise -- the subtraction is read from the run) the same
+way; the instrument is read from the run's pixel scale, and no --data is needed (run_demos
+loads its own cubes).  The Carter et al. configurations are MIRI's and are left out:
 
   python scripts/library_ablation.py --run-dir paper_runs/D_hip65426_pyklip --n-draws 40 \\
       --out paper_runs/D_hip65426_pyklip/library_ablation.json
@@ -724,8 +725,14 @@ def main(argv=None) -> int:
                     # the run's own source count -- NIRCam D injected 2, where the rule would
                     # give more; a MIRI run that left it to the rule records None
                     n_sources=setup.get("n_sources"),
-                    save_fits=False, save_eval_images=False, fm_curve=False, verify=False)
+                    save_fits=False, save_eval_images=False, fm_curve=False, verify=False,
+                    # a run that took a known companion out of its frames (paper_runs' D2 / D2K)
+                    # is ablated on that same objective
+                    subtract_known=[tuple(float(v) for v in t) for t in (setup.get("subtract_known") or [])])
     runner = Runner(red, space, obj, samp, cfg, os.path.join(a.run_dir, "_ablation"), log=log)
+    if cfg.subtract_known:
+        log(f"  the run subtracts {cfg.subtract_known} from its frames: so does every reduction here, and the "
+            f"companion's S/N is not measured (collect.py measures it, with the companion present)")
 
     lo_sel = np.array(space.lo, float)
     hi_sel = np.array(space.hi, float)
@@ -832,7 +839,7 @@ def main(argv=None) -> int:
             clean = runner._reduce(c, None, tag=f"abl_a{ia + 1}_{name}_clean", zone=zov)
             t_clean = time.time() - t0
             planet_snr = None
-            if zone[0] * px <= planet[0] <= zone[1] * px or zov is not None:
+            if (zone[0] * px <= planet[0] <= zone[1] * px or zov is not None) and not cfg.subtract_known:
                 try:
                     planet_snr = float(obj.metric.per_source(clean.image, None, [planet[0]], [planet[1]])[0])
                 except Exception as exc:

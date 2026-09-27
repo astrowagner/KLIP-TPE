@@ -17,8 +17,9 @@ Inside the annulus (0.36-0.74") the default and the winners, which were only eve
 the annulus, are reduced once more over that inner zone with the same parameters and the two
 zones are joined at the annulus' inner edge (dotted); Carter et al.'s single zone already
 covers it.  The S/N above each column is the companion's in the scored reduction
-(Table~\\ref{tab:miri}); the maps are computed on the joined image.  The stretch is set on the
-annulus, so the brighter residuals inside it saturate.
+(Table~\\ref{tab:miri}) -- the forward-model S/N of klip_tpe.companion, with the search metric's
+kept in the JSON; the maps are computed on the joined image.  The stretch is set on the annulus,
+so the brighter residuals inside it saturate.
 
 Writes ``figs/f13_miri.pdf`` and ``figs/f13_miri.json`` (the planet S/N of each panel).
 """
@@ -65,12 +66,27 @@ class _binned_as:
         return False
 
 
-def reduce_all(log=print, inner=True):
+#: Table 3's other two rows, measured for the companion but not drawn
+TABLE_ONLY = (("pyklip", "carter"), ("klip", "default"))
+
+
+def reduce_all(log=print, inner=True, companion=True):
     """Clean reductions of the inner annulus (and Carter's single zone), per panel; with
     ``inner``, also the zone between the inner working angle and the annulus, reduced with the
-    same parameters, for the panels whose own zone starts at the annulus."""
+    same parameters, for the panels whose own zone starts at the annulus.
+
+    With ``companion``, HIP 65426 b's forward-model S/N (klip_tpe.companion) in every panel and
+    in Table 3's other two rows: its position and contrast are fitted once by negative injection
+    in pyKLIP's reference-star (RDI) basis, which does not hold the companion, and each
+    configuration then fits its own contrast at that position.  Its noise ring at 0.82" holds
+    only about seven usable apertures (14 around the ring, less the quadrant boundaries and the
+    companion's neighbours), so these values carry ~30% uncertainty; the search metric's (``snr``)
+    is kept beside them."""
+    from klip_tpe.companion import companion_snr, fit_negative_companion
     out = {}
-    for engine in sorted({e for e, _, _ in PANELS}):
+    pos = None
+    want = {(e, n) for e, n, _ in PANELS} | set(TABLE_ONLY)
+    for engine in ("pyklip", "klip"):
         run_dir = os.path.join(RUNS, f"miri_HIP-65426_F1140C_v7_{engine}")
         with open(os.path.join(run_dir, "run_setup.json")) as f:
             setup = json.load(f)["config"]
@@ -79,6 +95,7 @@ def reduce_all(log=print, inner=True):
         a = type("A", (), dict(data=DATA, workers="auto", backend=engine))()
         rb = LA._rebuild("miri", setup, a, log)
         red, ann, obj, samp, px, space = (rb[k] for k in ("red", "ann", "obj", "samp", "px", "space"))
+        m = obj.metric
         cfg = RunConfig(ann_edges=[float(v) for v in ann], n_iter=1, n_init=1, seed=int(setup.get("seed", 21)),
                         validation=ValidationConfig(n_top=1, n_valid=1),
                         calibration=CalibrationConfig(forced=[float(fr["contrast"])]), n_remeasure=1,
@@ -91,27 +108,53 @@ def reduce_all(log=print, inner=True):
               "default": (LA._vec(runner, x_def), None)}
         if "maxnumbasis" in space.names:
             pool = int(np.asarray(space.hi, float)[space.names.index("maxnumbasis")])
-            mode = float(list(space.params[space.names.index("mode")].choices).index("ADI+RDI"))
-            xs["carter_full"] = (LA._vec(runner, x_def, **dict(mode=mode, maxnumbasis=pool, **LA.CARTER)),
-                                 (LA.IWA_AS / px, float(ann[-1])))
+            choices = list(space.params[space.names.index("mode")].choices)
+            every = dict(mode=float(choices.index("ADI+RDI")), maxnumbasis=pool, **LA.CARTER)
+            xs["carter_full"] = (LA._vec(runner, x_def, **every), (LA.IWA_AS / px, float(ann[-1])))
+            xs["carter"] = (LA._vec(runner, x_def, **every), None)
+            if companion and pos is None:
+                # the companion's position and contrast, once, in a basis that does not hold it
+                c_rdi = space.decode(LA._vec(runner, x_def, mode=float(choices.index("RDI")), maxnumbasis=pool))
+                f = fit_negative_companion(
+                    lambda s_: np.asarray(runner._reduce(c_rdi, s_, tag="fig_negfc").image, float),
+                    LA.PLANET[0], LA.PLANET[1], 4.95e-4, red.fwhm, px, angle_convention=red.angle_convention,
+                    max_evals=30, log=log)
+                pos = (f["rho"], f["pa"], f["contrast"])
         for name, (x, zone) in xs.items():
-            if (engine, name) not in {(e, n) for e, n, _ in PANELS}:
+            if (engine, name) not in want:
                 continue
             c = space.decode(x)
             img = np.asarray(runner._reduce(c, None, tag=f"fig_{engine}_{name}", zone=zone).image, float)
-            snr = float(obj.metric.per_source(img, None, [LA.PLANET[0]], [LA.PLANET[1]])[0])
+            snr = float(m.per_source(img, None, [LA.PLANET[0]], [LA.PLANET[1]])[0])
             iwa = LA.IWA_AS / float(px)
-            # the zone inside the annulus, same parameters: display only, never scored
-            inn = None
-            if inner and zone is None:
-                with _binned_as(red, float(fr["outrad"])):
-                    inn = np.asarray(runner._reduce(c, None, tag=f"fig_{engine}_{name}_inner",
-                                                    zone=(iwa, float(fr["inrad"]))).image, float)
-            out[(engine, name)] = dict(img=img, inner=inn, snr=snr, px=float(px), fwhm=float(red.fwhm),
-                                       inrad=float(fr["inrad"]), outrad=float(fr["outrad"]), iwa=iwa,
-                                       params={k: (v if isinstance(v, str) else float(v))
-                                               for k, v in c.params.items() if k in space.names})
-            log(f"  {engine:6s} {name:11s} planet S/N {snr:5.2f}  {out[(engine, name)]['params']}")
+            fm = None
+            if companion and pos is not None:
+                fn = (lambda s_, c=c, zone=zone:
+                      np.asarray(runner._reduce(c, s_, tag=f"fig_{engine}_{name}_fm", zone=zone).image, float))
+                fc = fit_negative_companion(fn, pos[0], pos[1], pos[2], red.fwhm, px,
+                                            angle_convention=red.angle_convention, fit_position=False,
+                                            rel_grid=(0.6, 0.8, 1.0, 1.2, 1.4, 1.7), clean=img)
+                r = companion_snr(fn, pos[0], pos[1], fc["contrast"], red.fwhm, px, m.kernel([pos[0]]),
+                                  pixel_mask=m.pixel_mask, angle_convention=red.angle_convention, clean=img)
+                fm = dict(snr=r["snr"], snr_band=r["snr_band"], sigma_range=list(r["sigma_range"]), n_ap=r["n_ap"],
+                          contrast=fc["contrast"], removed_fraction=fc["removed_fraction"],
+                          rho_as=pos[0], pa_deg=pos[1])
+            params = {k: (v if isinstance(v, str) else float(v)) for k, v in c.params.items() if k in space.names}
+            if (engine, name) in TABLE_ONLY:
+                out[(engine, name)] = dict(snr=snr, snr_fm=None if fm is None else fm["snr"], fm=fm, params=params,
+                                           table_only=True)
+            else:
+                # the zone inside the annulus, same parameters: display only, never scored
+                inn = None
+                if inner and zone is None:
+                    with _binned_as(red, float(fr["outrad"])):
+                        inn = np.asarray(runner._reduce(c, None, tag=f"fig_{engine}_{name}_inner",
+                                                        zone=(iwa, float(fr["inrad"]))).image, float)
+                out[(engine, name)] = dict(img=img, inner=inn, snr=snr, snr_fm=None if fm is None else fm["snr"],
+                                           fm=fm, px=float(px), fwhm=float(red.fwhm),
+                                           inrad=float(fr["inrad"]), outrad=float(fr["outrad"]), iwa=iwa, params=params)
+            log(f"  {engine:6s} {name:11s} planet S/N metric {snr:5.2f}, forward model "
+                f"{'--' if fm is None else format(fm['snr'], '.2f')}  {params}")
     return out
 
 
@@ -139,7 +182,8 @@ def plot(res, path):
         lo, hi = np.nanpercentile(img[ann & np.isfinite(img)], [1.0, 99.6])
         box = 1.08 * r["outrad"] * px
         mark = 0.8 * r["fwhm"] * px        # the ring clears the F1140C core (FWHM 0.37")
-        F._show(axes[0, j], img, px, LA.PLANET, f"{title}\nS/N {r['snr']:.1f}", vlim=(lo, hi), box_as=box,
+        s_q = r["snr_fm"] if r.get("snr_fm") is not None else r["snr"]
+        F._show(axes[0, j], img, px, LA.PLANET, f"{title}\nS/N {s_q:.1f}", vlim=(lo, hi), box_as=box,
                 mark_as=mark)
         m = F.snr_map(img, r["fwhm"], known=[LA.PLANET], px=px)
         m[out] = np.nan
@@ -159,6 +203,8 @@ if __name__ == "__main__":
     os.makedirs(os.path.join(HERE, "figs"), exist_ok=True)
     plot(res, os.path.join(HERE, "figs", "f13_miri.pdf"))
     with open(os.path.join(HERE, "figs", "f13_miri.json"), "w") as f:
-        json.dump({f"{e}_{n}": {"planet_snr": r["snr"], "params": r["params"]} for (e, n), r in res.items()},
-                  f, indent=1)
+        json.dump({f"{e}_{n}": {"planet_snr_metric": r["snr"], "planet_snr_fm": r.get("snr_fm"),
+                                "companion_fm": r.get("fm"), "params": r["params"],
+                                "panel": not r.get("table_only", False)}
+                   for (e, n), r in res.items()}, f, indent=1)
     print("  f13_miri.pdf")

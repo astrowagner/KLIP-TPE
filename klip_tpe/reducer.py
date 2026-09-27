@@ -305,19 +305,35 @@ class KLIPReducer(Reducer):
                                 target_partition=spec["partition"], metric=spec["metric"],
                                 n_min_ref=spec["n_min_ref"])
 
-    def _reflib(self, bcube, ref, bkeep_partition, filt, inrad, outrad):
-        """The library for this evaluation's binned cube, built once per distinct
-        (n_binned, filter, annulus) and reused."""
+    def _reflib(self, bcube, ref, bkeep_partition, filt, inrad, outrad, key_extra=(), sim_cube=None):
+        """The library for this evaluation: ``(selection, basis)``.
+
+        The SELECTION -- the groups and the similarity matrix that ranks each target's
+        references -- is built once per distinct (binning, frame selection, filter, annulus)
+        and reused; ``key_extra`` carries the binning and the frame-selection mask, and
+        ``sim_cube`` is the same binned cube WITHOUT injections, so that the ranking does not
+        depend on what was injected or on which evaluation came first.  The BASIS rows are
+        always this evaluation's own cube, ``[bcube | ref]``.
+
+        Until 2026-09-27 the cache held the basis rows too, keyed without the injections:
+        every later reduction with the same key took its science (other-roll) references from
+        whichever reduction had filled the cache first -- another evaluation's injections, or
+        none -- so an injected source was not self-subtracted by the other roll, a clean
+        reduction carried another evaluation's sources, and a result depended on the order of
+        the reductions.  It inflated every configuration that used the other roll on the
+        built-in engine's searched library (NIRCam DK, D2K, H2K; MIRI on the built-in engine);
+        pyKLIP, which builds its own basis, and the libraries without an other-roll pool were
+        untouched."""
         from .reflib import ReferenceGroup, ReferenceLibrary, similarity_matrix
         spec = self._reflib_spec
-        key = (int(bcube.shape[0]), int(filt), round(float(inrad), 3), round(float(outrad), 3),
-               spec["metric"], spec["shift_px"])
-        hit = self._reflib_cache.get(key)
-        if hit is not None:
-            return hit
         n_sci = int(bcube.shape[0])
         n_ref = 0 if ref is None else int(ref.shape[0])
         library = bcube if ref is None else np.concatenate([bcube, ref], axis=0)
+        key = (n_sci, int(filt), round(float(inrad), 3), round(float(outrad), 3),
+               spec["metric"], spec["shift_px"]) + tuple(key_extra)
+        lib = self._reflib_cache.get(key)
+        if lib is not None:
+            return lib, library
         groups = [ReferenceGroup("altroll", np.arange(n_sci), partition=bkeep_partition,
                                  min_keep=spec["min_keep"].get("altroll", 0))]
         for name, rows in (spec["groups"] or {spec["ref_group"]: np.arange(n_ref)}).items():
@@ -331,12 +347,16 @@ class KLIPReducer(Reducer):
                 raise ValueError(f"supplied similarity is {sim.shape}, expected "
                                  f"{(library.shape[0], n_sci)} (library x target)")
         else:
-            sim = similarity_matrix(bcube, library, inrad=inrad, outrad=outrad, filt=0.0,
+            sc = bcube if sim_cube is None else sim_cube
+            if sc.shape != bcube.shape:
+                raise ValueError(f"similarity cube {sc.shape} does not match the binned cube {bcube.shape}")
+            sim = similarity_matrix(sc, sc if ref is None else np.concatenate([sc, ref], axis=0),
+                                    inrad=inrad, outrad=outrad, filt=0.0,
                                     metric=spec["metric"], shift_px=spec["shift_px"])
         lib = ReferenceLibrary(groups, sim, target_partition=bkeep_partition,
                                metric=spec["metric"], n_min_ref=spec["n_min_ref"])
-        self._reflib_cache[key] = (lib, library)
-        return self._reflib_cache[key]
+        self._reflib_cache[key] = lib
+        return lib, library
 
     def _binned_partition(self, keep, grp, bkeep):
         """Partition label per surviving BINNED frame.
@@ -407,21 +427,27 @@ class KLIPReducer(Reducer):
 
         keep = frame_selection_mask(ds.nframes, ds.tags, p["corr_thresh"], p["noise_max"],
                                     p["coronoise_max"], bin_, k)
-        if not keep.all():
-            cube, angles = cube[keep], angles[keep]
-            if mcube is not None:
-                mcube = mcube[keep]
-
-        if filt > 1:
-            cube = np.stack([highpass(f, filt, nan_aware=False) for f in cube])
-            if mcube is not None:
-                mcube = np.stack([highpass(f, filt, nan_aware=False) for f in mcube])
-        if p["do_destripe"]:
-            # reduce_near_2 L1672-1677: 90 deg (columns) then 0 deg (rows); science only
-            clip = float(p["destripe_clip"])
-            cube = np.stack([destripe(destripe(f, 90.0, clip), 0.0, clip) for f in cube])
         dth = self.dth_max_deg(outrad)
-        bcube, bang, grp, bkeep = bin_frames(cube, angles, bin_, dth, return_groups=True)
+
+        def prep(c):
+            """frame selection, high-pass, destripe and binning of a science cube"""
+            a_ = angles
+            if not keep.all():
+                c, a_ = c[keep], a_[keep]
+            if filt > 1:
+                c = np.stack([highpass(f, filt, nan_aware=False) for f in c])
+            if p["do_destripe"]:
+                # reduce_near_2 L1672-1677: 90 deg (columns) then 0 deg (rows); science only
+                clip = float(p["destripe_clip"])
+                c = np.stack([destripe(destripe(f, 90.0, clip), 0.0, clip) for f in c])
+            return bin_frames(c, a_, bin_, dth, return_groups=True)
+
+        if mcube is not None:
+            if not keep.all():
+                mcube = mcube[keep]
+            if filt > 1:
+                mcube = np.stack([highpass(f, filt, nan_aware=False) for f in mcube])
+        bcube, bang, grp, bkeep = prep(cube)
         if bcube.shape[0] == 0:
             # bin_frames drops bins whose nansum is zero.  np.nansum of an ALL-NaN frame is
             # 0.0, so a cube that is mostly NaN -- a subarray padded into a larger grid, say
@@ -451,7 +477,17 @@ class KLIPReducer(Reducer):
                 # separate modes here -- an all-zero altroll count IS pure RDI, and the
                 # optimizer can elect it rather than being told.
                 bpart = self._binned_partition(keep, grp, bkeep)
-                ref_lib, ref_basis = self._reflib(bcube, ref, bpart, filt, inrad, outrad)
+                kx = (bin_, round(float(dth), 6), hash(np.asarray(keep, bool).tobytes()))
+                sim_cube = None
+                if req.injections:
+                    # the ranking is computed once per key, on the frames WITHOUT injections
+                    # -- rebuilt here only if the key is new
+                    k0 = (int(bcube.shape[0]), int(filt), round(float(inrad), 3), round(float(outrad), 3),
+                          self._reflib_spec["metric"], self._reflib_spec["shift_px"]) + kx
+                    if k0 not in self._reflib_cache:
+                        sim_cube = prep(ds.cube)[0]
+                ref_lib, ref_basis = self._reflib(bcube, ref, bpart, filt, inrad, outrad, key_extra=kx,
+                                                  sim_cube=sim_cube)
                 ref_keep = ref_lib.keep_from_config(p)
                 if mcube is not None:
                     fm_ref = np.concatenate(

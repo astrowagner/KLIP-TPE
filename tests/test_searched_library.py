@@ -166,3 +166,30 @@ def test_the_built_in_engine_accepts_a_library():
     red, r0, ang = _jwst_like()
     assert r0.supports_reference_library is True
     assert [p.name for p in r0.reference_params()] == ["nkeep_altroll", "nkeep_psfref"]
+
+
+def test_a_searched_library_reduction_does_not_depend_on_what_ran_before():
+    """The basis rows are the evaluation's OWN frames.  Until 2026-09-27 the library cache
+    kept the frames of whichever reduction filled it first, so an injected reduction took its
+    other-roll references from another evaluation's cube (its sources were not self-
+    subtracted), a clean one carried another evaluation's sources, and the answer depended on
+    the order of the reductions -- inflating every configuration that used the other roll."""
+    from klip_tpe.metrics import Source
+    from klip_tpe.reducer import ReductionRequest
+    red, r0, ang = _jwst_like()
+    prm = dict(k_klip=3, inrad=4, outrad=16, n_ang=1, filter=0, bin=1, nkeep_altroll=4, nkeep_psfref=0)
+    s1 = [Source(0.6, 30.0, 5e-3)]
+    s2 = [Source(0.6, 200.0, 5e-3)]
+
+    def run(srcs):
+        return np.asarray(r0.reduce(ReductionRequest(dict(prm), srcs)).image, float)
+    r0._reflib_cache.clear()
+    fresh = run(s2)
+    r0._reflib_cache.clear()
+    run(s1)                                     # fills the cache with another evaluation's cube
+    after = run(s2)
+    clean_after = run(None)
+    r0._reflib_cache.clear()
+    clean_fresh = run(None)
+    np.testing.assert_allclose(after, fresh, rtol=0, atol=1e-6, equal_nan=True)
+    np.testing.assert_allclose(clean_after, clean_fresh, rtol=0, atol=1e-6, equal_nan=True)
