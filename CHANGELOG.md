@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased — 2026-09-27 (known companions, and the built-in engine's library cache)
+
+- **The built-in engine's searched library handed one reduction another's frames.**
+  `KLIPReducer._reflib` cached the basis rows (`[science | references]`) with the ranking,
+  keyed on the binned frame count, filter and annulus only.  Every later reduction with the
+  same key took its other-roll frames from whichever reduction filled the cache first -- a
+  different evaluation's injections, or none -- so an injected source was not self-subtracted
+  by the other roll, a clean reduction carried someone else's sources, and a score depended on
+  the order of the reductions.  The cache now holds only the selection (groups and the
+  similarity ranking, computed on the frames without injections), keyed also on the binning,
+  the rotation threshold and the frame-selection mask; the basis is always the reduction's own
+  cube.  `tests/test_searched_library.py` has a test that fails on the old code.  Affected:
+  every built-in-engine run with a searched library and an other-roll pool (NIRCam DK, D2K,
+  H2K; MIRI `v7_klip`; any MWC 758 pilot on the built-in engine).  pyKLIP runs, which build their own basis, and the
+  NACO / SPHERE runs are not.  Rerun: MIRI's built-in winner now uses the reference star alone
+  inside 2.2″, and the 2026-09-25 head-to-head below is superseded (built-in / pyKLIP on common
+  draws: ×0.91, ×1.08, ×0.91 by annulus; HIP 65426 b 9.9 against 10.1).
+- **Known companions can be taken out of the frames** (`RunConfig.subtract_known`: a negative
+  injection of the template at a fitted position and contrast, in every reduction).  HIP 65426
+  b's light, spread over its KLIP sector, set the NIRCam ring scatter at 7-10× its
+  companion-free value across the inner annulus, well beyond the 1.5-FWHM exclusion, and the
+  searches optimized its suppression.  `paper_runs` stages D2 / D2K and H3 / H3K subtract it
+  (`run_demos.hip65426b_negfc`); H3's injection contrast was recalibrated with it gone
+  (1.497e-5, `calibrate_bench_contrast.py H3`).
+- **`klip_tpe.companion`**: the negative-fake-companion fit (`fit_negative_companion`) and a
+  forward-model companion S/N (`companion_snr`): the matched-filter peak of (reduction −
+  reduction with the companion subtracted) over the ring scatter of the subtracted reduction,
+  so the companion's own light is not in its noise.  `collect.py` reports it for default and
+  winner (`companion_fm_default` / `_optimized`) and measures the companion's photometry with
+  it; `miri_fig.py` titles its panels with it.
+- **Paper numbers from repo code**: `companion_tests.py miri_light` (the F1140C version of the
+  NIRCam companion-light test), `scripts/ablation_summary.py` (medians and win counts from
+  `library_ablation.py`, which logs means), `scripts/bench_numbers.py` (Table 4: validated
+  means, paired t, inflation, speed factors, raw-scale inflation).
+
 ## Unreleased — 2026-09-25 (the MIRI head-to-head, and collecting what the paper reads)
 
 - **MIRI v7, head to head** (40 paired draws per annulus, both engines injected at pyKLIP's
