@@ -705,7 +705,9 @@ def fig_bench():
         ax[0].set_xlabel("evaluation")
         ax[0].set_ylabel("running-best search score")
         ax[0].set_title(f"{lab}", fontsize=7.5)
-        ax[0].legend(frameon=False, fontsize=6.5, loc="lower right")
+        # a filled key: without one the seeded-default line ran through the labels
+        ax[0].legend(fontsize=6.5, loc="lower right", frameon=True, facecolor="white",
+                     edgecolor="none", framealpha=0.9)
         ax[0].grid(alpha=.25)
 
         ms = list(summ["modes"])
