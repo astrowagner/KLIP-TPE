@@ -1,5 +1,69 @@
 # Changelog
 
+## Unreleased — 2026-09-30 (MIRI frames: hot pixels, provenance, one exposure once; replayable draws)
+
+- **Static hot pixels the DQ array misses** (`load_calints(hot_pixels=None)`, on whenever
+  there are background pointings; `static_hot_pixels`).  On the blank-sky median of the
+  dedicated background pointings, a pixel above (or below) both the median of its seven row
+  neighbours and that of its seven column neighbours by more than `max(10 robust sigma, 5)`
+  MJy/sr is flagged in every science and reference frame and repaired like a DQ pixel.  The
+  AND keeps the 4QPM glow sticks off the list.  ERS 1386 F1140C has one five pixels (0.6")
+  from the star, 52 MJy/sr above its neighbours on the blank sky, that the pipeline's
+  background subtraction leaves at +12-15 MJy/sr in the science frames and the loader's at
+  +25-30 in the references: a fixed detector feature no ADI+RDI reduction can fit, which sat
+  at 11:30 o'clock in every reduction.  75 pixels flagged on the archive calints.
+- **One exposure, once.**  `load_calints` refuses a file list in which a product name occurs
+  twice.  A tree holding the archive calints and a re-reduction of them from `uncal`
+  (`reproc/stage2/` beside `mastDownload/`) was found whole by the drivers' recursive search
+  and stacked: every F1140C frame twice, from two pipelines.  `paper_runs/miri_fig.py` and
+  `companion_tests.py` now default to `~/Data/JWST/hip65426_miri/mastDownload` when it exists.
+- **The run records its frames.**  `info['provenance']` (in every Dataset's `meta`, and through
+  `KLIPReducer.describe()` in `run_setup.json` as `reducer.partitions.<id>.frames`): the
+  files, `CAL_VER` and `CRDS_CTX` from their headers, the pixel scale as read (0.1103"/px in
+  jwst 2.0.1 MIRI products, 0.1100 in jwst 1.13.4), the repaired pixels, what was
+  background-subtracted, and how many frames registration left unshifted.
+  `frames_provenance(reducer)` / `frames_signature(provenance)` name a frame treatment;
+  `miri_fig.miri_negfc` caches the companion fit per treatment (the original file keeps the
+  frames it was made on).
+- **Rebuilding a finished run** (`library_ablation._args_for` / `_rebuild`, `miri_fig`,
+  `companion_tests`) repairs hot pixels exactly when the run did
+  (`library_ablation.hot_pixels_for_rebuild`).  A run from before the repair stays unrepaired
+  on its own frames, recognised by the pixel scale it recorded, and gets the loader's default
+  on other frames; with only a run's `config` to go on it is rebuilt unrepaired.
+  `--hot-pixels on|off` (`run_miri.py`, `library_ablation.py`) and `hot_pixels=` override.
+- **Every draw recorded, and recorded draws replayed.**  A trial averaged over several draws
+  now keeps every draw's sources and raw score (`meta['draw_sources']`,
+  `meta['draw_raw_scores']`), and validation rows keep their trials' sources
+  (`trial_sources`).  `positions.ReplaySampler` / `Runner.replay_draws(recorded)` inject
+  recorded positions instead of drawing, and `library_ablation.py --draws-from JSON` scores a
+  run on another ablation's recorded injections.  A sampler's draws depend on the frames (their
+  rolls and dead zones set its forbidden sectors), so the same seed does not reproduce them on
+  another processing of the same data.
+- **pyKLIP on macOS no longer spends most of a search starting processes.**  pyKLIP builds a
+  worker pool for every reduction, and macOS's `spawn` start method makes each worker a fresh
+  interpreter that imports numpy, scipy and pyklip: MIRI's v7 pyKLIP search took a median 24 s
+  per three-draw evaluation on the Mac against 5 s for the built-in engine.  On macOS the
+  backend now gives pyKLIP a `forkserver` context (`KLIP_TPE_PYKLIP_START` overrides).
+  Measured with spawn forced: 18.0 / 12.6 s per evaluation against 8.7 / 4.0 s with the
+  forkserver, scores identical.  The built-in engine spends 85% of a MIRI evaluation in the
+  per-target KL basis (BLAS), 2-15 s per three-draw evaluation; a shortcut computing only the
+  first k modes changes the last bits of the basis, so it is not taken.
+- **Carter et al. (2023) as published** (`library_ablation.py`, configuration
+  `carter_published`, `CARTER_PUBLISHED`): their Figure 3 reduction from their configuration
+  file -- the first integration of every exposure dropped (80 + 81 frames), pyKLIP ADI+RDI over
+  the whole illuminated field (211x211 px, one zone), every mode (121), mean-combined -- scored
+  on the search's central 81x81 px.  `CARTER` (the k = 6 mapping) keeps its meaning for the
+  scripts that import it.  `paper_runs/miri_fig.py` shows it in f13's first panel ("published
+  configuration") and scores it for Table 3, over one zone and over the inner annulus.
+- **`companion_tests.py miri` also runs with the companion taken out** (`<engine>_<contrast>_removed`):
+  the same draws at HIP 65426 b's separation, on frames with b subtracted at its
+  negative-injection fit.  Left in, b's own light raises the ring scatter at its separation in
+  some configurations (1.8x in v8's pyKLIP winner), which the injections beside it feel and its
+  forward-model S/N does not.
+- **`paper_runs/miri_v8.sh`**: the paper's MIRI runs on the archive calints with the hot pixels
+  repaired -- both searches (v7's spaces, budgets, annuli and seed), both library ablations, the
+  companion tests and f13.
+
 ## Unreleased — 2026-09-27 (known companions, and the built-in engine's library cache)
 
 - **The built-in engine's searched library handed one reduction another's frames.**
