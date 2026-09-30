@@ -1,16 +1,17 @@
 #!/usr/bin/env python
 """The paper's MIRI figure: HIP 65426 b at F1140C under four configurations.
 
-    python3 miri_fig.py                     # MIRI_DATA, MIRI_RUNS as below
-    MIRI_DATA=~/Data/JWST/hip65426_miri MIRI_RUNS=.. python3 miri_fig.py
+    python3 miri_fig.py                     # MIRI_DATA, MIRI_RUNS, MIRI_TAG as below
+    MIRI_DATA=~/Data/JWST/hip65426_miri/mastDownload MIRI_RUNS=.. MIRI_TAG=v8 python3 miri_fig.py
 
-Carter et al. (2023)'s MIRI choices over one zone (``carter_full`` of
-scripts/library_ablation.py), the configured default on pyKLIP, and the validated winner of
-each engine's v7 search -- pyKLIP (``miri_HIP-65426_F1140C_v7_pyklip``) and the built-in
-engine (``..._v7_klip``) -- each reduced clean, with the companion's S/N measured by the
-run's own metric at Carter et al.'s F1140C position.  The runs are rebuilt by the code that
-ablated them (``library_ablation._rebuild``), which refuses a setup that does not reproduce
-the run, so these are the configurations Table~\\ref{tab:miri} scores.
+Carter et al. (2023)'s reduction as their configuration file sets it out (``carter_published``
+of scripts/library_ablation.py: their frame selection, the whole illuminated field as one zone,
+ADI+RDI with every mode, mean-combined), the configured default on pyKLIP, and the validated
+winner of each engine's search (MIRI_TAG, default v8) -- pyKLIP
+(``miri_HIP-65426_F1140C_v8_pyklip``) and the built-in engine (``..._v8_klip``) -- each reduced
+clean, with the companion's S/N measured at Carter et al.'s F1140C position.  The runs are
+rebuilt by the code that ablated them (``library_ablation._rebuild``), which refuses a setup
+that does not reproduce the run, so these are the configurations Table~\\ref{tab:miri} scores.
 
 Every panel is shown from the inner working angle out to the searched annulus' outer edge.
 Inside the annulus (0.36-0.74") the default and the winners, which were only ever reduced over
@@ -36,9 +37,37 @@ sys.path.insert(0, os.path.dirname(HERE))
 import library_ablation as LA                                      # noqa: E402
 from klip_tpe import CalibrationConfig, RunConfig, Runner, ValidationConfig   # noqa: E402
 
-DATA = os.path.expanduser(os.environ.get("MIRI_DATA", "~/Data/JWST/hip65426_miri"))
+def _default_data():
+    """The archive calints.  ``~/Data/JWST/hip65426_miri`` also holds a re-reduction from the
+    raw ramps (``reproc/``), which a recursive search would find beside MAST's products, so
+    point at ``mastDownload/`` when it is there."""
+    root = os.path.expanduser("~/Data/JWST/hip65426_miri")
+    md = os.path.join(root, "mastDownload")
+    return md if os.path.isdir(md) else root
+
+
+DATA = os.path.expanduser(os.environ.get("MIRI_DATA", "") or _default_data())
 RUNS = os.path.expanduser(os.environ.get("MIRI_RUNS", os.path.dirname(HERE)))
-PANELS = (("pyklip", "carter_full", "Carter et al. recipe\n(one zone, all frames, $k=6$)"),
+#: which MIRI runs the paper reports: v8 (archive calints, static hot pixels repaired, every
+#: draw recorded); MIRI_TAG=v7 rebuilds the figure of 27 Sep from the runs before the repair
+MIRI_TAG = os.environ.get("MIRI_TAG", "v8")
+
+
+def miri_run_dir(engine: str, tag: str = None) -> str:
+    return os.path.join(RUNS, f"miri_HIP-65426_F1140C_{tag or MIRI_TAG}_{engine}")
+
+
+def rebuild_run(engine: str, log=print, tag: str = None):
+    """A finished MIRI run rebuilt by the code that ablated it, with its whole run_setup.json
+    in hand, so the rebuild repairs hot pixels exactly when the run did.  Returns
+    ``(run_dir, full_setup, config, rebuilt)``."""
+    run_dir = miri_run_dir(engine, tag)
+    with open(os.path.join(run_dir, "run_setup.json")) as f:
+        full = json.load(f)
+    setup = full["config"]
+    a = type("A", (), dict(data=DATA, workers="auto", backend=engine))()
+    return run_dir, full, setup, LA._rebuild("miri", setup, a, log, full_setup=full)
+PANELS = (("pyklip", "carter_published", "published configuration\n(pyKLIP)"),
           ("pyklip", "default", "configured default\n(pyKLIP)"),
           ("pyklip", "winner", "optimized\n(pyKLIP)"),
           ("klip", "winner", "optimized\n(built-in engine)"))
@@ -67,21 +96,39 @@ class _binned_as:
 
 
 #: Table 3's other two rows, measured for the companion but not drawn
-TABLE_ONLY = (("pyklip", "carter"), ("klip", "default"))
+TABLE_ONLY = (("pyklip", "carter_published_annuli"), ("klip", "default"))
 
 #: HIP 65426 b in F1140C by negative injection, kept so the figure and companion_tests.py
-#: subtract and measure the same values (as run_demos.NEGFC_HIP does for F444W)
+#: subtract and measure the same values (as run_demos.NEGFC_HIP does for F444W).  This name
+#: holds the fit on the frames of 27 Sep (archive calints, no hot-pixel repair, 0.11033"/px);
+#: any other frame treatment gets its own file, see :func:`negfc_cache_path`.
 NEGFC_F1140C = os.path.join(RUNS, "_negfc", "hip65426b_f1140c.json")
+_NEGFC_LEGACY_PX = 0.11032674199848376
+
+
+def negfc_cache_path(red=None) -> str:
+    """Where the companion fit for ``red``'s frames is cached.  A fit belongs to the frames it
+    was made on -- repairing a hot pixel 0.26" from the companion, or another pipeline's
+    calints, moves it -- so the cache is named by the loader's frame signature, except for
+    the frames the original cache was made on, which keep :data:`NEGFC_F1140C`."""
+    from klip_tpe.backends.spaceklip import frames_provenance, frames_signature
+    rec = frames_provenance(red) if red is not None else None
+    if rec is None or (not (rec.get("hot_pixels") or {}).get("applied")
+                       and abs(float(rec.get("pxscale") or 0.0) - _NEGFC_LEGACY_PX) < 1e-6):
+        return NEGFC_F1140C
+    return os.path.join(RUNS, "_negfc", f"hip65426b_f1140c_{frames_signature(rec)}.json")
 
 
 def miri_negfc(runner, space, red, px, log=print, refit=False):
     """HIP 65426 b's position and contrast in F1140C, fitted once by negative injection in
     pyKLIP's reference-star (RDI) basis over every reference frame -- a basis that does not
-    hold the companion -- and cached in :data:`NEGFC_F1140C`.  ``runner``/``space`` must be the
-    pyKLIP v7 run's.  Returns ``(rho, pa, contrast)``.  The fit leaves ~16% of the stamp's
-    energy (NIRCam: 0.4%): the template matches this companion less well."""
-    if os.path.exists(NEGFC_F1140C) and not refit:
-        with open(NEGFC_F1140C) as f:
+    hold the companion -- and cached per frame treatment (:func:`negfc_cache_path`).
+    ``runner``/``space`` must be a pyKLIP run's.  Returns ``(rho, pa, contrast)``.  The fit
+    leaves ~16% of the stamp's energy (NIRCam: 0.4%): the template matches this companion
+    less well."""
+    path = negfc_cache_path(red)
+    if os.path.exists(path) and not refit:
+        with open(path) as f:
             d = json.load(f)
         return float(d["rho"]), float(d["pa"]), float(d["contrast"])
     from klip_tpe.companion import fit_negative_companion
@@ -93,9 +140,11 @@ def miri_negfc(runner, space, red, px, log=print, refit=False):
     f = fit_negative_companion(lambda s_: np.asarray(runner._reduce(c_rdi, s_, tag="fig_negfc").image, float),
                                LA.PLANET[0], LA.PLANET[1], 4.95e-4, red.fwhm, px,
                                angle_convention=red.angle_convention, max_evals=30, log=log)
-    os.makedirs(os.path.dirname(NEGFC_F1140C), exist_ok=True)
-    with open(NEGFC_F1140C, "w") as fh:
-        json.dump(dict(f, engine="pyklip", mode="RDI", maxnumbasis=pool), fh, indent=1)
+    from klip_tpe.backends.spaceklip import frames_provenance, frames_signature
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        json.dump(dict(f, engine="pyklip", mode="RDI", maxnumbasis=pool,
+                       frames_signature=frames_signature(frames_provenance(red))), fh, indent=1)
     return float(f["rho"]), float(f["pa"]), float(f["contrast"])
 
 
@@ -116,13 +165,9 @@ def reduce_all(log=print, inner=True, companion=True):
     pos = None
     want = {(e, n) for e, n, _ in PANELS} | set(TABLE_ONLY)
     for engine in ("pyklip", "klip"):
-        run_dir = os.path.join(RUNS, f"miri_HIP-65426_F1140C_v7_{engine}")
-        with open(os.path.join(run_dir, "run_setup.json")) as f:
-            setup = json.load(f)["config"]
+        run_dir, _full, setup, rb = rebuild_run(engine, log)
         with open(os.path.join(run_dir, "final_results.json")) as f:
             fr = json.load(f)["annuli"][0]              # the annulus that holds the companion
-        a = type("A", (), dict(data=DATA, workers="auto", backend=engine))()
-        rb = LA._rebuild("miri", setup, a, log)
         red, ann, obj, samp, px, space = (rb[k] for k in ("red", "ann", "obj", "samp", "px", "space"))
         m = obj.metric
         cfg = RunConfig(ann_edges=[float(v) for v in ann], n_iter=1, n_init=1, seed=int(setup.get("seed", 21)),
@@ -135,26 +180,45 @@ def reduce_all(log=print, inner=True, companion=True):
         x_def = space.default_vector()
         xs = {"winner": (LA._vec(runner, LA._x_from_params(space, fr["winner_config"]["params"], x_def)), None),
               "default": (LA._vec(runner, x_def), None)}
+        # Carter et al. (2023)'s reduction as their configuration file sets it out: their frame
+        # set, the whole illuminated field as one zone, every mode, mean-combined (library_ablation
+        # CARTER_PUBLISHED); the central 81x81 px are what the figure shows and what is scored.
+        field = {}
         if "maxnumbasis" in space.names:
-            pool = int(np.asarray(space.hi, float)[space.names.index("maxnumbasis")])
-            choices = list(space.params[space.names.index("mode")].choices)
-            every = dict(mode=float(choices.index("ADI+RDI")), maxnumbasis=pool, **LA.CARTER)
-            xs["carter_full"] = (LA._vec(runner, x_def, **every), (LA.IWA_AS / px, float(ann[-1])))
-            xs["carter"] = (LA._vec(runner, x_def, **every), None)
             if companion and pos is None:
                 # the companion's position and contrast, once, in a basis that does not hold it
                 pos = miri_negfc(runner, space, red, px, log=log)
+            if {(engine, "carter_published"), (engine, "carter_published_annuli")} & want:
+                a_pub = type("A", (), dict(data=DATA, workers="auto", backend="pyklip", run_dir=run_dir,
+                                           hot_pixels="auto"))()
+                rFF, poolC, zFF, restore = LA.carter_published_setup(a_pub, setup, _full, space, obj, samp, cfg, log)
+                rFF.ia, rFF.contrast = 0, runner.contrast
+                cpub = LA.carter_published_config(space, runner, x_def, poolC)
+                h = (int(np.shape(next(iter(red.reducers.values())).data.cube)[-1]) - 1) // 2
+                field = {"carter_published": (cpub, zFF), "carter_published_annuli":
+                         (cpub, (float(fr["inrad"]), float(fr["outrad"])))}
+                xs.update({k: (None, "field") for k in field})
+
+        def _reducer(name, x, zone):
+            """``(configuration, zone marker, reduce(sources, tag) -> image)`` for one panel."""
+            if name in field:
+                cf, zf = field[name]
+                return cf, zf, (lambda s_, tag, cf=cf, zf=zf:
+                                LA.central(np.asarray(rFF._reduce(cf, s_, tag=tag, zone=zf).image, float), h))
+            cr = space.decode(x)
+            return cr, zone, (lambda s_, tag, cr=cr, zone=zone:
+                              np.asarray(runner._reduce(cr, s_, tag=tag, zone=zone).image, float))
+
         for name, (x, zone) in xs.items():
             if (engine, name) not in want:
                 continue
-            c = space.decode(x)
-            img = np.asarray(runner._reduce(c, None, tag=f"fig_{engine}_{name}", zone=zone).image, float)
+            c, zone, red_fn = _reducer(name, x, zone)
+            img = red_fn(None, f"fig_{engine}_{name}")
             snr = float(m.per_source(img, None, [LA.PLANET[0]], [LA.PLANET[1]])[0])
             iwa = LA.IWA_AS / float(px)
             fm = None
             if companion and pos is not None:
-                fn = (lambda s_, c=c, zone=zone:
-                      np.asarray(runner._reduce(c, s_, tag=f"fig_{engine}_{name}_fm", zone=zone).image, float))
+                fn = (lambda s_, red_fn=red_fn, tag=f"fig_{engine}_{name}_fm": red_fn(s_, tag))
                 fc = fit_negative_companion(fn, pos[0], pos[1], pos[2], red.fwhm, px,
                                             angle_convention=red.angle_convention, fit_position=False,
                                             rel_grid=(0.6, 0.8, 1.0, 1.2, 1.4, 1.7), clean=img)
@@ -163,7 +227,8 @@ def reduce_all(log=print, inner=True, companion=True):
                 fm = dict(snr=r["snr"], snr_band=r["snr_band"], sigma_range=list(r["sigma_range"]), n_ap=r["n_ap"],
                           contrast=fc["contrast"], removed_fraction=fc["removed_fraction"],
                           rho_as=pos[0], pa_deg=pos[1])
-            params = {k: (v if isinstance(v, str) else float(v)) for k, v in c.params.items() if k in space.names}
+            params = {k: (v if isinstance(v, str) else float(v)) for k, v in c.params.items()
+                      if k in space.names or k == "comb_type"}
             if (engine, name) in TABLE_ONLY:
                 out[(engine, name)] = dict(snr=snr, snr_fm=None if fm is None else fm["snr"], fm=fm, params=params,
                                            table_only=True)
@@ -179,6 +244,8 @@ def reduce_all(log=print, inner=True, companion=True):
                                            inrad=float(fr["inrad"]), outrad=float(fr["outrad"]), iwa=iwa, params=params)
             log(f"  {engine:6s} {name:11s} planet S/N metric {snr:5.2f}, forward model "
                 f"{'--' if fm is None else format(fm['snr'], '.2f')}  {params}")
+        if field:
+            restore()
     return out
 
 

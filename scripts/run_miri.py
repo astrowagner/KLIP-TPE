@@ -162,6 +162,7 @@ def build(a, log):
     dsets, info = sk.load_calints(files, science_target=a.target, half_px=a.crop,
                                   partition=a.partition, filter=a.filter, star_center=sc,
                                   destripe=getattr(a, "destripe", None),
+                                  hot_pixels=getattr(a, "hot_pixels", None),
                                   ref_targets=getattr(a, "ref_target", None), log=log)
     filt = a.filter or info.get("FILTER") or info.get("filter")
     if not filt or str(filt).upper() not in miri.MODES:
@@ -366,6 +367,10 @@ def main(argv=None):
                     help="build everything and reduce once at the default, then stop")
     ap.add_argument("--default-only", action="store_true")
     ap.add_argument("--fresh", action="store_true")
+    ap.add_argument("--hot-pixels", default="auto", choices=["auto", "on", "off"],
+                    help="repair static hot pixels the DQ array misses, found on the blank-sky "
+                         "median of the dedicated background pointings (auto: whenever there are "
+                         "background pointings; the run records which pixels it repaired)")
     ap.add_argument("--no-destripe", dest="destripe", action="store_false", default=None,
                     help="skip the detector-frame destriping, which is ON by default for "
                          "MIRI: the per-row offset measures as large as the pixel-to-pixel "
@@ -383,6 +388,7 @@ def main(argv=None):
     ap.add_argument("--pdf-every", type=int, default=0, metavar="N",
                     help="also write a PDF panel every N evaluations (default 0 = never)")
     a = ap.parse_args(argv)
+    a.hot_pixels = {"auto": None, "on": True, "off": False}[a.hot_pixels]
 
     out = a.out or os.path.join(os.getcwd(), f"miri_{a.target or 'run'}")
     os.makedirs(out, exist_ok=True)

@@ -29,6 +29,10 @@ library, expressed in the engine's own terms):
   carter_full  the same over ONE zone covering the whole crop from the 4QPM inner working
             angle out, as they reduced it ("a single annulus and a single subsection (i.e.,
             the entire image)")
+  carter_published  their Figure 3 reduction from their configuration file (CARTER_PUBLISHED):
+            their frame set, the whole illuminated field (211x211 px) as one zone, ADI+RDI
+            with every mode, mean-combined; the central 81x81 px scored (pyKLIP runs only)
+  carter_published_annuli  the same reduction over the annulus' own zone
   default   the run's own seeded default
 
 Every injected reduction is scored twice: ``score_search`` (what the search maximised,
@@ -77,11 +81,12 @@ loads its own cubes).  The Carter et al. configurations are MIRI's and are left 
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import sys
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -100,6 +105,21 @@ from klip_tpe.instruments import generic                                 # noqa:
 CARTER = dict(bin=1, n_ang=1, filter=0, k_klip=6)
 PLANET = (0.823, 149.0)
 IWA_AS = 0.36                                   # FQPM1140C nominal inner working angle
+
+#: Carter et al. (2023)'s Figure 3 reduction as their configuration file sets it out (spaceKLIP
+#: commit a5b399c, tests/miri_config.yaml, 2022-08-27): the first integration of every exposure
+#: dropped (``bgtrim 'first'``: 80 science + 81 reference frames), pyKLIP ADI+RDI over one annulus
+#: and one subsection covering the illuminated field, movement 1, no high-pass, numbasis cut at
+#: the data's maximum with maxnumbasis the same (every frame of both pools: 40 + 81 = 121 modes),
+#: the derotated integrations mean-combined.  Here: the run's frames loaded again at 211x211 px
+#: (the illuminated 4QPM field), one zone from the inner working angle to the corners, scored on
+#: the central 81x81 px like everything else.  Not reproduced: their time-grouped background
+#: medians (``bgmed_splits [12, 4]``; the loader subtracts one blank-sky median), their temporal-
+#: median outlier pass (the loader repairs DQ and static hot pixels) and their unregistered frames
+#: (``centering 'basic'``; the loader registers by cross-correlation).  ``CARTER`` above is the
+#: older mapping onto our parameters (k = 6, the number of modes of their companion fit); it is
+#: kept, unchanged, for scripts that import it.
+CARTER_PUBLISHED = dict(bin=1, n_ang=1, filter=0, mode="ADI+RDI", comb_type="mean", field_half_px=105)
 
 
 def _need_finished_run(run_dir: str, flag: str) -> None:
@@ -173,13 +193,163 @@ def _contrasts_from(run_dir: str, setup: dict) -> list:
     return c
 
 
-def _args_for(run_setup: dict, data: str, workers, backend: str = "pyklip") -> object:
+def _frames_record(setup: dict):
+    """The loader's record of a run's frames (``load_calints``' provenance, which the
+    reducer's describe() puts into ``run_setup.json``), or None for a run from before it was
+    recorded -- or when only the ``config`` part of the setup was passed."""
+    parts = (setup.get("reducer") or {}).get("partitions") or {}
+    for d in parts.values():
+        if isinstance(d, dict) and d.get("frames"):
+            return d["frames"]
+    return None
+
+
+def _calints_pxscale(data: str):
+    """The pixel scale the calints under ``data`` carry (PIXAR_A2 of the first F1140C one),
+    or None.  It differs between pipeline versions (0.1103"/px in jwst 2.0.1 products,
+    0.1100 in jwst 1.13.4), so it tells a run's own frames from a re-reduction of them."""
+    try:
+        from astropy.io import fits
+        for f in sorted(glob.glob(os.path.join(os.path.expanduser(data), "**", "jw*_calints.fits"),
+                                  recursive=True)):
+            if str(fits.getheader(f).get("FILTER", "")).strip().upper() == "F1140C":
+                return float(np.sqrt(fits.getheader(f, "SCI")["PIXAR_A2"]))
+    except Exception:                                   # noqa: BLE001 -- the rule then falls back
+        return None
+    return None
+
+
+def hot_pixels_for_rebuild(setup: dict, data: str, override=None, log=None):
+    """Whether a rebuild of a finished run repairs static hot pixels (``load_calints``'
+    ``hot_pixels``): True, False, or None for the loader's own default.
+
+    * ``override`` (True / False) wins.
+    * A run that recorded its frames rebuilds the way it ran: repaired if it repaired.
+    * A run from before the repair existed (no record) rebuilt on ITS OWN frames stays
+      unrepaired, or the rebuild would not reproduce it.  Its own frames are recognised by
+      the pixel scale it recorded, which a re-reduction by another pipeline version does
+      not share; frames that are not its own get the loader's default.  With only the
+      ``config`` part of a setup to go on there is no scale to compare, and the run is
+      rebuilt unrepaired: pass ``override=True`` to repair.
+    """
+    say = log or (lambda s: None)
+    if override is not None:
+        return bool(override)
+    rec = _frames_record(setup)
+    if rec is not None:
+        return bool((rec.get("hot_pixels") or {}).get("applied", False))
+    px_run = setup.get("pxscale")
+    if px_run is None:
+        say("  rebuild: the run predates the hot-pixel repair and only its config was given -- "
+            "rebuilt without it (as it ran); pass hot_pixels=True to repair")
+        return False
+    px_now = _calints_pxscale(data)
+    if px_now is not None and abs(px_now - float(px_run)) <= 1e-6 * float(px_run):
+        say("  rebuild: the run predates the hot-pixel repair and these are its frames "
+            f"({px_now:.6f}\"/px, as recorded) -- rebuilt without it, as it ran")
+        return False
+    say(f"  rebuild: the run predates the hot-pixel repair and these frames are not its own "
+        f"({px_now}\"/px against the {float(px_run):.6f} it recorded) -- the loader decides")
+    return None
+
+
+def central(img, h: int = 40) -> np.ndarray:
+    """The central (2h+1)x(2h+1) px of a larger odd image, the star kept at the centre."""
+    img = np.asarray(img, float)
+    c = (img.shape[-1] - 1) // 2
+    return img[..., c - h:c + h + 1, c - h:c + h + 1]
+
+
+def carter_frame_set(frames: List[dict]):
+    """Carter et al.'s frame set as boolean masks over the loader's science and reference
+    frames (``info['frames']``, in the order the cube holds them): the first integration of
+    every exposure dropped."""
+    keep_s = np.array([int(p["integration"]) != 0 for p in frames if p["role"] == "SCI"], bool)
+    keep_r = np.array([int(p["integration"]) != 0 for p in frames if p["role"] == "REF"], bool)
+    return keep_s, keep_r
+
+
+def carter_published_setup(a, setup, full_setup, space, obj, samp, cfg, log):
+    """What :data:`CARTER_PUBLISHED` needs: the run's frames loaded again over the whole
+    illuminated field on pyKLIP, cut to Carter et al.'s frame set, with pyKLIP's own library
+    re-sized to it.  Returns ``(runner, pool, zone, restore)``; call ``restore()`` when done."""
+    import copy
+    half = int(CARTER_PUBLISHED["field_half_px"])
+    aFF = _args_for(setup, a.data, a.workers, "pyklip", hot_pixels=getattr(a, "hot_pixels", "auto"),
+                    full_setup=full_setup, log=log)
+    aFF.crop = half
+    _ds, infoFF, redFF = run_miri.build(aFF, log)[:3]
+    if int(infoFF["crop_px"]) != 2 * half + 1:
+        raise SystemExit(f"the full-field load came back {infoFF['crop_px']} px, not {2 * half + 1}")
+    r0 = next(iter(redFF.reducers.values()))
+    ds = r0.data
+    keep_s, keep_r = carter_frame_set(infoFF["frames"])
+    if keep_s.size != ds.cube.shape[0] or keep_r.size != np.shape(ds.ref_cube)[0]:
+        raise SystemExit("the loader's frame list does not match the cube it returned")
+    ds2 = copy.copy(ds)
+    ds2.cube, ds2.angles, ds2.ref_cube = ds.cube[keep_s], np.asarray(ds.angles)[keep_s], ds.ref_cube[keep_r]
+    if ds.tags:
+        ds2.tags = {k: np.asarray(v)[keep_s] for k, v in ds.tags.items()}
+    r0.data = ds2
+    r0.set_native_library(partition=np.round(np.asarray(ds2.angles, float), 1).astype(str),
+                          default_mode="ADI+RDI")
+    pool = int(r0._native_lib["n_alt"] + r0._native_lib["n_ref"])
+    log(f"  Carter et al. (2023) as published: {2 * half + 1}x{2 * half + 1} px, frames "
+        f"{ds.cube.shape[0]} -> {ds2.cube.shape[0]} science, {np.shape(ds.ref_cube)[0]} -> "
+        f"{ds2.ref_cube.shape[0]} reference, every mode ({pool})")
+    runner = Runner(redFF, space, obj, samp, cfg, os.path.join(a.run_dir, "_field"), log=lambda s_: None)
+    zone = (IWA_AS / float(infoFF["pxscale"]), float(np.hypot(half, half)) + 1.0)
+
+    def restore():
+        r0.data = ds
+    return runner, pool, zone, restore
+
+
+def carter_published_config(space, runner_small, x_def, pool):
+    """The :data:`CARTER_PUBLISHED` configuration: projected through the run's own guard
+    like every other one, then every mode (``k_klip = maxnumbasis = pool``) and a plain mean,
+    set after the projection because the guard caps both at the run's own library."""
+    from klip_tpe.space import Config
+    choices = list(space.params[space.names.index("mode")].choices)
+    over = {k: v for k, v in CARTER_PUBLISHED.items() if k in ("bin", "n_ang", "filter")}
+    base = _vec(runner_small, x_def, mode=float(choices.index(CARTER_PUBLISHED["mode"])),
+                maxnumbasis=float(pool), **over)
+    c0 = space.decode(base)
+    c = Config(dict(c0.params), {pid: dict(d) for pid, d in c0.per_partition.items()}, c0.selected, c0.x)
+    for d in [c.params] + list(c.per_partition.values()):
+        d["k_klip"] = int(pool)
+        d["maxnumbasis"] = int(pool)
+        d["comb_type"] = CARTER_PUBLISHED["comb_type"]
+    return c
+
+
+def recorded_draws(ablation: dict, annulus: int, n_sources: int) -> List[List[tuple]]:
+    """Annulus ``annulus`` (1-based)'s injection positions as another ablation recorded
+    them, to replay (``--draws-from``).  The sampler's own draws depend on the frames (their
+    rolls and dead zones set its forbidden sectors), so on another processing of the same
+    data the same seed does not give the same positions; the recorded ones do."""
+    A = next((x for x in ablation.get("annuli", []) if int(x["annulus"]) == int(annulus)), None)
+    if A is None or not A.get("draws"):
+        raise SystemExit(f"--draws-from: no recorded draws for annulus {annulus}")
+    d = [[(float(r), float(t)) for r, t in dr] for dr in A["draws"]]
+    if any(len(x) != int(n_sources) for x in d):
+        raise SystemExit(f"--draws-from: annulus {annulus} recorded {len(d[0])} sources per draw, "
+                         f"this run injects {n_sources}")
+    return d
+
+
+def _args_for(run_setup: dict, data: str, workers, backend: str = "pyklip", hot_pixels="auto",
+              full_setup: Optional[dict] = None, log=None) -> object:
     """``run_miri.build``'s argument object, mirroring the finished run (``backend`` may be
-    the other engine's: a cross-engine test)."""
+    the other engine's: a cross-engine test).  ``hot_pixels``: ``"auto"`` applies
+    :func:`hot_pixels_for_rebuild` to ``full_setup`` (the whole ``run_setup.json``) if given,
+    else to ``run_setup``; True / False / None pass straight to the loader."""
+    hp = (hot_pixels_for_rebuild(full_setup if full_setup is not None else run_setup, data, log=log)
+          if isinstance(hot_pixels, str) and hot_pixels == "auto" else hot_pixels)
     a = dict(data=data, target="HIP-65426", filter="F1140C", partition="all", crop=40, backend=backend,
              ann=[float(v) for v in run_setup["ann_edges"]], known=[(0.826, 150.2)],
              star_flux=None, flux_density_jy=None, mode="ADI+RDI", min_throughput=0.30,
-             dead_zones=True, nan_dead_zones=False, destripe=None,
+             dead_zones=True, nan_dead_zones=False, destripe=None, hot_pixels=hp,
              ref_target=["HIP-68245"], searched_library=True, star_center=None,
              workers=workers)
     return type("A", (), a)()
@@ -498,14 +668,16 @@ def _instrument(full_setup: dict, asked: str = "auto") -> str:
     raise SystemExit(f"cannot tell the instrument from the run's pixel scale ({px}); pass --instrument")
 
 
-def _rebuild(inst: str, setup: dict, a, log) -> dict:
+def _rebuild(inst: str, setup: dict, a, log, full_setup: Optional[dict] = None) -> dict:
     """The finished run's reducer, space, objective, sampler and annuli, built by the code
     that built the run: ``run_miri.build`` for MIRI, ``run_demos``'s ``run_D`` recipe for
     NIRCam (``hip65426_objects``, ``k_klip_max=18``, ``n_min_ref=4``, the planet as a known
     source).  ``carter``: whether the Carter et al. (2023) mapping applies -- it encodes their
     MIRI reduction and the 4QPM's inner working angle, so not on NIRCam."""
     if inst == "miri":
-        dsets, info, red, ann, obj, samp, m, px = run_miri.build(_args_for(setup, a.data, a.workers, a.backend), log)
+        dsets, info, red, ann, obj, samp, m, px = run_miri.build(
+            _args_for(setup, a.data, a.workers, a.backend, hot_pixels=getattr(a, "hot_pixels", "auto"),
+                      full_setup=full_setup, log=log), log)
         space = generic.make_space(red, k_klip_max=40, max_drop=0, search_angles=False)
         space.project = generic.make_guard(red, k_max=40)
         return dict(red=red, ann=ann, obj=obj, samp=samp, px=px, space=space, planet=PLANET, carter=True)
@@ -641,6 +813,13 @@ def main(argv=None) -> int:
                          "picture is written next to --out as a PNG either way")
     ap.add_argument("--no-show", dest="show", action="store_const", const=None,
                     help="no live window (the PNG is still written)")
+    ap.add_argument("--draws-from", default=None, metavar="JSON",
+                    help="replay another ablation's recorded injection positions instead of "
+                         "drawing (the same companions on other frames); --n-draws is then "
+                         "the number recorded")
+    ap.add_argument("--hot-pixels", default="auto", choices=["auto", "on", "off"],
+                    help="MIRI: repair static hot pixels in the rebuild (auto: as the run did; a run "
+                         "from before the repair, on its own frames, stays unrepaired)")
     ap.add_argument("--seed", type=int, default=20260923)
     ap.add_argument("--out", default="library_ablation.json")
     ap.add_argument("--versus", default=None, metavar="JSON",
@@ -648,6 +827,7 @@ def main(argv=None) -> int:
                          "--n-draws: its winners are compared with these draw for draw (the "
                          "injection positions are checked to be identical)")
     a = ap.parse_args(argv)
+    a.hot_pixels = {"auto": "auto", "on": True, "off": False}[a.hot_pixels]
 
     def log(s):
         print(f"[{time.strftime('%H:%M:%S')}] {s}", flush=True)
@@ -684,7 +864,7 @@ def main(argv=None) -> int:
     inst = _instrument(full_setup, a.instrument)
     if inst == "miri" and not a.data:
         raise SystemExit("--data (the MIRI calints directory) is required for a MIRI run")
-    rb = _rebuild(inst, setup, a, log)
+    rb = _rebuild(inst, setup, a, log, full_setup=full_setup)
     red, ann, obj, samp, px, space, planet = (rb[k] for k in ("red", "ann", "obj", "samp", "px", "space", "planet"))
     log(f"instrument: {inst};  space: {space.names}")
 
@@ -748,12 +928,27 @@ def main(argv=None) -> int:
         log(f"  {a.backend}: no searched library in this space -- the library variants are skipped")
     x_def = space.default_vector()
 
+    replay = None
+    if a.draws_from:
+        replay = json.load(open(a.draws_from))
+        a.n_draws = int(replay.get("n_draws") or 0) or a.n_draws
+    from klip_tpe.backends.spaceklip import frames_provenance, frames_signature
+    frec = frames_provenance(red)
     out = {"run_dir": os.path.abspath(a.run_dir), "n_draws": a.n_draws, "seed": a.seed, "backend": a.backend,
            "run_backend": run_backend, "contrast_from": a.contrast_from,
+           "draws_from": os.path.abspath(a.draws_from) if a.draws_from else None,
            "space": list(space.names), "pools": {"altroll": n_alt, "psfref": n_ref},
            "instrument": inst, "pxscale": float(px),
+           "frames": frec, "frames_signature": frames_signature(frec),
            "carter_mapping": CARTER if rb["carter"] else None, "annuli": []}
     annuli = [i - 1 for i in a.annuli] if a.annuli else list(range(len(final)))
+    published, h_small = None, None
+    if rb["carter"] and a.backend == "pyklip" and native and (
+            not a.configs or {"carter_published", "carter_published_annuli"} & set(a.configs)):
+        h_small = (int(np.shape(next(iter(red.reducers.values())).data.cube)[-1]) - 1) // 2
+        published = carter_published_setup(a, setup, full_setup, space, obj, samp, cfg, log)
+        out["carter_published"] = {k: v for k, v in CARTER_PUBLISHED.items()} | {
+            "pool": published[1], "zone_px": list(published[2])}
     # the other run's winner, per annulus, for the view
     vref = _versus_reference(json.load(open(a.versus))) if a.versus else {}
     disp = AblationDisplay(os.path.splitext(a.out)[0] + ".png",
@@ -816,6 +1011,12 @@ def main(argv=None) -> int:
                if rb["carter"] else {}),
             "default": (_vec(runner, x_def), None),
         })
+        if published is not None:
+            published[0].ia, published[0].contrast = ia, runner.contrast
+            cpub = carter_published_config(space, runner, x_def, published[1])
+            configs["carter_published"] = (cpub, "field")
+            # the same reduction over this annulus alone: what the zone geometry is worth
+            configs["carter_published_annuli"] = (cpub, "field_annulus")
         if a.configs:
             configs = {k: v for k, v in configs.items() if k in a.configs}
         n = runner._nsrc(ia)
@@ -823,8 +1024,14 @@ def main(argv=None) -> int:
         log(f"=== annulus {ia + 1}: zone {zone[0]:.1f}-{zone[1]:.1f} px, {n} sources in "
             f"{rlo:.3f}-{rhi:.3f}\", contrast {runner.contrast:.3e} (run: validated "
             f"{fr['winner_score']:.3f} at {float(fr['contrast']):.3e})")
-        draws = [runner.sampler.sample(n, rlo, rhi, np.random.default_rng([a.seed, ia, d]), runner.contrast)
-                 for d in range(a.n_draws)]
+        if replay is not None:
+            from klip_tpe.metrics import Source
+            draws = [[Source(r_, t_, runner.contrast) for r_, t_ in dr]
+                     for dr in recorded_draws(replay, ia + 1, n)]
+            log(f"   draws: the {len(draws)} recorded in {a.draws_from}, replayed")
+        else:
+            draws = [runner.sampler.sample(n, rlo, rhi, np.random.default_rng([a.seed, ia, d]), runner.contrast)
+                     for d in range(a.n_draws)]
         if not disp.n_total:
             disp.n_total = len(annuli) * len(configs) * (1 + a.n_draws)
         disp.start_annulus(ia + 1, list(configs), a.n_draws, zone, runner.contrast)
@@ -832,14 +1039,25 @@ def main(argv=None) -> int:
                "band_as": [rlo, rhi], "run_validated": fr["winner_score"],
                "draws": [[(s.rho, s.theta) for s in src] for src in draws], "configs": {}}
         for name, (x, zov) in configs.items():
-            c = space.decode(x)
+            field = isinstance(zov, str) and zov in ("field", "field_annulus")
+            rn = published[0] if field else runner
+            if field:
+                zov = published[2] if zov == "field" else zone
+            c = x if field else space.decode(x)
             p = {k: (v if isinstance(v, str) else int(v) if float(v).is_integer() else float(v))
-                 for k, v in c.params.items() if k in space.names}
+                 for k, v in c.params.items() if k in space.names or k == "comb_type"}
+
+            def _red(src, tag):
+                ev = rn._reduce(c, src, tag=tag, zone=zov)
+                if field:                            # the whole field reduced; the search's frame scored
+                    ev.image = central(ev.image, h_small)
+                return ev
             t0 = time.time()
-            clean = runner._reduce(c, None, tag=f"abl_a{ia + 1}_{name}_clean", zone=zov)
+            clean = _red(None, f"abl_a{ia + 1}_{name}_clean")
             t_clean = time.time() - t0
             planet_snr = None
-            if (zone[0] * px <= planet[0] <= zone[1] * px or zov is not None) and not cfg.subtract_known:
+            zeff = zov if zov is not None else zone          # the zone this reduction covered
+            if zeff[0] * px <= planet[0] <= zeff[1] * px and not cfg.subtract_known:
                 try:
                     planet_snr = float(obj.metric.per_source(clean.image, None, [planet[0]], [planet[1]])[0])
                 except Exception as exc:
@@ -848,7 +1066,7 @@ def main(argv=None) -> int:
             raw, srch, walls = [], [], []
             for d, src in enumerate(draws):
                 t1 = time.time()
-                inj = runner._reduce(c, src, tag=f"abl_a{ia + 1}_{name}_d{d}", zone=zov)
+                inj = _red(src, f"abl_a{ia + 1}_{name}_d{d}")
                 fmk = runner._fm_for(inj, clean)
                 r_raw = obj.score_raw(inj.image, src, clean.image, **fmk)
                 r_srch = obj.score_search(inj.image, src, clean.image, **fmk)
@@ -868,6 +1086,8 @@ def main(argv=None) -> int:
         out["annuli"].append(rec)
         with open(a.out, "w") as f:
             json.dump(out, f, indent=1)
+    if published is not None:
+        published[3]()
     log(f"wrote {a.out}")
     lines = []
     if a.versus:

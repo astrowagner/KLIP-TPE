@@ -88,6 +88,24 @@ reopens a finished annulus with a larger budget (IDL `extend_ann`).
 import display; display.render_steps('<dir>', every=10)"` rebuilds the step frames and the
 movie from the saved per-eval crops.
 
+## Re-scoring a run on other frames
+
+Every trial is the mean of `n_remeasure` fresh injection draws, and the run keeps all of them:
+`results.jsonl` records each draw's sources and raw score (`meta['draw_sources']`,
+`meta['draw_raw_scores']`), and each annulus' `validation.json` keeps its trials' sources
+(`trial_sources`).  The positions cannot be re-drawn from the seed on another processing of the
+same data -- the sampler's forbidden sectors come from the frames' rolls and dead zones -- so
+re-score from the record instead:
+
+```python
+runner.replay_draws(recorded)        # recorded: [[(rho, theta), ...], ...], one list per draw
+rec, inj, clean = runner.evaluate(x, "replay")
+```
+
+or, for a library ablation, `scripts/library_ablation.py ... --draws-from other/library_ablation.json`.
+`run_setup.json` says which frames a run used (`reducer.partitions.<id>.frames`: files,
+pipeline version, pixel scale, repaired hot pixels).
+
 ## Knowing what is running, and getting a run back
 
 A run is a long-lived process that outlives the terminal it was started from, and a

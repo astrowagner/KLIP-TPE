@@ -82,3 +82,31 @@ def test_the_f1140c_companion_fit_is_read_from_its_cache(tmp_path, monkeypatch):
     with open(M.NEGFC_F1140C, "w") as f:
         json.dump({"rho": 0.8407, "pa": 148.64, "contrast": 5.9428e-4}, f)
     assert M.miri_negfc(None, None, None, None) == (0.8407, 148.64, 5.9428e-4)
+
+
+def test_the_companion_fit_is_cached_per_frame_treatment(tmp_path, monkeypatch):
+    """A fit made on the frames of 27 Sep must not be handed to frames with hot pixels
+    repaired (or to another pipeline's calints): each treatment gets its own cache file,
+    and the original name stays with the original frames."""
+    pr = os.path.join(ROOT, "paper_runs")
+    if not os.path.exists(os.path.join(pr, "miri_fig.py")):
+        pytest.skip("paper_runs/ not next to the package")
+    monkeypatch.setenv("MIRI_RUNS", str(tmp_path))
+    sys.path.insert(0, pr)
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    M = _load(os.path.join(pr, "miri_fig.py"), "miri_fig_key_test")
+
+    class _R:                                        # a reducer whose one partition carries a record
+        def __init__(self, rec):
+            self.reducers = {"sci": type("P", (), {"data": type("D", (), {"meta": {"provenance": rec}})()})()}
+
+    base = {"files": {"sci": ["a"], "ref": [], "bkg": []}, "cal_ver": ["2.0.1"], "crds_ctx": ["x"],
+            "pxscale": 0.11032674199848376, "hot_pixels": {"applied": False, "pixels": []},
+            "background_subtracted": 0, "destripe": True, "repair": "dq"}
+    assert M.negfc_cache_path(None) == M.NEGFC_F1140C
+    assert M.negfc_cache_path(_R(base)) == M.NEGFC_F1140C
+    rep = dict(base, hot_pixels={"applied": True, "pixels": [[125, 111]]})
+    other = dict(base, pxscale=0.1100)
+    p_rep, p_other = M.negfc_cache_path(_R(rep)), M.negfc_cache_path(_R(other))
+    assert len({M.NEGFC_F1140C, p_rep, p_other}) == 3
+    assert os.path.dirname(p_rep) == os.path.dirname(M.NEGFC_F1140C)

@@ -770,9 +770,11 @@ class Runner:
                 return True
             probe = np.zeros(shape, float)
             worst = mr
+            # the geometry's own sampler: a replay of recorded draws must not spend them here
+            smp = getattr(self.sampler, "base", None) or self.sampler
             for seed in (0x5E3D, 0xC0FFEE):
-                src = self.sampler.sample(n, lo, hi, np.random.default_rng([int(self.cfg.seed or 0),
-                                                                            int(ia), int(n), seed]))
+                src = smp.sample(n, lo, hi, np.random.default_rng([int(self.cfg.seed or 0),
+                                                                   int(ia), int(n), seed]))
                 _, det = mawet_peak_snr(probe, [s.rho for s in src], [s.theta for s in src],
                                         self.pxscale, self.fwhm, known=self._known(),
                                         excl_fwhm=float(getattr(m, "excl_fwhm", 1.5) or 1.5),
@@ -1190,6 +1192,17 @@ class Runner:
             k_used=k_used, contrast=contrast, wall_s=time.time() - t0, meta=meta)
         return rec, inj, clean
 
+    def replay_draws(self, recorded) -> None:
+        """From now on, inject ``recorded`` draws in order wherever this runner would draw
+        fresh positions (search, validation, remeasurement), so a configuration can be
+        re-scored on other frames at the same injections.  ``recorded``: a list of draws,
+        each ``[(rho, theta[, contrast]), ...]`` -- ``library_ablation.json``'s ``draws``, an
+        evaluation's ``meta['draw_sources']``, a validation row's ``trial_sources``.  The
+        injected contrast is the runner's.  See :class:`~klip_tpe.positions.ReplaySampler`."""
+        from .positions import ReplaySampler
+        base = getattr(self.sampler, "base", None) if isinstance(self.sampler, ReplaySampler) else self.sampler
+        self.sampler = ReplaySampler(recorded, base=base)
+
     def evaluate_mean(self, x: np.ndarray, phase: str, tag: str = "eval",
                       n: Optional[int] = None, on_draw=None
                       ) -> Tuple[EvalRecord, EvalImages, Optional[EvalImages]]:
@@ -1229,6 +1242,12 @@ class Runner:
         good = [float(s) for s in scores if s is not None and np.isfinite(s)]
         meta = dict(last.meta)
         meta["draw_scores"] = [None if s is None or not np.isfinite(s) else float(s) for s in scores]
+        # every draw's injections and raw score, not just the last one's: with these a trial
+        # can be re-scored on other frames (positions.ReplaySampler), which a sequential RNG
+        # stream cannot reproduce once the frames' forbidden sectors differ
+        meta["draw_sources"] = [[list(s) for s in r.sources] for r in recs]
+        meta["draw_raw_scores"] = [None if r.raw_score is None or not np.isfinite(r.raw_score)
+                                   else float(r.raw_score) for r in recs]
         meta["draw_n"] = len(recs)
         meta["draw_failed"] = int(len(recs) - len(good))
         meta["draw_sd"] = float(np.std(good, ddof=1)) if len(good) > 1 else None
@@ -1737,6 +1756,7 @@ class Runner:
             row = {"candidate": ci, "eval_index": e, "search_score": float(self.history.y[e]),
                    "validated_score": None if not np.isfinite(vscore) else float(vscore),
                    "trials": [None if not np.isfinite(v) else float(v) for v in vs],
+                   "trial_sources": [[list(s.as_tuple()) for s in src] for src in trial_src],
                    "x": [float(v) for v in x], "config": cfg.to_dict(), "committed_trial": commit}
             table.append(row)
             self.log(f"  validation cand {ci+1}/{len(cands)} (eval {e+1}, search {self.history.y[e]:.3f}) "

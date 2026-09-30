@@ -574,7 +574,10 @@ class KLIPReducer(Reducer):
         d.update(lam_m=self.lam_m, diam_m=self.diam_m, truenorth=self.truenorth, zone_pad=self.zone_pad,
                  outrad_cap=self.outrad_cap, defaults=dict(self.defaults), nframes=self.data.nframes,
                  has_ref_cube=self.data.ref_cube is not None, mask_fn=self.mask_fn is not None,
-                 injection_model=None if self.model is None else self.model.describe())
+                 injection_model=None if self.model is None else self.model.describe(),
+                 # which frames these are, when the loader said (load_calints does): the run's
+                 # record of its input, beside the record of what it did with it
+                 frames=(getattr(self.data, "meta", None) or {}).get("provenance"))
         return d
 
 

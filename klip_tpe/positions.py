@@ -15,7 +15,7 @@ import numpy as np
 
 from .metrics import Source
 
-__all__ = ["PositionSampler"]
+__all__ = ["PositionSampler", "ReplaySampler"]
 
 
 @dataclass
@@ -107,6 +107,48 @@ class PositionSampler:
     def describe(self) -> dict:
         return {"strategy": self.strategy, "min_r_fwhm": self.min_r_fwhm, "excl_fwhm": self.excl_fwhm,
                 "known": [list(k) for k in self.known], "forbidden_pa": [list(f) for f in self.forbidden_pa]}
+
+
+class ReplaySampler:
+    """Recorded injection draws handed back in order, instead of new ones.
+
+    A sampler's draws depend on the frames: its forbidden sectors come from the rolls and
+    the dead zones, so the same seed draws different positions on another processing of
+    the same data (the archive calints and a re-reduction from the raw ramps, say).  To
+    score a configuration on other frames at the SAME injections, replay the positions an
+    earlier run recorded -- ``library_ablation.json``'s ``draws``, or an evaluation's
+    ``meta['draw_sources']`` -- through this.
+
+    ``draws`` is a list of draws, each a list of ``(rho, theta[, contrast])``; the contrast
+    given to :meth:`sample` is the one injected.  Other attributes (``fwhm_as``, ``known``,
+    ``forbidden_pa``, ``describe``) come from ``base``, the sampler being stood in for.
+    Running out of recorded draws is an error, not a quiet switch to fresh ones.
+    """
+
+    def __init__(self, draws, base: Optional[PositionSampler] = None):
+        self.draws = [[tuple(float(v) for v in s[:2]) for s in d] for d in draws]
+        self.base = base
+        self.i = 0
+
+    def __getattr__(self, name):
+        base = self.__dict__.get("base")
+        if base is None:
+            raise AttributeError(name)
+        return getattr(base, name)
+
+    def sample(self, n: int, r_lo: float, r_hi: float, rng=None, contrast: float = 0.0) -> List[Source]:
+        if self.i >= len(self.draws):
+            raise IndexError(f"all {len(self.draws)} recorded draws have been replayed")
+        d = self.draws[self.i]
+        if len(d) != max(int(n), 1):
+            raise ValueError(f"recorded draw {self.i} holds {len(d)} sources, {n} asked for")
+        self.i += 1
+        return [Source(r, t, float(contrast)) for r, t in d]
+
+    def describe(self) -> dict:
+        d = dict(self.base.describe()) if self.base is not None else {}
+        d.update(replay=True, n_recorded=len(self.draws))
+        return d
 
 
 def max_sources_for_noise(inner_px: float, fwhm: float, *, excl_fwhm: float = 1.5,

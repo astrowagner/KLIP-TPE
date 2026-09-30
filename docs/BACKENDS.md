@@ -100,6 +100,69 @@ PSF at the data's pixel scale (`psf_template`, e.g. from spaceKLIP's
 a Gaussian of `1.028 λ/D` and flux unit 1 is used, which is fine for parameter *ranking*
 but not for calibrated contrasts.
 
+**pyKLIP starts a worker pool for every reduction.**  `klip_parallelized` builds a new
+`multiprocessing.Pool` on each call, and under `spawn` -- macOS's default -- each worker is a
+fresh interpreter importing numpy, scipy and pyklip first.  On macOS the backend therefore hands
+pyKLIP a `forkserver` context: one server with pyklip imported, the workers forked from it.
+Measured on MIRI F1140C evaluations (three draws each), spawn cost 18.0 and 12.6 s against 8.7
+and 4.0 s with the forkserver, and the scores are identical to the last bit.
+`KLIP_TPE_PYKLIP_START=spawn|fork|forkserver` overrides; elsewhere the platform default stands.
+
+**pyKLIP's `maxnumbasis` selects the library; it does not truncate it.**  Per target frame and
+sector, pyKLIP keeps the `maxnumbasis` frames of the chosen pools most correlated with the
+target, and builds its modes from those.  Left unset, `maxnumbasis = numbasis`, so every mode
+count `k` also picks a library of `k` frames.  In HIP 65426's F1140C data every frame of the
+other roll ranks ahead of every frame of the reference star (counted per target frame, pyKLIP
+2.10.1, archive calints): in Carter et al.'s frame set ADI+RDI keeps the other roll's 40 frames
+alone up to `k = 40` and adds the reference star's above it (40 + 41 at `k = 81`), and every
+ADI+RDI winner and default of the v8 searches holds the whole other roll plus some of the
+reference star (the default, `maxnumbasis = 6` at bin 10, the other roll's 5 binned frames and
+one reference frame).  The pyKLIP backend searches `mode` and `maxnumbasis` separately from
+`k_klip` for this reason (`set_native_library`).
+
+#### Raw stage-2 files: `load_calints`
+
+`load_calints(files, ...)` reads `*_calints.fits` directly, without spaceKLIP, and does five
+things to them before KLIP sees them, each one recorded:
+
+* **One exposure, once.** A product is named after its exposure, so a name that occurs twice
+  is refused.  The usual cause is two processings of one data set in one tree — MAST's
+  `mastDownload/` beside a re-reduction from `uncal` — found together by a recursive search.
+  Point the loader at one of them.
+* **Background.** The blank-sky median of the programme's dedicated background pointings is
+  subtracted from whichever frames the pipeline did not already do (`S_BKDSUB`): an archive
+  download mixes the two, because science targets get the step and PSF references usually do
+  not.  A mixture with no background pointing to fix it is refused.
+* **Static hot pixels** (`hot_pixels=None`, the default: whenever there are background
+  pointings).  A pixel that stands above (or below) both the median of its seven row
+  neighbours and the median of its seven column neighbours on the blank sky, by more than
+  `max(10 × robust σ, 5)` MJy/sr, is flagged in every science and reference frame and
+  repaired like a DQ pixel.  The AND keeps the 4QPM glow sticks, which stand out along one
+  axis only, off the list (where two sticks cross, under the star, the crossing is flagged);
+  the unilluminated border is never flagged.  On ERS 1386 F1140C the pipeline's DQ array
+  misses a hot pixel five pixels (0.6") from the star that no ADI+RDI reduction can fit,
+  because the library carries it at a different level than the science frames.
+  `hot_pixels=False` leaves them; `True` insists, and raises without a background pointing.
+* **Destriping** (on by default for MIRI): row and column offsets removed on the full
+  subarray, star and 4QPM boundaries masked.  On the F1140C frames it halves the ring noise
+  of an every-mode ADI+RDI reduction.
+* **Registration** by cross-correlation; a frame whose offset cannot be measured is left
+  unshifted and counted.
+
+`info['provenance']`, which every `Dataset`'s `meta` carries and the reducer's `describe()`
+writes into `run_setup.json` (`reducer.partitions.<id>.frames`), records the files, the
+pipeline version and CRDS context from their headers (`CAL_VER`, `CRDS_CTX`), the pixel
+scale as read (jwst 2.0.1 MIRI products carry 0.1103"/px, jwst 1.13.4 ones 0.1100"/px), the
+repaired hot pixels, what was background-subtracted, and how many frames the registration
+left unshifted.  Which pipeline made the calints is a parameter of the reduction, so a run
+says which it used.  `frames_signature(provenance)` names a frame treatment, for keying
+anything cached from one (a companion fit, say).
+
+Rebuilding a finished run (`scripts/library_ablation.py`, `paper_runs/miri_fig.py`) repairs
+hot pixels exactly when the run did; a run from before the repair existed stays unrepaired on
+its own frames (recognised by the pixel scale it recorded) and gets the loader's default on
+anyone else's.  `--hot-pixels on|off` overrides.
+
 #### STPSF off-axis PSFs
 
 `psf="stpsf"` replaces that template with the off-axis PSF of the coronagraph itself,

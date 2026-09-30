@@ -34,7 +34,7 @@ from .pyklip import PyKLIPReducer, dataset_from_pyklip
 
 __all__ = ["load_spaceklip", "load_calints", "make_reducer", "read_jwst_files", "JWST_DIAM",
            "fill_dq_neighbours", "sigma_clip_repair", "shift_keeping_gaps", "blank_sky",
-           "destripe_detector"]
+           "static_hot_pixels", "destripe_detector", "frames_provenance", "frames_signature"]
 
 JWST_DIAM = 6.5   # m (effective; lambda/D for the angsep unit and the default FWHM)
 
@@ -72,6 +72,100 @@ def blank_sky(files: Sequence[str]) -> np.ndarray:
         with _w.catch_warnings():
             _w.simplefilter("ignore", RuntimeWarning)
             return np.nanmedian(np.concatenate(ims, axis=0), axis=0)
+
+
+def static_hot_pixels(sky: np.ndarray, nsig: float = 10.0, min_excess: float = 5.0,
+                      window: int = 7) -> np.ndarray:
+    """Pixels a blank-sky frame shows as hot (or dead) that the DQ array did not flag.
+
+    ``sky`` is :func:`blank_sky`'s median of the dedicated background pointings: no star in
+    it, so anything sharp in it is the detector.  A pixel is hot when it stands above the
+    median of its finite ``window`` row-neighbours AND above the median of its finite
+    ``window`` column-neighbours (itself excluded) by more than ``nsig`` robust sigmas of that
+    excess and by more than ``min_excess`` (image units, MJy/sr on JWST; 5 is a quarter of
+    the F1140C sky).  The AND is what keeps the 4QPM glow sticks out: a pixel on one of them
+    is level with its neighbours along the stick.  Dead pixels (the same amount below) are
+    flagged too.  A pixel with fewer than four finite neighbours on either line (the
+    unilluminated border) is never flagged.  Returns a boolean mask, True where hot.
+
+    Why this exists: ERS 1386 F1140C has an unflagged hot pixel five pixels from the star
+    (detector x, y = 125, 111; 52 MJy/sr above its neighbours on the blank sky, 80 in the
+    reference frames), which the pipeline's background subtraction only partly removes
+    (+12-15 MJy/sr left in the science frames, +25-30 in the references).  KLIP cannot fit a
+    fixed detector feature that the library carries at a different level, so it survived
+    every reduction as a bright spot 0.6" north of the star, where Carter et al. (2023),
+    who replaced "~30 static hot pixels" by hand, show none.
+    """
+    b = np.asarray(sky, float)
+    fin = np.isfinite(b)
+    if not fin.any():
+        return np.zeros(b.shape, bool)
+    h = max(int(window) // 2, 1)
+    ny, nx = b.shape
+
+    def line_median(axis):
+        """Median of the finite neighbours within ``h`` along ``axis``, the pixel excluded, and
+        how many there were."""
+        stack, count = [], np.zeros(b.shape, int)
+        for k in range(-h, h + 1):
+            if k == 0:
+                continue
+            sh = np.full(b.shape, np.nan)
+            if axis == 1:
+                src, dst = (slice(None), slice(max(k, 0), nx + min(k, 0))), (slice(None), slice(max(-k, 0), nx + min(-k, 0)))
+            else:
+                src, dst = (slice(max(k, 0), ny + min(k, 0)), slice(None)), (slice(max(-k, 0), ny + min(-k, 0)), slice(None))
+            sh[dst] = b[src]
+            stack.append(sh)
+            count += np.isfinite(sh)
+        with np.errstate(all="ignore"):
+            import warnings as _w
+            with _w.catch_warnings():
+                _w.simplefilter("ignore", RuntimeWarning)
+                return np.nanmedian(np.stack(stack), axis=0), count
+
+    row_med, n_row = line_median(1)
+    col_med, n_col = line_median(0)
+    ok = fin & (n_row >= 4) & (n_col >= 4) & np.isfinite(row_med) & np.isfinite(col_med)
+    up = b - np.maximum(row_med, col_med)          # excess over BOTH lines through the pixel
+    down = np.minimum(row_med, col_med) - b        # deficit below both
+    dev = np.where(up > 0, up, np.where(down > 0, -down, 0.0))
+    dev = np.where(ok, dev, 0.0)
+    v = dev[ok]
+    sig = 1.4826 * float(np.median(np.abs(v - np.median(v)))) if v.size else 0.0
+    thr = max(float(nsig) * sig, float(min_excess))
+    return ok & (np.abs(dev) > thr)
+
+
+def frames_provenance(reducer) -> Optional[Dict[str, Any]]:
+    """The loader's record of the frames a reducer holds (``load_calints``' provenance, in
+    each Dataset's ``meta``), from its first partition that has one; None otherwise."""
+    subs = list(getattr(reducer, "reducers", {}).values()) or [reducer]
+    for r in subs:
+        rec = (getattr(getattr(r, "data", None), "meta", None) or {}).get("provenance")
+        if rec:
+            return rec
+    return None
+
+
+def frames_signature(provenance: Optional[Dict[str, Any]]) -> str:
+    """A short, stable name for a frame treatment: the products (file names, pipeline
+    version, CRDS context, pixel scale) and what the loader did to them (hot pixels,
+    background, destriping, repair).  Two loads with the same signature hand the reducer the
+    same frames, so anything cached from one (a companion fit, a default image) holds for the
+    other; a different signature means it does not.  ``"none"`` without a record."""
+    if not provenance:
+        return "none"
+    import hashlib
+    import json as _json
+    hp = provenance.get("hot_pixels") or {}
+    key = {"files": provenance.get("files"), "cal_ver": provenance.get("cal_ver"),
+           "crds_ctx": provenance.get("crds_ctx"),
+           "pxscale": round(float(provenance.get("pxscale") or 0.0), 9),
+           "hot_pixels": sorted(map(tuple, hp.get("pixels") or [])) if hp.get("applied") else None,
+           "background_subtracted": provenance.get("background_subtracted"),
+           "destripe": provenance.get("destripe"), "repair": provenance.get("repair")}
+    return hashlib.sha1(_json.dumps(key, sort_keys=True, default=str).encode()).hexdigest()[:10]
 
 
 def shift_keeping_gaps(im: np.ndarray, shift, order: int = 3) -> np.ndarray:
@@ -427,8 +521,15 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
                  partition: str = "roll", filter: Optional[str] = None,
                  background: Optional[bool] = None, destripe: Optional[bool] = None,
                  ref_targets: Optional[Union[str, Sequence[str]]] = None,
+                 hot_pixels: Optional[bool] = None,
                  log: Callable[[str], None] = print) -> Tuple[Dict[str, Dataset], Dict[str, Any]]:
     """Stage-2 ``*_calints.fits`` straight into ``{name: Dataset}``, without spaceKLIP.
+
+    ``hot_pixels`` (default ``None`` = when there are background pointings to find them in):
+    static hot or dead pixels the DQ array misses, found on the blank-sky median by
+    :func:`static_hot_pixels`, are flagged in EVERY frame (science and reference) and
+    repaired like DQ pixels.  ``False`` leaves them; ``True`` insists and raises without a
+    background pointing.  ``info['hot_pixels']`` lists them as ``(x, y)`` detector pixels.
 
     ``background`` (default ``None`` = as needed): subtract the dedicated blank-sky pointings
     from whichever science / reference frames the pipeline did not already do it for.  The two
@@ -504,6 +605,26 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
     files = sorted(files)
     if not files:
         raise ValueError("load_calints got no files")
+
+    # One exposure, once.  A JWST product is named after its exposure, so a name that occurs
+    # twice is the same exposure twice -- typically two processings of it side by side, the
+    # archive calints and a re-reduction from the raw ramps in a subfolder, which a recursive
+    # search finds together.  Stacked, every frame would enter twice, from two pipelines.
+    _seen: Dict[str, str] = {}
+    _dups: List[Tuple[str, str]] = []
+    for f in files:
+        b = os.path.basename(str(f))
+        if b in _seen:
+            _dups.append((_seen[b], str(f)))
+        else:
+            _seen[b] = str(f)
+    if _dups:
+        ex = "; ".join(f"{a} and {b}" for a, b in _dups[:3])
+        raise ValueError(
+            f"{len(_dups)} exposure(s) occur more than once among the {len(files)} files -- the "
+            f"same product name in two places, e.g. {ex}. That is usually two processings of one "
+            f"data set in one directory tree (MAST's mastDownload/ beside a re-reduction from "
+            f"uncal). Point the loader at one of them.")
 
     # One filter, always.  The wavelength and the pixel scale were taken from the FIRST
     # file and applied to every frame, so a directory holding more than one filter was
@@ -607,6 +728,14 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
         log(f"  calints: no PSF-reference files among the {len(files)} given -- the "
             f"datasets will carry no RDI library and the reduction will be ADI only")
 
+    versions: Dict[str, set] = {"CAL_VER": set(), "CRDS_CTX": set()}
+
+    def _note_versions(ph):
+        for k in versions:
+            v = ph.get(k) if hasattr(ph, "get") else None
+            if v not in (None, ""):
+                versions[k].add(str(v).strip())
+
     def read(fs, role):
         ims, pas, prov = [], [], []
         for f in fs:
@@ -615,6 +744,7 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
                 dq = np.asarray(h["DQ"].data, int)
                 s = h["SCI"].header
                 ph = h[0].header
+                _note_versions(ph)
                 pa = float(s["ROLL_REF"]) - float(s.get("V3I_YANG", 0)) * float(s.get("VPARITY", 1))
                 bad = (dq & 1).astype(bool)
                 d = np.where(bad, np.nan, d)
@@ -758,6 +888,24 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
         raise ValueError("background=True but no dedicated background pointing is among the "
                          "files given")
 
+    # ---- static hot pixels the DQ array misses, from the blank sky -----------------------
+    hot_xy: List[Tuple[int, int]] = []
+    if hot_pixels is True and not bkg:
+        raise ValueError("hot_pixels=True but no dedicated background pointing is among the "
+                         "files given to find them in")
+    if hot_pixels is not False and bkg:
+        hot = static_hot_pixels(blank_sky(bkg))
+        ys_, xs_ = np.nonzero(hot)
+        hot_xy = [(int(x), int(y)) for x, y in zip(xs_, ys_)]
+        if hot_xy:
+            S[:, hot] = np.nan
+            if R.size:
+                R[:, hot] = np.nan
+        log(f"  calints: {len(hot_xy)} static hot/dead pixel(s) the DQ array does not flag, "
+            f"found on the blank-sky median of {len(bkg)} background pointing(s), flagged in "
+            f"every frame and repaired like DQ pixels"
+            + (": " + ", ".join(f"({x},{y})" for x, y in hot_xy) if 0 < len(hot_xy) <= 40 else ""))
+
     # ---- detector-frame destriping, on the FULL subarray and before the crop ----------
     # After the background subtraction (so the sky pedestal is not folded into the row
     # offsets) and before the crop (where a row would be mostly PSF).  On by default for
@@ -794,13 +942,13 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
         log(f"  calints: repair='sigma' rewrote a median of {int(np.median(unflagged_rewritten))} UNFLAGGED "
             f"pixels per frame on top of the DQ ones -- that is the PSF being median-filtered, star and "
             f"companion alike (HIP 65426 b peaks at 7 instead of 19 MJy/sr).  Use repair='dq'.")
+    n_unmeasured = [0]
     if align:
         with np.errstate(all="ignore"):
             import warnings as _w
             with _w.catch_warnings():
                 _w.simplefilter("ignore", RuntimeWarning)
                 a0 = np.nanmedian(S, axis=0)   # np.median over a cube with gaps is all-NaN
-        n_unmeasured = [0]
 
         def _shift_all(cube, prov):
             out = []
@@ -857,9 +1005,27 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
         return out
 
     Sx, Rx = crop(S), crop(R)
+    for f in bkg:
+        _note_versions(fits.getheader(f))
+    # What these frames are, for the run's record (run_setup.json, through the reducer's
+    # describe()): which products, made by which pipeline, and what this loader did to them.
+    # The calints are an input a reduction depends on, so a run has to be able to say which.
+    provenance = {
+        "loader": "load_calints",
+        "files": {"sci": [os.path.basename(f) for f in sci], "ref": [os.path.basename(f) for f in ref],
+                  "bkg": [os.path.basename(f) for f in bkg]},
+        "dirs": sorted({os.path.dirname(os.path.abspath(str(f))) for f in list(sci) + list(ref) + list(bkg)}),
+        "cal_ver": sorted(versions["CAL_VER"]), "crds_ctx": sorted(versions["CRDS_CTX"]),
+        "pxscale": px,
+        "hot_pixels": {"requested": hot_pixels, "applied": bool(hot_pixels is not False and bkg),
+                       "n": len(hot_xy), "pixels": [list(p) for p in hot_xy]},
+        "background_subtracted": (int(n_need) if (background is not False and n_need and bkg) else 0),
+        "destripe": bool(destripe), "repair": rmode, "align": bool(align),
+        "n_unshifted": int(n_unmeasured[0]) if align else None,
+    }
     meta = {"pxscale": px, "wavelength_m": _wavelength_m(fits.getheader(sci[0])),
             "header": dict(fits.getheader(sci[0])), "pixar_sr": float(hdr.get("PIXAR_SR", np.nan)),
-            "bunit": str(hdr.get("BUNIT", "")).strip()}
+            "bunit": str(hdr.get("BUNIT", "")).strip(), "provenance": provenance}
     if str(partition).lower() not in ("roll", "all"):
         raise ValueError(f"partition must be 'roll' or 'all', got {partition!r}")
     dsets: Dict[str, Dataset] = {}
@@ -875,7 +1041,8 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
                 filter=str(fits.getheader(sci[0]).get("FILTER", "")),
                 star_center=(float(cx), float(cy)),
                 crpix=(float(hdr["CRPIX1"] - 1), float(hdr["CRPIX2"] - 1)),
-                rolls=[float(v) for v in np.unique(np.round(pas, 1))])
+                rolls=[float(v) for v in np.unique(np.round(pas, 1))],
+                hot_pixels=hot_xy)
     if keep_frames:
         info.update(raw_sci=raw_s, raw_ref=raw_r,
                     aligned_sci=np.asarray(S, np.float32), aligned_ref=np.asarray(R, np.float32),

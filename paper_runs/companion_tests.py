@@ -20,7 +20,9 @@ nircam    runs D / DK kept HIP 65426 b in the frames: the metric's ring scatter 
 miri      HIP 65426 b at F1140C sits at 0.82", inward of the injection band of the inner annulus
           (sources at 1.2-1.75").  Inject at 0.823" at each run's calibrated contrast and at the
           companion's (Carter et al. 2023: dF1140C = 8.264 -> 4.95e-4), default vs winner, on
-          both engines.  Needs MIRI_DATA and MIRI_RUNS as for miri_fig.py.
+          both engines, with the companion in the frames and, on the same draws, subtracted
+          from them first (miri_fig.miri_negfc).  Needs MIRI_DATA and MIRI_RUNS as for
+          miri_fig.py.
 miri_light  does the companion set the F1140C noise, as it did in F444W?  Per engine: the
           metric's ring scatter with it in the frames and taken out (miri_fig.miri_negfc), and
           the paired default-vs-winner comparison at the run's calibrated contrast with it in
@@ -185,45 +187,55 @@ def test_hd95086():
 
 
 def test_miri(n_draws=10):
-    """HIP 65426 b in F1140C: default vs winner at the companion's separation, both engines."""
+    """HIP 65426 b in F1140C: default vs winner at the companion's separation, both engines --
+    with the companion in the frames, and (``<engine>_<contrast>_removed``) on the same draws
+    with it subtracted from the frames first, at its negative-injection fit
+    (``miri_fig.miri_negfc``).  In some configurations its own light sets the ring scatter at
+    its separation (``miri_light``), which its forward-model S/N, measured with it subtracted,
+    does not see and the injections beside it do."""
+    from dataclasses import replace
     sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
     import library_ablation as LA
-    data = os.path.expanduser(os.environ.get("MIRI_DATA", "~/Data/JWST/hip65426_miri"))
-    runs = os.path.expanduser(os.environ.get("MIRI_RUNS", os.path.dirname(HERE)))
+    import miri_fig as M                              # the runs (MIRI_TAG) and the data the figure uses
     out = {}
+    pos = None
     for engine in ("pyklip", "klip"):
-        run_dir = os.path.join(runs, f"miri_HIP-65426_F1140C_v7_{engine}")
-        with open(os.path.join(run_dir, "run_setup.json")) as f:
-            setup = json.load(f)["config"]
+        run_dir, _full, setup, rb = M.rebuild_run(engine, lambda s: None)
         with open(os.path.join(run_dir, "final_results.json")) as f:
             fr = json.load(f)["annuli"][0]
-        a = type("A", (), dict(data=data, workers="auto", backend=engine))()
-        rb = LA._rebuild("miri", setup, a, lambda s: None)
-        red, ann, obj, samp, space = (rb[k] for k in ("red", "ann", "obj", "samp", "space"))
+        red, ann, obj, samp, space, px = (rb[k] for k in ("red", "ann", "obj", "samp", "space", "px"))
         cfg = RunConfig(ann_edges=[float(v) for v in ann], n_iter=1, n_init=1, seed=3,
                         validation=ValidationConfig(n_top=1, n_valid=1), calibration=CalibrationConfig(forced=[1e-4]),
                         n_remeasure=1, n_sources=2, save_fits=False, save_eval_images=False, fm_curve=False, verify=False)
         runner = Runner(red, space, obj, samp, cfg, os.path.join(run_dir, "_bright"), log=lambda s: None)
         runner.ia, runner.contrast = 0, float(fr["contrast"])
+        if pos is None:
+            pos = M.miri_negfc(runner, space, red, px)       # pyKLIP comes first; cached after
+        runner_out = Runner(red, space, obj, samp, replace(cfg, subtract_known=[tuple(pos)]),
+                            os.path.join(run_dir, "_bright_sub"), log=lambda s: None)
+        runner_out.ia, runner_out.contrast = 0, float(fr["contrast"])
         x_def = space.default_vector()
         cand = {"default": LA._vec(runner, x_def),
                 "winner": LA._vec(runner, LA._x_from_params(space, fr["winner_config"]["params"], x_def))}
         rho = LA.PLANET[0]
         for lab, c in (("calibrated", float(fr["contrast"])), ("companion", 4.95e-4)):
-            rng = np.random.default_rng(17)
-            sc = {k: [] for k in cand}
-            for _ in range(n_draws):
-                src = samp.sample(2, rho, rho, rng, c)
-                for k, x in cand.items():
-                    r, _, _ = runner.evaluate(x, "default", contrast=c, sources=src, raw_only=True)
-                    sc[k].append(float(r.raw_score))
-            d, w = np.array(sc["default"]), np.array(sc["winner"])
-            out[f"{engine}_{lab}"] = {"contrast": c, "rho_as": rho, "default": d.tolist(), "winner": w.tolist(),
-                                      "ratio_of_medians": float(np.median(w) / np.median(d)),
-                                      "winner_better": int((w > d).sum())}
-            print(f"miri     {engine:6s} {lab:10s} c={c:.2e} at {rho}\": default {np.median(d):.2f}  winner "
-                  f"{np.median(w):.2f}  x{np.median(w) / np.median(d):.2f}  winner better {int((w > d).sum())}/{n_draws}",
-                  flush=True)
+            for suffix, rn in (("", runner), ("_removed", runner_out)):
+                rng = np.random.default_rng(17)           # the same draws with the companion in and out
+                sc = {k: [] for k in cand}
+                for _ in range(n_draws):
+                    src = samp.sample(2, rho, rho, rng, c)
+                    for k, x in cand.items():
+                        r, _, _ = rn.evaluate(x, "default", contrast=c, sources=src, raw_only=True)
+                        sc[k].append(float(r.raw_score))
+                d, w = np.array(sc["default"]), np.array(sc["winner"])
+                out[f"{engine}_{lab}{suffix}"] = {"contrast": c, "rho_as": rho, "default": d.tolist(),
+                                                  "winner": w.tolist(),
+                                                  "ratio_of_medians": float(np.median(w) / np.median(d)),
+                                                  "winner_better": int((w > d).sum()),
+                                                  "companion_removed": bool(suffix), "negfc": list(pos)}
+                print(f"miri     {engine:6s} {lab + suffix:18s} c={c:.2e} at {rho}\": default {np.median(d):.2f}  "
+                      f"winner {np.median(w):.2f}  x{np.median(w) / np.median(d):.2f}  winner better "
+                      f"{int((w > d).sum())}/{n_draws}", flush=True)
     return out
 
 
@@ -238,13 +250,9 @@ def test_miri_light(n_draws=20, radii=(0.6, 0.84, 1.1, 1.5, 1.9)):
     out = {}
     pos = None
     for engine in ("pyklip", "klip"):
-        run_dir = os.path.join(M.RUNS, f"miri_HIP-65426_F1140C_v7_{engine}")
-        with open(os.path.join(run_dir, "run_setup.json")) as f:
-            setup = json.load(f)["config"]
+        run_dir, _full, setup, rb = M.rebuild_run(engine, lambda s_: None)
         with open(os.path.join(run_dir, "final_results.json")) as f:
             fr = json.load(f)["annuli"][0]
-        a = type("A", (), dict(data=M.DATA, workers="auto", backend=engine))()
-        rb = LA._rebuild("miri", setup, a, lambda s_: None)
         red, ann, obj, samp, px, space = (rb[k] for k in ("red", "ann", "obj", "samp", "px", "space"))
         m = obj.metric
         cfg = RunConfig(ann_edges=[float(v) for v in ann], n_iter=1, n_init=1, seed=21,

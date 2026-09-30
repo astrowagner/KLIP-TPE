@@ -154,7 +154,10 @@ def test_companion_tests_rebuild_each_runs_objective():
     run's own objective, the winner mapped by parameter name, the raw validation metric."""
     src = _text("companion_tests.py")
     assert src.count("C.build(which)") == 3 and src.count("C.run_vector(") == 3
-    assert "raw_only=True" in src and 'LA._rebuild("miri"' in src
+    assert "raw_only=True" in src and "M.rebuild_run(engine" in src, \
+        "the MIRI tests rebuild the runs the figure uses (miri_fig.rebuild_run -> LA._rebuild)"
+    assert 'LA._rebuild("miri", setup, a, log, full_setup=full)' in _text("miri_fig.py"), \
+        "with the whole run_setup.json, so the rebuild repairs hot pixels exactly when the run did"
     assert '"companion_fm_default"' in src and 'fm["contrast"]' in src, \
         "beta Pic b's brightness is its negative-companion fit, not flux_scale x published"
     assert "Source(rho_b, pa, cc)]" in src, "one source per reduction"
@@ -162,9 +165,11 @@ def test_companion_tests_rebuild_each_runs_objective():
 
 def test_miri_figure_uses_the_ablation_rebuild():
     """f13 must show the configurations Table 3 scores: rebuilt by library_ablation, which
-    refuses a setup that does not reproduce the run."""
+    refuses a setup that does not reproduce the run, and Carter et al.'s reduction as
+    library_ablation's ``carter_published`` sets it up."""
     src = _text("miri_fig.py")
-    assert 'LA._rebuild("miri"' in src and "LA._x_from_params(" in src and "LA.CARTER" in src
+    assert 'LA._rebuild("miri"' in src and "LA._x_from_params(" in src
+    assert "LA.carter_published_setup(" in src and "LA.carter_published_config(" in src
 
 
 def test_miri_figure_shows_the_zone_inside_the_annulus():
