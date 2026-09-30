@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from typing import Any, Callable, Dict, Optional, Sequence
 
 import numpy as np
@@ -45,6 +46,35 @@ def _require_pyklip():
         raise ImportError("PyKLIPReducer needs pyklip: pip install pyklip") from exc
     _check_pyklip_numpy(pk)
     _quiet_pyklip_progress(par)
+    _pyklip_start_method(par)
+
+
+def _pyklip_start_method(par) -> None:
+    """How pyKLIP starts the worker pool it builds for EVERY reduction.
+
+    ``klip_parallelized`` creates a new ``multiprocessing.Pool`` on each call.  Under
+    ``spawn`` -- macOS's default start method since Python 3.8 -- each pool worker is a fresh
+    interpreter that imports numpy, scipy and pyklip before doing anything, which costs
+    seconds per reduction, and a three-draw evaluation is six reductions: a MIRI search on a
+    Mac spent most of its time starting processes (measured on Linux with spawn forced: 18.0
+    and 12.6 s per three-draw evaluation against 8.5 and 4.4 with fork).  So on macOS pyKLIP's
+    pools come from a ``forkserver`` instead: one server process with pyklip imported, the
+    workers forked from it (8.7 and 4.0 s; safe on macOS, where the server is single-threaded).
+    ``KLIP_TPE_PYKLIP_START`` overrides (``spawn``, ``fork``, ``forkserver``); elsewhere the
+    platform default stands.  The arithmetic does not change -- the same functions run on the
+    same arrays -- only how the workers come to exist.
+    """
+    name = os.environ.get("KLIP_TPE_PYKLIP_START", "").strip().lower()
+    if not name and sys.platform == "darwin":
+        name = "forkserver"
+    if not name or getattr(par, "_klip_tpe_start", None) == name:
+        return
+    import multiprocessing
+    ctx = multiprocessing.get_context(name)
+    if name == "forkserver":
+        ctx.set_forkserver_preload(["numpy", "scipy.ndimage", "pyklip.parallelized"])
+    par.mp = ctx
+    par._klip_tpe_start = name
 
 
 def _quiet_pyklip_progress(par) -> None:
