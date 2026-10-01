@@ -15,6 +15,9 @@
 # tree with the same exposure twice (MAST's mastDownload/ beside a re-reduction under reproc/).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# paper_runs/ imports klip_tpe from this checkout, so the stages work in an environment where
+# the package is not installed (scripts/ insert the checkout themselves; paper_runs/ does not)
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 DATA="${MIRI_DATA:-$HOME/Data/JWST/hip65426_miri/mastDownload}"
 W="${WORKERS:-auto}"
 ANN="6.68240733102219 20.047221993066568 26.864474529578956 36.0"   # v7's annuli, px
