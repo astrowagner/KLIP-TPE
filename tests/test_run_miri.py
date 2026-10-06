@@ -14,6 +14,7 @@ the pixels in its stamps.
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 import sys
 
@@ -21,6 +22,13 @@ import numpy as np
 import pytest
 
 fits = pytest.importorskip("astropy.io.fits")
+
+#: The driver's wiring -- loader, dead zones, 2-D throughput, forbidden sectors -- is the same on
+#: both engines, so these tests run it on the built-in one, which needs no optional package (CI
+#: installs none).  The driver's own default is pyKLIP; the tests about pyKLIP's library are
+#: marked and run wherever pyklip is installed.
+needs_pyklip = pytest.mark.skipif(importlib.util.find_spec("pyklip") is None,
+                                  reason="pyKLIP backend: pip install pyklip")
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "scripts"))
@@ -98,7 +106,7 @@ def _args(**kw):
                 dead_zones=True, nan_dead_zones=False, n_iter=10, n_init=2, k_max=4,
                 max_drop=0, out=None, seed=1, workers=1, check=True, default_only=False,
                 fresh=False, show=False, star_center=None, display=True, display_every=10,
-                pdf_every=0, flux_density_jy=None)
+                pdf_every=0, flux_density_jy=None, backend="klip")
     base.update(kw)
     return run_miri, type("A", (), base)()
 
@@ -291,7 +299,7 @@ def test_check_refuses_a_radial_model_on_a_four_quadrant_mask(tree, stub_stpsf, 
     with pytest.raises(SystemExit, match="azimuthal average"):
         run_miri.main([f"--data={tree}", "--target=TARG", "--check", "--crop=40",
                        f"--out={tmp_path / 'o'}", "--k-max=4", "--workers=1", "--star-flux=1",
-                       "--no-searched-library"])
+                       "--no-searched-library", "--backend=klip"])
 
 
 def test_check_runs_the_whole_path_and_passes(tree, stub_stpsf, tmp_path):
@@ -300,7 +308,7 @@ def test_check_runs_the_whole_path_and_passes(tree, stub_stpsf, tmp_path):
     import run_miri
     rc = run_miri.main([f"--data={tree}", "--target=TARG", "--check", "--crop=40",
                         f"--out={out}", "--k-max=4", "--workers=1", "--star-flux=1",
-                        "--no-searched-library"])
+                        "--no-searched-library", "--backend=klip"])
     assert rc == 0
     log = (out / "run.log").read_text()
     assert "miri_library" in log
@@ -344,7 +352,7 @@ def test_panels_are_written_without_a_live_window(tree, stub_stpsf, tmp_path, mo
     out = tmp_path / "o"
     run_miri.main([f"--data={tree}", "--target=TARG", "--crop=40", f"--out={out}",
                    "--k-max=4", "--workers=1", "--star-flux=1", "--n-iter=1", "--default-only",
-                   "--no-searched-library"])
+                   "--no-searched-library", "--backend=klip"])
     assert made, "no display was created without --show, so no panels are written"
     assert made["show"] is False and made["run_dir"] == str(out)
     assert "klip-tpe view --run-dir" in (out / "run.log").read_text()
@@ -358,7 +366,7 @@ def test_no_display_really_turns_the_panels_off(tree, stub_stpsf, tmp_path, monk
     out = tmp_path / "o2"
     run_miri.main([f"--data={tree}", "--target=TARG", "--crop=40", f"--out={out}",
                    "--k-max=4", "--workers=1", "--star-flux=1", "--n-iter=1", "--default-only", "--no-display",
-                   "--no-searched-library"])
+                   "--no-searched-library", "--backend=klip"])
     assert made == []
 
 
@@ -496,6 +504,7 @@ def test_the_default_miri_annuli_leave_every_ring_its_noise_apertures():
 
 # ------------------------------------------- a searched library only on an engine that applies it
 
+@needs_pyklip
 def test_pyklip_searches_its_own_library_and_the_preflight_passes(tree, stub_stpsf, tmp_path):
     """On pyKLIP the searched library is pyKLIP's own ranking -- `mode` and `maxnumbasis` --
     never the nkeep_* counts it cannot apply (run v6 searched those for four hours to no
@@ -503,14 +512,14 @@ def test_pyklip_searches_its_own_library_and_the_preflight_passes(tree, stub_stp
     reduction before anything is spent on it."""
     import run_miri
     from klip_tpe.instruments import generic
-    run_miri, a = _args(data=str(tree), partition="all", searched_library=True)   # pyklip default
+    run_miri, a = _args(data=str(tree), partition="all", backend="pyklip", searched_library=True)
     dsets, info, red, ann, obj, samp, m, px = run_miri.build(a, log=lambda *_: None)
     names = generic.make_space(red, k_klip_max=4, search_angles=False).names
     assert "mode" in names and "maxnumbasis" in names
     assert not any(n.startswith("nkeep_") for n in names)
     out = tmp_path / "pk"
     rc = run_miri.main([f"--data={tree}", "--target=TARG", "--check", "--crop=40", "--partition=all",
-                        f"--out={out}", "--k-max=4", "--workers=1", "--star-flux=1"])
+                        f"--out={out}", "--k-max=4", "--workers=1", "--star-flux=1", "--backend=pyklip"])
     assert rc == 0
     log = (out / "run.log").read_text()
     assert "pyKLIP's own ranking" in log
@@ -519,6 +528,7 @@ def test_pyklip_searches_its_own_library_and_the_preflight_passes(tree, stub_stp
                    for l in log.splitlines() if "liveness:" in l), d
 
 
+@needs_pyklip
 def test_a_dead_dimension_stops_the_run_before_it_starts(tree, stub_stpsf, tmp_path, monkeypatch):
     """What should have happened to run v6: a searched dimension the reducer ignores is caught
     by the pre-flight and the run refuses to start."""
@@ -535,7 +545,8 @@ def test_a_dead_dimension_stops_the_run_before_it_starts(tree, stub_stpsf, tmp_p
     monkeypatch.setattr(generic, "make_space", with_a_dead_one)
     with pytest.raises(SystemExit, match="nkeep_altroll"):
         run_miri.main([f"--data={tree}", "--target=TARG", "--check", "--crop=40", "--partition=all",
-                       f"--out={tmp_path / 'dead'}", "--k-max=4", "--workers=1", "--star-flux=1"])
+                       f"--out={tmp_path / 'dead'}", "--k-max=4", "--workers=1", "--star-flux=1",
+                       "--backend=pyklip"])
 
 
 def test_the_built_in_engine_takes_the_library_and_searches_it(tree, stub_stpsf):
