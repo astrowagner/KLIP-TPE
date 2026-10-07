@@ -101,8 +101,9 @@ run_dir/
 ```
 
 `klip-tpe plots --run-dir <dir>` regenerates the diagnostic PNGs (`plots/`);
-`klip_tpe.display.plot_annulus_books(run_dir, ia)` the books; `render_steps(run_dir)`
-rebuilds the step frames and movie from the saved crops.
+`klip_tpe.display.plot_annulus_books(run_dir, ia)` the books; `klip-tpe render --run-dir <dir>`
+(`render_steps`) draws every evaluation's step panel again from the saved crops, including the
+ones the live display skipped, into `steps_rebuilt/` with its own movie.
 
 ## Reading the numbers
 

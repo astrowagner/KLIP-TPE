@@ -100,6 +100,30 @@ def test_post_hoc_books_and_steps(live_run):
     assert paths[-1].endswith("step0004.png")
 
 
+def test_klip_tpe_render_draws_every_panel_beside_the_live_ones(live_run, tmp_path):
+    """The live display's skip notice sends people to ``klip-tpe render``, which no version of
+    the CLI had.  It draws the panels from the log and the saved crops into steps_rebuilt/,
+    with its own movie, and leaves the live frames and movie exactly as they were -- the live
+    steps/ also holds calibration and validation frames this cannot redraw."""
+    import shutil
+    from klip_tpe import cli
+    d = str(tmp_path / "run")
+    shutil.copytree(live_run[0], d)
+    live = os.path.join(d, "steps")
+    before = {f: os.path.getmtime(os.path.join(live, f)) for f in os.listdir(live)}
+    movie = os.path.join(d, "opt_steps.gif")
+    movie_before = os.path.getmtime(movie) if os.path.exists(movie) else None
+    cli.main(["render", "--run-dir", d, "--every", "4", "--dpi", "60"])
+    out = os.path.join(d, "steps_rebuilt")
+    rebuilt = sorted(f for f in os.listdir(out) if f.startswith("step"))
+    assert rebuilt == [f"step{i:04d}.png" for i in range(5)], rebuilt     # evals 1, 5, 9, 13 and the last (14)
+    assert all(_size(os.path.join(out, f)) > 20_000 for f in rebuilt)
+    assert _size(os.path.join(out, "opt_steps.gif")) > 10_000
+    assert {f: os.path.getmtime(os.path.join(live, f)) for f in os.listdir(live)} == before, "live frames touched"
+    if movie_before is not None:
+        assert os.path.getmtime(movie) == movie_before, "the live movie was overwritten"
+
+
 def test_render_step_edge_cases(tmp_path):
     """First eval (no history), failed eval (NaN), single partition, no k_klip."""
     space = {"params": [{"name": "bin", "lo": 1, "hi": 20, "kind": "int"},

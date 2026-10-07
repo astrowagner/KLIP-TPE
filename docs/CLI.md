@@ -48,7 +48,7 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic}]
                         [--k-scan-max K_SCAN_MAX]
                         [--stitch-every STITCH_EVERY] [--verify] [--no-verify]
                         [--verify-n-boot VERIFY_N_BOOT] [--param-verify]
-                        [--no-param-verify] [--n-pv N_PV]
+                        [--no-param-verify] [--n-remeasure N] [--n-pv N_PV]
                         [--pv-divmin PV_DIVMIN] [--candidates]
                         [--write-setup-files] [--no-setup-files]
                         [--legacy-stitch] [--display] [--no-display]
@@ -137,6 +137,11 @@ options:
   --param-verify        parameter-ensemble persistence stage (default: on when
                         per-night blocks exist)
   --no-param-verify
+  --n-remeasure N       score each trial as the MEAN of N independent
+                        injection draws (default 1). The objective's per-draw
+                        scatter is ~0.9 S/N on typical data, so N=3 divides it
+                        by sqrt(3) and roughly halves the optimism of the
+                        reported best; see docs/BUDGET.md
   --n-pv N_PV
   --pv-divmin PV_DIVMIN
   --candidates          blind candidate search on the running/final stitch
@@ -261,8 +266,8 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic}]
                      [--k-mode {search,scan_rescore,scan}]
                      [--k-scan-max K_SCAN_MAX] [--stitch-every STITCH_EVERY]
                      [--verify] [--no-verify] [--verify-n-boot VERIFY_N_BOOT]
-                     [--param-verify] [--no-param-verify] [--n-pv N_PV]
-                     [--pv-divmin PV_DIVMIN] [--candidates]
+                     [--param-verify] [--no-param-verify] [--n-remeasure N]
+                     [--n-pv N_PV] [--pv-divmin PV_DIVMIN] [--candidates]
                      [--write-setup-files] [--no-setup-files]
                      [--legacy-stitch] [--display] [--no-display]
                      [--display-every DISPLAY_EVERY] [--pdf-every PDF_EVERY]
@@ -349,6 +354,11 @@ options:
   --param-verify        parameter-ensemble persistence stage (default: on when
                         per-night blocks exist)
   --no-param-verify
+  --n-remeasure N       score each trial as the MEAN of N independent
+                        injection draws (default 1). The objective's per-draw
+                        scatter is ~0.9 S/N on typical data, so N=3 divides it
+                        by sqrt(3) and roughly halves the optimism of the
+                        reported best; see docs/BUDGET.md
   --n-pv N_PV
   --pv-divmin PV_DIVMIN
   --candidates          blind candidate search on the running/final stitch
@@ -696,6 +706,26 @@ usage: klip-tpe plots [-h] --run-dir RUN_DIR
 options:
   -h, --help         show this help message and exit
   --run-dir RUN_DIR
+```
+
+## `klip-tpe render`
+
+```
+usage: klip-tpe render [-h] --run-dir RUN_DIR [--every EVERY]
+                       [--annulus ANNULUS [ANNULUS ...]] [--dpi DPI]
+                       [--out OUT] [--no-movie]
+
+options:
+  -h, --help            show this help message and exit
+  --run-dir RUN_DIR
+  --every EVERY         every Nth evaluation of each annulus (its last is
+                        always drawn)
+  --annulus ANNULUS [ANNULUS ...]
+                        only these annuli (1-based)
+  --dpi DPI             text scale of the panel; 100 = the live panel's
+  --out OUT             output directory (default <run-dir>/steps_rebuilt; the
+                        live steps/ and opt_steps.gif are left as they are)
+  --no-movie            skip <out>/opt_steps.gif
 ```
 
 ## `klip-tpe replay`

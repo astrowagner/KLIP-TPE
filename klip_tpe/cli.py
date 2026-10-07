@@ -582,6 +582,28 @@ def cmd_plots(a):
     print("wrote", ", ".join(sorted(figs)))
 
 
+def cmd_render(a):
+    """Every evaluation's panel, drawn after the fact.
+
+    The live display skips a panel whenever the render thread is still drawing the last one
+    (so the window shows the present instead of falling behind), and says so with a pointer
+    here.  The run's log and its per-evaluation crops hold everything a panel needs, so the
+    complete set can be drawn afterwards -- into its own directory, because the live
+    ``steps/`` also holds the calibration and validation frames this cannot redraw, and
+    renumbering over them would leave the two sets interleaved."""
+    from .display import render_steps
+    if not os.path.isdir(a.run_dir):
+        raise SystemExit(f"no run directory {a.run_dir}")
+    out = a.out or os.path.join(a.run_dir, "steps_rebuilt")
+    annuli = None if not a.annulus else [int(k) - 1 for k in a.annulus]
+    paths = render_steps(a.run_dir, annuli=annuli, every=a.every, dpi=a.dpi, out_dir=out,
+                         movie=not a.no_movie, movie_dir=out)
+    print(f"wrote {len(paths)} panels to {out}")
+    gif = os.path.join(out, "opt_steps.gif")
+    if not a.no_movie and paths and os.path.exists(gif):
+        print(f"movie: {gif}")
+
+
 def cmd_compare(a):
     """Replay the evaluations of a (running) IDL run through the Python objective."""
     from .idl_compare import LiveComparison
@@ -728,6 +750,19 @@ def _build_parser():
     p = sub.add_parser("plots", help="diagnostic plots for a run directory")
     p.add_argument("--run-dir", required=True)
     p.set_defaults(func=cmd_plots)
+
+    p = sub.add_parser("render", help="draw every evaluation's panel after the fact, including the ones the "
+                                      "live display skipped (from the run's log and saved crops)")
+    p.add_argument("--run-dir", required=True)
+    p.add_argument("--every", type=int, default=1,
+                   help="every Nth evaluation of each annulus (its last is always drawn)")
+    p.add_argument("--annulus", type=int, nargs="+", default=None, help="only these annuli (1-based)")
+    p.add_argument("--dpi", type=int, default=100, help="text scale of the panel; 100 = the live panel's")
+    p.add_argument("--out", default=None,
+                   help="output directory (default <run-dir>/steps_rebuilt; the live steps/ and "
+                        "opt_steps.gif are left as they are)")
+    p.add_argument("--no-movie", action="store_true", help="skip <out>/opt_steps.gif")
+    p.set_defaults(func=cmd_render)
 
     p = sub.add_parser("runs", help="what runs exist, which are actually running, and stop the strays")
     p.add_argument("--root", nargs="?", default=None,

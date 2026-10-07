@@ -3205,11 +3205,14 @@ def load_eval_images(run_dir: str, ia: int, i: int) -> Tuple[Optional[np.ndarray
 
 def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: int = 1, dpi: int = 90,
                  out_dir: Optional[str] = None, movie: bool = True,
-                 partition_label: Optional[str] = None) -> List[str]:
-    """Rebuild the step PNGs of a finished run from its log (no live images: the image
-    cells show the annulus winner FITS with a note).  Optionally assembles the movie.
+                 partition_label: Optional[str] = None, movie_dir: Optional[str] = None) -> List[str]:
+    """Rebuild the step PNGs of a run from its log and the per-evaluation crops it saved
+    (``annulusNN/evals/``); where a crop is missing the image cells show the annulus
+    winner's FITS with a note.  ``every``-th evaluation of each annulus, and its last.
+    Optionally assembles the movie, as ``opt_steps.gif`` / ``.mp4`` in ``movie_dir``
+    (default: the run directory, where the live run's own movie is).
     ``partition_label`` overrides what the partition panels call the partitions, for a run
-    written before the reducer carried one."""
+    written before the reducer carried one.  ``klip-tpe render`` is this from a terminal."""
     run = load_run(run_dir)
     out_dir = out_dir or os.path.join(run_dir, "steps")
     os.makedirs(out_dir, exist_ok=True)
@@ -3267,7 +3270,9 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
             from .animate import make_movie
             setup = run.get("setup") or run.get("checkpoint") or {}
             intro = render_intro(dict(setup, run_dir=run_dir), os.path.join(out_dir, "intro.png"))
-            make_movie(paths, os.path.join(run_dir, "opt_steps.gif"), os.path.join(run_dir, "opt_steps.mp4"), intro=intro)
+            md = movie_dir or run_dir
+            os.makedirs(md, exist_ok=True)
+            make_movie(paths, os.path.join(md, "opt_steps.gif"), os.path.join(md, "opt_steps.mp4"), intro=intro)
         except Exception:
             pass
     return paths

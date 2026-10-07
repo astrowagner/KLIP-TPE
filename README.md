@@ -159,6 +159,7 @@ klip-tpe near     --instrument nomic --root <pyNOMIC workdir> --obj <name> [--gr
 klip-tpe resume   --run-dir <dir>|last  <same data arguments>                                        # continue
 klip-tpe extend   --run-dir <dir> --n-iter <new totals>                                              # more evaluations
 klip-tpe plots    --run-dir <dir>                                                                    # figures
+klip-tpe render   --run-dir <dir> [--every N]                                                        # every panel, afterwards
 ```
 
 Common search arguments: `--ann-edges r0 r1 [r2 ...]` (px), `--n-iter`, `--n-init` (per

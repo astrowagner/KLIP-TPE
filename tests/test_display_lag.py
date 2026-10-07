@@ -115,6 +115,21 @@ def test_skipping_is_reported_once(tmp_path):
     assert d._skipped_panels == 300
 
 
+def test_the_rebuild_hint_names_a_command_that_exists(tmp_path):
+    """The notice told people to run ``klip-tpe render``, and so did tutorial 1 and
+    docs/BUDGET.md, but no version of the CLI had that command.  Whatever the hint names
+    has to parse, as printed."""
+    import re
+    from klip_tpe import cli
+    msgs = []
+    d = LiveDisplay(str(tmp_path), show=False, save_png=False, movie=False, log=msgs.append)
+    d._skip_panel()
+    m = re.search(r"klip-tpe (\S+) +--run-dir (\S+)", " ".join(msgs))
+    assert m, f"no command in the hint: {msgs!r}"
+    a = cli._build_parser().parse_args([m.group(1), "--run-dir", m.group(2)])
+    assert a.func is cli.cmd_render and a.run_dir == str(tmp_path)
+
+
 def test_a_skipped_panel_promises_no_file(tmp_path):
     """The gate runs before the panel is promised, so a skipped evaluation must leave no
     entry in the frame lists -- the progress movie reads those and a missing file breaks it."""

@@ -84,9 +84,10 @@ reopens a finished annulus with a larger budget (IDL `extend_ann`).
 
 ## Afterwards
 
-`klip-tpe plots --run-dir <dir>` regenerates every figure and book; `python -c "from klip_tpe
-import display; display.render_steps('<dir>', every=10)"` rebuilds the step frames and the
-movie from the saved per-eval crops.
+`klip-tpe plots --run-dir <dir>` regenerates every figure and book; `klip-tpe render --run-dir
+<dir> [--every 10]` draws the step panels again from the saved per-eval crops -- every one,
+including those the live display skipped -- into `<dir>/steps_rebuilt/` with its own movie,
+leaving the live `steps/` alone (`display.render_steps` from Python).
 
 ## Re-scoring a run on other frames
 

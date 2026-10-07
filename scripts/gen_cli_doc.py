@@ -7,7 +7,7 @@ import sys
 
 from klip_tpe import cli
 
-COMMANDS = ["generic", "near", "resume", "extend", "plots", "replay", "compare", "testbed"]
+COMMANDS = ["generic", "near", "resume", "extend", "plots", "render", "replay", "compare", "testbed"]
 INTRO = """# Command-line reference
 
 Generated from `klip-tpe <command> --help` (`python scripts/gen_cli_doc.py`).  `near` and

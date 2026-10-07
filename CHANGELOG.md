@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 2026-10-07 (live display: validation panels gated, one rc context at a time)
+## Unreleased — 2026-10-07 (live display: validation panels gated, one rc context at a time; `klip-tpe render`)
 
 - **Validation panels wait their turn.**  `LiveDisplay.on_validation_trial` now passes the
   render gate the search panels already used.  Every validation trial (`n_top x n_valid`, 48
@@ -17,6 +17,14 @@
   `corner.pdf` ... `products.pdf` were being written, and the wrong order of exits could
   leave the dark theme behind for figures made afterwards.  Pinning the light colours in
   `_RC` had fixed only the books' side of the race.
+- **`klip-tpe render --run-dir <dir> [--every N] [--annulus K ...] [--out DIR]`** draws every
+  evaluation's step panel after the fact, from the log and the saved per-eval crops, into
+  `<dir>/steps_rebuilt/` with its own `opt_steps.gif` -- the live `steps/` (which also holds
+  the calibration and validation frames) and the live movie are left as they are.  The live
+  display's skip notice, tutorial 1 and docs/BUDGET.md have all pointed at this command, which
+  did not exist; `display.render_steps` was there, Python-only.  `render_steps(movie_dir=)`
+  puts its movie beside the panels.  docs/CLI.md regenerated, which also adds the
+  `--n-remeasure` the README's terminal example already uses.
 
 ## Unreleased — 2026-09-30 (MIRI frames: hot pixels, provenance, one exposure once; replayable draws)
 
