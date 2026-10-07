@@ -16,6 +16,7 @@ for the backlog to form at all.
 """
 import threading
 import time
+import types
 
 import numpy as np
 import pytest
@@ -133,6 +134,44 @@ def test_a_skipped_panel_promises_no_file(tmp_path):
     gate.set()
     assert d._paths == [] and d._ann_frames == [], (d._paths, d._ann_frames)
     assert d._skipped_panels == 20
+
+
+def test_validation_trials_go_through_the_same_gate(tmp_path, monkeypatch):
+    """The validation panels had no gate at all.  ``n_top x n_valid`` trials arrive back to
+    back and every one was queued, so on the README's first run 48 panels piled up behind
+    the render thread: the window fell 3.7 minutes behind, the annulus waited for them
+    before it could finish, and its books were written while they were still drawing."""
+    drawn = []
+    monkeypatch.setattr(D, "render_step", lambda *a, **k: drawn.append(k.get("step_label")))
+    d = LiveDisplay(str(tmp_path), show=False, save_png=True, movie=False, log=lambda m: None)
+    d._render_pool()
+    d.RENDER_GRACE = 0.01
+    d._data = lambda runner: _annulus(n=50, npart=1)
+    runner = types.SimpleNamespace(ia=0, cfg=None, results=[], wall0=time.time(), wall_prev=0.0)
+
+    def trial(ci, n_cand, t, n_valid):
+        d.on_validation_trial(runner, 0, ci, n_cand, 10 + ci, t, n_valid, None, None, [], None,
+                              [None] * n_valid)
+
+    # a free render thread: the trial gets its panel, as before
+    trial(0, 1, 0, 1)
+    d._wait_renders()
+    assert len(drawn) == 1 and drawn[0].startswith("VALIDATION"), drawn
+    step0, paths0 = d._step, list(d._paths)
+
+    # a busy one: every trial is declined -- none queued, none promised a file
+    gate = threading.Event()
+    d._submit_render(None, lambda: gate.wait(10))
+    for ci in range(6):
+        for t in range(8):
+            trial(ci, 6, t, 8)
+    in_flight = sum(1 for f, _ in d._renders if not f.done())
+    gate.set()
+    d._wait_renders()
+    assert in_flight == 1, f"{in_flight} renders in flight: validation panels queued behind a busy render"
+    assert d._skipped_panels == 48
+    assert (d._step, d._paths) == (step0, paths0), "a skipped validation panel was promised a file"
+    assert len(drawn) == 1
 
 
 def test_the_window_keeps_its_turn_while_the_gate_waits(tmp_path):

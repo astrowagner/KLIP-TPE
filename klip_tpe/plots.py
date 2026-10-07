@@ -11,8 +11,10 @@ metric name, never a generic "S/N map".
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -39,8 +41,28 @@ _STYLE = {"axes.spines.top": True, "axes.spines.right": True, "axes.grid": False
           "pdf.fonttype": 42}          # TrueType embedding: real text in the paper figures (see display._RC)
 
 
+#: Held by every rc context this package opens (:func:`_locked_rc`).  matplotlib keeps ONE
+#: rcParams dict per process, and ``rc_context`` writes its values into it on entry and puts
+#: its own snapshot back on exit -- so two threads inside contexts at once each draw with the
+#: other's settings, and whichever leaves last restores a snapshot holding the other's.  The
+#: live panel (dark, on the display's render thread) and the annulus books (light, on the
+#: main thread) did exactly that: panels drawn while the books were being written came out
+#: with white axes and black-on-black text (4 of 122 frames of the README's first run).
+#: Reentrant, so a context opened inside another on the same thread nests as matplotlib's
+#: own contexts do; the panel's lag is still one panel (the render gate), so a book waits
+#: at most that long.
+_RC_LOCK = threading.RLock()
+
+
+@contextlib.contextmanager
+def _locked_rc(rc: Dict[str, Any]):
+    """``matplotlib.rc_context(rc)``, entered under :data:`_RC_LOCK`."""
+    with _RC_LOCK, matplotlib.rc_context(rc):
+        yield
+
+
 def _style():
-    return matplotlib.rc_context(_STYLE)
+    return _locked_rc(_STYLE)
 
 
 # ----------------------------------------------------------------------------

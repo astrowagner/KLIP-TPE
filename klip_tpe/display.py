@@ -51,7 +51,7 @@ from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 
 from .metrics import radprof, source_xy, star_center
 from .plots import (PHASE_COLORS, PHASE_ORDER, SEARCH_LABEL, VALID_LABEL, _annulus_records, _bins_for,
-                    _config, _metric_name, _space, load_run)
+                    _config, _locked_rc, _metric_name, _space, load_run)
 from .runner import RunCallback
 
 __all__ = ["AnnulusData", "LiveDisplay", "annulus_from_run", "render_step", "render_steps",
@@ -136,14 +136,15 @@ _RC = {"axes.spines.top": True, "axes.spines.right": True, "axes.grid": False,
        "xtick.labelsize": 7, "ytick.labelsize": 7, "legend.fontsize": 7, "legend.frameon": False,
        "axes.titlepad": 3, "axes.labelpad": 2, "xtick.major.pad": 2, "ytick.major.pad": 2,
        # Every colour _RC_DARK touches is pinned light here, so the package style is a
-       # complete theme rather than a patch on whatever is in rcParams.  The live panel
-       # renders its frames on a worker thread inside _rc(idl=True, dark=True), and
-       # matplotlib's rc_context mutates the one process-global rcParams dict: while that
-       # frame is drawing, a book written from the main thread used to pick up the panel's
-       # savefig.facecolor and come out black-on-black (corner.pdf and parhist.pdf, at
-       # random, depending on which thread won).  Pinning the light values makes _rc()
-       # immune to that -- the dark context still wins for the panel, because _RC_DARK is
-       # applied after _RC.
+       # complete theme rather than a patch on whatever is in rcParams (a user's own dark
+       # matplotlibrc included).  That is not what keeps the two threads apart, though: the
+       # live panel renders on a worker thread inside _rc(idl=True, dark=True) while the
+       # main thread writes books inside _rc(), and rc_context mutates the one
+       # process-global rcParams dict.  Pinning alone fixed one direction (books coming out
+       # black-on-black with the panel's savefig.facecolor, corner.pdf and parhist.pdf at
+       # random) and left the other: panels drawn while a book was open took its white
+       # faces and black text.  _rc() therefore holds plots._RC_LOCK for its whole extent,
+       # so only one theme is ever in force.
        "figure.facecolor": "white", "axes.facecolor": "white", "savefig.facecolor": "white",
        "text.color": "black", "axes.labelcolor": "black", "axes.edgecolor": "black",
        "xtick.color": "black", "ytick.color": "black", "grid.color": "#b0b0b0",
@@ -170,13 +171,15 @@ _RC_DARK = {"figure.facecolor": "black", "axes.facecolor": "black", "savefig.fac
 
 def _rc(idl: bool = False, dark: bool = False):
     """Matplotlib rc context: the package style, or the IDL live-window look (boxed
-    axes, inward ticks; ``dark`` = black background like the IDL X window)."""
+    axes, inward ticks; ``dark`` = black background like the IDL X window).  Entered
+    under the package's rc lock (see ``_RC`` above), so a context on another thread
+    waits for this one to close instead of restyling it mid-figure."""
     rc = dict(_RC)
     if idl:
         rc.update(_RC_IDL)
     if dark:
         rc.update(_RC_DARK)
-    return matplotlib.rc_context(rc)
+    return _locked_rc(rc)
 
 
 def _fg() -> str:
@@ -4201,11 +4204,23 @@ class LiveDisplay(RunCallback):
     def on_validation_trial(self, runner, ia: int, ci: int, n_cand: int, e: int, t: int, n_valid: int,
                             inj, clean, sources, r, trials) -> None:
         """Validation trials go through the step panel like IDL's ``valid`` frames: the
-        trial's images in the Test cells, candidate / trial / fresh sources in the title."""
+        trial's images in the Test cells, candidate / trial / fresh sources in the title.
+
+        They pass the same render gate as the search panels.  The trials arrive back to
+        back -- ``n_top x n_valid`` of them, 48 in the README's first run -- and every one
+        used to be queued: on a machine where a panel takes longer to draw than a trial
+        takes to run, the window fell minutes behind (3.7 min on that run), the annulus
+        then sat in ``_wait_renders`` until the backlog had drained, and the annulus books
+        were written while queued panels were still drawing.  A trial is drawn when the
+        render thread is free and skipped when it is not; the annulus-done frame that
+        follows is drawn regardless, so the result never goes without its panel."""
         ad = self._guard(runner, "validation data", self._data, runner)
         if ad is None or ad.n == 0:
             return
-        self._eta_mark(runner, "val")
+        self._eta_mark(runner, "val")                # every trial, drawn or not: it is the ETA's clock
+        if not self._render_room():
+            self._skip_panel()
+            return
         et = getattr(self, "_eval_times", [])[-50:]
         per = (et[-1] - et[0]) / (len(et) - 1) if len(et) >= 2 else np.nan
         trials_left = (n_cand - ci - 1) * n_valid + (n_valid - t - 1)

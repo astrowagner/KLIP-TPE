@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — 2026-10-07 (live display: validation panels gated, one rc context at a time)
+
+- **Validation panels wait their turn.**  `LiveDisplay.on_validation_trial` now passes the
+  render gate the search panels already used.  Every validation trial (`n_top x n_valid`, 48
+  in the README's first run) was queued unconditionally, so where a panel draws slower than a
+  trial runs, the window fell minutes behind and the annulus then waited in `_wait_renders`
+  for the backlog: 3.7 min on that run on two cores, long enough for the heartbeat to report a
+  stall in `param_verify` that was really the display.  A trial is skipped while the render
+  thread is busy; the annulus-done frame is drawn regardless.
+- **One rc context at a time.**  Every rc context the package opens (`display._rc`,
+  `plots._style`) now holds one reentrant lock (`plots._RC_LOCK`) for its whole extent.
+  rcParams is a single dict per process, and the panel (dark, on the render thread) and the
+  annulus books (light, on the main thread) used to be open together: 4 of that run's 122
+  panels came out with white axes and black-on-black text, every one drawn while
+  `corner.pdf` ... `products.pdf` were being written, and the wrong order of exits could
+  leave the dark theme behind for figures made afterwards.  Pinning the light colours in
+  `_RC` had fixed only the books' side of the race.
+
 ## Unreleased — 2026-09-30 (MIRI frames: hot pixels, provenance, one exposure once; replayable draws)
 
 - **Static hot pixels the DQ array misses** (`load_calints(hot_pixels=None)`, on whenever
