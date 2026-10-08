@@ -8,9 +8,9 @@ rolls) and the reference star HIP 68245 (9-point small-grid dither) as stage-2
     python3 tutorials/fetch_jwst_hip65426.py [--out ~/.klip_tpe/data/jwst_hip65426] [--filters F444W F300M]
 
 Files (~10-60 MB each, 320x320 SUB320A335R) come from MAST; no login needed.  The
-tutorial then reads them with ``klip_tpe.backends.spaceklip.load_spaceklip(sci_files=...,
-ref_files=...)``.  spaceKLIP's ImageTools products (better centring / cleaning) can be
-substituted one for one.
+tutorial repairs and registers them itself; ``klip_tpe.backends.spaceklip.load_calints``
+does the same in one call.  spaceKLIP's ImageTools products (better centring and cleaning)
+load with ``load_spaceklip`` instead.
 """
 import argparse
 import os

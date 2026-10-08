@@ -253,10 +253,14 @@ def _protocol_args(p):
     p.add_argument("--fm-preview", dest="fm_preview", action="store_true", default=True,
                    help="live KLIP-FM preview at each new best (A 9.3; one extra reduction per new best; default on)")
     p.add_argument("--no-fm-preview", dest="fm_preview", action="store_false")
-    p.add_argument("--no-liveness-check", dest="liveness_check", action="store_false", default=True,
-                   help="skip the pre-flight that moves each searched reduction dimension alone and refuses "
-                        "to start when one changes nothing (klip_tpe.liveness; ~1 + ndim reductions, new "
-                        "runs only)")
+    live = p.add_mutually_exclusive_group()
+    live.add_argument("--no-liveness-check", dest="liveness_check", action="store_const", const="off",
+                      default="warn",
+                      help="skip the pre-flight that moves each searched reduction dimension alone and warns "
+                           "when one changes nothing (klip_tpe.liveness; ~1 + ndim reductions, new runs only)")
+    live.add_argument("--strict-liveness", dest="liveness_check", action="store_const", const="strict",
+                      help="stop before the first evaluation when the pre-flight finds a dimension that "
+                           "changes nothing, instead of warning")
 
 
 def _protocol_config(a) -> dict:
@@ -267,7 +271,7 @@ def _protocol_config(a) -> dict:
                 write_setup_files=a.write_setup_files, legacy_stitch=a.legacy_stitch,
                 partition_weighting=a.weighting, fm_curve=a.fm_curve, fm_preview=a.fm_preview,
                 pair_area_midpoint=not getattr(a, "ladder_pair", False),
-                liveness_check=bool(getattr(a, "liveness_check", True)))
+                liveness_check=getattr(a, "liveness_check", "warn"))
 
 
 def build_near_space(red, a):

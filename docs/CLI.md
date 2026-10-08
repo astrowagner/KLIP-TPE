@@ -56,7 +56,8 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic}]
                         [--pdf-every PDF_EVERY] [--movie-every MOVIE_EVERY]
                         [--show [SHOW]] [--aliens]
                         [--window-scale WINDOW_SCALE] [--no-fm-curve]
-                        [--fm-preview] [--no-fm-preview] [--no-liveness-check]
+                        [--fm-preview] [--no-fm-preview]
+                        [--no-liveness-check | --strict-liveness]
 
 options:
   -h, --help            show this help message and exit
@@ -174,9 +175,12 @@ options:
                         extra reduction per new best; default on)
   --no-fm-preview
   --no-liveness-check   skip the pre-flight that moves each searched reduction
-                        dimension alone and refuses to start when one changes
-                        nothing (klip_tpe.liveness; ~1 + ndim reductions, new
-                        runs only)
+                        dimension alone and warns when one changes nothing
+                        (klip_tpe.liveness; ~1 + ndim reductions, new runs
+                        only)
+  --strict-liveness     stop before the first evaluation when the pre-flight
+                        finds a dimension that changes nothing, instead of
+                        warning
 
 generic cubes (--instrument generic / klip-tpe generic):
   --cube CUBE [CUBE ...]
@@ -278,7 +282,8 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic}]
                      [--display-every DISPLAY_EVERY] [--pdf-every PDF_EVERY]
                      [--movie-every MOVIE_EVERY] [--show [SHOW]] [--aliens]
                      [--window-scale WINDOW_SCALE] [--no-fm-curve]
-                     [--fm-preview] [--no-fm-preview] [--no-liveness-check]
+                     [--fm-preview] [--no-fm-preview]
+                     [--no-liveness-check | --strict-liveness]
 
 options:
   -h, --help            show this help message and exit
@@ -396,9 +401,12 @@ options:
                         extra reduction per new best; default on)
   --no-fm-preview
   --no-liveness-check   skip the pre-flight that moves each searched reduction
-                        dimension alone and refuses to start when one changes
-                        nothing (klip_tpe.liveness; ~1 + ndim reductions, new
-                        runs only)
+                        dimension alone and warns when one changes nothing
+                        (klip_tpe.liveness; ~1 + ndim reductions, new runs
+                        only)
+  --strict-liveness     stop before the first evaluation when the pre-flight
+                        finds a dimension that changes nothing, instead of
+                        warning
 
 generic cubes (--instrument generic / klip-tpe generic):
   --cube CUBE [CUBE ...]

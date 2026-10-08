@@ -6,10 +6,13 @@ what the star flux is, over what aperture the two are normalised, and therefore 
 contrast axis means. It also names the places where a normalisation is *assumed* rather
 than measured.
 
-The optimizer never needs any of this: it compares S/N between configurations, and every
-configuration sees the same injections, so a wrong star flux cancels. It matters for one
-thing only — the absolute contrast axis — which is why it can be wrong for a long time
-without anything looking wrong.
+The optimizer barely needs any of this: it compares S/N between configurations, and the
+calibration scales the injected contrast until the default configuration scores S/N ≈ 5,
+so a star flux that is off by a modest factor only relabels the axis. It stops cancelling
+when it is off by orders of magnitude: the contrast the calibration needs then lies above
+its cap (`CalibrationConfig.max_contrast = 0.1`), the injections stay invisible, and the
+search ranks noise. Short of that it matters for one thing only — the absolute contrast
+axis — which is why it can be wrong for a long time without anything looking wrong.
 
 ## The one line that sets the scale
 
@@ -71,9 +74,9 @@ interchangeable and nothing checks them against each other.
      the whole stamp and says nothing about β Pictoris. The files carry no headers — no
      `EXPTIME`, no DIT, no ND keyword — so nothing in the distribution records the scale.
 
-  Left unset, `flux_unit` becomes 4.3491 and the axis lands **9.4 × 10⁵** from a contrast:
-  β Pic b then measures 586 instead of 6.25e-4. A normalised template is the easiest way to
-  get an axis that looks plausible and means nothing.
+  Left unset, `flux_unit` becomes 4.3491 and the axis is off by 3.3268e6 / 4.3491 =
+  **7.65 × 10⁵**: β Pic b then measures 586 instead of 7.7e-4. A normalised template is the
+  easiest way to get an axis that looks plausible and means nothing.
 
 * **Where the number comes from.** VIP's own metrics tutorial publishes
   `starphot = 764939.6` for this very cube, "obtained from the non-coronagraphic PSF before
@@ -142,8 +145,9 @@ interchangeable and nothing checks them against each other.
   `stpsf_psf.star_flux_from_flux_density(grid, 0.40259, PIXAR_SR)` — `optics_transmission`
   at its default of 1.0.
 * **Status**: **the chain is complete, nothing in it is anchored on the companion, and it
-  closes on HIP 65426 b: ΔF444W = 8.735 ± 0.094 against Carter et al. (2023)'s 8.703 ± 0.055
-  (Table 3), +0.03 mag** (`scripts/check_hip65426_contrast.py`, 2026-09-16). An independent
+  closes on HIP 65426 b: ΔF444W = 8.796 ± 0.092 against Carter et al. (2023)'s 8.703 ± 0.055
+  (Table 3), +0.09 mag or 0.9σ** (`scripts/check_hip65426_contrast.py`; it read 8.735 until
+  the templates stopped being rotated on 2026-09-22, see the CHANGELOG). An independent
   route agrees: injecting the STPSF off-axis PSF at Carter's published flux density
   (127 µJy) and recovering it through the same pyKLIP reduction as the companion gives
   F_measured / F_Carter = 1.01 ± 0.10 (ADI+RDI, 20 modes, r ≤ 4 px) and 1.16 ± 0.13 (RDI,
@@ -387,8 +391,8 @@ published `starphot`, checked against β Pic b at 1.1 σ) and HIP 65426's, which
 all. Closed on 2026-09-16: the last assumed number in the HIP 65426 table — the 0.561
 "optics transmission" anchored on the companion was the calints loader's median filter
 damaging the companion and not the fakes; with the repair fixed, the star centre re-solved on
-clean frames and no anchor, HIP 65426 b measures ΔF444W = 8.735 ± 0.094 against Carter et al.'s
-8.703 ± 0.055. What remains:
+clean frames and no anchor, HIP 65426 b measures ΔF444W = 8.796 ± 0.092 against Carter et al.'s
+8.703 ± 0.055 (8.735 before the templates stopped being rotated). What remains:
 
 1. ~~`optics_transmission = 0.561` is anchored on HIP 65426 b.~~ Closed — see above and
    "What 0.561 really was" in the HIP 65426 section.

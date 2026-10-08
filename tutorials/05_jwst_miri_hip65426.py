@@ -1,31 +1,31 @@
 # %% [markdown]
-# # Tutorial 5 — JWST/MIRI coronagraphy: the four-quadrant phase mask
+# # Tutorial 5: JWST/MIRI Coronagraphy with a Four-Quadrant Phase Mask (HIP 65426 b, F1140C)
 #
-# Tutorial 3 optimized the NIRCam half of ERS-1386 on HIP 65426.  This is the **MIRI** half
-# of the same programme, on the same star: F1140C behind FQPM1140, two rolls 9.4° apart, and
-# sixteen reference exposures of two other stars.  Running one target through two instruments
-# is the cheapest way to see which parts of a reduction are the pipeline's and which are the
-# coronagraph's.
+# Tutorial 3 optimized the NIRCam half of ERS 1386 on HIP 65426. This is the MIRI half of the
+# same program on the same star: F1140C behind FQPM1140, two rolls 9.4° apart, and the
+# reference star HIP 68245 (φ Cen) in a 9-point small-grid dither. Running one target through
+# two instruments separates what belongs to the pipeline from what belongs to the
+# coronagraph.
 #
-# Because MIRI is not NIRCam with different numbers in it.  Three of its four coronagraphs
-# are **four-quadrant phase masks**: instead of blocking a disc, they put a π phase step
-# across two perpendicular lines through the star.  Everything downstream that assumes a
-# round occulter is wrong here, and each of the three consequences below is a way to get a
-# confident wrong answer rather than a crash.  All three were live bugs in this repository
-# in September 2026; the sections say what they looked like.
+# Three of MIRI's four coronagraphs are four-quadrant phase masks (4QPM). Instead of blocking
+# a disk, they put a π phase step along two perpendicular lines through the star. Everything
+# downstream that assumes a round occulter is wrong here, and each of the three consequences in
+# sections 2 and 3 gives a wrong answer without an error if it is missed.
 #
-# **Data.**  `scripts/fetch_jwst_ar.py` pulls the programme from MAST (~1.5 GB for all three
-# MIRI filters, no login):
+# **Data.** `scripts/fetch_jwst_ar.py` lists and downloads the program's MIRI coronagraphy
+# (F1140C and F1550C for this star) from MAST, with no login:
 # ```
-# python3 scripts/fetch_jwst_ar.py --list hip65426_miri        # look before downloading
-# python3 scripts/fetch_jwst_ar.py --fetch hip65426_miri --out ~/Data/JWST/hip65426_miri
+# python3 scripts/fetch_jwst_ar.py --targets hip65426_miri                         # list first
+# python3 scripts/fetch_jwst_ar.py --targets hip65426_miri --download --outdir ~/Data/JWST
 # ```
-# Point `KLIP_TPE_JWST_MIRI` elsewhere if you keep it somewhere else.  Every cell below is
-# guarded, so the notebook reads as a document without the files.
+# The files land in `~/Data/JWST/hip65426_miri/`. Set `KLIP_TPE_JWST_MIRI` if you keep them
+# elsewhere. Every cell below is guarded, so the notebook reads as a document without them.
 #
-# **STPSF.**  The throughput map and the off-axis PSFs come from STPSF (Python ≥ 3.10 plus
-# ~90 MB of data files), but they are *cached*, so a machine that cannot install STPSF runs
-# from a copied cache — see section 7.
+# **PSF model.** The throughput map and the off-axis PSFs come from STPSF (Python ≥ 3.10, with
+# its data files), and they are cached. A machine without STPSF runs from three cache files per
+# filter, copied into `$KLIP_TPE_DATA/stpsf_cache`: the stamp grid (`stpsf_MIRI_F1140C_*.fits`),
+# the throughput map (`miri_thrumap_F1140C_*.npz`) and the encircled energy
+# (`eeunocc_MIRI_F1140C_*.fits`). A missing file stops the notebook with its name.
 
 # %%
 import glob, os, time
@@ -43,8 +43,9 @@ DATA = os.path.expanduser(os.environ.get("KLIP_TPE_JWST_MIRI", "~/Data/JWST/hip6
 if os.path.isdir(os.path.join(DATA, "mastDownload")):   # the archive files, not a reprocessing beside them:
     DATA = os.path.join(DATA, "mastDownload")           # load_calints refuses one exposure found twice
 RUN_DIR = os.path.abspath("runs/hip65426_f1140c")
+# Re-running RESUMES this directory -- delete it to search again (see tutorial 01).
 FILTER = "F1140C"
-PLANET = (0.826, 150.2)            # HIP 65426 b, Carter et al. 2023 (F444W astrometry)
+PLANET = (0.820, 149.9)            # HIP 65426 b, Carter et al. 2023, Table 3 (F444W astrometry)
 
 files = sorted(glob.glob(os.path.join(DATA, "**", "jw*_calints.fits"), recursive=True))
 in_filt = [f for f in files if str(fits.getheader(f).get("FILTER", "")).upper() == FILTER]
@@ -53,83 +54,76 @@ print(f"{len(files)} calints under {DATA}, {len(in_filt)} in {FILTER}"
       f"  ({'ok' if HAVE_DATA else 'run the fetch script'})")
 
 # %% [markdown]
-# ## 1. What an archive download of one programme actually contains
+# ## 1. What an Archive Download of One Program Contains
 #
-# Not just a target and a reference star.  A MIRI coronagraphic programme also takes
-# **dedicated background pointings** — offset exposures of blank sky — because at 11 µm the
-# thermal background is large and structured.  Sorting the three roles is the first thing
-# `load_calints` does, and getting it wrong is silent in both directions: blank sky in the
-# RDI library is empty frames used to model a star's diffraction, and a reference star named
-# after its target (AU Mic's is `AU_Mic_psf_reference`, which starts with `AUMIC`) gets
-# derotated and stacked with the science.
+# A MIRI coronagraphic program takes dedicated background pointings (offset exposures of blank
+# sky) as well as its targets, because the thermal background at 11 µm is large and
+# structured. The download for HIP 65426 also holds the program's second target, HD 141569A,
+# a resolved disk, and its reference star HD 140986. `load_calints` sorts the files into
+# science, reference and background, and `ref_targets="HIP-68245"` keeps the RDI library to
+# φ Cen. Without it, every pointing that is neither the science target nor a background goes
+# into the library, the disk included.
 #
-# The subtler half is that **the background may already have been subtracted — for some of
-# the files.**  Image2 runs its background step when the association has background members,
-# which a programme's *science* targets have and its pure *PSF reference* stars usually do
-# not.  The header records it as `S_BKDSUB`.  For this programme at F1140C:
+# The pipeline's background subtraction has already been applied to some of the files.
+# Image2 runs its background step when the association has background members, which the
+# science targets have and the pure PSF reference stars usually do not. The header records it
+# as `S_BKDSUB`. For this program at F1140C:
 #
 # | target | role | files | `S_BKDSUB` |
 # |---|---|---|---|
 # | HIP-65426 | science | 2 | `COMPLETE` |
-# | HD-141569A | reference | 2 | `COMPLETE` |
-# | HIP-68245 | reference | 9 | absent |
-# | HD-140986 | reference | 5 | absent |
-# | `*-BACKGROUND` | background | 8 | absent — they *are* the background |
+# | HIP-68245 (φ Cen) | reference | 9 | absent |
+# | HD-141569A | second science target (disk) | 2 | `COMPLETE` |
+# | HD-140986 | its reference | 5 | absent |
+# | `*-BACKGROUND` | background | 8 | absent (they are the background) |
 #
-# So an untreated load puts fourteen reference frames carrying a ~19 MJy/sr sky pedestal and
-# the mask's glow sticks into one KLIP library beside two that carry neither and science
-# frames that carry neither.  The library's dominant common mode is then the sky rather than
-# the stellar PSF.
+# Untreated, the reference frames carry a sky pedestal of about 19 MJy/sr and the glow of the
+# mask edges, and the science frames carry neither. The leading KL mode is then the sky rather
+# than the stellar PSF. `load_calints` reads `S_BKDSUB` per exposure, subtracts the median of
+# the program's own blank-sky pointings from the frames that lack it, and leaves the rest
+# alone. A mixture with no background pointings to fix it raises an error.
 #
-# What that costs, measured on paired 1000-evaluation runs that differ only in this:
-# the calibration contrast falls from 2.27e-4 to 1.63e-4, so the *same* default
-# configuration reaches S/N 5 on a source 28% fainter once the library is consistent.  And
-# the k-scan curve changes shape: with the mismatch it was flat to 1.5% over k = 4..20 with
-# k = 1 on top, because the leading KL mode was the pedestal and removing it was the only
-# subtraction that helped; fixed, low k is clearly penalised and more modes keep helping.
-#
-# Worth recording what did *not* happen, because it is the obvious prediction and it is
-# wrong: one might expect the optimizer to compensate by choosing a hard high-pass, since a
-# high-pass hides a smooth pedestal, and so to choose a milder one once the mismatch is
-# gone.  It did not — the two runs chose `filter = 5` and `filter = 6`.  The mismatch is
-# worth fixing on the evidence above, not on that argument.
-#
-# `load_calints` reads `S_BKDSUB` per exposure, subtracts the median of the programme's own
-# blank-sky pointings from whichever frames lack it, and leaves the rest alone.  A mixture
-# with no background to fix it with raises rather than proceeding.
+# On paired 1000-evaluation runs that differed only in this, the calibration contrast fell
+# from 2.27 × 10⁻⁴ to 1.63 × 10⁻⁴: the same default configuration reached S/N 5 on a source
+# 28% fainter once the library was consistent. The k-scan changed shape too. With the
+# mismatch it was flat to 1.5% over k = 4 to 20, with k = 1 on top, because the leading KL
+# mode was the pedestal. With a consistent library, low k is clearly penalized and more modes
+# keep helping.
 
 # %%
 if HAVE_DATA:
     for f in sorted(in_filt)[:26]:
         h = fits.getheader(f)
-        role = ("background" if "BACKGROUND" in str(h.get("TARGPROP", "")).upper()
-                else "science" if str(h.get("TARGPROP", "")).upper().startswith("HIP-65426")
-                else "reference")
+        tp = str(h.get("TARGPROP", "")).upper()
+        role = ("background" if "BACKGROUND" in tp else "science" if tp.startswith("HIP-65426")
+                else "reference" if tp.startswith("HIP-68245") else "not used")
         print(f"  {str(h.get('TARGPROP','')):24s} {role:11s} "
               f"S_BKDSUB={h.get('S_BKDSUB', 'absent')!s:9s} NINTS={h.get('NINTS')}")
 
 # %%
 if HAVE_DATA:
+    # partition="all": both rolls in ONE partition, so ADI+RDI really uses the other roll
+    # (tutorial 3, section 2); ref_targets keeps the disk HD 141569A out of the library.
     dsets, info = sk.load_calints(in_filt, science_target="HIP-65426", half_px=40,
-                                 partition="roll", filter=FILTER)
+                                 partition="all", filter=FILTER, ref_targets="HIP-68245")
     px = float(info["pxscale"])
     m = miri.mode_for_filter(info["filter"])
     print(f"\n{m['filter']} / {m['image_mask']} ({m['kind']}), {px * 1e3:.2f} mas/px, "
           f"lambda = {m['lam_m'] * 1e6:.2f} um, partitions {list(dsets)}")
 
 # %% [markdown]
-# Two pixel scales appear in MIRI work and they differ by 0.6%: the instrument model says
-# **0.109655″/px** and these science headers report **0.110327″/px** via `PIXAR_A2`.  The
-# loader takes the data's own value, because that is what the astrometry of *these* frames
-# is on; `miri.pixelscale()` returns the model's, for the model's own grids.  Over a 24″
-# field 0.6% is a seventh of a pixel — small, but it is the kind of difference that moves a
-# companion between annuli at the outer edge, so it is worth knowing which one you are using.
+# Two pixel scales appear in MIRI work, and they differ by 0.6%. The instrument model says
+# 0.109655″/px, and these science headers give 0.110327″/px through `PIXAR_A2`. The loader
+# takes the data's own value, because the astrometry of these frames is on it.
+# `miri.pixelscale()` returns the model's value when STPSF is installed, and the documented
+# 0.110 when it is not. Across a 24″ field 0.6% is 0.15″, 1.3 px from edge to edge, enough to
+# move a companion between annuli at the outer edge. Use one scale within an analysis.
 #
-# ## 2. Throughput is a function of position, not radius
+# ## 2. Throughput Is a Function of Position, Not Radius
 #
-# This is the one that matters most.  A round occulter has a transmission `T(ρ)`; a 4QPM
-# suppresses along two *lines*, so at one separation the throughput varies by a large factor
-# with position angle.  Measured from STPSF for F1065C over the default grid:
+# This matters most. A round occulter has a transmission `T(ρ)`. A 4QPM suppresses along two
+# lines, so at one separation the throughput varies by a large factor with position angle.
+# Measured from STPSF for F1065C over the default grid:
 #
 # | ρ | min | max | ratio |
 # |---|---|---|---|
@@ -141,33 +135,38 @@ if HAVE_DATA:
 # | 5.63″ | 0.233 | 0.999 | ×4.3 |
 # | 10.80″ | 0.406 | 0.991 | ×2.4 |
 #
-# A factor of up to **six and a half at constant separation**.  A radial model is not merely
-# imprecise here — it is wrong in a way that tracks position angle, reporting a companion
-# near a boundary up to three times fainter than it is and one between boundaries too
-# bright, and a contrast curve built that way is an azimuthal average of two different
-# things.  So `klip_tpe.instruments.miri` carries its own two-dimensional map, sampled on a
-# (separation, detector azimuth) grid and cached like the radial grids are.
+# At constant separation the throughput varies by up to a factor of 6.5. A radial model is
+# wrong in a way that tracks position angle. It reports a companion near a boundary several
+# times too faint and one between boundaries too bright, and a contrast curve built that way
+# averages two different things. `klip_tpe.instruments.miri` therefore carries its own
+# two-dimensional map, sampled on a grid of separation and detector azimuth and cached like
+# the radial grids.
 #
-# Two details the map gives you that a hardcoded mask would not:
+# The map shows two things a hardcoded mask would miss.
 #
-# * **The boundaries are not where they look.**  `locate_boundaries` measures them at az =
-#   356°, 86°, 176° and 266° — four degrees off the detector axes, the same on all four, so
-#   this is the mask's mounting angle and not noise.  Masking along detector rows and columns
-#   would be off by ~1.5 px at 2″: it leaves the real dead zone in the data and discards good
-#   pixels beside it.  An earlier version of that scan swept the circle in 15° steps and
-#   reported all four boundaries *exactly* on the axes — which is the answer it would give if
-#   they were there, and is why it looked right.
-# * **The symmetry is two-fold, not four-fold.**  At 2″, `|T(az) − T(az+180)| ≤ 0.003` while
-#   `|T(az) − T(az+90)|` reaches 0.18.  That is the mask's own asymmetry, and it is why the
-#   map is measured over the whole circle rather than folded into one quadrant.
+# * **The boundaries are not on the detector axes.** For F1065C, `locate_boundaries` measures
+#   them at azimuths of 356°, 86°, 176° and 266°, four degrees off the axes and the same on all
+#   four, which is the mask's mounting angle. Masking along detector rows and columns would be
+#   off by 1.3 px at 2″, leaving the real dead zone in the data and discarding good pixels
+#   beside it. The F1140C map carries its own measured boundaries (`g["boundaries"]`).
+# * **The symmetry is two-fold, not four-fold.** At 2″, `|T(az) − T(az+180)| ≤ 0.003` while
+#   `|T(az) − T(az+90)|` reaches 0.18. That is the mask's own asymmetry, and it is why the map
+#   covers the whole circle rather than one quadrant.
 #
-# The plateau between the boundaries sits at 1.00 within half a per cent, which is what it
-# *should* be: the unocculted reference carries the same Lyot stop, so far from a boundary
-# the phase mask takes nothing.
+# Between the boundaries the throughput sits at 1.00 to within about 1%, as it should. The
+# unocculted reference carries the same Lyot stop, so far from a boundary the phase mask
+# takes nothing.
 
 # %%
-if HAVE_DATA and stpsf_psf.have_stpsf():
-    g = miri.throughput_map(FILTER)
+if HAVE_DATA:
+    try:
+        # Read from the cache when the map is there; STPSF is needed only to compute it.
+        g = miri.throughput_map(FILTER)
+    except (RuntimeError, ImportError) as exc:
+        raise RuntimeError(
+            f"This tutorial needs the STPSF model of the {FILTER} 4QPM: STPSF itself (Python >= 3.10, "
+            f"with its data files), or the cached throughput map, stamp grid and encircled-energy "
+            f"files for {FILTER} in $KLIP_TPE_DATA/stpsf_cache.\n{exc}") from exc
     T = miri.throughput_map_fn(g)
     az = np.linspace(0, 360, 721)
     fig, ax = plt.subplots(1, 2, figsize=(11, 3.8))
@@ -176,70 +175,69 @@ if HAVE_DATA and stpsf_psf.have_stpsf():
     ax[0].set_xlabel("detector azimuth (deg)"); ax[0].set_ylabel("throughput")
     ax[0].set_title(f"{FILTER}: throughput vs position angle", fontsize=9)
     ax[0].legend(fontsize=7, title="separation", title_fontsize=7); ax[0].set_xlim(0, 360)
-    for b in (356, 86, 176, 266):
-        ax[0].axvline(b, color="0.7", lw=0.6, zorder=0)
+    if g.get("boundaries") is not None:
+        for b in np.atleast_1d(g["boundaries"]):
+            ax[0].axvline(float(b) % 360, color="0.7", lw=0.6, zorder=0)
+        print(f"grey lines: the boundaries measured for {FILTER}, "
+              f"{', '.join(f'{float(b) % 360:.0f}' for b in np.atleast_1d(g['boundaries']))} deg")
     R, A = np.meshgrid(np.geomspace(0.3, 8.0, 160), az)
     im = ax[1].pcolormesh(A, R, T(R, A), shading="auto", cmap="magma", vmin=0, vmax=1.05)
     ax[1].set_yscale("log"); ax[1].set_xlabel("detector azimuth (deg)")
     ax[1].set_ylabel("separation (arcsec)"); ax[1].set_title("the map itself", fontsize=9)
     plt.colorbar(im, ax=ax[1], label="T"); plt.tight_layout()
-    print("grey lines: the measured boundaries, four degrees off the detector axes")
 
 # %% [markdown]
-# ## 3. The dead zones: three things have to happen, and one must not
+# ## 3. The Dead Zones: Three Things Have to Happen, and One Must Not
 #
-# Where the mask has taken most of the flux the photometry is unreliable and the stamp is
-# *distorted*, not merely attenuated — the regime the radial stamp library cannot represent.
-# `min_throughput=0.30`, roughly half the best throughput a 4QPM reaches, marks those pixels.
-# On this frame that is 634 px, 9.7% of the 81×81 stamp.  Three things follow.
+# Where the mask has taken most of the flux, the photometry is unreliable and the stamp is
+# distorted, not merely attenuated, which is the regime the radial stamp library cannot
+# represent. `min_throughput=0.30`, 30% of the plateau, marks those pixels. On this frame that
+# is 634 px, 9.7% of the 81×81 stamp. Three things follow.
 #
-# **They must leave the noise estimate.**  Where the phase mask took the starlight it took
-# the speckles too, so a dead-zone pixel is *quieter* than the ring it sits in.  Left in, it
-# depresses σ, inflates every S/N, and gives the optimizer an incentive to choose parameters
-# that preserve the dead zones.  `miri.dead_zone_pixel_mask` carries the detector geometry
-# through every roll into the de-rotated frame and goes in as the metric's `pixel_mask`.
-# Note the direction: taking them out *raises* σ and *lowers* the reported contrast.  Unlike
-# a cut made because a region looked bright, this one is justified by the mask design before
-# anyone looks at the image.
+# **They must leave the noise estimate.** Where the phase mask took the starlight it took the
+# speckles too, so a dead-zone pixel is quieter than the ring it sits in. Left in, it depresses
+# σ, inflates every S/N, and rewards parameters that preserve the dead zones.
+# `miri.dead_zone_pixel_mask` carries the detector geometry through every roll into the
+# derotated frame, and it goes in as the metric's `pixel_mask`. Taking these pixels out raises
+# σ, so every S/N and contrast limit becomes more conservative. The cut follows from the mask
+# design, before anyone looks at the image.
 #
-# **Injections must not land in them.**  The boundaries are fixed to the detector and the
-# sampler works in sky position angle, so which sky angles are dead depends on how the
-# telescope was pointed: `az = θ − truenorth − 270 − parang`.  `miri.forbidden_pa` takes the
-# whole `angles` array and forbids a PA only when it is suppressed in more than `dead_frac`
-# of the frames.  That fraction is 0.34 and not 0.5 on purpose — a JWST sequence is usually
-# **two** rolls, so a PA one boundary eats is dead in exactly half the frames, and a `> 0.5`
-# test would forbid nothing at all for the commonest observation there is, on an exact
-# floating-point tie.  On these two rolls it returns eight sectors of ±2° covering 12% of the
-# ring.  Injecting into a dead zone and "recovering" nothing is not a measurement of
-# contrast; it is a measurement of the mask, presented as a measurement of the reduction.
+# **Injections must not land in them.** The boundaries are fixed to the detector and the
+# sampler works in sky position angle, so which sky angles are dead depends on the pointing:
+# `az = θ − truenorth − 270 − parang`. `miri.forbidden_pa` takes the whole `angles` array and
+# forbids a PA only when it is suppressed in more than `dead_frac` of the frames. That
+# fraction is 0.34 rather than 0.5 on purpose. A JWST sequence is usually two rolls, so a PA
+# that one boundary removes is dead in exactly half the frames, and a `> 0.5` test would
+# forbid nothing on an exact floating-point tie. Injecting into a dead zone and recovering
+# nothing measures the mask, not the reduction.
 #
-# These two go **together**.  Injections that avoid sectors which still inflate the ring σ
-# are scored against a noise level nothing is measuring them at — worse than doing neither.
+# The two go together. An injection kept out of the dead zones, but scored against a noise ring
+# that still contains them, is measured against a σ that is too low.
 #
-# **And they must stay in the cube.**  The obvious move is to NaN them out, and it cannot
-# work.  The reducer high-passes each frame at `nan_aware=False`, which is
-# `ndimage.uniform_filter` — a *running-sum* filter, so a NaN poisons everything downstream
-# of it along each axis rather than a box the filter's width.  One NaN near the corner of an
-# 81×81 frame takes **73%** of it; the dead zones are lines through the star reaching all
-# four frame edges, so they take all of it.  Then `np.nansum` of an all-NaN frame is 0.0,
-# `bin_frames` drops zero-sum bins, and the reduction has no frames left.  No crop rescues
-# it either — the dead zones cross the middle of the array.  The pixels are attenuated
-# measurements, not missing ones: they belong in the cube and in the KLIP basis, and out of
-# the *statistic*.
+# **And they must stay in the cube.** Setting them to NaN cannot work. The reducer high-passes
+# each frame with `nan_aware=False`, which is `ndimage.uniform_filter`, a running-sum filter.
+# A NaN therefore spreads along each axis from where it sits, not just across a box the
+# filter's width. One NaN near the corner of an 81×81 frame takes 73% of it, and the dead zones
+# are lines through the star that reach all four edges, so they take all of it. `np.nansum` of
+# an all-NaN frame is then 0.0, `bin_frames` drops zero-sum bins, and the reduction has no
+# frames left. No crop helps, because the dead zones cross the middle of the array. The
+# pixels are attenuated measurements, not missing ones. They belong in the cube and in the KLIP
+# basis, and out of the statistic.
 
 # %%
-if HAVE_DATA and stpsf_psf.have_stpsf():
+if HAVE_DATA:
     angles = np.concatenate([np.asarray(d.angles, float).ravel() for d in dsets.values()])
     ann = (6.7, 36.0)
     mid_as = 0.5 * (ann[0] + ann[1]) * px
     fpa = miri.forbidden_pa(angles, rho_as=mid_as, filter=FILTER)
     pmask = miri.dead_zone_pixel_mask((81, 81), px, angles, filter=FILTER)
-    print(f"rolls {sorted(set(np.round(angles, 1)))}, {len(fpa)} forbidden sector(s), "
+    print(f"rolls {sorted(set(np.round(angles, 1)))}, {len(fpa)} forbidden sector(s) covering "
+          f"{100 * sum(2 * w for _, w in fpa) / 360:.1f}% of the ring, "
           f"{int(pmask.sum())} px ({100 * pmask.mean():.1f}%) out of the noise estimate")
 
     fig, ax = plt.subplots(1, 2, figsize=(9, 4))
     ax[0].imshow(pmask, origin="lower", cmap="gray_r")
-    ax[0].set_title("dead zones, de-rotated (two rolls)", fontsize=9)
+    ax[0].set_title("dead zones, derotated (two rolls)", fontsize=9)
     ax[0].set_xticks([]); ax[0].set_yticks([])
     th = np.radians(np.linspace(0, 360, 721))
     ax[1] = plt.subplot(122, projection="polar")
@@ -253,76 +251,80 @@ if HAVE_DATA and stpsf_psf.have_stpsf():
     plt.tight_layout()
 
 # %% [markdown]
-# ## 4. The contrast axis
+# ## 4. The Contrast Axis
 #
-# HIP 65426 is behind the mask in every exposure, so its brightness has to be imported — the
-# same problem as tutorial 3, and the same four terms.  What is different is where the flux
-# density comes from, because there is no published MIRI stellar flux for this star to copy:
+# HIP 65426 is behind the mask in every exposure, so its brightness has to be imported, as in
+# tutorial 3 and with the same four terms. The flux density needs its own source, because no
+# MIRI stellar flux has been published for this star:
 #
 # | term | value | from |
 # |---|---|---|
-# | `S` | 0.06899 Jy | Planck(8600 K) through the F1140C bandpass, normalised to 2MASS Ks = 6.771, **ratio-anchored** to the F444W entry |
+# | `S` | 0.06899 Jy | Planck(8600 K) through the F1140C bandpass, normalized to 2MASS Ks = 6.771, as a ratio to the F444W entry |
 # | units | `S / (10⁶·PIXAR_SR)` = 2.4117e5 | `BUNIT = MJy/sr`, `PIXAR_SR = 2.8606e-13` |
-# | `EE` | 0.4660 at 4.50 px | the model PSF unocculted *through the Lyot stop* |
+# | `EE` | 0.4660 at 4.50 px | the model PSF unocculted through the Lyot stop |
 # | `T_optics` | 1.0 | `PHOTMJSR` of the coronagraphic mode already carries its optics |
 #
-# giving `star_flux = 1.1238e5`.  Two things about that are worth copying as method.
+# This gives `star_flux = 1.1239e5`. Two steps in it are worth copying.
 #
-# **Anchor, don't recompute.**  The Planck-through-the-bandpass recipe reproduces the repo's
-# independently-checked F444W value of 0.40259 Jy to −3.3%, inside its own ±3%, and the
-# residual is the 2MASS zero-point and effective-wavelength convention.  Taking the *ratio*
-# to F444W cancels that convention and leaves only the model's shape between 4.4 and 11.3 µm
-# — a Rayleigh–Jeans tail, where Planck and a real atmosphere differ by a per cent or two.
-# Teff = 8600 K is Carter et al. (2023)'s own PHOENIX fit, so both entries rest on one model.
-# The photosphere is the right thing to use here: the only excess those authors report is
-# 3.5σ at 24 µm with `T_dust ≈ 300 K`, which contributes far less at 11 µm.
+# **Anchor the ratio rather than recomputing.** The Planck-through-the-bandpass recipe gives
+# 3.3% less than the independently checked F444W value of 0.40259 Jy, about that value's own
+# ±3% uncertainty. The difference is the 2MASS zero point and effective-wavelength convention.
+# Taking the ratio to F444W cancels that convention and leaves only the spectral shape between
+# 4.4 and 11.3 µm. That is the Rayleigh–Jeans tail, where Planck and a real atmosphere differ by
+# a percent or two. Teff = 8600 K is the PHOENIX fit of Carter et al. (2023), so both entries
+# rest on one model. The photosphere is the right input here, because the only excess those
+# authors report is at 24 µm (3.5σ, `T_dust ≈ 300 K`), and it contributes far less at 11 µm.
 #
-# **Then check it against something the recipe did not use.**  Carter et al. (2023) Table 3
-# puts the companion at ΔF1140C = 8.264 ± 0.021 — a contrast of 4.95e-4 — and at
-# (7.40 ± 1.16) × 10⁻¹⁹ W m⁻² µm⁻¹, which is 31.5 µJy at 11.3 µm.  Divide one by the other
-# and *their* star comes out at 0.0637 Jy: our `S = 0.0690 Jy` is 8.3% higher, against their
-# ±3.5% on the stellar magnitude and our own ±5% — 1.3σ.  Their quoted background-limited
-# sensitivity of ~2.7 µJy is then a contrast floor of 3.9e-5, in line with the ~5e-5 their
-# contrast curve reaches beyond 3″.  (Do not mistake the ~2e-4 in their text for the planet:
-# that is their 5σ *limit* at 1″, and the planet is 2.5× brighter than it.)
+# **Then check it against something the recipe did not use.** Carter et al. (2023, Table 3)
+# give the companion as ΔF1140C = 8.264 ± 0.021, a contrast of 4.95 × 10⁻⁴, and as
+# (7.40 ± 1.16) × 10⁻¹⁹ W m⁻² µm⁻¹, which is 31.5 µJy at 11.3 µm. Their ratio puts the star at
+# 0.0637 Jy. Our `S = 0.0690 Jy` is 8.3% higher, against their ±3.5% on the stellar magnitude
+# and our own ±5%, a 1.4σ difference. Their background-limited sensitivity of about 2.7 µJy is
+# then a contrast floor of 3.9 × 10⁻⁵, in line with the 5 × 10⁻⁵ their contrast curve reaches
+# beyond 3″. The 2 × 10⁻⁴ in their text is their S/N=5 limit at 1″, and the planet is 2.5×
+# brighter than it.
 #
-# **And 1.0 is not a safe default for this.**  `make_reducer(star_flux=None)` becomes
-# `star_flux or 1.0`, which makes one unit of contrast worth *one count* against a cube whose
-# pixels reach several hundred MJy/sr — 1.1e5 times too faint.  Injections then do nothing at
-# any contrast: the calibration walks its whole ladder from 3e-5 to the 1e-1 cap with the
-# median S/N flat at −0.11, 0.00, −0.02, −0.31, −0.04, reports that it could not calibrate,
-# and the search ranks noise for as long as you let it.  A response flat over four orders of
-# magnitude is not a faint source, it is an inert one.  `scripts/run_miri.py` now derives the
-# flux unit or refuses to start.
+# **A star flux of 1.0 does not work.** `make_reducer(star_flux=None)` uses `star_flux or 1.0`,
+# which makes one unit of contrast worth one count in a cube whose pixels reach several hundred
+# MJy/sr, 1.1 × 10⁵ times too faint. The injections then do nothing at any contrast. The
+# calibration walks its whole ladder from 3 × 10⁻⁵ to the cap of 0.1 with the median S/N flat at
+# −0.11, 0.00, −0.02, −0.31 and −0.04, reports that it could not calibrate, and the search ranks
+# noise. A response that stays flat over 3.5 decades of contrast is not a faint source but an
+# inert one. `scripts/run_miri.py` derives the flux unit or refuses to start.
 
 # %%
 STAR_FLUX = None
-if HAVE_DATA and stpsf_psf.have_stpsf():
+if HAVE_DATA:
     phot = datasets.PHOTOMETRY[f"hip65426_{FILTER.lower()}"]
     STAR_FLUX = miri.star_flux_from_flux_density(FILTER, phot["flux_density_jy"],
                                                  info["pixar_sr"], bunit=info["bunit"])
     print(f"star_flux = {STAR_FLUX:.4e}   ({phot['ref']})")
 
 # %% [markdown]
-# ## 5. Reducer, space, objective — and the check that comes first
+# ## 5. Reducer, Space and Objective, and the Check That Comes First
 #
-# `psf="stpsf"` routes MIRI to `miri.library`: radial stamps with the **two-dimensional**
-# throughput attached.  The model's `azimuth_dependent` flag is what tells `inject_sources`
-# to evaluate the throughput per frame, because a source at a fixed sky PA moves across the
-# boundaries as the telescope rolls — so its attenuation genuinely differs frame to frame.
-# The run log should say `injection miri_library`; `LibraryPSF` with a radial `throughput_fn`
-# would also run, and would silently report azimuthal averages.
+# `psf="stpsf"` routes MIRI to `miri.library`: radial stamps with the two-dimensional
+# throughput attached. The model's `azimuth_dependent` flag tells `inject_sources` to evaluate
+# the throughput per frame, because a source at a fixed sky PA moves across the boundaries as
+# the telescope rolls, so its attenuation differs from frame to frame. The run log should say
+# `injection miri_library`. A `LibraryPSF` with a radial `throughput_fn` would also run, and
+# would silently report azimuthal averages.
 #
-# Before spending hours, reduce once at the seeded default and look at what was built.  This
-# is what `scripts/run_miri.py --check` does, and it is worth doing by hand once:
+# Both rolls are in one partition, so `mode="ADI+RDI"` uses the other roll and φ Cen.
+# `search_angles=False` leaves out `angsep` and `anglemax`, which do little with two rolls 9.4°
+# apart (`scripts/run_miri.py` drops them too, and also searches the reference library).
+#
+# Before spending hours, reduce once at the default configuration and look at what was built.
+# This is what `scripts/run_miri.py --check` does:
 
 # %%
 if HAVE_DATA and STAR_FLUX is not None:
     red = sk.make_reducer(dsets, pxscale=px, wavelength_m=m["lam_m"], diam_m=miri.DIAMETER_M,
                           psf="stpsf", star_flux=STAR_FLUX, mode="ADI+RDI", max_workers=3)
     obj, samp = generic.default_config(red, known=[PLANET], forbidden_pa=fpa, pixel_mask=pmask)
-    space = generic.make_space(red, k_klip_max=20)
+    space = generic.make_space(red, k_klip_max=20, search_angles=False)
     space.project = generic.make_guard(red, k_max=20)
+    print(space.names)
 
     dec = space.decode(space.default_vector())
     model = red.reducers[list(dec.selected)[0]].model
@@ -338,33 +340,32 @@ if HAVE_DATA and STAR_FLUX is not None:
     print(f"annulus finite       : {100 * np.isfinite(img[inann]).mean():.1f}%   (must be high)")
 
 # %% [markdown]
-# Those four lines are the whole check.  A radial model on a 4QPM, a cube with any NaN in it
-# when the filter is 12 px wide, or an empty search annulus each produce a run that completes
-# and reports numbers — so each is refused rather than warned about.  The annulus line in
-# particular: measure finite pixels *inside the annulus*, not over the frame, because most of
-# the frame is outside the reduced zones by design.  A single roll reduced ADI-only used to
-# report "finite 0.0%" and then "check passed".
+# Those four lines are the whole check. A radial model on a 4QPM, a cube with any NaN in it when
+# the filter is 12 px wide, and an empty search annulus each produce a run that completes and
+# reports numbers, so `run_miri.py --check` refuses each one. Measure the finite pixels inside
+# the annulus, not over the frame, because most of the frame lies outside the reduced zones by
+# design.
 #
 # ## 6. Optimize
 #
-# Tutorial 1's budget: 300 evaluations with 40 of random warm-up, and the six best candidates
-# validated on eight fresh injection sets each (the paper runs use 1000).  With pyKLIP that is
-# an hour or two.  Everything about the search itself is tutorial 1 — what is MIRI's is
-# entirely in what has already been built above.
+# The budget is tutorial 1's: 300 evaluations with 40 of warm-up, three injection draws averaged
+# per trial, and the six best candidates validated on eight fresh injection sets each. On these
+# data a single draw scatters by 0.84 in S/N, the example `RunConfig.n_remeasure` documents.
+# With pyKLIP the run takes several hours. Everything else about the search is tutorial 1. What
+# is MIRI's is in what has already been built above.
 #
-# One setting is about the picture rather than the score.  The four injected sources step
-# across the band in radius, and the innermost rung passes within 1.6 FWHM of HIP 65426 b
-# whenever it lands at the planet's position angle — allowed by the default 1.5-FWHM
-# exclusion, harmless to the score (the planet cancels between the reductions with and
-# without injections), and confusing in the panel, where MIRI's PSF makes two such sources one
-# blob.  The cell keeps every injection 3 FWHM (1.1″) from the planet.
+# One setting is about the picture rather than the score. The four injected sources step across
+# the band in radius, and the innermost one passes within 1.6 FWHM of HIP 65426 b whenever it
+# lands at the planet's position angle. The standard 1.5-FWHM exclusion allows that, and it does
+# not affect the search score, but in the panel MIRI's PSF merges the two into one blob. The cell
+# keeps every injection 3 FWHM (1.1″) from the planet.
 
 # %%
 if HAVE_DATA and STAR_FLUX is not None:
     samp.excl_fwhm = 3.0          # injections >= 3 FWHM (1.1") from HIP 65426 b
-    cfg = RunConfig(ann_edges=[ann[0], ann[1]], n_iter=300, n_init=40, seed=21,
+    cfg = RunConfig(ann_edges=[ann[0], ann[1]], n_iter=300, n_init=40, seed=21, n_remeasure=3,
                     validation=ValidationConfig(n_top=6, n_valid=8),
-                    calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=3),
+                    calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=2),
                     verify=True, save_eval_images=False)
     disp = LiveDisplay(RUN_DIR, every=5, pdf_every=0, movie=False, show="auto")
     runner = Runner(red, space, obj, samp, cfg, RUN_DIR, callbacks=[disp], resume="auto")
@@ -373,40 +374,40 @@ if HAVE_DATA and STAR_FLUX is not None:
     print(f"\n{(time.time() - t0) / 60:.1f} min -> {RUN_DIR}")
 
 # %% [markdown]
-# On the real programme with `n_iter=1000` the calibration lands at S/N 5.08 for a contrast of
-# 3e-4 and settles at 2.27e-4.  That number is a *sensitivity* — the contrast at which the
-# default configuration sees an injected source at S/N ≈ 5 — not a flux measurement, so it
-# says nothing about the flux scale on its own.  HIP 65426 b, at 4.95e-4 in Carter et al.'s
-# Table 3, sits 2.2× above it, which is what a clear detection at this separation should
-# look like.  The flux-scale check is the one in section 4.
+# The calibration contrast is a sensitivity: the contrast at which the default configuration
+# sees an injected source at S/N ≈ 5. It says nothing about the flux scale on its own. On the
+# full program it settled at 1.63 × 10⁻⁴ (section 1), and HIP 65426 b, at 4.95 × 10⁻⁴ in
+# Carter et al. (2023, Table 3), sits 3.0× above it, as a clear detection at this separation
+# should. The flux-scale check is the one in section 4.
 #
-# ## 7. Notes for real MIRI work
+# ## 7. Notes for Real MIRI Work
 #
-# * **The cache is the point, on a machine without STPSF.**  Every PSF grid, throughput map
-#   and encircled-energy figure is cached as one file under `$KLIP_TPE_DATA/stpsf_cache`, so
-#   a machine whose Python is too old for STPSF (3.9, say) runs from a cache computed
-#   elsewhere.  A cache miss there is *"you are missing one file"*, not "install STPSF", and
-#   the error names the file and the directory to copy it into.  `throughput_map` for one
-#   filter is ~10 minutes and is check-pointed, so a killed process does not discard the
+# * **The cache.** Every PSF grid, throughput map and encircled energy is cached as one file
+#   under `$KLIP_TPE_DATA/stpsf_cache`, so a machine whose Python is too old for STPSF (3.9,
+#   say) runs from files computed elsewhere. A cache miss names the missing file. A throughput
+#   map takes about 25 minutes (576 PSFs) and is checkpointed, so a killed process keeps the
 #   PSFs it already computed.
-# * **The other two filters.**  F1065C is cached and ready; `datasets.PHOTOMETRY` has all
-#   three (`S` = 0.07813 / 0.06899 / 0.03739 Jy for F1065C / F1140C / F1550C).  F1550C needs
-#   its throughput map computed first.
-# * **Which pixel scale.**  The loader uses the data's `PIXAR_A2` (0.110327″/px here); the
-#   STPSF model says 0.109655.  Do not mix them within one analysis.
-# * **`--star-center`.**  `CRPIX` is the *aperture reference point*, not the star.  Measure
-#   the star by maximising the point symmetry of the stacked frame, **not** with a flux
-#   centroid — on a four-quadrant residual the centroid is biased by the pattern rather than
-#   the centre, and on these frames it lands 0.4 px on the opposite side and moves by 0.4 px
-#   with the aperture radius.  The symmetry solution here is 0.39 px (45 mas) from CRPIX with
-#   the two rolls agreeing to 0.05 px, so CRPIX is adequate for this data set and the flag is
-#   for the ones where it is not.
-# * **The Lyot mode (F2300C)** is a round occulter with a support bar, so the radial path is
-#   the right one for it; `mode_for_filter("F2300C")["kind"]` is `"lyot"` and
-#   `quadrant_mask` masks the catalogued 2.16″ spot instead of a cross.
-# * **The whole path as one command**, which is what to use in anger:
+# * **The other filter.** HIP 65426 was also observed in F1550C. `datasets.PHOTOMETRY` has
+#   `S` for F1065C, F1140C and F1550C (0.07813, 0.06899 and 0.03739 Jy). Each filter needs its
+#   own cache files.
+# * **Which pixel scale.** The loader uses the data's `PIXAR_A2` (0.110327″/px here), and the
+#   STPSF model says 0.109655. Do not mix them within one analysis.
+# * **`--star-center`.** `CRPIX` is the aperture reference point, not the star. Measure the
+#   star by maximizing the point symmetry of the stacked frame, not with a flux centroid. On a
+#   four-quadrant residual the centroid is biased by the pattern. On these frames it lands
+#   0.4 px on the opposite side and moves by 0.4 px with the aperture radius. The symmetry
+#   solution here is 0.39 px (43 mas) from CRPIX, with the two rolls agreeing to 0.05 px, so
+#   CRPIX is adequate for this data set, and the flag is for data sets where it is not.
+# * **The Lyot mode (F2300C)** is a round occulter with a support bar.
+#   `mode_for_filter("F2300C")["kind"]` is `"lyot"`. It uses the same two-dimensional map as the
+#   4QPM filters, and `quadrant_mask` adds the cataloged 2.16″ spot to the thresholded map.
+# * **The whole path as one command.** `scripts/run_miri.py` is the production driver:
 #   ```
-#   python3 scripts/run_miri.py --data ~/Data/JWST/hip65426_miri --target HIP-65426 \
-#       --filter F1140C --crop 40 --workers 3 --known 0.826 150.2 --n-iter 1000 --show
+#   python3 scripts/run_miri.py --data ~/Data/JWST/hip65426_miri/mastDownload --target HIP-65426 \
+#       --ref-target HIP-68245 --filter F1140C --crop 40 --known 0.820 149.9 --show
 #   ```
-#   `--check` first: it builds everything, reduces once at the default, and stops.
+#   Its defaults differ from this notebook. It searches three annuli for 1000 evaluations each
+#   (150 of warm-up), validates on ten injection sets, and also searches the reference library
+#   (pyKLIP's `mode` and `maxnumbasis`). Run it with `--check` first. That builds everything,
+#   moves each searched dimension alone to check that it changes the reduction, reduces once at
+#   the default configuration, and stops.

@@ -645,3 +645,26 @@ def test_inline_outside_notebook_falls_back_to_window(monkeypatch):
     assert LiveDisplay("/tmp/klip_tpe_inline_probe", show="auto").inline is True
     monkeypatch.setattr(dm, "_in_notebook", lambda: False)
     assert LiveDisplay("/tmp/klip_tpe_inline_probe", show="auto").inline is False
+
+
+def test_pdf_and_movie_cadence_count_evaluations_not_panels(tmp_path, monkeypatch):
+    """--display-every 2 draws evaluations 1, 3, 5, ...; the PDF and the progress movie are
+    still due at evaluations 4 and 8 (every 4) and at the annulus' last one.  Both used to
+    be decided after the panel gate -- and against a ``last`` that had been overwritten by
+    the loop time, so every drawn panel wrote a PDF and asked for a movie."""
+    d = str(tmp_path / "cad")
+    red, space, obj, samp, cfg = build_synthetic_run(ann_edges=[8, 30], n_iter=9, n_init=3,
+                                                     validation=ValidationConfig(n_top=1, n_valid=1),
+                                                     calibration=CalibrationConfig(recal_budget=0, n_remeasure=1))
+    disp = LiveDisplay(d, every=2, pdf_every=4, movie_every=4, dpi=40, movie=True)
+    asked = []
+    orig = disp._submit_progress_movie
+
+    def spy(ia):
+        asked.append(len(disp._records))
+        return orig(ia)
+    monkeypatch.setattr(disp, "_submit_progress_movie", spy)
+    Runner(red, space, obj, samp, cfg, d, log=lambda s: None, callbacks=[disp]).run()
+    pdfs = sorted(f for f in os.listdir(os.path.join(d, "annulus01")) if f.startswith("eval_"))
+    assert pdfs == ["eval_0004_panel.pdf", "eval_0008_panel.pdf", "eval_0009_panel.pdf"], pdfs
+    assert asked[:3] == [4, 8, 9], asked

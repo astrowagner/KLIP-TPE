@@ -1,23 +1,29 @@
 # %% [markdown]
-# # Tutorial 3 — JWST/NIRCam coronagraphy: HIP 65426 b with ADI + RDI (pyKLIP engine)
+# # Tutorial 3: JWST/NIRCam Coronagraphy of HIP 65426 b with ADI and RDI (pyKLIP Engine)
 #
-# The ERS-1386 NIRCam observations of HIP 65426 (Carter et al. 2023) are the reference
-# JWST high-contrast data set: two science rolls through the MASK335R coronagraph and a
-# reference star (HIP 68245) observed in a 9-point small-grid dither.  With only ~10° of
-# roll this is an **RDI** problem — what matters is how the 18 reference frames are used,
-# not the field rotation.
+# The ERS 1386 NIRCam observations of HIP 65426 (Carter et al. 2023) are the reference JWST
+# high-contrast data set: two science rolls through the MASK335R coronagraph, and a reference
+# star, HIP 68245 (φ Cen), observed in a 9-point small-grid dither. With only 10° of roll this
+# is an RDI problem. What matters is how the 18 reference frames are used, not the field
+# rotation.
 #
-# spaceKLIP is the community pipeline for these data and hands them to pyKLIP; klip-tpe
-# plugs in at that hand-over: both rolls in one partition, the reference exposures as the
-# RDI library, pyKLIP's `klip_parallelized` as the engine, and the TPE search on top.
+# spaceKLIP is the community pipeline for these data and hands them to pyKLIP. klip-tpe plugs
+# in at that hand-over: both rolls in one partition, the reference exposures as the RDI
+# library, pyKLIP's `klip_parallelized` as the engine, and the TPE search on top.
 #
-# **Data.**  `tutorials/fetch_jwst_hip65426.py` pulls the F444W `calints` products from
-# MAST (no login, ~60 MB):
+# **Data.** `tutorials/fetch_jwst_hip65426.py` downloads the F444W `calints` products from
+# MAST (no login, about 60 MB):
 # ```
-# python3 -m pip install astroquery pyklip
-# python3 tutorials/fetch_jwst_hip65426.py            # --dry-run lists the files first
+# python3 -m pip install astroquery pyklip       # on Python 3.9 with numpy < 2.1: "pyklip<2.9"
+# python3 tutorials/fetch_jwst_hip65426.py       # --dry-run lists the files first
 # ```
-# The notebook skips the run (and says so) when the files are not there.
+# The notebook skips the run, and says so, when the files are not there.
+#
+# **PSF model.** Sections 3 to 5 need the STPSF model of MASK335R. Either install STPSF
+# (Python ≥ 3.10, with its data files), or copy the cached grid files
+# (`stpsf_NIRCam_F444W_MASK335R_<key>.fits` and `eeunocc_NIRCam_F444W_<key>.fits`) into
+# `$KLIP_TPE_DATA/stpsf_cache` from a machine that has computed them. Section 3 stops with that
+# message if neither is available.
 
 # %%
 import glob, os, time, warnings
@@ -35,10 +41,12 @@ from klip_tpe.metrics import MawetPeakSNR
 
 DATA = os.path.expanduser(os.environ.get("KLIP_TPE_JWST", "~/.klip_tpe/data/jwst_hip65426"))
 RUN_DIR = os.path.abspath("runs/hip65426_f444w")
-# Re-running RESUMES this directory -- delete it to search again (see tutorial 01).
-PLANET = (0.826, 150.2)                    # HIP 65426 b, Carter et al. 2023
+# Re-running RESUMES this directory -- delete it to search again (see tutorial 01).  Delete it
+# also if it was made without the STPSF model: a resumed run keeps its old injection scale.
+PLANET = (0.820, 149.9)                    # HIP 65426 b in F444W, Carter et al. 2023, Table 3
 
 files = sorted(glob.glob(os.path.join(DATA, "**", "jw*calints.fits"), recursive=True))
+files = [f for f in files if fits.getheader(f).get("FILTER") == "F444W"]   # the fetch script can add F300M
 def _targ(f):
     h = fits.getheader(f)
     return str(h.get("TARGPROP", h.get("TARGNAME", ""))).replace("-", "").replace("_", "").upper()
@@ -49,28 +57,25 @@ print(f"science exposures: {len(sci_files)}, reference exposures: {len(ref_files
       f"  ({'ok' if HAVE_DATA else 'data not found - run the fetch script'})")
 
 # %% [markdown]
-# ## 1. Stage-2 products need cleaning and alignment first
+# ## 1. Stage-2 Products Need Cleaning and Alignment First
 #
-# `*_calints.fits` come out of the JWST calibration pipeline *uncleaned*: hot and dead
-# pixels are flagged in the `DQ` extension but not repaired, and nothing has been aligned —
-# each small-grid-dither reference exposure sits at its own sub-pixel offset.  Subtracting
-# such references leaves a residual far brighter than any planet (try it: the planet is
-# undetectable without this section).
+# Stage-2 `calints` products flag bad pixels in the `DQ` extension and leave their repair and
+# the frame alignment to post-processing. Each small-grid-dither reference exposure also sits
+# at its own sub-pixel offset. Subtracting such references leaves a residual far brighter than
+# any planet. Try it: the planet is undetectable without this section.
 #
-# **In production, use spaceKLIP's `ImageTools`** (`quick_cleaning`, `align_frames`, …),
-# which does this properly and writes `STARCENX/Y` into the headers; `load_spaceklip` then
-# reads its products directly (section 6).  So that this notebook stands alone, here is the
-# minimal version: fill the flagged pixels from their neighbours, then register every frame
-# on the median science frame by FFT cross-correlation.
+# **In production, use spaceKLIP's `ImageTools`** (`quick_cleaning`, `align_frames` and so
+# on). It does this properly and writes `STARCENX/Y` into the headers, and `load_spaceklip`
+# then reads its products directly (section 7). So that this notebook stands alone, here is the
+# minimal version: fill the flagged pixels from their neighbors, then register every frame on
+# the median science frame by FFT cross-correlation.
 #
-# **Fill the flagged pixels and nothing else.**  A coronagraphic PSF is *supposed* to be
-# full of sharp, isolated blobs — the six-lobed Lyot-stop pattern of the star, and for a
-# companion behind MASK335R a three-bar "hamburger" core (Carter et al. 2023, Fig. 3).  Any
-# repair that decides from the pixel *values* what is an outlier — a median filter with a
-# sigma clip against the frame's scatter, which is set by empty sky — will rewrite the PSF:
-# on these frames such a filter touched ~5,000 pixels per frame of which only ~1,560 were
-# flagged, and turned HIP 65426 b into one smeared blob at a third of its peak.  Until
-# 2026-09-16 this notebook and `load_calints` did exactly that.
+# **Fill the flagged pixels and nothing else.** A coronagraphic PSF is supposed to be full of
+# sharp, isolated blobs: the six-lobed Lyot-stop pattern of the star, and for a companion
+# behind MASK335R a three-bar core (Carter et al. 2023, Fig. 3). A repair that decides from the
+# pixel values what is an outlier, such as a sigma-clipped median filter, rewrites the PSF. On
+# these frames such a filter changed about 5,000 pixels per frame, of which about 1,560 were
+# flagged, and cut the peak of HIP 65426 b to 39%.
 
 # %%
 def read_calints(paths):
@@ -142,43 +147,41 @@ if HAVE_DATA:
     plt.tight_layout()
 
 # %% [markdown]
-# ## 2. One partition, both rolls, the reference star as the RDI library
+# ## 2. One Partition, Both Rolls, the Reference Star as the RDI Library
 #
-# klip-tpe expects the star at the centre of the array, so the crop is taken about it.  The
-# four science integrations — two per roll, each with its own position angle — go into **one**
-# `Dataset`, and the 18 reference integrations ride along as its `ref_cube`.
+# klip-tpe expects the star at the center of the array, so the crop is taken about it. The
+# four science integrations (two per roll, the two of a roll at the same position angle) go
+# into **one** `Dataset`, and the 18 reference integrations go with it as its `ref_cube`.
 #
-# **Why one partition and not one per roll.**  A partition is reduced on its own.  With a
-# partition per roll every frame in it has the same PA, so pyKLIP's `ADI` has no reference
-# frames at all and `ADI+RDI` is just `RDI` — the other roll is never in the basis, because it
-# is in the other partition.  Only with both rolls together does `ADI` mean what it means
-# for JWST: subtract roll 2 from roll 1 and vice versa.  (`spaceklip.load_calints` does all of
-# section 1 and this in one call; `partition='all'` is this layout, `'roll'` the other.)
+# **Why one partition and not one per roll.** A partition is reduced on its own. With one
+# partition per roll, every frame in it has the same PA, so pyKLIP's `ADI` has no reference
+# frames and `ADI+RDI` is just `RDI`. The other roll is never in the basis, because it is in
+# the other partition. Only with both rolls together does `ADI` mean what it means for JWST,
+# subtracting roll 2 from roll 1 and the reverse. `spaceklip.load_calints` does section 1 and
+# this in one call, where `partition='all'` is this layout and `'roll'` the other.
 #
-# **`CRPIX` is where the mask is, not where the star is.**  It is the *aperture reference
-# point* — identical in every file of the programme, dithers included — and on these frames it
-# misses HIP 65426 by **0.78 px**, which throws the companion 0.8 px inside its own separation
-# and, worse, mismatches its KLIP throughput against the fakes injected to calibrate it.
+# **`CRPIX` marks the mask, not the star.** It is the aperture reference point, the same in
+# every file of the program, dithers included. On these frames it misses HIP 65426 by 0.78 px.
+# That would put the companion 0.8 px inside its own separation and mismatch its KLIP
+# throughput against the injected fakes.
 #
-# Three ways to find the star, two of which fail here: there is no off-axis stellar image
-# anywhere in the programme to centroid (HIP 65426 *and* the reference star φ Cen are behind
-# MASK335R in every exposure), and a 180° symmetry fit to the coronagraphic residual is too
-# speckle-dominated — it moved the centre by 2 px between the two rolls of these very data.
-# What works is the companion itself: derotating about a centre that is wrong by `δ` puts it at
+# There is no off-axis image of the star to centroid: HIP 65426 and the reference star are
+# behind MASK335R in every exposure. A 180° symmetry fit to the coronagraphic residual is
+# dominated by speckles, and on these data it moved the center by 2 px between the rolls.
+# The companion itself works. Derotating about a center that is off by `δ` puts it at
 # `u + R(PA_k)·δ` in roll `k`, so each roll gives `δ = R(−PA_k)·(measured − expected)`
-# independently, and the two agree to 0.12 px (on the median-filtered frames of section 1's
-# warning they disagreed by 0.71 px — the smear had moved the peak).  `datasets.PHOTOMETRY` carries the answer and
-# `scripts/check_hip65426_contrast.py` is the solve; the proper source is spaceKLIP's own
-# star-centring step (`STARCENX/Y`), which section 6's path uses.
+# independently, and the two rolls agree to 0.12 px. `datasets.PHOTOMETRY` carries the
+# result, and `scripts/check_hip65426_contrast.py` is the solve. The proper source is
+# spaceKLIP's star-centering step (`STARCENX/Y`), which the path in section 7 uses.
 #
-# Note this fixes the *geometry* only.  It leaves the contrast axis alone — that is section 3.
+# This fixes the geometry only. The contrast axis is section 3.
 
 # %%
 if HAVE_DATA:
     hdr = fits.getheader(sci_files[0], "SCI")
     pxscale = float(np.sqrt(hdr["PIXAR_A2"]))                      # 0.0626"/px (NIRCam LW)
     pixar_sr = float(hdr["PIXAR_SR"])                              # for the flux scale, section 3
-    wavelength = 4.44e-6                                           # F444W pivot
+    wavelength = 4.44e-6                                           # F444W mean wavelength
     PHOT = datasets.PHOTOMETRY["hip65426_f444w"]
     cx, cy = PHOT["star_center"]                                   # NOT CRPIX -- see above
     print(f"CRPIX ({hdr['CRPIX1']-1:.2f}, {hdr['CRPIX2']-1:.2f}) vs the star at "
@@ -204,65 +207,68 @@ if HAVE_DATA:
           f"RDI library {d.ref_cube.shape[0]} frames")
 
 # %% [markdown]
-# ## 3. Reducer, space, objective
+# ## 3. Reducer, Space and Objective
 #
-# `spaceklip.make_reducer` builds a `PyKLIPReducer` per partition — one here — with λ/D
-# from the filter and D = 6.5 m.  The searched block is small: the high-pass filter, `n_ang`
-# (pyKLIP `subsections`) and `k_klip` (`numbasis`), because `make_space` scales the ranges
-# to the data: with four frames there is nothing to bin and no angular exclusion worth
-# searching (`angsep` stays 0, which for pyKLIP means "exclude only the frames with no
-# motion at all" — the frame itself and its same-roll twin).
+# `spaceklip.make_reducer` builds a `PyKLIPReducer` per partition (one here), with λ/D from
+# the filter and D = 6.5 m. The searched block is small. With four frames there is nothing to
+# bin, so `make_space` pins `bin` at 1. `search_angles=False` leaves out the angular exclusion:
+# `angsep` stays 0, which for pyKLIP excludes only the frames with no motion at all, the frame
+# itself and its same-roll twin. What remains is the high-pass filter, `n_ang` (pyKLIP's
+# `subsections`) and `k_klip` (`numbasis`).
 #
-# On top of that we add one *global categorical* dimension: pyKLIP's **`mode`**
-# (`ADI`, `RDI`, `ADI+RDI`).  Any `Param` whose name matches a backend option is passed
-# straight through to the engine, so the optimizer decides how to use the two rolls and the
-# reference library.  With a 10° roll it is a real trade-off: `ADI` has only the other
-# roll's two frames to build a basis from and self-subtracts part of the companion (which
-# moves ~1 FWHM between rolls); `RDI` keeps the most companion flux; `ADI+RDI` gives up some
-# throughput for whiter speckles.  Two cells down measures the three at the seeded default.
-# Carter et al. (2023) compare the same three and quote their photometry from
-# forward-modelled fits for exactly this reason.
+# To that we add one global categorical dimension, pyKLIP's **`mode`** (`ADI`, `RDI`,
+# `ADI+RDI`). Any `Param` whose name matches a backend option is passed straight to the
+# engine, so the optimizer decides how to use the two rolls and the reference library. With a
+# 10° roll it is a real trade-off. `ADI` has only the other roll's two frames for its basis and
+# self-subtracts part of the companion, which moves about 1 FWHM between rolls. `RDI` keeps the
+# most companion flux, and `ADI+RDI` gives up some throughput for whiter speckles. The last
+# cell of this section compares the three at the default configuration. Carter et al. (2023)
+# compare the same three modes.
 #
-# **The contrast axis.** HIP 65426 is behind the mask in every exposure and so is the
-# reference star, so the star's brightness has to be imported — and with a coronagraph the
-# import has four terms that are easy to confuse:
+# **The contrast axis.** HIP 65426 and the reference star are behind the mask in every
+# exposure, so the star's brightness has to be imported. With a coronagraph the import has four
+# terms:
 #
 # | term | value | from |
 # |---|---|---|
-# | `S` | 0.4026 Jy | synthetic photometry: Planck(8600 K) through F444W, normalised to 2MASS Ks = 6.771 |
+# | `S` | 0.4026 Jy | synthetic photometry: Planck(8600 K) through F444W, normalized to 2MASS Ks = 6.771 |
 # | units | `S / (10⁶·PIXAR_SR)` | `BUNIT = MJy/sr` and `PIXAR_SR` from the header |
-# | `EE` | 0.696 at 16.5 px | the model PSF **unocculted through the Lyot stop** — an *imaging* PSF gives 0.928 and counts the stop twice |
-# | `T_optics` | 1.0 | nothing left to add: `PHOTMJSR` for `PUPIL=MASKRND` already carries the coronagraphic optics |
+# | `EE` | 0.696 at 16.5 px | the model PSF unocculted through the Lyot stop (an imaging PSF gives 0.928 and counts the stop twice) |
+# | `T_optics` | 1.0 | `PHOTMJSR` for `PUPIL=MASKRND` already carries the coronagraphic optics |
 #
-# and one term that is deliberately **not** in `flux_unit`: the occulter's spatial
-# transmission `T(ρ)`, which multiplies it inside `inject_sources`.  Folding it into the star
-# flux, or applying it twice, is the classic coronagraphic error.
+# One term is deliberately not in `flux_unit`: the occulter's spatial transmission `T(ρ)`,
+# which multiplies the injection inside `inject_sources`. Folding it into the star flux, or
+# applying it twice, gets the contrast axis wrong by `1/T`.
 #
-# Why `T_optics` is 1: STPSF's `calc_psf` defaults to `normalize='first'` — normalise at the
-# *entrance pupil* and propagate only diffractive losses — which is what makes the grid's
-# measured `transmission` a real number (`normalize='last'` would report `T ≈ 1` everywhere).
-# The model therefore lacks the COM substrate and the Lyot substrate, but so did every flux
-# standard observed through them: `PHOTMJSR` for this pupil (2.486, against ~0.4 for CLEAR
-# imaging) was derived in this very optical train, so the MJy/sr in the file already put an
-# off-mask source at its true flux, and `EE` is a *fraction* of the Lyot-stop PSF in which the
-# stop's own 0.18 cancels.  The proof is the planet: with nothing tuned, HIP 65426 b measures
-# ΔF444W = 8.796 ± 0.092 against Carter et al. (2023)'s 8.703 ± 0.055 — 1.0σ
-# (`scripts/check_hip65426_contrast.py`).  Until 2026-09-16 a `T_optics` of 0.561 sat here,
-# "anchored" on the companion — it was compensating for the median-filter damage described in
-# section 1, not for any optics.  See `docs/FLUX_CALIBRATION.md`.
+# `T_optics` is 1 because STPSF's `calc_psf` normalizes at the entrance pupil and propagates
+# only diffractive losses (`normalize='first'`), which is what makes the grid's measured
+# transmission a real number. The model therefore lacks the COM substrate and the Lyot
+# substrate, but so did every flux standard observed through them. `PHOTMJSR` for this pupil
+# (2.486, against about 0.4 for CLEAR imaging) was derived in the same optical train, so the
+# MJy/sr in the file already put an off-mask source at its true flux. `EE` is a fraction of the
+# Lyot-stop PSF, in which the stop's own 0.18 cancels. The planet confirms it: with nothing
+# tuned, HIP 65426 b measures ΔF444W = 8.796 ± 0.092, against the 8.703 ± 0.055 of Carter et al.
+# (2023), a difference of 0.9σ (`scripts/check_hip65426_contrast.py`, and
+# `docs/FLUX_CALIBRATION.md`).
 
 # %%
 STAR_FLUX, PSF_MODEL = None, None
-if HAVE_DATA and stpsf_psf.have_stpsf():
-    grid = stpsf_psf.offaxis_grid("NIRCam", "F444W", image_mask="MASK335R",
-                                  seps_as=np.arange(0.2, 3.01, 0.2), stamp_px=41, nlambda=3)
-    STAR_FLUX = stpsf_psf.star_flux_from_flux_density(
-        grid, PHOT["flux_density_jy"], pixar_sr,
-        optics_transmission=PHOT["optics_transmission"])
-    PSF_MODEL = stpsf_psf.library(grid, star_flux=STAR_FLUX)
-elif HAVE_DATA:
-    print("STPSF unavailable -- falling back to a Gaussian of flux unit 1: parameter *ranking*"
-          "\nis unaffected, only the contrast axis becomes arbitrary (template units).")
+if HAVE_DATA:
+    try:
+        # Read from the cache when the grid is there; STPSF is needed only to compute it.
+        grid = stpsf_psf.offaxis_grid("NIRCam", "F444W", image_mask="MASK335R",
+                                      seps_as=np.arange(0.2, 3.01, 0.2), stamp_px=41, nlambda=3)
+        STAR_FLUX = stpsf_psf.star_flux_from_flux_density(
+            grid, PHOT["flux_density_jy"], pixar_sr, bunit=hdr["BUNIT"],
+            optics_transmission=PHOT["optics_transmission"])
+        PSF_MODEL = stpsf_psf.library(grid, star_flux=STAR_FLUX)
+    except (RuntimeError, ImportError) as exc:
+        raise RuntimeError(
+            "This tutorial needs the STPSF model of MASK335R: STPSF itself (Python >= 3.10, with its "
+            "data files), or the cached stpsf_NIRCam_F444W_MASK335R_<key>.fits and "
+            "eeunocc_NIRCam_F444W_<key>.fits in $KLIP_TPE_DATA/stpsf_cache.  Without it the "
+            "injections have no physical scale, the calibration cannot reach S/N 5, and the search "
+            f"ranks noise.\n{exc}") from exc
 
 if HAVE_DATA:
     from klip_tpe import Param
@@ -276,11 +282,30 @@ if HAVE_DATA:
     print(space.names)
 
 # %% [markdown]
-# A default RDI reduction with 10 KL modes: HIP 65426 b is the point source at 0.83″,
-# PA 150° (circled).  Look at its shape: a three-bar "hamburger" core with six faint lobes
-# around it, exactly as in Carter et al. (2023)'s Fig. 3 — that is what an off-axis source
-# behind MASK335R looks like through the round Lyot stop, not two sources.  (Try
-# `mode="ADI"` here to see the other roll's two frames do what they can.)
+# The STPSF model gives the injections the right shape and the mask throughput, which falls
+# steeply inside 1″ (`grid` spans 0.2″ to 3.0″, the whole search annulus):
+
+# %%
+if HAVE_DATA:
+    plt.figure(figsize=(9, 3.2))
+    plt.subplot(1, 2, 1)
+    plt.plot(grid["seps"], grid["transmission"], "-o", ms=3)
+    plt.axvline(PLANET[0], color="c", ls=":", label="HIP 65426 b")
+    plt.axhline(0.5, color="k", lw=.5)
+    plt.xlabel("separation (arcsec)"); plt.ylabel("MASK335R throughput")
+    plt.legend(); plt.grid(alpha=.3)
+    plt.subplot(1, 2, 2)
+    st, _, _ = PSF_MODEL.stamp(PLANET[0])
+    plt.imshow(st ** 0.4, origin="lower", cmap="inferno")
+    plt.title(f'off-axis PSF at {PLANET[0]}"'); plt.xticks([]); plt.yticks([])
+    plt.tight_layout()
+    print(f"throughput at the planet: {PSF_MODEL.throughput(PLANET[0]):.3f}")
+
+# %% [markdown]
+# A default RDI reduction with 10 KL modes. HIP 65426 b is the point source at 0.82″, PA 150°
+# (circled). Its core has three bars with six faint lobes around it, as in Carter et al.
+# (2023, Fig. 3). That is what an off-axis source behind MASK335R looks like through the round
+# Lyot stop. `mode="ADI"` here shows what the other roll's two frames can do.
 
 # %%
 if HAVE_DATA:
@@ -306,16 +331,18 @@ if HAVE_DATA:                                    # the same reduction in each mo
 # %% [markdown]
 # ## 4. Optimize
 #
-# Tutorial 1's budget: 300 evaluations, the first 40 random warm-up, and the six best
-# candidates validated on eight fresh injection sets each.  Each evaluation injects companions
-# into the *science* frames only — the reference library is never contaminated — reduces with
-# and without them and scores the difference.  With pyKLIP doing the reductions, budget about
-# an hour for this search and as long again for the forward-modelled one below.
+# The budget is tutorial 1's, 300 evaluations with 40 of warm-up and the six best candidates
+# validated on eight fresh injection sets each, but with one injection draw per trial instead
+# of three. With pyKLIP doing the reductions, this search took about two hours on a Mac, and
+# the forward-modeled one in section 5 takes as long again. `n_remeasure=3` (tutorial 1,
+# section 3) ranks the trials better and costs about twice as much.
 #
-# The four injected sources step across the band in radius, so one of them always sits near
-# HIP 65426 b's separation; `known=` keeps it 1.5 FWHM away, which is enough for the score
-# (the planet cancels between the reductions with and without injections) but leaves it right
-# beside the planet in the panel's images.  The cell keeps every injection 4 FWHM (0.6″) clear.
+# Each evaluation injects companions into the science frames only, so the reference library is
+# never contaminated. It reduces with and without them and scores the difference. The four
+# injected sources step across the band in radius, so one of them always sits near the
+# separation of HIP 65426 b. `known=` keeps it 1.5 FWHM away, which is enough for the search
+# score, but leaves it right next to the planet in the panel's images. The cell keeps every
+# injection 4 FWHM (0.6″) clear.
 
 # %%
 if HAVE_DATA:
@@ -351,66 +378,28 @@ if HAVE_DATA:
     cc = np.loadtxt(os.path.join(RUN_DIR, "annulus01", "contrast_curve.txt"))
     plt.figure(figsize=(6, 4)); plt.semilogy(cc[:, 0], cc[:, 1], "-o", ms=3)
     plt.axvline(PLANET[0], color="c", ls=":", label="HIP 65426 b")
-    plt.xlabel("separation (arcsec)")
-    plt.ylabel("5-sigma contrast" + ("" if STAR_FLUX else " (template units)"))
+    plt.xlabel("separation (arcsec)"); plt.ylabel("S/N=5 contrast")
     plt.grid(alpha=.3); plt.legend(); plt.title("HIP 65426, NIRCam F444W");
 
 # %% [markdown]
-# ## 5. The real PSF, and a forward-modelled matched filter
+# ## 5. A Forward-Modeled Matched Filter
 #
-# Two approximations are worth removing on JWST.  First the **injected PSF**: inside a few
-# λ/D of a coronagraph the off-axis PSF is neither a Gaussian nor separation-independent,
-# and the mask throughput is a steep function of separation.
-# [STPSF](https://stpsf.readthedocs.io) (the renamed WebbPSF) computes both from the mode in
-# the headers — `psf="stpsf"` in `make_reducer`, or by hand below.  The grid is cached, so
-# the cost is paid once.
+# KLIP does not conserve flux. It removes part of the planet and leaves negative lobes around
+# the rest, by an amount that depends on the parameters being searched. `klip_tpe.fmmf.FMMFSNR`
+# propagates the PSF model through each configuration's own subtraction and filters with that
+# (Pueyo 2016; Ruffio et al. 2017). The Mawet small-sample ring statistics, the clean
+# subtraction and the validation protocol are unchanged, so the two runs differ only in the
+# filter.
 #
-# Second the **matched filter**.  KLIP is not flux-conserving: it eats part of the planet
-# and leaves negative lobes around what is left, by an amount that depends on the very
-# parameters being searched.  `klip_tpe.fmmf.FMMFSNR` propagates the PSF model through each
-# configuration's own subtraction and filters with *that* (Pueyo 2016; Ruffio et al. 2017).
-# Everything else — the Mawet small-sample ring statistics, the clean-subtraction rule, the
-# validation protocol — is untouched, so the two runs differ only in the filter.
-
-# %%
-if HAVE_DATA:
-    try:
-        # The grid has to span the SEARCH ANNULUS, not just the planet: the injections are
-        # spread from the inner to the outer edge, and `LibraryPSF` has no template outside
-        # its own range, so a source past the last separation aborts that evaluation.  Built
-        # only out to 2.0" while the annulus reaches 45 px = 2.82", every one of 50
-        # evaluations failed -- the run finished with no winner and no best image.
-        grid = stpsf_psf.offaxis_grid("NIRCam", "F444W", image_mask="MASK335R",
-                                      seps_as=np.arange(0.2, 45 * pxscale + 0.21, 0.2),
-                                      stamp_px=21, nlambda=1)
-        psf_model = PSF_MODEL or stpsf_psf.library(grid, star_flux=STAR_FLUX or 1.0)
-        plt.figure(figsize=(9, 3.2))
-        plt.subplot(1, 2, 1)
-        plt.plot(grid["seps"], grid["transmission"], "-o", ms=3)
-        plt.axvline(PLANET[0], color="c", ls=":", label="HIP 65426 b")
-        plt.axhline(0.5, color="k", lw=.5)
-        plt.xlabel("separation (arcsec)"); plt.ylabel("MASK335R throughput")
-        plt.legend(); plt.grid(alpha=.3)
-        plt.subplot(1, 2, 2)
-        st, _, _ = psf_model.stamp(PLANET[0])
-        plt.imshow(st ** 0.4, origin="lower", cmap="inferno")
-        plt.title(f'off-axis PSF at {PLANET[0]}"'); plt.xticks([]); plt.yticks([])
-        plt.tight_layout()
-        print(f"throughput at the planet: {psf_model.throughput(PLANET[0]):.3f}")
-    except Exception as exc:            # STPSF and its data files are an optional dependency
-        psf_model = None
-        print(f"STPSF unavailable ({exc}); keeping the Gaussian template")
-
-# %% [markdown]
-# The same search, scored with the forward-modelled filter.  pyKLIP has no
-# analytic KLIP-FM, so the template is the *numerical* forward model `injected − clean` —
-# the same response to first order, and free, because the clean reduction is computed
-# anyway.  `fm_fraction` says what fraction of the filters really were forward-modelled.
+# klip-tpe's pyKLIP backend has no analytic KLIP-FM, so the template is the numerical forward
+# model `injected − clean`. That is the same response to first order, and it costs nothing,
+# because the clean reduction is computed anyway. `fm_fraction` reports the fraction of filters
+# that really were forward-modeled.
 
 # %%
 if HAVE_DATA:
     from klip_tpe.fmmf import FMMFSNR
-    red_fm = sk.make_reducer(dsets, injection_model=psf_model,
+    red_fm = sk.make_reducer(dsets, injection_model=PSF_MODEL,
                              mode="RDI", max_workers="auto")
     objective_fm, _ = generic.default_config(red_fm, metric="fmmf", known=[PLANET])
     metric_fm = objective_fm.metric
@@ -422,7 +411,7 @@ if HAVE_DATA:
     runner_fm = Runner(red_fm, space, objective_fm, sampler, cfg_fm, run_fm,
                        callbacks=[LiveDisplay(run_fm, show="inline", window_scale=0.55, every=5)])
     t0 = time.time(); results_fm = runner_fm.run(); print(f"{(time.time() - t0) / 60:.1f} min")
-    print(f"forward-modelled filters: {metric_fm.describe()['fm_fraction']:.0%} of "
+    print(f"forward-modeled filters: {metric_fm.describe()['fm_fraction']:.0%} of "
           f"{metric_fm.describe()['n_filtered']}")
 
 # %%
@@ -432,37 +421,43 @@ if HAVE_DATA:
     print(f"HIP 65426 b, scored the same way for all three images:")
     print(f"   default k=10        S/N {snr0:5.1f}")
     print(f"   PSF matched filter  S/N {snr1:5.1f}")
-    print(f"   forward-modelled MF S/N {snr2:5.1f}")
+    print(f"   forward-modeled MF S/N {snr2:5.1f}")
     print(f"   winner (fmmf): " + "  ".join(
         f"{k}={v}" for k, v in results_fm[0].winner_config["params"].items()
         if k in ("mode", "filter", "n_ang", "k_klip")))
 
 # %% [markdown]
-# ## 6. Notes for real JWST work
+# ## 6. Notes for Real JWST Work
 #
-# * **Preprocessing sets the floor.**  Section 1 is the bare minimum; spaceKLIP's
-#   `ImageTools` (bad-pixel repair, background subtraction, sub-pixel alignment on the
-#   diffraction pattern, frame selection) does better, and the optimizer works with whatever
-#   floor it is given.
-# * **Photometry.**  Pass an off-axis PSF and the star flux for contrasts in physical units
-#   rather than template units.
-# * **Small data sets.**  With four science integrations a single evaluation's score is
-#   noisy; raise `n_sources` (more injections per evaluation cost nothing — one reduction
-#   either way) rather than the number of evaluations.
-# * **What is searched** here is the number of KL modes, the high-pass filter, the
-#   azimuthal subdivision and pyKLIP's `mode` — five dimensions.  Any other backend option
-#   (`annuli_spacing`, `algo`, `corr_smooth`, …) becomes searchable the same way: add a
+# * **Preprocessing sets the floor.** Section 1 is the minimum. spaceKLIP's `ImageTools`
+#   (bad-pixel repair, background subtraction, sub-pixel alignment on the diffraction pattern,
+#   frame selection) does better, and the optimizer works from whatever floor it is given.
+# * **Photometry.** The STPSF model and the imported star flux of section 3 are what make the
+#   injections, the calibration and the contrast curve physical. Without them the search has
+#   nothing to rank.
+# * **Small data sets.** With four science integrations, a single evaluation's score is noisy.
+#   More injected sources per evaluation help only up to the cap that keeps enough of the noise
+#   ring clean, which the runner applies to `n_sources`. `n_remeasure=3` averages fresh
+#   positions and works on any annulus.
+# * **What is searched** here is the number of KL modes, the high-pass filter, the azimuthal
+#   subdivision and pyKLIP's `mode`, four dimensions. Any other backend option
+#   (`annuli_spacing`, `algo`, `corr_smooth` and so on) becomes searchable the same way: add a
 #   `Param` with that name.
+# * **STPSF from the headers.** `make_reducer(dsets, psf="stpsf")` builds the same model from
+#   the instrument mode, which it reads from a dataset header. The datasets here carry none, so
+#   it would need `stpsf_kw=dict(filter="F444W", image_mask="MASK335R")`.
 #
-# ## 7. From a spaceKLIP database
+# ## 7. From a spaceKLIP Database
 #
-# Once you have run spaceKLIP, skip sections 1–2 entirely:
+# After spaceKLIP has processed the data, sections 1 and 2 reduce to:
 # ```python
 # from spaceKLIP import database
 # db = database.Database(output_dir="spaceklip/")
 # db.read_jwst_s012_data(datapaths=sorted(glob.glob("spaceklip/IMGPROCESS/*_calints.fits")))
 # dsets = sk.load_spaceklip(db, key="JWST_NIRCAM_NRCALONG_F444W_MASKRND_MASK335R_SUB320A335R",
 #                           crop_half=55, partition_by=None)   # one Dataset; "roll" splits it
-# red = sk.make_reducer(dsets, psf_template="offset_psf_F444W.fits", star_flux=F_star)
+# red = sk.make_reducer(dsets, injection_model=PSF_MODEL, mode="RDI")   # section 3's STPSF model
 # ```
-# Everything from section 3 on is identical.
+# `make_reducer(dsets, psf_template="offset_psf_F444W.fits", star_flux=F_star)` works too.
+# That template is normalized inside 2 λ/D and carries no mask throughput, so `F_star` has to
+# be the star's flux in that aperture, and the contrast inside 1″ is only approximate.

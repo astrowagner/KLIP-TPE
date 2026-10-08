@@ -29,8 +29,8 @@ for as a fixed point instead of read off one injection: inject at the current es
 measure, re-inject at the answer, until the fake and the planet are equally bright and their
 throughputs are therefore identical.
 
-Expected: dL' = 7.78 against the 8.01 +/- 0.16 that Absil et al. (2013, A&A 559, L12)
-published from these same data -- agreement at ~1.2 sigma.
+Expected: dL' = 7.81 +/- 0.08 against the 8.01 +/- 0.16 that Absil et al. (2013, A&A 559,
+L12) published from these same data -- agreement at 1.1 sigma.
 """
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ INRAD, OUTRAD = 8, 26                # annulus bracketing 0.452" = 16.6 px
 TEST_PA = [70.0, 110.0, 150.0, 260.0, 300.0, 340.0]
 #: multiples of the fixed point, to show how far the recovery is from linear
 SWEEP = [0.25, 0.5, 2.0, 4.0]
-TOL_MAG = 0.45                       # fail above this; the expected offset is 0.24 mag
+TOL_MAG = 0.45                       # fail above this; the expected offset is 0.20 mag
 
 
 def measure(img, red, rho, theta, *, known=(), pixel_mask=None):

@@ -1,34 +1,37 @@
 # %% [markdown]
-# # Tutorial 6 — MIRI with one roll and four planets: HR 8799
+# # Tutorial 6: MIRI with One Roll and Four Planets (HR 8799)
 #
-# Tutorial 5 covered what makes MIRI's four-quadrant masks different.  This one is about a
-# *different shape of observation*, on the system where the mid-infrared payoff is clearest.
-# GO 1194 (Boccaletti et al. 2024, A&A 686, A33) observed HR 8799 through F1065C, F1140C and
-# F1550C and detected all four planets in the two shorter filters — the first mid-infrared
-# images of the system — with the inner dust belt as well.
+# Tutorial 5 covered what makes MIRI's four-quadrant masks different. This one is about a
+# different kind of observation, on a system where the mid-infrared payoff is clear. JWST GTO
+# program 1194 observed HR 8799 through F1065C, F1140C and F1550C (Boccaletti et al. 2024, A&A
+# 686, A33). It detected all four planets in the two shorter filters and resolved the inner
+# warm dust belt, about 15 au (0.37″) from the star.
 #
-# Three things about the observation change how you set the run up, and none of them are
-# about the coronagraph:
+# Three features of the observation change how the run is set up, and none of them is about
+# the coronagraph:
 #
-# 1. **One science pointing, not two rolls.**  So there is no field rotation at all, and
-#    **ADI is impossible**: the reduction is RDI, and every parameter that matters is about
-#    how the reference library is used.  This is the commonest JWST coronagraphic layout and
-#    the one most likely to be set up wrongly.
-# 2. **A nine-point small-grid dither on the reference star**, 10 mas steps — eighteen
-#    reference integrations that sample the PSF's response to pointing jitter, which is the
-#    point of an SGD and what makes RDI work at this contrast.
-# 3. **Four companions from ~0.4″ to ~1.7″, at four different position angles.**  One
-#    companion tests a throughput model at one place.  Four test whether a
-#    position-dependent throughput is right *everywhere at once*, which is the claim a 2-D
-#    map actually makes.
+# 1. **One science pointing, not two rolls.** There is no field rotation at all, so ADI is
+#    impossible. The reduction is RDI, and every parameter that matters is about how the
+#    reference library is used. Most JWST coronagraphic sequences have two rolls, and a
+#    single-roll sequence is easy to set up wrongly.
+# 2. **A nine-point small-grid dither on the reference star** (HD 218261), in 10 mas steps.
+#    Its eighteen integrations sample the PSF's response to pointing jitter, which is the
+#    point of a small-grid dither and what makes RDI work at this contrast.
+# 3. **Four companions from about 0.4″ to 1.7″, at four different position angles.** On a
+#    4QPM the throughput depends on position angle (tutorial 5), so the four planets sit at
+#    four quite different attenuations.
 #
 # **Data.**
 # ```
-# python3 scripts/fetch_jwst_ar.py --list hr8799
-# python3 scripts/fetch_jwst_ar.py --fetch hr8799 --out ~/Data/JWST/hr8799
+# python3 scripts/fetch_jwst_ar.py --targets hr8799                                # list first
+# python3 scripts/fetch_jwst_ar.py --targets hr8799 --download --outdir ~/Data/JWST
 # ```
-# ~1.2 GB for the MIRI half (the programme also has a NIRCam half in eight filters).  Set
-# `KLIP_TPE_JWST_HR8799` if you keep it elsewhere.
+# The files land in `~/Data/JWST/hr8799/`, together with the program's NIRCam coronagraphy.
+# Set `KLIP_TPE_JWST_HR8799` if you keep them elsewhere.
+#
+# **PSF model.** As in tutorial 5, the cells need STPSF or the three cache files for the
+# filter (stamp grid, throughput map and encircled energy) in `$KLIP_TPE_DATA/stpsf_cache`. A
+# missing file stops the notebook with its name.
 
 # %%
 import glob, os, time
@@ -47,6 +50,7 @@ if os.path.isdir(os.path.join(DATA, "mastDownload")):   # the archive files, not
     DATA = os.path.join(DATA, "mastDownload")           # load_calints refuses one exposure found twice
 FILTER = "F1065C"                  # all four planets are detected here and in F1140C
 RUN_DIR = os.path.abspath(f"runs/hr8799_{FILTER.lower()}")
+# Re-running RESUMES this directory -- delete it to search again (see tutorial 01).
 
 files = sorted(glob.glob(os.path.join(DATA, "**", "jw*_calints.fits"), recursive=True))
 in_filt = [f for f in files if str(fits.getheader(f).get("FILTER", "")).upper() == FILTER]
@@ -55,26 +59,22 @@ print(f"{len(files)} calints under {DATA}, {len(in_filt)} in {FILTER}"
       f"  ({'ok' if HAVE_DATA else 'run the fetch script'})")
 
 # %% [markdown]
-# ## 1. One roll means the partition layout decides what is possible
+# ## 1. With One Roll, the Partition Layout Decides What Is Possible
 #
-# `partition="roll"` makes one partition per unique roll angle.  With a single pointing that
-# is **one** partition containing every science integration at one PA — which is correct
-# here, and it means `mode="ADI"` would give pyKLIP nothing to build a basis from.  Ask for
-# it and you get NaN, or worse, a number from a basis of one frame.
+# `partition="roll"` makes one partition per roll angle. With a single pointing that is one
+# partition holding every science integration at one PA, which is right here. It also means
+# that `mode="ADI"` would give pyKLIP nothing to build a basis from. Ask for it and you get
+# NaN, or a number from a basis of one frame.
 #
-# This is not a MIRI subtlety, it is the trap that invalidated two of this package's own
-# paper runs: with `partition="roll"` on a *two*-roll NIRCam sequence, every frame in each
-# partition shared a PA, so ADI had no reference frames and "ADI+RDI" was really RDI — and a
-# run that searched over `mode` was choosing between three options of which two could not
-# work.  The rule: **a partition is reduced on its own**, so if you want ADI to mean anything,
-# the frames that provide the rotation have to be in the same partition (`partition="all"`).
-# Here there is no rotation to have, so the honest setup is one partition and RDI.
+# The same layout on a two-roll sequence is a trap. With `partition="roll"` on two rolls, every
+# frame in each partition shares a PA, so ADI has no reference frames and ADI+RDI duplicates
+# RDI. The rule is that **a partition is reduced on its own**. For ADI to mean anything, the
+# frames that provide the rotation have to be in the same partition (`partition="all"`, as in
+# tutorials 3 and 5). Here there is no rotation, so the right setup is one partition and RDI.
 #
-# Note also what the loader does *not* say below: there is no background-subtraction line.
-# Every science and reference exposure in this programme already carries
-# `S_BKDSUB='COMPLETE'`, unlike the ERS programme in tutorial 5 where only the science half
-# did.  Nothing to fix — but worth confirming rather than assuming, which is why the loader
-# reports the census either way.
+# Every science and reference exposure in this program already carries
+# `S_BKDSUB='COMPLETE'`, unlike the ERS program in tutorial 5. The header census below confirms
+# it, and the loader then has no background to subtract.
 
 # %%
 if HAVE_DATA:
@@ -92,20 +92,20 @@ if HAVE_DATA:
           f"library {np.asarray(d0.ref_cube).shape}, roll(s) {info['rolls']}")
 
 # %% [markdown]
-# ## 2. The companions, and why this tutorial will not hand you their positions
+# ## 2. The Companions, and Why This Tutorial Leaves Their Positions to You
 #
-# `known=[(ρ, PA), ...]` does two things: it keeps injected sources away from real ones, and
-# it keeps real ones out of the noise ring the injections are scored against.  Forget it and
-# a real planet inflates σ in its own annulus, so every contrast in that annulus is
-# pessimistic and the optimizer is rewarded for parameters that suppress it.
+# `known=[(ρ, PA), ...]` does two things. It keeps injected sources away from real ones, and it
+# keeps real ones out of the noise ring that the injections are scored against. Without it, a
+# real planet inflates σ in its own annulus, every contrast there is pessimistic, and the
+# optimizer is rewarded for parameters that suppress the planet.
 #
-# So the positions have to be right — and **they move**.  HR 8799's planets are on 40-to-500
-# year orbits; e advances several degrees of position angle per year.  A table copied out of a
-# tutorial is wrong for your epoch, and wrong in the direction that puts the exclusion zone
-# beside the planet rather than on it.  Boccaletti et al. (2024) observed on **2022 November
-# 7–8** and report photometry rather than astrometry, so take positions from an orbit fit or
-# an astrometric compilation at your own epoch — `whereistheplanet` (Wang et al.) does this
-# from the published astrometry — and put them in here:
+# So the positions have to be right, and they move. HR 8799's planets have orbital periods of
+# about 45 to 460 years, and e advances several degrees of position angle per year. A table
+# copied from a tutorial is wrong for your epoch, and it puts the exclusion zone next to the
+# planet rather than on it. Boccaletti et al. (2024) observed on 2022 November 7 and 8 and
+# report photometry, not astrometry. Take the positions for your epoch from an orbit fit or an
+# astrometric compilation (`whereistheplanet`, Wang et al., computes them from the published
+# astrometry), and enter them here:
 
 # %%
 # EDIT THESE for your epoch.  Left empty on purpose: the cells below work either way and say
@@ -117,25 +117,24 @@ if HAVE_DATA and not KNOWN:
           "measure a contrast curve for this system -- see section 5.")
 
 # %% [markdown]
-# ## 3. What four companions test that one cannot
+# ## 3. Throughput at Each Planet's Separation
 #
-# The planets sit at four different position angles.  On a 4QPM the throughput at a fixed
-# separation varies by up to a factor of six and a half with azimuth (tutorial 5), so the
-# four of them sample four quite different attenuations — and the two things the map has to
-# get right, the boundary *positions* and the depth *between* them, are tested at four places
-# instead of one.
-#
-# %% [markdown]
-# Their *separations* are another matter: those change far more slowly than the position
-# angles (b's period is ~460 yr), so quoting them approximately is safe where quoting a PA is
-# not.  Roughly 1.7″, 0.95″, 0.66″ and 0.39″ for b, c, d and e.  The figure below is the whole
-# argument of this section: at each of those separations, how much the throughput varies with
-# azimuth.  The planets do not choose their position angles to suit us, and at 1.7″ the
-# attenuation a companion suffers depends on where it sits by nearly a factor of six.
+# The separations change far more slowly than the position angles (b's period is about 460
+# years), so they can be quoted approximately: about 1.7″, 0.95″, 0.66″ and 0.39″ for b, c, d
+# and e. The figure shows, at each of those separations, how much the throughput varies with
+# azimuth. At 1.7″ the attenuation a companion suffers depends on where it sits by about a
+# factor of 6.4.
 
 # %%
-if HAVE_DATA and stpsf_psf.have_stpsf():
-    g = miri.throughput_map(FILTER)
+if HAVE_DATA:
+    try:
+        # Read from the cache when the map is there; STPSF is needed only to compute it.
+        g = miri.throughput_map(FILTER)
+    except (RuntimeError, ImportError) as exc:
+        raise RuntimeError(
+            f"This tutorial needs the STPSF model of the {FILTER} 4QPM: STPSF itself (Python >= 3.10, "
+            f"with its data files), or the cached throughput map, stamp grid and encircled-energy "
+            f"files for {FILTER} in $KLIP_TPE_DATA/stpsf_cache.\n{exc}") from exc
     T = miri.throughput_map_fn(g)
     az = np.linspace(0, 360, 721)
     fig, ax = plt.subplots(figsize=(7.5, 3.6))
@@ -151,16 +150,15 @@ if HAVE_DATA and stpsf_psf.have_stpsf():
     plt.tight_layout()
 
 # %% [markdown]
-# The cell below asks the map what it predicts at each planet's position for each roll of
-# this observation.  With one roll there is one answer per planet; with two rolls you would
-# get two, and the spread between them is exactly the per-frame variation that
-# `azimuth_dependent=True` exists to handle.
+# The cell below asks the map for the throughput at each planet's position in each roll of
+# this observation. With one roll there is one value per planet. With two rolls there would be
+# two, and the spread between them is the per-frame variation that `azimuth_dependent=True`
+# handles.
 
 # %%
-if HAVE_DATA and KNOWN and stpsf_psf.have_stpsf():
+if HAVE_DATA and KNOWN:
     angles = np.unique(np.round(np.asarray(d0.angles, float), 2))
-    truenorth = 0.0        # in a real run this is the reducer's: getattr(red, "truenorth", 0.0),
-                           # which is what forbidden_pa is given in section 5
+    truenorth = 0.0        # 0 for these frames; in general the per-partition reducer's truenorth
     print(f"{'planet':>8s} {'rho':>6s} {'PA':>6s}   throughput per roll")
     for i, (rho, pa) in enumerate(KNOWN):
         az = np.asarray([pa - truenorth - 270.0 - a for a in angles])
@@ -170,25 +168,23 @@ if HAVE_DATA and KNOWN and stpsf_psf.have_stpsf():
               + ("   <- in a dead zone" if np.min(t) < 0.30 else ""))
 
 # %% [markdown]
-# ## 4. The flux unit, checked against somebody else's number
+# ## 4. The Flux Unit, Checked Against an Independent Number
 #
-# Same four terms as tutorial 5.  What is worth showing here is the *check*, because HR 8799
-# has one that tutorial 5's star does not.
+# The four terms are the same as in tutorial 5. HR 8799 has a check that tutorial 5's star
+# does not.
 #
-# Boccaletti et al. (2024) interpolate the stellar flux density at 15.5 µm from WISE and
-# AKARI photometry and get **154.2 mJy**.  Planck(7600 K) through the F1550C bandpass,
-# normalised to 2MASS Ks = 5.240, gives **155.8 mJy** — agreement to 1.0%, by a route with
-# nothing in common with theirs.  Across the plausible Teff range (7200–7800 K) the synthetic
-# value moves 159.6 → 154.0 mJy, so the agreement also pins the inputs: an error in Ks would
-# scale straight through.
+# Boccaletti et al. (2024) interpolate the star's flux density at 15.5 µm between WISE W3 and
+# AKARI L18W and get 154.2 mJy. Planck(7600 K, the effective temperature they adopt) through
+# the F1550C bandpass, normalized to 2MASS Ks = 5.240, gives 155.8 mJy, a 1.0% agreement by a
+# route that shares nothing with theirs. Over 7200 to 7800 K the synthetic value runs from
+# 159.6 to 154.0 mJy, so the agreement holds to within 3.5% across that range. An error in Ks
+# would scale straight through.
 #
-# That is the standard to hold a contrast axis to.  Getting a number is easy; the question is
-# always what independent thing it agrees with.  `datasets.PHOTOMETRY` carries both stars'
-# entries with their checks written into them.
+# `datasets.PHOTOMETRY` carries the entries for both stars, with their checks.
 
 # %%
 STAR_FLUX = None
-if HAVE_DATA and stpsf_psf.have_stpsf():
+if HAVE_DATA:
     phot = datasets.PHOTOMETRY[f"hr8799_{FILTER.lower()}"]
     STAR_FLUX = miri.star_flux_from_flux_density(FILTER, phot["flux_density_jy"],
                                                  info["pixar_sr"], bunit=info["bunit"])
@@ -196,21 +192,19 @@ if HAVE_DATA and stpsf_psf.have_stpsf():
     print(f"check: {phot['check']}")
 
 # %% [markdown]
-# ## 5. The run
+# ## 5. The Run
 #
-# Two differences from tutorial 5's setup, both following from the single roll.
+# Two settings follow from the single roll.
 #
-# **`mode="RDI"`, fixed, not searched.**  Searching a categorical whose other values cannot
-# work wastes evaluations and produces a "choice" that is not one.
+# * **`mode="RDI"`, fixed.** ADI has no frames to work with, so searching `mode` would only
+#   spend evaluations.
+# * **`search_angles=False`.** With every frame at one PA, `angsep` and `anglemax` change
+#   nothing, so they are left out. The search covers the number of KL modes, the high-pass
+#   filter and the azimuthal subdivision. With eighteen reference frames and no rotation, the
+#   number of KL modes does most of the work.
 #
-# **The searchable reference-library dimensions matter more.**  With eighteen SGD frames and
-# no rotation, how many KL modes to keep and how the library is weighted *is* the reduction.
-# `make_space` scales `k_klip` to the data (up to `nframes/5`), and `make_guard` keeps the
-# reference census honest — a configuration that would leave KLIP fewer than `n_min_ref`
-# usable references is projected back rather than evaluated and scored as a failure.
-#
-# Contrast with tutorial 5: there, two rolls 9.4° apart make ADI+RDI a real trade-off and
-# `mode` is worth searching.  The observation decides, not the instrument.
+# Two rolls in one partition (tutorial 5) would give ADI+RDI the other roll as well. The
+# observation decides, not the instrument.
 
 # %%
 if HAVE_DATA and STAR_FLUX is not None:
@@ -223,9 +217,9 @@ if HAVE_DATA and STAR_FLUX is not None:
     red = sk.make_reducer(dsets, pxscale=px, wavelength_m=m["lam_m"], diam_m=miri.DIAMETER_M,
                           psf="stpsf", star_flux=STAR_FLUX, mode="RDI", max_workers=3)
     obj, samp = generic.default_config(red, known=KNOWN, forbidden_pa=fpa, pixel_mask=pmask)
-    space = generic.make_space(red, k_klip_max=16)
+    space = generic.make_space(red, k_klip_max=16, search_angles=False)
     space.project = generic.make_guard(red, k_max=16)
-    print(f"{space.ndim} dimensions, {len(fpa)} forbidden sector(s), "
+    print(f"{space.names}, {len(fpa)} forbidden sector(s), "
           f"{int(pmask.sum())} px out of the noise estimate")
 
     dec = space.decode(space.default_vector())
@@ -238,21 +232,22 @@ if HAVE_DATA and STAR_FLUX is not None:
           f"model {red.reducers[list(dec.selected)[0]].model.name}")
 
 # %% [markdown]
-# The search uses tutorial 1's budget: 300 evaluations, the first 40 random warm-up, and the
-# six best candidates validated on eight fresh injection sets each.  With pyKLIP that is an hour
-# or two.
+# The search uses tutorial 1's budget: 300 evaluations with 40 of warm-up, three injection
+# draws averaged per trial, and the six best candidates validated on eight fresh injection
+# sets each. It has not been timed on these data, but with 9 science and 18 reference frames it
+# runs faster than tutorial 5.
 #
-# The four injected sources step across the band in radius, and the inner two sit about a
-# FWHM either side of b's separation.  With `KNOWN` empty nothing keeps them off the planets:
-# an injection can land on b, and is then scored against a ring the planet also inflates.  For a run whose
-# panels or numbers you will use, fill in `KNOWN` (section 2), and consider keeping the
-# injections a few FWHM clear of the planets as tutorial 5 does (`samp.excl_fwhm`).
+# The four injected sources step across the band in radius, and the inner two sit about a FWHM
+# on either side of b's separation. With `KNOWN` empty nothing keeps them off the planets. An
+# injection can land on b and is then scored against a ring that the planet also inflates. For
+# a run whose panels or numbers you will use, fill in `KNOWN` (section 2), and consider keeping
+# the injections a few FWHM from the planets as tutorial 5 does (`samp.excl_fwhm`).
 
 # %%
 if HAVE_DATA and STAR_FLUX is not None:
-    cfg = RunConfig(ann_edges=[ann[0], ann[1]], n_iter=300, n_init=40, seed=21,
+    cfg = RunConfig(ann_edges=[ann[0], ann[1]], n_iter=300, n_init=40, seed=21, n_remeasure=3,
                     validation=ValidationConfig(n_top=6, n_valid=8),
-                    calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=3),
+                    calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=2),
                     verify=True, save_eval_images=False)
     disp = LiveDisplay(RUN_DIR, every=5, pdf_every=0, movie=False, show="auto")
     runner = Runner(red, space, obj, samp, cfg, RUN_DIR, callbacks=[disp], resume="auto")
@@ -261,34 +256,32 @@ if HAVE_DATA and STAR_FLUX is not None:
     print(f"\n{(time.time() - t0) / 60:.1f} min -> {RUN_DIR}")
 
 # %% [markdown]
-# ## 6. The same target through three filters
+# ## 6. The Same Target through Three Filters
 #
-# Change `FILTER` at the top and re-run.  What to expect, from Boccaletti et al. (2024): all
-# four planets in **F1065C** and **F1140C**; in **F1550C** only b clearly, with c marginal.
-# So the three filters are not three repetitions of one exercise — F1550C is the regime where
-# the search is working near its floor, which is where the optimizer's choices matter most
-# and where a wrong noise estimate does the most damage.
+# Change `FILTER` at the top and run again. Boccaletti et al. (2024) detect all four planets in
+# F1065C and F1140C, and in F1550C only b, with c marginal. F1550C is therefore where the search
+# works near its floor, where the optimizer's choices matter most and a wrong noise estimate
+# does the most damage.
 #
-# Practical notes for running all three:
+# * `datasets.PHOTOMETRY` has all three flux densities (324.4, 286.6 and 155.8 mJy for F1065C,
+#   F1140C and F1550C), so `--flux-density-jy` is never needed by hand.
+# * Each filter needs its own three cache files. A throughput map takes about 25 minutes on a
+#   machine with STPSF, and it is checkpointed.
+# * The star flux differs by a factor of two across the three filters, and so does the
+#   background. Do not carry a `--star-flux` from one filter to another. Let the lookup do it.
 #
-# * `datasets.PHOTOMETRY` has all three flux densities (324.4 / 286.6 / 155.8 mJy for
-#   F1065C / F1140C / F1550C), so `--flux-density-jy` is never needed by hand.
-# * Each filter needs its own cached throughput map and encircled-energy file.  F1065C and
-#   F1140C are cached; **F1550C's map has to be computed once** (~10 minutes, check-pointed)
-#   on a machine with STPSF, and the cache file copied over. The error names the file.
-# * The star flux differs by a factor of two across the three, and so does the background.
-#   Do not carry a `--star-flux` from one filter to another; let the lookup do it.
+# ## 7. Where This System Is Hard
 #
-# ## 7. Where this system is genuinely hard
-#
-# * **The inner dust belt.**  Boccaletti et al. detect it, which means there is extended
-#   emission in the search annulus — the case tutorial 4 is about.  If you are tuning for the
-#   planets, `forbidden_pa` and the matching `pixel_mask` keep the belt out of both the
-#   injections and the noise estimate; doing only one of the two is worse than neither.
-# * **Four planets is four exclusion zones.**  At 1.5 FWHM each, plus 12% of the ring already
-#   forbidden by the mask's dead zones, a narrow annulus can run out of legal injection
-#   positions. The sampler will tell you; widen the annulus or inject fewer sources.
-# * **e is at ~0.4″**, which at 10.65 µm is about 1.2 λ/D — inside where a radial stamp
-#   library is trustworthy on a 4QPM, and in the regime `min_throughput` is designed to mask
-#   rather than extrapolate into. Treat any contrast quoted inside ~2 λ/D as the mask's
-#   statement rather than the reduction's.
+# * **The inner dust belt** lies at about 0.15″ to 0.37″, inside this annulus (0.74″ to 3.97″).
+#   An annulus that reaches in that far contains extended emission at every position angle,
+#   because a ring around the star covers them all, so `forbidden_pa` cannot keep the
+#   injections off it. `pixel_mask` can take it out of the noise estimate (tutorial 4).
+# * **Which planets the run sees.** In this annulus only b lies where the injections go. c, at
+#   0.95″, sits inside the inner edge of the injection band, and d and e lie inside the annulus.
+#   A wider annulus brings more of them in. Each planet in `KNOWN` then removes a zone of
+#   1.5 FWHM radius on top of the dead zones, and a narrow annulus can run short of legal
+#   injection positions.
+# * **e is at about 0.4″**, about 1.2 λ/D at 10.65 µm. That is inside the region where a radial
+#   stamp library can be trusted on a 4QPM, and in the regime `min_throughput` masks rather than
+#   extrapolates into. Treat any contrast quoted inside about 2 λ/D as a statement about the
+#   mask rather than the reduction.

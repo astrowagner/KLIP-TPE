@@ -74,7 +74,7 @@ channel.
 
 ```python
 from klip_tpe.backends import spaceklip as sk
-datasets = sk.load_spaceklip(database, key="JWST_NIRCAM_NRCA5_F444W_MASKRND_MASK335R_SUB320A335R")
+datasets = sk.load_spaceklip(database, key="JWST_NIRCAM_NRCALONG_F444W_MASKRND_MASK335R_SUB320A335R")
 # or: sk.load_spaceklip(sci_files=[...calints.fits], ref_files=[...])
 red = sk.make_reducer(datasets, psf_template="offset_psf_F444W.fits", star_flux=F_star, max_workers=4)
 ```
@@ -96,9 +96,11 @@ would put the target frame in its own basis and annihilate any source.
 mapping the partitions onto threads (`pool="threads"`: pyKLIP forks its own workers) with λ/D from
 the filter wavelength and D = 6.5 m. For injection pass a webbpsf / `webbpsf_ext` offset
 PSF at the data's pixel scale (`psf_template`, e.g. from spaceKLIP's
-`analysistools.get_offsetpsf`) and the star flux in image units (`star_flux`); without one
-a Gaussian of `1.028 λ/D` and flux unit 1 is used, which is fine for parameter *ranking*
-but not for calibrated contrasts.
+`analysistools.get_offsetpsf`) and the star flux in image units (`star_flux`).  Without
+them a Gaussian of `1.028 λ/D` with a flux unit of 1 is injected, so a "contrast" is a
+fraction of one image unit.  On frames in MJy/sr that is far fainter than any companion:
+the calibration reaches its contrast cap (`CalibrationConfig.max_contrast = 0.1`) with the
+injections still invisible, and the search ranks noise.  Give both for any real run.
 
 **pyKLIP starts a worker pool for every reduction.**  `klip_parallelized` builds a new
 `multiprocessing.Pool` on each call, and under `spawn` -- macOS's default -- each worker is a
@@ -184,9 +186,10 @@ this matters twice: injected sources get the right shape *and* the right amplitu
 the grid also measures the mask throughput `T(ρ)` (for MASK335R it reaches half
 transmission at 0.65″, against the published 0.63″ IWA) and `LibraryPSF` applies it. Each
 PSF costs seconds, so a grid is computed once and cached as a FITS under
-`$KLIP_TPE_DATA/stpsf_cache` (default `~/.klip_tpe/stpsf_cache`); the stamps are stored
-source-centred with the star towards −x, which is the `refpa_deg=0` convention the
-injector rotates from. STPSF is an optional dependency (`pip install stpsf`, Python ≥
+`$KLIP_TPE_DATA/stpsf_cache` (default `~/.klip_tpe/stpsf_cache`).  The stamps are stored
+source-centred and injected translated, never rotated (`refpa_deg=None`): the structure in a
+JWST coronagraphic PSF is fixed to the spacecraft and does not turn with the companion.  Pass
+`refpa_deg` to reproduce a run from before 2026-09-22, when the injector rotated them. STPSF is an optional dependency (`pip install stpsf`, Python ≥
 3.10, plus its ~90 MB data files via `STPSF_PATH`); nothing else imports the module.
 
 #### Forward-modelled matched filter (`--metric fmmf`)
@@ -205,7 +208,8 @@ klip-tpe generic --cube ... --metric fmmf          # or metric="fmmf" in default
 Everything else is unchanged — the same Mawet small-sample ring statistics, the same
 clean-subtraction rule, the same validation protocol — so an FMMF run and a PSF-matched
 filter run differ only in the filter. The template comes from the analytic KLIP-FM image
-when the reducer has one (the built-in annular KLIP); pyKLIP, VIP and spaceKLIP do not, and
+when the reducer has one (the built-in annular KLIP); this package's pyKLIP, VIP and
+spaceKLIP backends do not, and
 there the runner passes the *numerical* forward model `injected − clean`, which is the same
 quantity to first order and costs nothing extra because `clean_subtract=True` already
 computes both. `FMMFSNR.describe()["fm_fraction"]` reports what fraction of the filters

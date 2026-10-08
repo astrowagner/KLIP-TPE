@@ -46,10 +46,13 @@ Everything the IDL run writes has a counterpart (`docs/DISPLAY.md`).
 
 Before its first evaluation a new run moves each searched reduction dimension alone and
 reduces annulus 1's clean image, about one reduction per dimension
-(`klip_tpe.liveness.check_live_dimensions`).  A dimension that changes nothing stops the run
-there, naming it; this is the class of problem `docs/IDL_FINDINGS.md` §1 describes, which the
-search itself cannot see.  A dimension the guards never let move alone is logged and the run
-goes on.  `--no-liveness-check` skips the check; a resume is not re-checked.
+(`klip_tpe.liveness.check_live_dimensions`).  A frame-selection threshold is moved to the cut
+points of the frames' own tags, because it acts only between the smallest and largest tag.
+A dimension that changes nothing is reported as a warning, naming it.  This is the class of
+problem `docs/IDL_FINDINGS.md` §1 describes, which the search itself cannot see.
+`--strict-liveness` stops the run there instead.  A dimension the guards never let move
+alone is logged and the run goes on.  `--no-liveness-check` skips the check, and a resume
+is not re-checked.
 
 ## Jupyter
 

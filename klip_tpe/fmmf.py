@@ -123,10 +123,11 @@ class FMMFSNR(Metric):
     peak is below that many times its own robust scatter (0 = accept any finite stamp).
 
     ``fm_from_difference`` (read by :meth:`klip_tpe.runner.Runner._fm_for`) lets a reducer
-    with no analytic KLIP-FM -- pyKLIP, VIP, spaceKLIP -- supply the *numerical* forward
-    model ``injected - clean`` instead, which is the same thing to first order and costs
-    nothing extra when ``clean_subtract=True`` (the production default, and what this
-    metric expects: without a clean reduction there is no forward model to fall back on).
+    with no analytic KLIP-FM -- this package's pyKLIP, VIP and spaceKLIP backends -- supply
+    the *numerical* forward model ``injected - clean`` instead, which is the same thing to
+    first order and costs nothing extra when ``clean_subtract=True`` (the production
+    default, and what this metric expects: without a clean reduction there is no forward
+    model to fall back on).
     """
 
     pxscale: float

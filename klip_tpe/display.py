@@ -4113,13 +4113,25 @@ class LiveDisplay(RunCallback):
         if cur_inj is not None or cur_clean is not None:
             self._last_images = {"inj": cur_inj, "clean": cur_clean, "index": i}
         last = (i + 1) >= ad.n_iter
-        if not (is_best or last or (i % self.every == 0)):
+        # The PDF and the progress movie are due every pdf_every / movie_every EVALUATIONS,
+        # whatever the panel cadence.  Both used to be decided after the ``every`` gate, so
+        # with every=2 and pdf_every=10 the panel of evaluation 10 was never drawn (only
+        # evaluations 1, 3, 5, ... are) and neither came round until the annulus ended.
+        pdf_due = bool(self.pdf_every) and ((i + 1) % self.pdf_every == 0 or last)
+        movie_due = bool(self.movie and self.movie_every and self.save_png) and \
+            ((i + 1) % self.movie_every == 0 or last)
+        if not (is_best or last or pdf_due or (i % self.every == 0)):
+            if movie_due:
+                self._submit_progress_movie(runner.ia)
             return
         # The panel for the annulus' final evaluation is part of the result and always gets
-        # drawn; any other one is skipped when the render thread is still busy, so the
-        # window's lag stays the cost of one panel instead of growing with the run.
-        if not (last or self._render_room()):
+        # drawn, and so does a PDF that is due; any other one is skipped when the render
+        # thread is still busy, so the window's lag stays the cost of one panel instead of
+        # growing with the run.
+        if not (last or pdf_due or self._render_room()):
             self._skip_panel()
+            if movie_due:
+                self._submit_progress_movie(runner.ia)
             return
         bimg = self._best_images(runner)
         brec = bimg.get("record")
@@ -4146,9 +4158,7 @@ class LiveDisplay(RunCallback):
         last = et[-1] - et[-2] if len(et) >= 2 else np.nan                         # this evaluation's loop time
         eta, eta_full = self._eta_estimate(runner, ad, per)             # IDL rem_ann / rem
         png = os.path.join(self.run_dir, "steps", f"step{self._step:04d}.png") if self.save_png else None
-        pdf = None
-        if self.pdf_every and ((i + 1) % self.pdf_every == 0 or last):
-            pdf = os.path.join(self._ann_dir(runner.ia), f"eval_{i + 1:04d}_panel.pdf")
+        pdf = os.path.join(self._ann_dir(runner.ia), f"eval_{i + 1:04d}_panel.pdf") if pdf_due else None
         curves = self._curves(runner, ad, live)
         label = "NEW BEST" if is_best else ""
         note = self._live_reason
@@ -4168,7 +4178,7 @@ class LiveDisplay(RunCallback):
         # the step panel renders on a worker thread (Agg figure, ~2-4 s) so the evaluation loop
         # does not wait for it; the window shows each panel as soon as it is finished
         self._submit_render(png, _job)
-        if self.movie and self.movie_every and png and ((i + 1) % self.movie_every == 0 or last):
+        if movie_due:
             self._submit_progress_movie(runner.ia)
         self._show_latest()
 

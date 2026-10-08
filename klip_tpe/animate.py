@@ -81,9 +81,15 @@ def make_movie(paths: Sequence[str], out_gif: str, out_mp4: Optional[str] = None
         ims[0].save(out_gif, save_all=True, append_images=ims[1:], duration=dur_ms, loop=0)
         written.append(out_gif)
     if out_mp4:
+        # The FFMPEG plugin by name: without imageio-ffmpeg, imageio otherwise hands ".mp4"
+        # to its TIFF writer, which writes an 8-byte header and then fails on ``fps``,
+        # leaving a broken opt_steps.mp4 behind.
+        opened = False
         try:
             import imageio.v2 as iio2
-            w = iio2.get_writer(out_mp4, fps=fps, codec="libx264", quality=7, macro_block_size=None)
+            w = iio2.get_writer(out_mp4, format="FFMPEG", fps=fps, codec="libx264", quality=7,
+                                macro_block_size=None)
+            opened = True
             try:
                 for f in frames:
                     w.append_data(f)
@@ -91,6 +97,6 @@ def make_movie(paths: Sequence[str], out_gif: str, out_mp4: Optional[str] = None
                 w.close()
             written.append(out_mp4)
         except Exception:
-            if os.path.exists(out_mp4) and os.path.getsize(out_mp4) == 0:
+            if os.path.exists(out_mp4) and (opened or os.path.getsize(out_mp4) == 0):
                 os.remove(out_mp4)
     return written

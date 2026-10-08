@@ -147,7 +147,7 @@ whole validation stage at `n_top = 6, n_valid = 8` is 48 reductions — a few pe
 
 ## The search number and the validation number are different statistics
 
-Do not read `search best 8.9 → validated 7.6` as the answer getting worse.  The search
+Do not read a validated score below the search best as the answer getting worse.  The search
 maximises `score_search`, which subtracts a one-sided speckle term at each injection site
 (`s_inj − max(s_clean, 0)`); validation deliberately reports `score_raw = s_inj`.  Measured
 on these data that term is worth **+0.84 S/N**, so validation sits about 0.8 *above* the

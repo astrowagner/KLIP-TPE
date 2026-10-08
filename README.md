@@ -32,11 +32,12 @@ Jupyter for the inline display.
 
 ## Your first run
 
-About four minutes on one core, on public data (VIP's β Pictoris tutorial sequence).  **It
-draws a live panel while it runs — watch it**; a search is otherwise a silent process, and
-the panel is the only way to tell a converging run from a stuck one.  If no window appears,
-the same panel is written to `runs/betapic/steps/stepNNNN.png` after every evaluation, and
-`klip-tpe view --run-dir runs/betapic` opens one on a run that is already going.
+A few minutes of computation on one core, on public data (VIP's β Pictoris tutorial
+sequence), and more with the live panel.  **It draws a live panel while it runs — watch it**;
+a search is otherwise a silent process, and the panel is the only way to tell a converging
+run from a stuck one.  If no window appears, every panel is also written to
+`runs/betapic/steps/stepNNNN.png`, and `klip-tpe view --run-dir runs/betapic` opens one on a
+run that is already going.
 
 ```python
 from klip_tpe import Runner, RunConfig, ValidationConfig, datasets
@@ -62,7 +63,7 @@ or, the same from a terminal:
 ```
 klip-tpe generic --cube naco_betapic_cube_cen.fits --angles naco_betapic_derot_angles.fits \
     --psf naco_betapic_psf.fits --star-flux 3.3268e6 --pxscale 0.02719 --lam 3.8e-6 --diam 8.2 \
-    --known 0.452 211.9 --ann-edges 8 22 --n-iter 300 --n-init 40 --n-remeasure 3 \
+    --known 0.452 211.9 --ann-edges 8 22 --n-iter 300 --n-init 40 --n-remeasure 3 --k-max 30 \
     --n-top 6 --n-valid 8 --run-dir runs/betapic --show
 klip-tpe resume --run-dir runs/betapic ...        # after an interruption (or: --run-dir last)
 klip-tpe plots  --run-dir runs/betapic            # regenerate the figures
@@ -84,10 +85,10 @@ data.
 |---|---|---|
 | [`tutorials/01_naco_betapic.ipynb`](tutorials/01_naco_betapic.ipynb) | VLT/NACO L′ β Pic (public, 5 MB, auto-download) | the whole protocol on one cube, inline live display, results and products, VIP / pyKLIP engines, your own data |
 | [`tutorials/02_sphere_hd95086.ipynb`](tutorials/02_sphere_hd95086.ipynb) | VLT/SPHERE IRDIS K1+K2 HD 95086 (30 MB, auto-download) | **partitions**: two channels tuned and selected individually, real planet S/N before / after, per-partition products |
-| [`tutorials/03_jwst_nircam_hip65426.ipynb`](tutorials/03_jwst_nircam_hip65426.ipynb) | JWST/NIRCam F444W HIP 65426 (MAST, `tutorials/fetch_jwst_hip65426.py`) | ADI + RDI through the **spaceKLIP / pyKLIP** path, per-roll partitions, reference library |
+| [`tutorials/03_jwst_nircam_hip65426.ipynb`](tutorials/03_jwst_nircam_hip65426.ipynb) | JWST/NIRCam F444W HIP 65426 (MAST, `tutorials/fetch_jwst_hip65426.py`) | ADI + RDI through the **spaceKLIP / pyKLIP** path: both rolls in one partition, the reference library, pyKLIP's `mode` searched, and the STPSF model of the mask |
 | [`tutorials/04_known_sources.ipynb`](tutorials/04_known_sources.ipynb) | VLT/NACO β Pic (same as 1) | **known companions and disks**: `known=[(ρ, PA)]` in the injections, the noise rings and the contrast curve; `forbidden_pa` / `pixel_mask` for disks |
-| [`tutorials/05_jwst_miri_hip65426.ipynb`](tutorials/05_jwst_miri_hip65426.ipynb) | JWST/MIRI F1140C HIP 65426 — the same star as 3, other instrument (MAST, `scripts/fetch_jwst_ar.py`) | **four-quadrant phase masks**: throughput that depends on position and not radius (×6.5 at one separation), dead zones out of the noise estimate and *in* the cube, `forbidden_pa` from the rolls, and a contrast axis built and then checked against a published sensitivity |
-| [`tutorials/06_jwst_miri_hr8799.ipynb`](tutorials/06_jwst_miri_hr8799.ipynb) | JWST/MIRI F1065C/F1140C/F1550C HR 8799, four planets (MAST, `scripts/fetch_jwst_ar.py`) | **one roll, so RDI**: why the partition layout decides what `mode` can mean, a nine-point SGD library, four companions at four position angles as a test of a 2-D throughput, the same target through three filters |
+| [`tutorials/05_jwst_miri_hip65426.ipynb`](tutorials/05_jwst_miri_hip65426.ipynb) | JWST/MIRI F1140C HIP 65426 — the same star as 3, other instrument (MAST, `scripts/fetch_jwst_ar.py`) | **four-quadrant phase masks**: throughput that depends on position and not radius (×6.5 at one separation), dead zones out of the noise estimate and *in* the cube, `forbidden_pa` from the rolls, and a contrast axis built and then checked against the companion's published photometry |
+| [`tutorials/06_jwst_miri_hr8799.ipynb`](tutorials/06_jwst_miri_hr8799.ipynb) | JWST/MIRI F1065C/F1140C/F1550C HR 8799, four planets (MAST, `scripts/fetch_jwst_ar.py`) | **one roll, so RDI**: why the partition layout decides what `mode` can mean, a nine-point SGD library, four companions at four position angles on a 2-D throughput map, the same target through three filters |
 | [`notebooks/near2_production_run.ipynb`](notebooks/near2_production_run.ipynb) | NEAR campaign (private) | the production protocol (6 nights × 3 annuli × 15 000 evaluations) from Jupyter |
 
 `docs/TUTORIALS.md` has the reading order and what each one assumes.

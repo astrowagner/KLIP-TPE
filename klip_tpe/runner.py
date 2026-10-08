@@ -42,12 +42,13 @@ import tempfile
 import time
 import warnings
 from dataclasses import asdict, dataclass, field, fields, replace
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
 from . import __version__
 from .heartbeat import Heartbeat
+from .liveness import liveness_mode
 from .metrics import (Objective, Source, mawet_peak_snr, nanmedian_even, radprof, source_xy,
                       star_center)
 from .optimizers import GridSearch, History, Optimizer, RandomSearch, TPE
@@ -211,8 +212,10 @@ class RunConfig:
     #: residuals are mildly left-skewed (-0.85) with no excess kurtosis (-0.03) -- there are
     #: no heavy tails for a median to earn its efficiency back on.
     #:
-    #: Costs n reductions per trial, so at fixed wall clock it buys ranking fidelity with
-    #: trials.  Raising the source count is the cheaper lever where the noise ring allows it,
+    #: Costs n + 1 reductions per trial against 2 for a single draw (the clean image depends
+    #: on the configuration alone and is reduced once; the later draws run in pairs), so at
+    #: fixed wall clock it buys ranking fidelity with trials: about twice the time per trial
+    #: at n = 3.  Raising the source count is the cheaper lever where the noise ring allows it,
     #: since one reduction serves every source; a fresh draw additionally re-randomises the
     #: azimuth anchor, which extra sources in a single draw do not.
     n_remeasure: int = 1
@@ -279,12 +282,14 @@ class RunConfig:
     fm_curve: bool = True
     fm_preview: bool = True              # live KLIP-FM preview at each new best (IDL: 'after 1st best')
     #: Before a new run's first evaluation, move every searched reduction dimension alone
-    #: and refuse to start if one never changes the clean reduction
+    #: and see whether it changes the clean reduction
     #: (:func:`klip_tpe.liveness.check_live_dimensions`, about ``1 + ndim`` reductions; a
-    #: resumed run is not re-checked).  Off here, on for ``klip-tpe near`` / ``generic``
-    #: (``--no-liveness-check``): a dead dimension is the bug class of the IDL ``parstr``
+    #: resumed run is not re-checked).  ``"warn"`` logs a dimension that never does and goes
+    #: on, ``"strict"`` (or ``True``) stops the run, ``False`` / ``"off"`` skips the check.
+    #: Off here; ``klip-tpe near`` / ``generic`` warn (``--strict-liveness``,
+    #: ``--no-liveness-check``).  A dead dimension is the bug class of the IDL ``parstr``
     #: omission, which the search itself cannot see.
-    liveness_check: bool = False
+    liveness_check: Union[bool, str] = False
     #: Known sources to take out of the frames before EVERY reduction the run makes --
     #: ``[(rho_arcsec, pa_deg, contrast), ...]``, each injected with the negative of its
     #: contrast (:mod:`klip_tpe.companion`; fit the values there, in a reference-star
@@ -961,9 +966,9 @@ class Runner:
         first order (both reductions see the same data and the same configuration, so the
         speckle field cancels and what is left is the pipeline's response to the injected
         sources, self-subtraction and all).  That fallback is what gives a matched filter
-        to the backends with no analytic FM -- pyKLIP, VIP, spaceKLIP.  Both scoring calls
-        of :meth:`Objective.score_search` get the *same* array, so the injected and clean
-        terms are always filtered with identical kernels.
+        to the backends with no analytic FM -- this package's pyKLIP, VIP and spaceKLIP
+        ones.  Both scoring calls of :meth:`Objective.score_search` get the *same* array, so
+        the injected and clean terms are always filtered with identical kernels.
         """
         if not getattr(self.objective.metric, "needs_fm", False) or inj is None:
             return {}
@@ -2791,12 +2796,13 @@ class Runner:
         return out
 
     def _liveness_preflight(self) -> None:
-        """:attr:`RunConfig.liveness_check`: refuse to search a dimension that changes
-        nothing.  Dead = moved alone and never changed the clean reduction -> SystemExit
-        before any evaluation.  Untested = the guards never let it move alone at the points
-        tried -> logged, not fatal (not evidence of a bug).  The search RNG is put back, so
-        a seeded run is the same run with or without the check."""
-        from .liveness import check_live_dimensions
+        """:attr:`RunConfig.liveness_check`: is every searched dimension doing something?
+        Dead = moved alone and never changed the clean reduction -> logged as a warning, or
+        SystemExit before any evaluation in strict mode.  Untested = the guards never let it
+        move alone at the points tried -> logged, not fatal (not evidence of a bug).  The
+        search RNG is put back, so a seeded run is the same run with or without the check."""
+        from .liveness import check_live_dimensions, liveness_mode
+        strict = liveness_mode(self.cfg.liveness_check) == "strict"
         self.hb.stage("liveness pre-flight", annulus=0)
         n_red = sum(1 for p in self.space.params if p.role == "reduction")
         self.log(f"liveness: moving each of the {n_red} searched reduction dimension(s) alone, annulus 1")
@@ -2810,17 +2816,23 @@ class Runner:
         if untested:
             self.log(f"liveness: {len(untested)} dimension(s) could not be moved alone at the points tried "
                      f"(guards): {', '.join(untested)} -- not evidence of a bug; continuing")
-        if dead:
+        if dead and strict:
             raise SystemExit(
                 f"liveness: searched dimension(s) that change nothing when moved alone: {', '.join(dead)} -- "
                 f"not starting a search that would spend its budget on them.  Check that the reducer "
-                f"receives them (docs/IDL_FINDINGS.md section 1 shows what this looks like); "
-                f"--no-liveness-check to override.")
+                f"receives them (docs/IDL_FINDINGS.md section 1 shows what this looks like), or drop "
+                f"--strict-liveness to search anyway.")
+        if dead:
+            self.log(f"liveness: WARNING -- searched dimension(s) that changed nothing when moved alone: "
+                     f"{', '.join(dead)}.  The search will spend part of its budget on them.  If the "
+                     f"reducer should act on them, check that it receives them (docs/IDL_FINDINGS.md "
+                     f"section 1); --strict-liveness stops a run here.")
+            return
         self.log(f"liveness: all {n_red - len(untested)} tested reduction dimension(s) live")
 
     def _run(self) -> List[AnnulusResult]:
         if not self._resumed:
-            if self.cfg.liveness_check:
+            if liveness_mode(self.cfg.liveness_check) != "off":
                 self._liveness_preflight()
             self.write_setup()
             self._emit("on_setup")

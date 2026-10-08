@@ -86,12 +86,12 @@ INSTRUMENT = {
 #: ``naco_betapic``: the distributed ``naco_betapic_psf.fits`` is NORMALISED -- its flux
 #: inside r = 2.000 px is 1.000000000 to 2e-9 -- so its own counts say nothing about beta
 #: Pic's brightness, and ``star_flux`` left unset (= the stamp's sum, 4.349) puts the axis
-#: 9.4e5 away from a real contrast.  VIP's metrics tutorial publishes ``starphot = 764939.6``
+#: 7.65e5 away from a real contrast.  VIP's metrics tutorial publishes ``starphot = 764939.6``
 #: for this very cube, "obtained from the non-coronagraphic PSF before normalization and
 #: after rescaling to the integration time used in the coronagraphic observations", i.e. in
 #: the aperture the template is normalised in.  CHECKED, not assumed: with it, beta Pic b
-#: measures dL' = 7.79 against the 8.01 +/- 0.16 Absil et al. (2013) published from these
-#: same data -- 1.2 sigma.  See ``scripts/check_betapic_contrast.py`` and docs/FLUX_CALIBRATION.md.
+#: measures dL' = 7.81 +/- 0.08 against the 8.01 +/- 0.16 Absil et al. (2013) published from
+#: these same data -- 1.1 sigma.  See ``scripts/check_betapic_contrast.py`` and docs/FLUX_CALIBRATION.md.
 #:
 #: The other sets are calibrated differently and are NOT listed here: ``sphere_hd95086``
 #: distributes flux frames already on the science scale (``star_flux`` = the frame's own
@@ -110,7 +110,7 @@ PHOTOMETRY = {
         "starphot": 764939.6, "aperture_px": 2.0,
         "ref": "VIP tutorial 04_metrics (vip.readthedocs.io), NACO L' beta Pic; "
                "off-axis PSF rescaled to the coronagraphic DIT",
-        "check": "beta Pic b -> dL' 7.79 vs 8.01 +/- 0.16 (Absil et al. 2013, A&A 559, L12)",
+        "check": "beta Pic b -> dL' 7.81 +/- 0.08 vs 8.01 +/- 0.16 (Absil et al. 2013, A&A 559, L12)",
     },
     "hip65426_f444w": {
         "flux_density_jy": 0.40259, "flux_density_err_frac": 0.03, "filter": "F444W",

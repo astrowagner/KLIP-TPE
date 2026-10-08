@@ -1,5 +1,53 @@
 # Changelog
 
+## Unreleased — 2026-10-08 (the dead-dimension check warns and reads the frame tags; display cadence; tutorials and docs reviewed)
+
+- **The command line's dead-dimension check warns instead of stopping** (`--strict-liveness`
+  stops).  Added earlier today, it refused the tutorials' own terminal commands: on the NaCo
+  β Pic cube it called `corr_thresh` dead, and on HD 95086 `coronoise_max_K2`.  Both act, but
+  only in a sliver of their range.  The frame correlations of the β Pic cube run from 0.980
+  to 0.997, so `corr_thresh` acts on 2% of its [0, 1] range and the 41-value grid stepped
+  over it.  A frame-selection threshold is now moved first to the cut points of the frames'
+  own tags (midpoints between consecutive tag values, nearest its value first), which change
+  the selection one frame at a time.  Both commands now pass the check, in 0.9 s and 17 s (it
+  took 158 s to refuse the second).  `liveness_check` takes `"warn"`, `"strict"` (or `True`)
+  and `"off"` (or `False`).  With `--backend vip` it reports `anglemax` dead, which is right:
+  VIP has no such parameter.
+- **The panel's PDF and progress movie are due every `pdf_every` / `movie_every`
+  evaluations**, whatever the panel cadence, and a due PDF is never skipped.  Both used to be
+  decided after the `every` gate, and against a `last` that the loop time had overwritten, so
+  every drawn panel wrote a PDF and asked for a movie, and with `every=2` neither came round
+  at the evaluations named.
+- **No broken `opt_steps.mp4` without imageio-ffmpeg.**  imageio handed `.mp4` to its TIFF
+  writer, which left an 8-byte file behind; the writer is now asked for by name.
+- **Tutorials 1–6 reviewed for accuracy and rewritten for clarity.**  The code changes:
+  - tutorials 3, 5 and 6 skipped their PSF-model cells whenever STPSF could not be imported,
+    even with its cache present, and tutorial 3 then injected a Gaussian with a flux unit of
+    1, which no contrast can calibrate.  They now read the cache, and stop with the name of
+    the missing file when neither STPSF nor the cache is there.  A run made in the fallback
+    state has to be deleted, not resumed;
+  - tutorial 2's terminal command gave the star fluxes ×1347 (`2.91e9 2.66e9`; `2.16e6
+    2.47e6` is right), and tutorials 1 and 2 now give `--n-remeasure 3 --k-max 30 --seed`
+    and say which settings have no flag;
+  - tutorial 5 loads both rolls into one partition (with one per roll, ADI+RDI was RDI),
+    keeps the resolved disk HD 141569A out of the RDI library (`ref_targets="HIP-68245"`, as
+    the paper run does), and leaves out `angsep` / `anglemax`, as `scripts/run_miri.py` does;
+  - tutorials 5 and 6 average three draws per trial (the 3 had been set on the calibration
+    instead), and their fetch commands are the ones `scripts/fetch_jwst_ar.py` accepts;
+  - HIP 65426 b is at the 0.820″, PA 149.9° of Carter et al. (2023, Table 3).
+
+  Notebooks 1, 2 and 4 are re-executed with these changes (tutorial 2 took 27 minutes on two
+  cores and keeps K1 alone, as all six validated candidates do).  Notebooks 3, 5 and 6 are
+  stored without outputs until they are run on a machine with the MAST data and the STPSF
+  model.
+- **Docs corrected**: `docs/BACKENDS.md` (the spaceKLIP database key is `NRCALONG`; a
+  unit-flux Gaussian is not "fine for ranking"; the STPSF stamps are not rotated; it is this
+  package's pyKLIP backend that has no analytic KLIP-FM), `docs/FLUX_CALIBRATION.md` (a wrong
+  star flux cancels only within the calibration's reach; β Pic's unset flux unit is off by
+  7.65 × 10⁵; HIP 65426 b is ΔF444W = 8.796 ± 0.092), `datasets.PHOTOMETRY` and
+  `scripts/check_betapic_contrast.py` (ΔL′ = 7.81 ± 0.08, 1.1σ), `docs/RUNNING.md`,
+  `docs/BUDGET.md`, `docs/TUTORIALS.md` and the README's tutorial table.
+
 ## Unreleased — 2026-10-08 (runs: one clean reduction per trial, a linear validation checkpoint, the CLI's TPE default, a dead-dimension pre-flight)
 
 All of these were found by the NEAR2 / IDL session while it set up the Python NEAR2 production
@@ -30,7 +78,7 @@ run (`--n-remeasure 3`, validation 25 x 50).  None changes a score.
   `TPE` have since 2026-09-06 (IDL addendum 2: block-multivariate lost on real data and was the
   least stable of the three).  Until now a command line without `--blocks` silently ran
   `partitions`.  Both NEAR scripts pass the flag, so production runs are unaffected; the README's
-  and the tutorials' terminal examples do not, and now run what their Python versions run.
+  and the tutorials' terminal examples do not pass it.
 - **`check_live_dimensions` no longer calls a narrow-band threshold dead.**  It moved each
   dimension only to its bounds and its midpoint, and on the first real run against the
   56-dimensional NEAR2 space that called `noise_max` dead on nights 3–5 and
@@ -42,11 +90,12 @@ run (`--n-remeasure 3`, validation 25 x 50).  None changes a score.
   at the same points before it is called dead, and the verdict says what was probed.  A
   healthy dimension still costs one reduction.
 - **`klip-tpe near` / `generic` check every searched dimension before searching**
-  (`RunConfig.liveness_check`, on for the command line, `--no-liveness-check` to skip; off in
-  the Python API).  A new run first moves each reduction dimension alone and reduces annulus
-  1's clean image (`klip_tpe.liveness.check_live_dimensions`, about one reduction per
-  dimension); a dimension that never changes it stops the run before its first evaluation,
-  one the guards never let move alone is logged.  The search RNG is put back, so a seeded run
+  (`RunConfig.liveness_check`: a warning on the command line, `--strict-liveness` to stop the
+  run instead, `--no-liveness-check` to skip; off in the Python API).  A new run first moves
+  each reduction dimension alone and reduces annulus 1's clean image
+  (`klip_tpe.liveness.check_live_dimensions`, about one reduction per dimension); a dimension
+  that never changes it is reported before the first evaluation, one the guards never let
+  move alone is logged.  The search RNG is put back, so a seeded run
   is the same run with or without the check, and a resume is not re-checked.  The JWST
   drivers have done this since 2026-09-23; the NEAR launcher, whose 56-dimensional space is
   where the IDL `parstr` omission left 18 dimensions dead, never did.
@@ -59,24 +108,26 @@ run (`--n-remeasure 3`, validation 25 x 50).  None changes a score.
 
 ## Unreleased — 2026-10-08 (tutorials: one budget, and injections clear of the companions)
 
-- **Every tutorial search uses tutorial 1's budget**: 300 evaluations, the first 40 random
-  warm-up, the six best candidates validated on eight fresh injection sets each (tutorial 2
-  also averages three draws per trial, as tutorial 1 does).  Tutorials 2, 3, 5 and 6 had demo
+- **Every tutorial search uses tutorial 1's budget**: 300 evaluations, the first 40 of them
+  warm-up, the six best candidates validated on eight fresh injection sets each, and three
+  draws averaged per trial (tutorial 3 keeps one draw, to hold its two pyKLIP searches to
+  about two hours each).  Tutorials 2, 3, 5 and 6 had demo
   budgets of 50–80 evaluations with 15–20 warm-up, which tutorial 1 and docs/BUDGET.md
   explain give a meaningless answer rather than a rough one.  docs/TUTORIALS.md has the new
   run times.
 - **Injections are kept clear of the companion where its position is given**
   (`sampler.excl_fwhm`): 4 FWHM for β Pic b (tutorial 1) and for HIP 65426 b on NIRCam
   (tutorial 3), 6 for HD 95086 b (tutorial 2), 3 for HIP 65426 b on MIRI (tutorial 5).  The
-  default 1.5 FWHM (the IDL's) is enough for the score, which compares each injection with
-  the same reduction without it, but it let about one injected source in twenty land within
-  3 FWHM of HD 95086 b, and beside it in every image of the panel.  Tutorial 4 shows what the
+  default 1.5 FWHM (the IDL's) is enough for the search score, which subtracts the S/N the
+  same reduction gives at each injection site without the injection, but it let about one
+  injected source in twenty land within 3 FWHM of HD 95086 b, and beside it in every image
+  of the panel.  Tutorial 4 shows what the
   radius does; tutorial 6 still leaves its planets' positions to the reader, and now says
   what that costs.  The default is unchanged.
 - **Tutorials 1, 2 and 4 re-executed** with this release's display.  Tutorial 1's text now
-  quotes its own run (injections ≈5 → 6.5, β Pic b 16 → 21) and says why its validated score
-  sits below BUDGET.md's 7.6, measured with the default exclusion.  Tutorials 3, 5 and 6 need
-  the MAST data and STPSF and are executed separately.
+  quotes its own run (injections from S/N 4.2 at the default configuration to 6.5 validated,
+  β Pic b from 15.4 to 20.9).  Tutorials 3, 5 and 6 need the MAST data and STPSF and are
+  executed separately.
 - **The MIRI tutorials read `<data>/mastDownload` when it exists**: an archive download beside
   a reprocessing of the same exposures (`reproc/`) made the recursive search find each exposure
   twice, which `load_calints` refuses.

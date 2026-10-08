@@ -118,7 +118,7 @@ def test_the_betapic_template_is_normalised_and_the_photometry_undoes_it():
 def test_the_photometry_entry_records_its_provenance_and_its_check():
     p = datasets.PHOTOMETRY["naco_betapic"]
     assert "VIP" in p["ref"] and "DIT" in p["ref"]
-    assert "Absil" in p["check"] and "7.79" in p["check"]
+    assert "Absil" in p["check"] and "7.81" in p["check"]
     # the sets calibrated some other way must NOT acquire a starphot by copy-paste
     assert "sphere_hd95086" not in datasets.PHOTOMETRY
     assert "nircam_pds70_f480m" not in datasets.PHOTOMETRY
