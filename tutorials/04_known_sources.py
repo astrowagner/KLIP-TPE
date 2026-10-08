@@ -139,6 +139,33 @@ def hits(known, n=4000):
 print(f"injections landing on beta Pic b: {hits([]):.1f}% without known=, {hits(KNOWN):.1f}% with it")
 
 # %% [markdown]
+# **How far is far enough** depends on what the run is for.  For the score, 1.5 FWHM is
+# enough: each injection is scored against the same reduction without it, so the planet
+# cancels.  For the eye it is not — an injection 2 FWHM from a bright planet sits right beside
+# it in every image of the live panel, and the panel is how a run is read.  Raise the radius
+# on the sampler for any run whose panels people will look at; tutorial 1 uses 4 FWHM for
+# β Pic b, tutorial 2 uses 6 for HD 95086 b.  Keep enough of the ring free: two sources 180°
+# apart at the planet's own radius must both clear it, so a radius near the separation
+# leaves almost no room.
+
+# %%
+def closest(excl, n=4000):
+    s = PositionSampler(fwhm_as=FWHM * PX, known=KNOWN, excl_fwhm=excl)
+    d = []
+    for _ in range(n // 2):
+        for src in s.sample(2, band[0], band[1], rng, 5e-4):
+            dx = src.rho * np.sin(np.deg2rad(src.theta)) - KNOWN[0][0] * np.sin(np.deg2rad(KNOWN[0][1]))
+            dy = src.rho * np.cos(np.deg2rad(src.theta)) - KNOWN[0][0] * np.cos(np.deg2rad(KNOWN[0][1]))
+            d.append(np.hypot(dx, dy) / (FWHM * PX))
+    d = np.asarray(d)
+    return d.min(), 100.0 * np.mean(d < 3.0)
+
+for excl in (1.5, 4.0):
+    dmin, near = closest(excl)
+    print(f"excl_fwhm = {excl}: closest injection {dmin:.1f} FWHM from beta Pic b, "
+          f"{near:.1f}% of them within 3 FWHM")
+
+# %% [markdown]
 # And the metric leaves the known source out of the noise apertures when it scores an
 # injection, so the score no longer depends on how far the injection happens to be from
 # the planet:

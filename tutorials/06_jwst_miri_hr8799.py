@@ -43,6 +43,8 @@ from klip_tpe.instruments import generic, miri
 from klip_tpe.display import LiveDisplay
 
 DATA = os.path.expanduser(os.environ.get("KLIP_TPE_JWST_HR8799", "~/Data/JWST/hr8799"))
+if os.path.isdir(os.path.join(DATA, "mastDownload")):   # the archive files, not a reprocessing beside them:
+    DATA = os.path.join(DATA, "mastDownload")           # load_calints refuses one exposure found twice
 FILTER = "F1065C"                  # all four planets are detected here and in F1140C
 RUN_DIR = os.path.abspath(f"runs/hr8799_{FILTER.lower()}")
 
@@ -235,10 +237,21 @@ if HAVE_DATA and STAR_FLUX is not None:
     print(f"default reduction: {100 * np.isfinite(img[inann]).mean():.1f}% of the annulus finite, "
           f"model {red.reducers[list(dec.selected)[0]].model.name}")
 
+# %% [markdown]
+# The search uses tutorial 1's budget: 300 evaluations, the first 40 random warm-up, and the
+# six best candidates validated on eight fresh injection sets each.  With pyKLIP that is an hour
+# or two.
+#
+# The four injected sources step across the band in radius, and the inner two sit about a
+# FWHM either side of b's separation.  With `KNOWN` empty nothing keeps them off the planets:
+# an injection can land on b, and is then scored against a ring the planet also inflates.  For a run whose
+# panels or numbers you will use, fill in `KNOWN` (section 2), and consider keeping the
+# injections a few FWHM clear of the planets as tutorial 5 does (`samp.excl_fwhm`).
+
 # %%
 if HAVE_DATA and STAR_FLUX is not None:
-    cfg = RunConfig(ann_edges=[ann[0], ann[1]], n_iter=60, n_init=15, seed=21,
-                    validation=ValidationConfig(n_top=4, n_valid=8),
+    cfg = RunConfig(ann_edges=[ann[0], ann[1]], n_iter=300, n_init=40, seed=21,
+                    validation=ValidationConfig(n_top=6, n_valid=8),
                     calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=3),
                     verify=True, save_eval_images=False)
     disp = LiveDisplay(RUN_DIR, every=5, pdf_every=0, movie=False, show="auto")

@@ -38,7 +38,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--execute", action="store_true")
     ap.add_argument("--only", nargs="*", default=None)
-    ap.add_argument("--timeout", type=int, default=3600)
+    ap.add_argument("--timeout", type=int, default=14400)   # per cell: a 300-evaluation JWST search runs over an hour
     a = ap.parse_args()
     for src in sorted(glob.glob(os.path.join(HERE, "[0-9][0-9]_*.py"))):
         name = os.path.splitext(os.path.basename(src))[0]

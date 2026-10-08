@@ -105,14 +105,21 @@ plt.plot(xb, yb, "o", mfc="none", mec="c", ms=20); plt.title("K1+K2 default KLIP
 # %% [markdown]
 # ## 2. Optimize
 #
-# 80 evaluations (20 warm-up), the best two validated on three fresh injection sets each,
-# on the 30–70 px annulus.  On a laptop this takes ~10 minutes; most of it is the live
-# panel, `display_every=2` halves that.  The contrast is calibrated to S/N ≈ 5 for the
-# default configuration.
+# Tutorial 1's budget, for the reasons given there: 300 evaluations of which the first 40
+# are random warm-up, three injection draws averaged per trial, and the six best candidates
+# validated on eight fresh injection sets each, on the 30–70 px annulus.  The contrast is
+# calibrated to S/N ≈ 5 for the default configuration.  About half an hour on two cores with
+# the live panel (27 minutes measured); `every=2` draws every second panel.
+#
+# The injections are also kept **6 FWHM (0.33″) from HD 95086 b** instead of the default
+# 1.5.  The default is enough for the score, which compares each injection with the same
+# reduction without it, but with it about one injected source in twenty lands within 3 FWHM
+# of the planet, and sits beside it in the panel's images.
 
 # %%
-cfg = RunConfig(ann_edges=[30, 70], n_iter=80, n_init=20, seed=3,
-                validation=ValidationConfig(n_top=2, n_valid=3),
+sampler.excl_fwhm = 6.0          # injections >= 6 FWHM (0.33") from HD 95086 b
+cfg = RunConfig(ann_edges=[30, 70], n_iter=300, n_init=40, seed=3, n_remeasure=3,
+                validation=ValidationConfig(n_top=6, n_valid=8),
                 calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=2),
                 defaults={"k_klip": 10}, fm_curve=True)
 display = LiveDisplay(RUN_DIR, show="inline", window_scale=0.55, every=2, movie_every=10)
@@ -201,5 +208,7 @@ Image(filename=os.path.join(RUN_DIR, "annulus01", "partition_map.png"), width=80
 #   klip-tpe generic --cube hd95086_irdis_K1_cube.fits hd95086_irdis_K2_cube.fits --names K1 K2 \
 #       --angles hd95086_irdis_angles.fits --psf hd95086_irdis_K1_psf.fits hd95086_irdis_K2_psf.fits \
 #       --star-flux 2.91e9 2.66e9 --pxscale 0.01225 --lam 2.18e-6 --diam 8.2 --known 0.62 145 \
-#       --ann-edges 30 70 --n-iter 80 --n-init 20 --n-top 2 --n-valid 3 --run-dir runs/hd95086_cli --show
+#       --ann-edges 30 70 --n-iter 300 --n-init 40 --n-remeasure 3 --n-top 6 --n-valid 8 \
+#       --run-dir runs/hd95086_cli --show
 #   ```
+#   (the command line keeps the default 1.5-FWHM exclusion around `--known` sources).

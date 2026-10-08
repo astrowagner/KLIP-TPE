@@ -40,6 +40,8 @@ from klip_tpe.instruments import generic, miri
 from klip_tpe.display import LiveDisplay
 
 DATA = os.path.expanduser(os.environ.get("KLIP_TPE_JWST_MIRI", "~/Data/JWST/hip65426_miri"))
+if os.path.isdir(os.path.join(DATA, "mastDownload")):   # the archive files, not a reprocessing beside them:
+    DATA = os.path.join(DATA, "mastDownload")           # load_calints refuses one exposure found twice
 RUN_DIR = os.path.abspath("runs/hip65426_f1140c")
 FILTER = "F1140C"
 PLANET = (0.826, 150.2)            # HIP 65426 b, Carter et al. 2023 (F444W astrometry)
@@ -345,14 +347,23 @@ if HAVE_DATA and STAR_FLUX is not None:
 #
 # ## 6. Optimize
 #
-# A small budget here so the notebook finishes; the paper runs use 1000.  Everything about
-# the search itself is tutorial 1 — what is MIRI's is entirely in what has already been
-# built above.
+# Tutorial 1's budget: 300 evaluations with 40 of random warm-up, and the six best candidates
+# validated on eight fresh injection sets each (the paper runs use 1000).  With pyKLIP that is
+# an hour or two.  Everything about the search itself is tutorial 1 — what is MIRI's is
+# entirely in what has already been built above.
+#
+# One setting is about the picture rather than the score.  The four injected sources step
+# across the band in radius, and the innermost rung passes within 1.6 FWHM of HIP 65426 b
+# whenever it lands at the planet's position angle — allowed by the default 1.5-FWHM
+# exclusion, harmless to the score (the planet cancels between the reductions with and
+# without injections), and confusing in the panel, where MIRI's PSF makes two such sources one
+# blob.  The cell keeps every injection 3 FWHM (1.1″) from the planet.
 
 # %%
 if HAVE_DATA and STAR_FLUX is not None:
-    cfg = RunConfig(ann_edges=[ann[0], ann[1]], n_iter=60, n_init=15, seed=21,
-                    validation=ValidationConfig(n_top=4, n_valid=8),
+    samp.excl_fwhm = 3.0          # injections >= 3 FWHM (1.1") from HIP 65426 b
+    cfg = RunConfig(ann_edges=[ann[0], ann[1]], n_iter=300, n_init=40, seed=21,
+                    validation=ValidationConfig(n_top=6, n_valid=8),
                     calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=3),
                     verify=True, save_eval_images=False)
     disp = LiveDisplay(RUN_DIR, every=5, pdf_every=0, movie=False, show="auto")

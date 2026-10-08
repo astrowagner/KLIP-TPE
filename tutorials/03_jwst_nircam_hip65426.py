@@ -306,14 +306,22 @@ if HAVE_DATA:                                    # the same reduction in each mo
 # %% [markdown]
 # ## 4. Optimize
 #
-# 50 evaluations, the best two validated on three fresh injection sets each.  Each
-# evaluation injects companions into the *science* frames only — the reference library is
-# never contaminated — reduces with and without them and scores the difference.
+# Tutorial 1's budget: 300 evaluations, the first 40 random warm-up, and the six best
+# candidates validated on eight fresh injection sets each.  Each evaluation injects companions
+# into the *science* frames only — the reference library is never contaminated — reduces with
+# and without them and scores the difference.  With pyKLIP doing the reductions, budget about
+# an hour for this search and as long again for the forward-modelled one below.
+#
+# The four injected sources step across the band in radius, so one of them always sits near
+# HIP 65426 b's separation; `known=` keeps it 1.5 FWHM away, which is enough for the score
+# (the planet cancels between the reductions with and without injections) but leaves it right
+# beside the planet in the panel's images.  The cell keeps every injection 4 FWHM (0.6″) clear.
 
 # %%
 if HAVE_DATA:
-    cfg = RunConfig(ann_edges=[6, 45], n_iter=50, n_init=15, seed=5, n_sources=4,
-                    validation=ValidationConfig(n_top=2, n_valid=3),
+    sampler.excl_fwhm = 4.0      # injections >= 4 FWHM from HIP 65426 b (both searches use this sampler)
+    cfg = RunConfig(ann_edges=[6, 45], n_iter=300, n_init=40, seed=5, n_sources=4,
+                    validation=ValidationConfig(n_top=6, n_valid=8),
                     calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=2),
                     defaults={"k_klip": 10}, fm_curve=False)        # KLIP-FM: built-in engine only
     display = LiveDisplay(RUN_DIR, show="inline", window_scale=0.55, every=2, movie_every=10)
@@ -394,7 +402,7 @@ if HAVE_DATA:
         print(f"STPSF unavailable ({exc}); keeping the Gaussian template")
 
 # %% [markdown]
-# The same 50-evaluation search, scored with the forward-modelled filter.  pyKLIP has no
+# The same search, scored with the forward-modelled filter.  pyKLIP has no
 # analytic KLIP-FM, so the template is the *numerical* forward model `injected − clean` —
 # the same response to first order, and free, because the clean reduction is computed
 # anyway.  `fm_fraction` says what fraction of the filters really were forward-modelled.
@@ -406,8 +414,8 @@ if HAVE_DATA:
                              mode="RDI", max_workers="auto")
     objective_fm, _ = generic.default_config(red_fm, metric="fmmf", known=[PLANET])
     metric_fm = objective_fm.metric
-    cfg_fm = RunConfig(ann_edges=[6, 45], n_iter=50, n_init=15, seed=5, n_sources=4,
-                       validation=ValidationConfig(n_top=2, n_valid=3),
+    cfg_fm = RunConfig(ann_edges=[6, 45], n_iter=300, n_init=40, seed=5, n_sources=4,
+                       validation=ValidationConfig(n_top=6, n_valid=8),
                        calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=2),
                        defaults={"k_klip": 10}, fm_curve=False)
     run_fm = os.path.join(os.path.dirname(RUN_DIR), "hip65426_fmmf")

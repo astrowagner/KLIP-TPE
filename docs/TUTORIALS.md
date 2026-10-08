@@ -15,10 +15,14 @@ without running anything).  Authored as `tutorials/NN_name.py` (cell markers `# 
 | — | `notebooks/near2_production_run.ipynb` | NEAR campaign (private) | the production run from Jupyter (background thread, watch cell, resume) |
 
 All of them draw a **live panel** while they run — that is where you watch a search
-converge, and a run without it is a silent process for several minutes.  All of them also
-use budgets chosen so the tutorial finishes quickly, which is *not* the budget an answer
-needs: see [BUDGET.md](BUDGET.md) for how many evaluations warm-up, search and validation
-actually require, measured on tutorial 1's data.
+converge, and a run without it is a silent process for several minutes.  Every search in
+them uses the budget tutorial 1 explains — 300 evaluations, the first 40 random warm-up, and
+the six best candidates validated on eight fresh injection sets each — because a smaller
+budget does not give a rougher answer but a meaningless one ([BUDGET.md](BUDGET.md) has the
+measurements, on tutorial 1's data).  Where a companion's position is given, the injections
+are also kept a few FWHM clear of it (`sampler.excl_fwhm`), so that none of them lands beside
+it in the panel; tutorial 4 shows what the radius does, and tutorial 6 leaves its planets'
+positions to you.
 
 Reading order: 1, then 4 if your field has a real companion or disk, then 2 or 3 depending
 on your data.  JWST/MIRI: 3 first for the spaceKLIP path, then 5 for everything the
@@ -34,10 +38,12 @@ jupyter lab tutorials/
 
 Run times on a laptop (8 cores): tutorial 1 ≈ 10–20 min (300 evaluations × 3 injection
 draws; the reductions alone are ~5 min on *one* core, the rest is the live panel — see
-[BUDGET.md](BUDGET.md) for both measurements and the `every=` throttle), tutorial 2 ≈ 10–15 min, tutorial 3
-≈ 15 min after the download, tutorial 4 ≈ 1 min (no optimization run), tutorials 5 and 6
-≈ 10 min each after the download (both need a cached STPSF throughput map for their
-filter — see their last section; F1550C's is not computed yet).  Most of the time goes into the live panel; `every=2` in
+[BUDGET.md](BUDGET.md) for both measurements and the `every=` throttle), tutorial 2 ≈ 30 min
+(27 min measured on two cores; less with more), tutorial 3 ≈ 2 h after the download (two searches
+through pyKLIP), tutorial 4 ≈ 1 min (no optimization run), tutorials 5 and 6 ≈ 1–2 h each
+after the download (both need a cached STPSF throughput map for their filter — see their
+last section; F1550C's is not computed yet).  The JWST times are estimates from the
+per-evaluation cost of the paper's NIRCam and MIRI runs.  Most of the time goes into the live panel; `every=2` in
 `LiveDisplay` halves it, `show=False` removes the window but keeps the frames on disk.
 
 ## Running the notebooks headless

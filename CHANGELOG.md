@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased — 2026-10-08 (tutorials: one budget, and injections clear of the companions)
+
+- **Every tutorial search uses tutorial 1's budget**: 300 evaluations, the first 40 random
+  warm-up, the six best candidates validated on eight fresh injection sets each (tutorial 2
+  also averages three draws per trial, as tutorial 1 does).  Tutorials 2, 3, 5 and 6 had demo
+  budgets of 50–80 evaluations with 15–20 warm-up, which tutorial 1 and docs/BUDGET.md
+  explain give a meaningless answer rather than a rough one.  docs/TUTORIALS.md has the new
+  run times.
+- **Injections are kept clear of the companion where its position is given**
+  (`sampler.excl_fwhm`): 4 FWHM for β Pic b (tutorial 1) and for HIP 65426 b on NIRCam
+  (tutorial 3), 6 for HD 95086 b (tutorial 2), 3 for HIP 65426 b on MIRI (tutorial 5).  The
+  default 1.5 FWHM (the IDL's) is enough for the score, which compares each injection with
+  the same reduction without it, but it let about one injected source in twenty land within
+  3 FWHM of HD 95086 b, and beside it in every image of the panel.  Tutorial 4 shows what the
+  radius does; tutorial 6 still leaves its planets' positions to the reader, and now says
+  what that costs.  The default is unchanged.
+- **Tutorials 1, 2 and 4 re-executed** with this release's display.  Tutorial 1's text now
+  quotes its own run (injections ≈5 → 6.5, β Pic b 16 → 21) and says why its validated score
+  sits below BUDGET.md's 7.6, measured with the default exclusion.  Tutorials 3, 5 and 6 need
+  the MAST data and STPSF and are executed separately.
+- **The MIRI tutorials read `<data>/mastDownload` when it exists**: an archive download beside
+  a reprocessing of the same exposures (`reproc/`) made the recursive search find each exposure
+  twice, which `load_calints` refuses.
+
 ## Unreleased — 2026-10-07 (live display: validation panels gated, one rc context at a time; `klip-tpe render`)
 
 - **Validation panels wait their turn.**  `LiveDisplay.on_validation_trial` now passes the

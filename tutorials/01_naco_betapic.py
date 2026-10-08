@@ -140,12 +140,21 @@ plt.title("default KLIP (k=10, 8-22 px)"); plt.colorbar();
 # detects the fakes at S/N ≈ 5 (parameters matter most where the companion is marginal);
 # `CalibrationConfig(forced=[c])` fixes it instead.
 #
+# **Keep the injections clear of β Pic b.**  `known=` already stops an injection landing
+# *on* the planet: within `excl_fwhm` = 1.5 FWHM of it, the IDL convention.  That is enough
+# for the score, which compares each injection with the same reduction without it, so the
+# planet cancels.  It is not enough for the eye: an injected source 2 FWHM from a planet this
+# bright sits right beside it in every image of the live panel.  The cell below sets 4 FWHM
+# (0.39″), which at this radius also keeps every injection at least 49° of position angle
+# off the disk (PA 29° / 209°).  Tutorial 4 shows what the radius does.
+#
 # ### The budget is not a free parameter
 #
 # A run spends evaluations in three phases, and each one has a size it has to reach before
 # it does anything.  These numbers were **measured** on this exact data set and space — four
-# 1200-evaluation searches plus eight 300-evaluation searches; [docs/BUDGET.md](
-# ../docs/BUDGET.md) has the full tables and how to size a budget for your own data.
+# 1200-evaluation searches plus eight 300-evaluation searches, with the default 1.5-FWHM
+# exclusion; [docs/BUDGET.md](../docs/BUDGET.md) has the full tables and how to size a budget
+# for your own data.
 #
 # * **Warm-up, `n_init=40`.**  Random draws that give TPE something to model.  It sorts the
 #   history and fits a density to the best quarter, so `n_init=15` (this tutorial's old
@@ -179,6 +188,7 @@ plt.title("default KLIP (k=10, 8-22 px)"); plt.colorbar();
 # run, not a problem, and `klip-tpe render --run-dir ...` draws the missing ones afterwards.
 
 # %%
+sampler.excl_fwhm = 4.0          # injections >= 4 FWHM (0.39") from beta Pic b, see above
 cfg = RunConfig(ann_edges=[8, 22], n_iter=300, n_init=40, seed=1, n_remeasure=3,
                 validation=ValidationConfig(n_top=6, n_valid=8),
                 calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=2),
@@ -262,7 +272,7 @@ for row in r.validation_table:
 # scatter.  A run that lands low has not failed; it has optimized the thing it was asked to.
 #
 # So read the cell below as two different claims.  The injected-companion number is what was
-# actually optimized, is a median over many placements, and improves reliably (≈5 → ≈9 here).
+# actually optimized, is a median over many placements, and improves reliably (≈5 → 6.5 here).
 # The β Pic b number is one source at one angle, and it is a genuinely independent check —
 # which means it is allowed to disagree.  The candidate table underneath prints it for every
 # validated candidate: when they cluster together but away from the default, the search has
@@ -297,10 +307,14 @@ for row in r.validation_table:
           f"beta Pic b {bpic(img):5.1f}")
 
 # %% [markdown]
-# The gain on the *injections* (≈5 → 9) is larger than on the planet (16 → 19): the
-# injections sit near the detection limit, where the parameters matter most, while β Pic b
-# is far above it.  To tune for a bright known companion, force the injection contrast to
-# its own with `CalibrationConfig(forced=[c])`.
+# Here the injections went from ≈5 to 6.5 and β Pic b from 16 to 21, by about the same
+# fraction.  That is a coincidence of this run: only the injections were optimized, and the
+# fifteen runs above put the planet anywhere from 11 to 22.  The validated 6.5 also sits below
+# the ≈ 7.6 of section 3, which was measured with the default 1.5-FWHM exclusion; keeping the
+# injections 4 FWHM from β Pic b changes where on the ring they can land, and with it the
+# scale of every score.  The injections sit near the detection limit, where the parameters
+# matter most, while β Pic b is far above it.  To tune for a bright known companion, force
+# the injection contrast to its own with `CalibrationConfig(forced=[c])`.
 #
 # Contrast curve (5σ, injection-calibrated throughput) of the validated winner, plus the
 # KLIP forward-model cross-check.  Known companions passed as `known=` are excluded from
