@@ -1,5 +1,62 @@
 # Changelog
 
+## Unreleased — 2026-10-08 (runs: one clean reduction per trial, a linear validation checkpoint, the CLI's TPE default, a dead-dimension pre-flight)
+
+All of these were found by the NEAR2 / IDL session while it set up the Python NEAR2 production
+run (`--n-remeasure 3`, validation 25 x 50).  None changes a score.
+
+- **An averaged trial reduces its clean image once** (`Runner.evaluate_mean`).  Each of a
+  trial's `n_remeasure` draws used to run a complete `evaluate`, injected and clean image
+  both, but the clean image depends on the configuration alone: 2n reductions where n + 1 do,
+  6 where 4 do at n = 3.  Every draw's positions are now drawn first, in order, by the same
+  generator calls, so positions, scores and the RNG stream are the per-draw loop's (a run
+  started on the old code resumes on the new one).  On a parallel reducer the injected
+  reductions after the first run two at a time, the pair the thread budget was already sized
+  for, so the saving shows in wall time: tutorial 1's search, headless on one core, took 2.48
+  min instead of 3.34 with an identical history, and a trial on its reducer 0.47 s instead
+  of 0.65 on one core, 0.38 s instead of 0.56 on two.  The k-scan modes keep the
+  per-draw loop, since each draw picks its own k there.  A trial's `wall_s` is now its elapsed
+  time rather than the sum of its draws'.
+- **The validation trial checkpoint is linear in `n_valid`.**  `val_candNN_trials.pkl` was
+  rewritten whole after every trial (the clean image and every trial image so far, ~1,300
+  image sets per candidate at 50 trials) and `checkpoint.json` with it (the whole search
+  history, 14 MB at 10 000 evaluations, once per trial).  It is now a header plus one appended
+  record per trial carrying the RNG state after its draw, which is what the per-trial
+  `checkpoint.json` was for; a resume restores it.  Files written by the old code still
+  resume, a record cut short by an interruption is dropped and cut off, and a failed write
+  rewrites the stream whole at the next trial.  `checkpoint.json` is written once when
+  validation starts.
+- **`klip-tpe near` / `generic` default to `--blocks univariate`**, as `RunConfig.blocks` and
+  `TPE` have since 2026-09-06 (IDL addendum 2: block-multivariate lost on real data and was the
+  least stable of the three).  Until now a command line without `--blocks` silently ran
+  `partitions`.  Both NEAR scripts pass the flag, so production runs are unaffected; the README's
+  and the tutorials' terminal examples do not, and now run what their Python versions run.
+- **`check_live_dimensions` no longer calls a narrow-band threshold dead.**  It moved each
+  dimension only to its bounds and its midpoint, and on the first real run against the
+  56-dimensional NEAR2 space that called `noise_max` dead on nights 3–5 and
+  `coronoise_max` on night 4.  Each acts only in a band a few tenths wide: above it the cut is
+  above every frame's tag ratio and removes nothing, below it the night drops under its
+  minimum frame count and the guard snaps the cut back.  None of the three probe values
+  lands in the band.  Whatever that first pass
+  leaves unmoved is now re-probed on a 41-value grid (`dense=`), nearest its own value first,
+  at the same points before it is called dead, and the verdict says what was probed.  A
+  healthy dimension still costs one reduction.
+- **`klip-tpe near` / `generic` check every searched dimension before searching**
+  (`RunConfig.liveness_check`, on for the command line, `--no-liveness-check` to skip; off in
+  the Python API).  A new run first moves each reduction dimension alone and reduces annulus
+  1's clean image (`klip_tpe.liveness.check_live_dimensions`, about one reduction per
+  dimension); a dimension that never changes it stops the run before its first evaluation,
+  one the guards never let move alone is logged.  The search RNG is put back, so a seeded run
+  is the same run with or without the check, and a resume is not re-checked.  The JWST
+  drivers have done this since 2026-09-23; the NEAR launcher, whose 56-dimensional space is
+  where the IDL `parstr` omission left 18 dimensions dead, never did.
+- **docs/IDL_FINDINGS.md corrected**: the §1 snippet was the first version of the
+  frame-selection fix, which references serial-only variables and fails on the parallel
+  path (now the applied version); the §3 bisection call needs `fast=0`, production's
+  per-target path (`reduce_near_2` defaults to the single-basis `fast=1`); `dthmax` is
+  forwarded since 2026-10-07; run_20260906_173000 continued to 4881 evaluations after the
+  4469 that §6.1 compared, and was retired on 2026-10-07; the TPE default noted in §4 was stale.
+
 ## Unreleased — 2026-10-08 (tutorials: one budget, and injections clear of the companions)
 
 - **Every tutorial search uses tutorial 1's budget**: 300 evaluations, the first 40 random

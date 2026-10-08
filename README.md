@@ -32,7 +32,7 @@ Jupyter for the inline display.
 
 ## Your first run
 
-About five minutes on one core, on public data (VIP's β Pictoris tutorial sequence).  **It
+About four minutes on one core, on public data (VIP's β Pictoris tutorial sequence).  **It
 draws a live panel while it runs — watch it**; a search is otherwise a silent process, and
 the panel is the only way to tell a converging run from a stuck one.  If no window appears,
 the same panel is written to `runs/betapic/steps/stepNNNN.png` after every evaluation, and

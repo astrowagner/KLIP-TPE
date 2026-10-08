@@ -11,7 +11,7 @@
 #
 # This notebook runs the whole pipeline on a small public data set — the VIP tutorial
 # sequence of β Pictoris (NACO L′, 61 frames, 101×101 px, Absil et al. 2013), which contains
-# the planet β Pic b at ~0.45″.  The search in section 4 is ~900 reductions: about five
+# the planet β Pic b at ~0.45″.  The search in section 4 is ~1,300 reductions: about four
 # minutes of computation on one core, and 10–20 minutes in practice because it **draws a
 # live panel while it runs**.  Watch that panel — section 4 says what to look for, and
 # section 3 says why the budget is the size it is.
@@ -174,11 +174,12 @@ plt.title("default KLIP (k=10, 8-22 px)"); plt.colorbar();
 # `n_remeasure=3` is the other half of the story.  Scoring the same configuration twice does
 # not give the same number — the injection positions are redrawn every time, and on these
 # data that scatter is σ ≈ 0.87 S/N against a landscape only 1.44 wide.  Averaging three
-# draws per trial divides it by √3 and roughly halves the optimism above.  It costs 3×, and
-# it is worth it.
+# draws per trial divides it by √3 and roughly halves the optimism above.  It costs twice
+# what one draw does (the three draws share one clean reduction: four reductions per trial
+# instead of two), and it is worth it.
 #
-# The whole thing is ~900 reductions.  Headless that is about **five minutes on one core**
-# (3–7 min across our runs; the optimizer drifts toward more expensive configurations as it
+# The whole thing is ~1,300 reductions.  Headless that is about **four minutes on one core**
+# (2.5–5 min; the optimizer drifts toward more expensive configurations as it
 # converges, so the second half is slower than the first), and `max_workers="auto"` above
 # already gave the reducer every core you have.  Drawing the live panel costs real CPU on
 # top of that — on a single core it dominated, taking 60 evaluations from 43 s to 290 s —
@@ -200,7 +201,7 @@ cfg = RunConfig(ann_edges=[8, 22], n_iter=300, n_init=40, seed=1, n_remeasure=3,
 # **Watch the panel while this runs.**  `LiveDisplay(show="auto")` draws it inline in this
 # output cell inside Jupyter, and opens a matplotlib window when you run this file as a
 # script.  It is the only way to tell a converging search from a stuck one, and without it
-# the next five minutes are a silent process.  If you see nothing, the panel is also written
+# the next few minutes are a silent process.  If you see nothing, the panel is also written
 # to `runs/betapic_naco/steps/stepNNNN.png` after every evaluation, and
 # `klip-tpe view --run-dir runs/betapic_naco` opens a window on a run that is already going
 # (from another terminal, read-only, attach and detach freely).

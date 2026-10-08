@@ -44,6 +44,13 @@ klip-tpe near --root $ROOT --nights 1 2 3 4 5 6 \
 stream (IDL used 1789071027 — the streams are not interchangeable, only the protocol is).
 Everything the IDL run writes has a counterpart (`docs/DISPLAY.md`).
 
+Before its first evaluation a new run moves each searched reduction dimension alone and
+reduces annulus 1's clean image, about one reduction per dimension
+(`klip_tpe.liveness.check_live_dimensions`).  A dimension that changes nothing stops the run
+there, naming it; this is the class of problem `docs/IDL_FINDINGS.md` §1 describes, which the
+search itself cannot see.  A dimension the guards never let move alone is logged and the run
+goes on.  `--no-liveness-check` skips the check; a resume is not re-checked.
+
 ## Jupyter
 
 `notebooks/near2_production_run.ipynb`: the same protocol built from the Python API
@@ -57,7 +64,9 @@ cell that shows the newest step panel and the log tail, and a resume cell.
 can see.  The budget is spent like IDL's bridges: after the nights are loaded the reducer forks
 `min(workers, 2 × nights)` worker processes that share the loaded cubes (copy-on-write, nothing
 is pickled but requests and the small result images); the injected and the clean reduction of
-an evaluation run concurrently, each mapping its selected nights onto those workers; whatever
+an evaluation run concurrently, each mapping its selected nights onto those workers (with
+`--n-remeasure N` a trial reduces its clean image once, with the first draw, and the other
+injected reductions then run two at a time); whatever
 budget is left over becomes per-target threads inside each night's KLIP loop; BLAS is pinned to
 one thread per worker.  `--pool threads` keeps everything in one process (slower: Python's GIL
 limits the thread version to roughly one to two cores' worth of work), `--workers 8` pins the

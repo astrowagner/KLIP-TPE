@@ -253,6 +253,10 @@ def _protocol_args(p):
     p.add_argument("--fm-preview", dest="fm_preview", action="store_true", default=True,
                    help="live KLIP-FM preview at each new best (A 9.3; one extra reduction per new best; default on)")
     p.add_argument("--no-fm-preview", dest="fm_preview", action="store_false")
+    p.add_argument("--no-liveness-check", dest="liveness_check", action="store_false", default=True,
+                   help="skip the pre-flight that moves each searched reduction dimension alone and refuses "
+                        "to start when one changes nothing (klip_tpe.liveness; ~1 + ndim reductions, new "
+                        "runs only)")
 
 
 def _protocol_config(a) -> dict:
@@ -262,7 +266,8 @@ def _protocol_config(a) -> dict:
                 n_remeasure=max(int(getattr(a, "n_remeasure", 1) or 1), 1),
                 write_setup_files=a.write_setup_files, legacy_stitch=a.legacy_stitch,
                 partition_weighting=a.weighting, fm_curve=a.fm_curve, fm_preview=a.fm_preview,
-                pair_area_midpoint=not getattr(a, "ladder_pair", False))
+                pair_area_midpoint=not getattr(a, "ladder_pair", False),
+                liveness_check=bool(getattr(a, "liveness_check", True)))
 
 
 def build_near_space(red, a):
@@ -640,7 +645,11 @@ def _add_run_args(p):
     p.add_argument("--n-iter", type=int, nargs="+", default=[200])
     p.add_argument("--n-init", type=int, nargs="+", default=[50])
     p.add_argument("--mode", default="tpe", choices=["tpe", "random", "grid"])
-    p.add_argument("--blocks", default="partitions", help="partitions | univariate | full")
+    # The CLI default follows RunConfig.blocks and the TPE class.  It said "partitions" until
+    # 2026-10-08, a month after the package default moved to univariate (IDL addendum 2), so
+    # any `klip-tpe near` / `generic` call without --blocks ran block-multivariate densities.
+    p.add_argument("--blocks", default="univariate",
+                   help="TPE density model: univariate (default; the IDL reference) | partitions | full")
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--contrast0", type=float, default=3e-5)
     p.add_argument("--use-contrast", type=float, nargs="+", default=None, help="forced contrast per annulus (0 = calibrate)")

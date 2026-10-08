@@ -56,7 +56,7 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic}]
                         [--pdf-every PDF_EVERY] [--movie-every MOVIE_EVERY]
                         [--show [SHOW]] [--aliens]
                         [--window-scale WINDOW_SCALE] [--no-fm-curve]
-                        [--fm-preview] [--no-fm-preview]
+                        [--fm-preview] [--no-fm-preview] [--no-liveness-check]
 
 options:
   -h, --help            show this help message and exit
@@ -102,7 +102,8 @@ options:
   --n-iter N_ITER [N_ITER ...]
   --n-init N_INIT [N_INIT ...]
   --mode {tpe,random,grid}
-  --blocks BLOCKS       partitions | univariate | full
+  --blocks BLOCKS       TPE density model: univariate (default; the IDL
+                        reference) | partitions | full
   --seed SEED
   --contrast0 CONTRAST0
   --use-contrast USE_CONTRAST [USE_CONTRAST ...]
@@ -172,6 +173,10 @@ options:
   --fm-preview          live KLIP-FM preview at each new best (A 9.3; one
                         extra reduction per new best; default on)
   --no-fm-preview
+  --no-liveness-check   skip the pre-flight that moves each searched reduction
+                        dimension alone and refuses to start when one changes
+                        nothing (klip_tpe.liveness; ~1 + ndim reductions, new
+                        runs only)
 
 generic cubes (--instrument generic / klip-tpe generic):
   --cube CUBE [CUBE ...]
@@ -273,7 +278,7 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic}]
                      [--display-every DISPLAY_EVERY] [--pdf-every PDF_EVERY]
                      [--movie-every MOVIE_EVERY] [--show [SHOW]] [--aliens]
                      [--window-scale WINDOW_SCALE] [--no-fm-curve]
-                     [--fm-preview] [--no-fm-preview]
+                     [--fm-preview] [--no-fm-preview] [--no-liveness-check]
 
 options:
   -h, --help            show this help message and exit
@@ -319,7 +324,8 @@ options:
   --n-iter N_ITER [N_ITER ...]
   --n-init N_INIT [N_INIT ...]
   --mode {tpe,random,grid}
-  --blocks BLOCKS       partitions | univariate | full
+  --blocks BLOCKS       TPE density model: univariate (default; the IDL
+                        reference) | partitions | full
   --seed SEED
   --contrast0 CONTRAST0
   --use-contrast USE_CONTRAST [USE_CONTRAST ...]
@@ -389,6 +395,10 @@ options:
   --fm-preview          live KLIP-FM preview at each new best (A 9.3; one
                         extra reduction per new best; default on)
   --no-fm-preview
+  --no-liveness-check   skip the pre-flight that moves each searched reduction
+                        dimension alone and refuses to start when one changes
+                        nothing (klip_tpe.liveness; ~1 + ndim reductions, new
+                        runs only)
 
 generic cubes (--instrument generic / klip-tpe generic):
   --cube CUBE [CUBE ...]

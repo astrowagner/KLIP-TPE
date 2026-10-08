@@ -505,7 +505,7 @@ def test_validation_resumes_per_candidate(tmp_path):
 
 def test_validation_resumes_mid_candidate(tmp_path):
     """An interruption INSIDE a candidate's trials resumes after the last finished
-    trial (val_candNN_trials.pkl + checkpointed RNG): the trials, validated scores and
+    trial (val_candNN_trials.pkl, whose records carry the RNG): the trials, validated scores and
     winner are identical to an uninterrupted run and no trial is re-reduced."""
     red, space, obj, samp, cfg = build_synthetic_run(ann_edges=[8, 30], n_iter=8, n_init=3, seed=3,
                                                      save_fits=False, verify=False, candidates=False,

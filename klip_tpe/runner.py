@@ -278,6 +278,13 @@ class RunConfig:
     partition_weighting: Optional[str] = None
     fm_curve: bool = True
     fm_preview: bool = True              # live KLIP-FM preview at each new best (IDL: 'after 1st best')
+    #: Before a new run's first evaluation, move every searched reduction dimension alone
+    #: and refuse to start if one never changes the clean reduction
+    #: (:func:`klip_tpe.liveness.check_live_dimensions`, about ``1 + ndim`` reductions; a
+    #: resumed run is not re-checked).  Off here, on for ``klip-tpe near`` / ``generic``
+    #: (``--no-liveness-check``): a dead dimension is the bug class of the IDL ``parstr``
+    #: omission, which the search itself cannot see.
+    liveness_check: bool = False
     #: Known sources to take out of the frames before EVERY reduction the run makes --
     #: ``[(rho_arcsec, pa_deg, contrast), ...]``, each injected with the negative of its
     #: contrast (:mod:`klip_tpe.companion`; fit the values there, in a reference-star
@@ -588,6 +595,7 @@ class Runner:
         self._k_default = int(self.cfg.defaults.get("k_klip", 10) or 10)
         self._resumed = False
         self._extend_mode = False
+        self._vt_on_disk: Dict[Tuple[int, int], Optional[Dict[str, int]]] = {}   # validation trial records written
         self._ann_images: Dict[int, Dict[str, Any]] = {}       # per-annulus winner images (memory cache)
         self._ann_histories: Dict[int, History] = {}           # completed annuli's histories
         self._pv_results: Dict[int, Dict[str, Any]] = {}       # param_verify outputs per annulus
@@ -1106,35 +1114,56 @@ class Runner:
         return cfg, k_used, info
 
     # -- evaluation ------------------------------------------------------------
+    def _draw_sources(self, cfg: Config, contrast: float) -> List[Source]:
+        """The sources one evaluation of ``cfg`` injects when the caller supplies none.
+
+        A fresh draw per evaluation, from the band this configuration defines (with
+        opt_width that band is the configuration's own mid-radius, which is why freezing is
+        meaningless there and stays off).  The non-default ``fixed_sources`` returns the
+        annulus' frozen set instead, which does not touch ``self.rng``.
+        """
+        if self.cfg.fixed_sources and not self.cfg.opt_width:
+            return self.search_sources(self.ia, contrast)
+        rlo, rhi = self._band(self.ia, cfg)
+        return self.sampler.sample(self._nsrc(self.ia), rlo, rhi, self.rng, contrast)
+
+    def _kscan_active(self) -> bool:
+        """Each evaluation picks its own k by a k-scan (``k_mode`` scan / scan_rescore)."""
+        return bool(self.cfg.k_mode in SCAN_MODES and getattr(self.reducer, "supports_kscan", False))
+
+    def _needs_clean(self, raw_only: bool = False) -> bool:
+        return bool((self.objective.needs_clean and not raw_only) or self.objective.metric.needs_clean)
+
     def evaluate(self, x: np.ndarray, phase: str, contrast: Optional[float] = None,
                  sources: Optional[Sequence[Source]] = None, raw_only: bool = False,
-                 tag: str = "eval") -> Tuple[EvalRecord, EvalImages, Optional[EvalImages]]:
+                 tag: str = "eval", clean: Optional[EvalImages] = None
+                 ) -> Tuple[EvalRecord, EvalImages, Optional[EvalImages]]:
         """Reduce + score one (already projected) vector.
 
         Sources are drawn fresh for this evaluation, as ``optimize_near_2_tpe`` does: the
         radial ladder is deterministic for the annulus, the azimuth anchor is not.  The
         caller may supply its own instead (calibration, validation and param-verify all do),
         and the non-default ``fixed_sources`` freezes them for the annulus instead.
+
+        ``clean``: this configuration's clean reduction, already made.  Only the injected
+        image is then reduced.  The draws of one averaged trial share it
+        (:meth:`evaluate_mean`): the clean image depends on the configuration alone, never
+        on where the sources went.  Ignored in the k-scan modes, where every evaluation
+        picks its own k and so reduces its own clean image.
         """
         t0 = time.time()
         contrast = self.contrast if contrast is None else float(contrast)
         cfg = self.space.decode(x)
         if sources is None:
-            # The default path: a fresh draw per evaluation, from the band this
-            # configuration defines (with opt_width that band is the configuration's own
-            # mid-radius, which is why freezing is meaningless there and stays off).
-            if self.cfg.fixed_sources and not self.cfg.opt_width:
-                sources = self.search_sources(self.ia, contrast)
-            else:
-                rlo, rhi = self._band(self.ia, cfg)
-                sources = self.sampler.sample(self._nsrc(self.ia), rlo, rhi, self.rng, contrast)
+            sources = self._draw_sources(cfg, contrast)
         else:
             sources = [Source(s.rho, s.theta, contrast) for s in sources]
         k_used = None
-        clean = None
+        given_clean, clean = clean, None
         kinfo: Dict[str, Any] = {}
         try:
-            if self.cfg.k_mode in SCAN_MODES and self.reducer.supports_kscan:
+            if self._kscan_active():
+                given_clean = None
                 cfg, k_used, kinfo = self._kscan_pick(cfg, sources, tag)
                 # re-score at the chosen k(s) on fresh positions, as IDL does: its k-scan
                 # picks on one set (inj_rho/inj_theta) and then draws hrho/htheta for the
@@ -1143,8 +1172,11 @@ class Runner:
                 if not self.cfg.fixed_sources:
                     rlo, rhi = self._band(self.ia, cfg)
                     sources = self.sampler.sample(self._nsrc(self.ia), rlo, rhi, self.rng, contrast)
-            need_clean = (self.objective.needs_clean and not raw_only) or self.objective.metric.needs_clean
-            if need_clean and getattr(self.reducer, "max_workers", 1) >= 2:
+            need_clean = self._needs_clean(raw_only)
+            if need_clean and given_clean is not None:
+                inj = self._reduce(cfg, sources, tag=tag + "_inj")
+                clean = given_clean
+            elif need_clean and getattr(self.reducer, "max_workers", 1) >= 2:
                 # injected and clean reductions concurrently (IDL: clean on the 2nd worker per night)
                 import concurrent.futures as _cf
                 from .parallel import pump_wait
@@ -1217,10 +1249,66 @@ class Runner:
         what the panel then shows.  So the panel is one real measurement and the number
         beside it is the average of ``n``; ``meta['draw_scores']`` and ``meta['draw_sd']``
         record the spread so the run reports its own noise as it goes.
+
+        The clean image is reduced ONCE per trial and shared by its draws: it depends on the
+        configuration, not on where the sources went, so reducing it per draw only repeated
+        it -- ``2n`` reductions where ``n + 1`` do (6 where 4 do at ``n = 3``).  Every draw's
+        positions are drawn first, in order, by the same generator calls the per-draw loop
+        made, so positions and scores are the ones that loop produced; and on a parallel
+        reducer the injected reductions after the first run two at a time, the pair the
+        thread budget was already sized for, so the saving shows in wall time too.  The
+        k-scan modes keep the per-draw loop: each draw picks its own k there, and with it
+        its own clean image.
         """
         n = int(self.cfg.n_remeasure if n is None else n)
         if n <= 1:
             return self.evaluate(x, phase, tag=tag)
+        if not self.SHARE_CLEAN or self._kscan_active():
+            return self._evaluate_draws_each(x, phase, tag, n, on_draw)
+        t0 = time.time()
+        draws = [self._draw_sources(self.space.decode(x), self.contrast) for _ in range(n)]
+        recs, last = [], (None, None, None)
+
+        def _done(j, out):
+            nonlocal last
+            rec, inj, clean = out
+            recs.append(rec)
+            last = out
+            if on_draw is not None:
+                on_draw(j, n, rec, inj, clean)
+
+        # draw 1 as a single evaluation: the injected and the clean image, concurrently on a
+        # parallel reducer
+        first = self.evaluate(x, phase, sources=draws[0], tag=f"{tag}_d1")
+        shared = first[2]
+        _done(0, first)
+        rest = list(range(1, n))
+        # A failed first draw leaves no clean image to share; the later draws then reduce
+        # their own, as they always did, one draw at a time.
+        pair = (getattr(self.reducer, "max_workers", 1) >= 2 and len(rest) > 1
+                and (shared is not None or not self._needs_clean()))
+        if pair:
+            import concurrent.futures as _cf
+            from .parallel import pump_wait
+            with _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="klip-draw") as ex:
+                futs = [ex.submit(self.evaluate, x, phase, sources=draws[j], tag=f"{tag}_d{j+1}", clean=shared)
+                        for j in rest]
+                for j, f in zip(rest, futs):
+                    _done(j, pump_wait([f])[0])       # reported in draw order, from this thread
+        else:
+            for j in rest:
+                _done(j, self.evaluate(x, phase, sources=draws[j], tag=f"{tag}_d{j+1}", clean=shared))
+        rec, inj, clean = last
+        return self._combine_draws(recs, rec, wall=time.time() - t0), inj, clean
+
+    #: share one clean reduction between the draws of an averaged trial (see
+    #: :meth:`evaluate_mean`).  False restores the per-draw loop -- a switch for the test
+    #: that the two give the same trial, not a setting.
+    SHARE_CLEAN = True
+
+    def _evaluate_draws_each(self, x: np.ndarray, phase: str, tag: str, n: int, on_draw=None
+                             ) -> Tuple[EvalRecord, EvalImages, Optional[EvalImages]]:
+        """Every draw a complete :meth:`evaluate` of its own, clean image included."""
         recs, last = [], (None, None, None)
         for j in range(n):
             rec, inj, clean = self.evaluate(x, phase, tag=f"{tag}_d{j+1}")
@@ -1232,8 +1320,9 @@ class Runner:
         return self._combine_draws(recs, rec), inj, clean
 
     @staticmethod
-    def _combine_draws(recs: List[EvalRecord], last: EvalRecord) -> EvalRecord:
-        """Average the draws' scores onto the last draw's record."""
+    def _combine_draws(recs: List[EvalRecord], last: EvalRecord, wall: Optional[float] = None) -> EvalRecord:
+        """Average the draws' scores onto the last draw's record.  ``wall``: the trial's
+        elapsed time, when its draws overlapped (otherwise the draws' sum)."""
         def _mean(vals):
             v = [float(s) for s in vals if s is not None and np.isfinite(s)]
             return float(np.mean(v)) if v else None
@@ -1253,7 +1342,7 @@ class Runner:
         meta["draw_sd"] = float(np.std(good, ddof=1)) if len(good) > 1 else None
         meta["draw_spread"] = float(max(good) - min(good)) if len(good) > 1 else None
         return replace(last, score=_mean(scores), raw_score=_mean([r.raw_score for r in recs]),
-                       wall_s=float(sum(r.wall_s for r in recs)), meta=meta)
+                       wall_s=float(sum(r.wall_s for r in recs)) if wall is None else float(wall), meta=meta)
 
     # ------------------------------------------------------------ calibration
     def _scan_k(self, cfg0: Config, rlo: float, rhi: float, nsrc: int, contrast: float,
@@ -1680,6 +1769,9 @@ class Runner:
         sets with the RAW metric; elect the winner on the validated median."""
         vc = self.cfg.validation
         self.hb.stage(f"annulus {ia + 1} validation", annulus=ia)
+        # The search's state, written now rather than held by the routine throttle: the
+        # trial records carry the RNG from here on, and they pair with this history.
+        self.checkpoint()
         order = self.history.order()
         cands: List[int] = []
         for e in order:
@@ -1779,6 +1871,7 @@ class Runner:
             with open(os.path.join(self._ann_dir(ia), "validation.json"), "w") as f:
                 json.dump(table, f, indent=1, default=_json_default)
             self._save_validation_partial(ia, ci, cands, cand)
+            self._vt_on_disk.pop((int(ia), int(ci)), None)
             try:
                 os.remove(self._val_trials_pkl(ia, ci))
             except OSError:
@@ -1800,31 +1893,89 @@ class Runner:
     def _val_trials_pkl(self, ia: int, ci: int) -> str:
         return os.path.join(self._ann_dir(ia), f"val_cand{ci+1:02d}_trials.pkl")
 
+    #: the per-trial lists a validation candidate accumulates, in the order they are kept
+    _VT_LISTS = ("trials", "trial_imgs", "trial_src", "trial_ps", "samples_r", "samples_s")
+
     def _save_validation_trials(self, ia, ci, cands, clean, trials, trial_imgs, trial_src, trial_ps, samples_r, samples_s) -> None:
-        """Intra-candidate checkpoint (one validation trial can take minutes): the clean
-        reduction and every finished trial, plus checkpoint.json for the RNG state."""
+        """Intra-candidate checkpoint (one validation trial can take minutes).
+
+        ``val_candNN_trials.pkl`` is an append-only stream of pickles: a header with the
+        candidate list and the clean reduction, written once, then one record per finished
+        trial holding that trial's entries and the RNG state after its draw.  Until
+        2026-10-08 the file was rewritten whole after every trial -- the clean image and
+        every trial image so far, ~1,300 image sets per candidate at 50 trials -- and
+        checkpoint.json with it, the whole search history once per trial (found by the
+        NEAR2 / IDL session).  The RNG state in the records is what checkpoint.json was
+        rewritten for; :meth:`_load_validation_trials` restores it.  A write that fails
+        marks the stream for a full rewrite at the next trial, so an error cannot leave a
+        gap in it.
+        """
+        path = self._val_trials_pkl(ia, ci)
+        key = (int(ia), int(ci))
+        lists = dict(zip(self._VT_LISTS, (trials, trial_imgs, trial_src, trial_ps, samples_r, samples_s)))
+        on_disk = self._vt_on_disk.get(key)          # {list name: entries in the file}, or None
         try:
-            with open(self._val_trials_pkl(ia, ci), "wb") as f:
-                pickle.dump({"cands": list(cands), "clean": clean, "trials": list(trials), "trial_imgs": list(trial_imgs),
-                             "trial_src": list(trial_src), "trial_ps": list(trial_ps),
-                             "samples_r": list(samples_r), "samples_s": list(samples_s)}, f, protocol=pickle.HIGHEST_PROTOCOL)
-            self.checkpoint()
+            if on_disk is None or any(on_disk[k] > len(lists[k]) for k in self._VT_LISTS):
+                with open(path, "wb") as f:
+                    pickle.dump({"format": 2, "cands": list(cands), "clean": clean}, f,
+                                protocol=pickle.HIGHEST_PROTOCOL)
+                on_disk = {k: 0 for k in self._VT_LISTS}
+            rec = {k: list(lists[k][on_disk[k]:]) for k in self._VT_LISTS}
+            rec["rng"] = self.rng.bit_generator.state
+            with open(path, "ab") as f:
+                pickle.dump(rec, f, protocol=pickle.HIGHEST_PROTOCOL)
+            self._vt_on_disk[key] = {k: len(lists[k]) for k in self._VT_LISTS}
         except Exception as exc:
+            self._vt_on_disk[key] = None
             self.log(f"  (validation trial checkpoint not written: {exc!r})")
 
     def _load_validation_trials(self, ia: int, ci: int, cands: List[int]) -> Optional[Dict[str, Any]]:
+        """The trials an interrupted pass finished for this candidate, or None.
+
+        Reads the record stream :meth:`_save_validation_trials` writes, and the single
+        pickle it wrote before 2026-10-08 (that whole state, possibly followed by records
+        appended after a resume).  A record cut short by the interruption is dropped and
+        cut off the file, so the next trial appends after the last complete one.  The RNG
+        is set to the state after the last trial kept: the search generator then stands
+        where it stood when that trial finished.
+        """
         if not getattr(self, "_resumed", False):
             return None
         pk = self._val_trials_pkl(ia, ci)
         if not os.path.exists(pk):
             return None
+        d: Optional[Dict[str, Any]] = None
+        rng_state = None
+        good_end = 0
         try:
             with open(pk, "rb") as f:
-                d = pickle.load(f)
+                while True:
+                    try:
+                        rec = pickle.load(f)
+                    except EOFError:
+                        break
+                    except Exception:
+                        if d is None:
+                            return None         # not even the header: start the candidate over
+                        break                   # a record cut short: keep what came before it
+                    if d is None:               # header (or the old whole-state pickle)
+                        d = {"cands": list(rec.get("cands", [])), "clean": rec.get("clean")}
+                        for k in self._VT_LISTS:
+                            d[k] = list(rec.get(k, []))
+                    else:
+                        for k in self._VT_LISTS:
+                            d[k].extend(rec.get(k, []))
+                        rng_state = rec.get("rng", rng_state)
+                    good_end = f.tell()
+            if os.path.getsize(pk) > good_end:
+                os.truncate(pk, good_end)
         except Exception:
             return None
-        if list(d.get("cands", [])) != list(cands) or not d.get("trials"):
+        if d is None or list(d["cands"]) != list(cands) or not d["trials"]:
             return None
+        if rng_state is not None:
+            self.rng.bit_generator.state = rng_state
+        self._vt_on_disk[(int(ia), int(ci))] = {k: len(d[k]) for k in self._VT_LISTS}
         return d
 
     def _load_validation_partial(self, ia: int, cands: List[int]) -> Dict[int, Tuple[Dict[str, Any], Dict[str, Any]]]:
@@ -2639,8 +2790,38 @@ class Runner:
         self.hb.stop("finished")
         return out
 
+    def _liveness_preflight(self) -> None:
+        """:attr:`RunConfig.liveness_check`: refuse to search a dimension that changes
+        nothing.  Dead = moved alone and never changed the clean reduction -> SystemExit
+        before any evaluation.  Untested = the guards never let it move alone at the points
+        tried -> logged, not fatal (not evidence of a bug).  The search RNG is put back, so
+        a seeded run is the same run with or without the check."""
+        from .liveness import check_live_dimensions
+        self.hb.stage("liveness pre-flight", annulus=0)
+        n_red = sum(1 for p in self.space.params if p.role == "reduction")
+        self.log(f"liveness: moving each of the {n_red} searched reduction dimension(s) alone, annulus 1")
+        st = self.rng.bit_generator.state
+        try:
+            status = check_live_dimensions(self, log=self.log)
+        finally:
+            self.rng.bit_generator.state = st
+        dead = sorted(n for n, s in status.items() if not s["live"] and s["tested"])
+        untested = sorted(n for n, s in status.items() if not s["live"] and not s["tested"])
+        if untested:
+            self.log(f"liveness: {len(untested)} dimension(s) could not be moved alone at the points tried "
+                     f"(guards): {', '.join(untested)} -- not evidence of a bug; continuing")
+        if dead:
+            raise SystemExit(
+                f"liveness: searched dimension(s) that change nothing when moved alone: {', '.join(dead)} -- "
+                f"not starting a search that would spend its budget on them.  Check that the reducer "
+                f"receives them (docs/IDL_FINDINGS.md section 1 shows what this looks like); "
+                f"--no-liveness-check to override.")
+        self.log(f"liveness: all {n_red - len(untested)} tested reduction dimension(s) live")
+
     def _run(self) -> List[AnnulusResult]:
         if not self._resumed:
+            if self.cfg.liveness_check:
+                self._liveness_preflight()
             self.write_setup()
             self._emit("on_setup")
             start_ia, resume_index = 0, None

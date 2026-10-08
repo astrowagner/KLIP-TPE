@@ -80,12 +80,19 @@ def test_evaluate_mean_makes_one_history_entry_and_reports_every_draw():
     seen = []
 
     class _R:
+        # the per-draw loop; the shared-clean path is tested on a real runner in
+        # tests/test_remeasure_shared_clean.py
+        SHARE_CLEAN = False
         cfg = RunConfig(ann_edges=[6, 20], n_remeasure=3)
         evaluate_mean = Runner.evaluate_mean
+        _evaluate_draws_each = Runner._evaluate_draws_each
         _combine_draws = staticmethod(Runner._combine_draws)
 
         def __init__(self):
             self.n = 0
+
+        def _kscan_active(self):
+            return False
 
         def evaluate(self, x, phase, tag="eval"):
             self.n += 1

@@ -37,7 +37,7 @@ jupyter lab tutorials/
 ```
 
 Run times on a laptop (8 cores): tutorial 1 ≈ 10–20 min (300 evaluations × 3 injection
-draws; the reductions alone are ~5 min on *one* core, the rest is the live panel — see
+draws; the reductions alone are ~4 min on *one* core, the rest is the live panel — see
 [BUDGET.md](BUDGET.md) for both measurements and the `every=` throttle), tutorial 2 ≈ 30 min
 (27 min measured on two cores; less with more), tutorial 3 ≈ 2 h after the download (two searches
 through pyKLIP), tutorial 4 ≈ 1 min (no optimization run), tutorials 5 and 6 ≈ 1–2 h each

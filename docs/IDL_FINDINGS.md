@@ -31,10 +31,23 @@ from the running job, whose headers record all other parameters) with the *logge
 thresholds gives clean-image correlations of 0.26–0.93; with the worker defaults the poor
 cases jump to 0.91–0.93 (n4, anglemax 21 and k=5 configs) and none get worse.
 
-Fix (one line, no semantic change to anything else): append
-`', corr_thresh='+strtrim(corr_thresh,2)+', noise_max='+strtrim(noise_thresh,2)+', coronoise_max='+strtrim(coronoise_thresh,2)`
-to `parstr`.  Note this will change the objective for the running A/B pair if applied
-mid-run; apply between runs.
+Fix: forward the three keywords in `parstr`.  Note this changes the objective for a running
+run if applied mid-run; apply between runs.
+
+**Correction (2026-10-08).**  The snippet first given here appended `noise_thresh` and
+`coronoise_thresh`.  Those variables are only defined inside the serial `if nbridges le 1`
+branch, so on the parallel path that string is an undefined-variable error.  The fix as
+applied on 2026-09-05 forwards the keywords the parent was given, each with the child's own
+default as fallback, formatted `(F0.6)` so the value survives the command string:
+
+```idl
+cthr_w = (n_elements(corr_thresh)   gt 0) ? float(corr_thresh[0])   : 0.95
+nmax_w = (n_elements(noise_max)     gt 0) ? float(noise_max[0])     : 2.0
+cnmx_w = (n_elements(coronoise_max) gt 0) ? float(coronoise_max[0]) : 2.0
+parstr = parstr + ', corr_thresh='   + strtrim(string(cthr_w, format='(F0.6)'),2) $
+                + ', noise_max='     + strtrim(string(nmax_w, format='(F0.6)'),2) $
+                + ', coronoise_max=' + strtrim(string(cnmx_w, format='(F0.6)'),2)
+```
 
 The Python port passes the thresholds through (`KLIPReducer.reduce` applies
 `frame_selection_mask` with the searched values), so the two implementations will differ on
@@ -57,7 +70,7 @@ seq_range, seq_values, cache, nowait, jobflags, out_suffix`) was checked against
 | `block_burn aa bb ba ab`, `block_airy` | yes (when set) | |
 | `lean`, `klip_scan`, `nthreads`, `use_near2_throughput`, `use_rdi rdi_mode`, `n_min_ref` | yes | |
 | `corr_thresh noise_max coronoise_max` | **was missing** → fixed 2026-09-04 | §1 |
-| `dthmax` | **not forwarded** | only matters if a caller passes `dthmax`; the optimizer never does today, so children fall back to the same `0.5·FWHM/outrad` rule as the parent. Forward it anyway for safety: `if n_elements(dthmax) gt 0 then parstr += ', dthmax='+strtrim(dthmax,2)` |
+| `dthmax` | was not forwarded → forwarded since 2026-10-07, when given | only matters if a caller passes `dthmax`; the optimizer never does, so children fell back to the same `0.5·FWHM/outrad` rule as the parent and the default path is unchanged |
 
 Non-keyword settings the children *must* agree on because they are hard-coded in
 `reduce_near_2` and therefore identical in parent and child: `bin_type='mean'`,
@@ -127,11 +140,19 @@ subtraction, pre/post high-pass placement, combination weights (nwadi vs mean),
 rotation direction / true-north sign, rotation centre (`(n-1)/2` vs `n/2`), bilinear vs
 cubic, binning rule, frame selection, self-inclusion of the target in its basis, the
 `n_min_ref` drop.  The next diagnostic requires IDL-side intermediates: one serial
-`reduce_near_2, seq_range=[2,2], nbridges=1, cache=0, bin=17, k_klip=25, n_ang=2, filter=9,
-angsep=0.0316197, anglemax=46, inrad=0, outrad=22, corr_thresh=0, noise_max=3, coronoise_max=3`
+`reduce_near_2, seq_range=[2,2], nbridges=1, cache=0, fast=0, n_min_ref=10, bin=17, k_klip=25,
+n_ang=2, filter=9, angsep=0.0316197, anglemax=46, inrad=0, outrad=22, corr_thresh=0,
+noise_max=3, coronoise_max=3`
 run **without `/lean`** (so `AB_cube_klip.fits` is written) plus a `save` of the binned
 `angles`, the binned cube and the per-frame `nottarget` counts, to bisect the stage where
-the two diverge (`klip_tpe.klip.klip_annular` returns the same intermediates).  Until then, Python and IDL
+the two diverge (`klip_tpe.klip.klip_annular` returns the same intermediates).
+*Correction (2026-10-08):* the call first given here omitted `fast=0`.  `reduce_near_2`
+defaults to `fast=1`, one shared basis with no per-target reference selection, while
+production dispatches `fast=0`, the per-target path the comparisons above were made against;
+without it the dump would come from the other code path and carry no `nottarget` counts.
+`n_min_ref=10` is production's value too.  `reduce_near_2` has had a `dump_klip=`
+keyword since 2026-10-07 (serial path only) that saves exactly what `multiklip` receives,
+with the per-target reference census.  Until that dump has been compared, Python and IDL
 scores agree in rank (Spearman 0.58, p=0.001 on 29 replayed configurations) but Python is
 systematically ~15–40 % lower in S/N on the high-k configurations that win the IDL search.
 
@@ -160,9 +181,11 @@ inferred from the images, not from the IDL source (`rot` → `poly_2d` is built 
 | 0.40 | 2.69 | 4.05 | 2.95 | +1.36 (8/8) | 2.61 / 3.67 / 3.02, +1.06 |
 | 0.25 transposed | 4.73 | 5.60 | 4.84 | +0.87 (8/8) | 4.83 / 5.30 / 4.93, +0.47 |
 
-Same ordering, same magnitudes, same noise trend and the mismatch result survives.  The
-Python `TPE` defaults to `blocks="partitions"` (block-multivariate over the per-partition
-sub-vectors); `blocks="univariate"` is the byte-for-byte IDL reference sampler.
+Same ordering, same magnitudes, same noise trend and the mismatch result survives.  When
+this was written the Python `TPE` defaulted to `blocks="partitions"` (block-multivariate over
+the per-partition sub-vectors).  Since 2026-09-06 (addendum 2) `TPE` and `RunConfig` default
+to `blocks="univariate"`, the byte-for-byte IDL reference sampler; the command line followed
+on 2026-10-08 (until then `klip-tpe near` / `generic` without `--blocks` ran `partitions`).
 
 ## 4b. Injection geometry for the two-source annulus (addendum 2 §2b / §2c)
 
@@ -230,7 +253,10 @@ low-residual discrepancy is resolved.
 
 Setup: 6 nights, annulus [0, 20] px, contrast 6e-5, univariate TPE, `pbest` 0, post-fix
 frame selection, area-midpoint pair geometry; 4469 evaluations logged when the RAID filled
-up (the run stalled at 22:20 UTC on 2026-09-11).  IDL writes a setup file and the combined
+up (the run stalled at 22:20 UTC on 2026-09-11).  The run was resumed twice after that and
+stopped at 4881 evaluations on 2026-09-13 (its last checkpoint, 20:15 UTC); this comparison
+covers the first 4469.  It was retired on 2026-10-07 without a validation stage, and NEAR2
+production moved to the Python package.  IDL writes a setup file and the combined
 injected image for every evaluation, so both checks below use IDL's **exact** injection
 positions.  Sample: every 25th evaluation (178 configurations).
 

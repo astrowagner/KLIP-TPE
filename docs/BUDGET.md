@@ -170,8 +170,11 @@ score means nothing; do not report it.
 
 ## How long that takes
 
-The β Pic tutorial's 300 evaluations at `n_remeasure=3` — 900 reductions plus validation —
-took **3.2 to 6.6 minutes** on a single core across eight runs, with no display.  The spread
+The β Pic tutorial's 300 evaluations at `n_remeasure=3` took **3.2 to 6.6 minutes** on a
+single core across eight runs, with no display, when each of a trial's three draws also
+reduced its own clean image.  Since 2026-10-08 the draws share one clean reduction, four
+reductions per trial instead of six: the same search (seed 1) took 2.48 minutes instead of
+3.34, with an identical history, so expect about three quarters of the times here.  The spread
 is real and not a timing artefact: the optimizer drifts toward configurations that are more
 expensive to reduce (less temporal binning, more KL modes), so the cost per evaluation
 roughly tripled between the start and the end of a run, and two 1200-evaluation searches on
