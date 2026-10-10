@@ -147,6 +147,10 @@ def view(run_dir: Optional[str] = None, root: Optional[str] = None, interval: fl
     log(f"klip-tpe view: watching {d}")
     import matplotlib
     if not once:
+        from .winsize import prefer_x11_on_wayland
+        note = prefer_x11_on_wayland()               # before the toolkit starts (see winsize)
+        if note:
+            log(f"klip-tpe view: {note}")
         for cand in ([os.environ["KLIP_TPE_BACKEND"]] if os.environ.get("KLIP_TPE_BACKEND")
                      else ["MacOSX", "QtAgg", "TkAgg", "GTK3Agg"]):
             try:

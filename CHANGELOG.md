@@ -2,6 +2,31 @@
 
 ## Unreleased — 2026-10-10 (the live window keeps one size; tutorials 3, 5 and 6 with outputs; the trace figure)
 
+- **The live window holds its size on GNOME's Wayland desktop too.**  On Ubuntu's GNOME
+  session (port 3389 remote login included) the window could still be maximized and resized,
+  and then jumped back and forth.  A native Wayland Qt window draws its own frame, and GNOME
+  maximizes it on a double-click whatever size Qt has fixed.  Reproduced on mutter 46 with
+  Qt 6.11's GNOME decorations: a `setFixedSize` window maximizes to 1920 × 1162.  Now:
+  - on a Wayland session Qt and GTK open through XWayland (`QT_QPA_PLATFORM=xcb;wayland`,
+    `GDK_BACKEND=x11,wayland`, set only when unset and before the toolkit starts), where
+    mutter draws the frame and refuses both: a corner drag and a title double-click leave
+    the live window at 1017 × 544.  Qt's xcb plugin needs `libxcb-cursor0`; without it Qt
+    stays native and the log says how to install it.  `KLIP_TPE_WAYLAND=native` opts out;
+  - `keep_window_size` reads the toolkit window's own size, un-maximizes, and restores
+    through the toolkit (Tk `geometry`, Qt `showNormal`/`resize`, GTK `unmaximize`/`resize`,
+    wx `SetSize`).  A window manager that resizes a Tk window leaves the figure's size
+    alone, so the old check missed it, and Tk ignores a size requested by the canvas after
+    such a resize.  Resized from outside with no window manager to stop it, Tk and Qt live
+    windows and `klip-tpe view` return to their size within 0.6 s.  On native Wayland a
+    maximized live window is un-maximized at the next GUI turn;
+  - a size is adopted only while the window settles (2 s after it opens, or after a dpi
+    change from moving to a screen with another scale).  Later sizes are always put back,
+    at most every 0.5 s and every 5 s after ten requests that did not take.  Adopting any
+    size held for 2 s let a user's resize or a maximize stick;
+  - the run log names the backend and the windowing system: `live window: QtAgg on x11,
+    1017 x 544 px, fixed size`.
+  Checked under metacity, xfwm4 and mutter (X11, and Wayland with Xwayland), with Tk and Qt,
+  at 96 and 192 dpi.
 - **The paper's trace figure (f2) shows only the evaluations at each annulus' final injected
   contrast** (`paper_runs/figs.py`).  The β Pic and NIRCam panels began with the ten
   evaluations made before the warm-up check rescaled the contrast.  On NIRCam those ran at

@@ -10,10 +10,17 @@ file by file.  The panel and the product set are those of the IDL optimizer
 
 Black window, 1850 × 990 px (`window_scale` shrinks it; `show="inline"` puts it in a
 Jupyter output cell).  The window keeps that size for the whole run.  Tk, Qt and GTK
-windows cannot be resized.  With the macOS backend the resize control goes when PyObjC is
-installed (`pip install pyobjc-framework-Cocoa`); without it a resized window returns to
-its size.  The inline panel has a fixed size as well, whatever the width of the notebook.
-`klip-tpe view` behaves the same way.  Every evaluation renders one frame
+windows cannot be resized.  On a Wayland desktop (GNOME on Ubuntu, remote-login sessions
+included) Qt and GTK windows draw their own frame, and GNOME maximizes such a window
+whatever its size limits, so the window opens through XWayland, where GNOME's window
+manager holds its size.  Qt needs `libxcb-cursor0` for that (`sudo apt install
+libxcb-cursor0`); without it the window stays native, and the log says so.
+`KLIP_TPE_WAYLAND=native` keeps it native on purpose.  With the macOS backend the resize
+control goes when PyObjC is installed (`pip install pyobjc-framework-Cocoa`).  Wherever a
+window can still be resized or maximized, it returns to its size within half a second.
+The run log names the backend and the windowing system (`live window: QtAgg on x11, 1017 x
+544 px, fixed size`).  The inline panel has a fixed size as well, whatever the width of the
+notebook.  `klip-tpe view` behaves the same way.  Every evaluation renders one frame
 (`steps/stepNNNN.png`), on a worker thread so the evaluation loop never waits for it.
 
 **Top row — images** (KLIP image, σ-stretch, image colour map)

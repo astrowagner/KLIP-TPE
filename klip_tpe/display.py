@@ -53,7 +53,7 @@ from .metrics import radprof, source_xy, star_center
 from .plots import (PHASE_COLORS, PHASE_ORDER, SEARCH_LABEL, VALID_LABEL, _annulus_records, _bins_for,
                     _config, _locked_rc, _metric_name, _space, load_run)
 from .runner import RunCallback
-from .winsize import fix_window_size, keep_window_size
+from .winsize import fix_window_size, keep_window_size, prefer_x11_on_wayland, window_platform
 
 __all__ = ["AnnulusData", "LiveDisplay", "annulus_from_run", "render_step", "render_steps",
            "render_calibration", "render_validation", "render_corner", "render_landscapes",
@@ -3381,6 +3381,9 @@ class LiveDisplay(RunCallback):
             mode = "window"
         self.inline = mode == "inline"
         self.save_png, self.show, self.cmap, self.dpi, self.movie = save_png, bool(mode), cmap, int(dpi), movie
+        # before any GUI toolkit starts: on a Wayland desktop the window goes through XWayland,
+        # where the window manager holds its size (winsize.prefer_x11_on_wayland)
+        self._wayland_note = prefer_x11_on_wayland() if (self.show and not self.inline) else None
         self._handle = None                          # IPython display handle (inline mode)
         self._log = log
         self._records: List[Dict[str, Any]] = []
@@ -3445,6 +3448,9 @@ class LiveDisplay(RunCallback):
         if getattr(self, "_inline_fallback", False):
             self._say(runner, 'live display: show="inline" only works inside a Jupyter kernel -- '
                               "opening a window instead")
+        note = getattr(self, "_wayland_note", None) or prefer_x11_on_wayland()
+        if note:
+            self._say(runner, f"live window: {note}")
         import matplotlib
         matplotlib.rcParams["toolbar"] = "None"        # no home/arrows bar under the live panel
         cur = matplotlib.get_backend().lower()
@@ -3542,13 +3548,15 @@ class LiveDisplay(RunCallback):
                 # title is set first, because on macOS the window is found by its title.
                 C._win.canvas.flush_events()
                 off = fix_window_size(C._win)
-                w_px, h_px = (int(v) for v in np.round(C._win.get_size_inches() * self.dpi))
+                w_px, h_px = (int(v) for v in np.round(C._win.get_size_inches() * C._win.dpi))
+                plat = window_platform(C._win)
+                where = matplotlib.get_backend() + (f" on {plat}" if plat else "")
                 note = ""
                 if not off:
                     note = " (a resized window returns to this size"
                     note += ("; pip install pyobjc-framework-Cocoa to remove the resize control)"
                              if "macosx" in matplotlib.get_backend().lower() else ")")
-                self._say(None, f"live window: {w_px} x {h_px} px, fixed size{note}")
+                self._say(None, f"live window: {where}, {w_px} x {h_px} px, fixed size{note}")
             if C._win_im is None or C._win_im.get_array().shape[:2] != img.shape[:2]:
                 C._win_ax.clear(); C._win_ax.set_axis_off()
                 # lanczos: crisp text when the 1870-px panel is resampled to the window (nearest blurred it)
