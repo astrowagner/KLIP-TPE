@@ -1,7 +1,14 @@
 # Changelog
 
-## Unreleased — 2026-10-10 (the live window keeps one size; tutorials 3, 5 and 6 with outputs)
+## Unreleased — 2026-10-10 (the live window keeps one size; tutorials 3, 5 and 6 with outputs; the trace figure)
 
+- **The paper's trace figure (f2) shows only the evaluations at each annulus' final injected
+  contrast** (`paper_runs/figs.py`).  The β Pic and NIRCam panels began with the ten
+  evaluations made before the warm-up check rescaled the contrast.  On NIRCam those ran at
+  1.6× the final contrast, and one of them set the panel's running maximum (9.18, against
+  8.95 at the final contrast and a validated 8.92).
+- `docs/BACKENDS.md` gives the MASK335R inner working angle as the JWST documentation does,
+  0.64″ (it said 0.63″).
 - **Notebooks 3, 5 and 6 are stored with their outputs**, from runs on a Mac with the MAST
   data and the STPSF cache.  The searches took 11.1 and 13.4 minutes (tutorial 3), 116.5
   minutes (tutorial 5) and 18.8 minutes (tutorial 6).  The text now quotes what the runs

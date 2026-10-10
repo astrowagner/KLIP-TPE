@@ -184,7 +184,7 @@ red   = sk.make_reducer(datasets, injection_model=model)
 Inside a few λ/D of a mask the PSF is neither a Gaussian nor separation-independent, so
 this matters twice: injected sources get the right shape *and* the right amplitude, since
 the grid also measures the mask throughput `T(ρ)` (for MASK335R it reaches half
-transmission at 0.65″, against the published 0.63″ IWA) and `LibraryPSF` applies it. Each
+transmission at 0.65″, against the 0.64″ IWA in the JWST documentation) and `LibraryPSF` applies it. Each
 PSF costs seconds, so a grid is computed once and cached as a FITS under
 `$KLIP_TPE_DATA/stpsf_cache` (default `~/.klip_tpe/stpsf_cache`).  The stamps are stored
 source-centred and injected translated, never rotated (`refpa_deg=None`): the structure in a

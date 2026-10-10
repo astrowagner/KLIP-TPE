@@ -266,9 +266,13 @@ def fig_trace(s):
         w = prim(s, t)
         run = os.path.join(OUT, s[w]["run"])
         ia = s[w]["annuli"][0]["annulus"]
-        # every calibration segment, as before, but each evaluation once: a resume replays
-        # the evaluations after its checkpoint and re-logs them (bench.read_records)
-        rec = read_records(run, annulus=ia, last_segment=False)
+        # The final calibration segment only, each evaluation once (a resume replays the
+        # evaluations after its checkpoint and re-logs them; bench.read_records).  An evaluation
+        # made before the warm-up check rescaled the contrast was injected at another
+        # brightness, so its S/N is on another scale: on NIRCam (D2) the first ten ran at 1.6x
+        # the final contrast, and one of them was the panel's running maximum (9.18, against
+        # 8.95 at the final contrast and a validated 8.92).
+        rec = read_records(run, annulus=ia, last_segment=True)
         # The raw median injected S/N, the statistic the dashed default and the validated star
         # are measured on.  The search ranks on the clean-subtracted score, which sits ~0.5
         # below it; plotting that against the raw star put the star above the running best
@@ -356,7 +360,10 @@ def fig_partition(s, key=None):
         return
     r = s[key]
     run = os.path.join(OUT, r["run"])
-    recs = read_records(run, last_segment=False)          # each evaluation once (see fig_trace)
+    # each evaluation once; every segment, which is right only because the four-group run has
+    # a single calibration segment (with annulus=None, last_segment=True would keep only the
+    # last annulus' last segment)
+    recs = read_records(run, last_segment=False)
     parts = r["partitions"]
     sel = [set(str(x) for x in (rc.get("meta", {}).get("selected") or parts)) for rc in recs]
     y = np.array([np.nan if rc.get("score") is None else rc["score"] for rc in recs])
