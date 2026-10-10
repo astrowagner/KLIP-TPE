@@ -2831,6 +2831,8 @@ class Runner:
         self.log(f"liveness: all {n_red - len(untested)} tested reduction dimension(s) live")
 
     def _run(self) -> List[AnnulusResult]:
+        from .version import describe
+        self.log(describe())           # which code this is: a log then says if it matches the repository
         if not self._resumed:
             if liveness_mode(self.cfg.liveness_check) != "off":
                 self._liveness_preflight()

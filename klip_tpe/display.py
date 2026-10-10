@@ -53,7 +53,8 @@ from .metrics import radprof, source_xy, star_center
 from .plots import (PHASE_COLORS, PHASE_ORDER, SEARCH_LABEL, VALID_LABEL, _annulus_records, _bins_for,
                     _config, _locked_rc, _metric_name, _space, load_run)
 from .runner import RunCallback
-from .winsize import fix_window_size, keep_window_size, prefer_x11_on_wayland, window_platform
+from .winsize import (keep_window_size, open_panel_window, panel_box, prefer_x11_on_wayland,
+                      screen_copy, show_panel)
 
 __all__ = ["AnnulusData", "LiveDisplay", "annulus_from_run", "render_step", "render_steps",
            "render_calibration", "render_validation", "render_corner", "render_landscapes",
@@ -65,6 +66,13 @@ __all__ = ["AnnulusData", "LiveDisplay", "annulus_from_run", "render_step", "ren
 # ----------------------------------------------------------------------------
 SCORE_CMAP = "viridis"          # score-coloured points (IDL cmap_plots)
 PANEL_PX = (1850, 990)          # live panel size in pixels = the IDL window (window, 2, xsize=1850, ysize=990)
+
+
+def _fills(img, box) -> bool:
+    """True when ``img`` fills ``box`` (w, h) at its own aspect: one side equal, the other
+    no larger.  ``img`` is an image or a ``(w, h)`` size."""
+    w, h = (img[0], img[1]) if isinstance(img, tuple) else (np.shape(img)[1], np.shape(img)[0])
+    return (w == box[0] and h <= box[1]) or (h == box[1] and w <= box[0])
 
 
 def panel_size(dpi: float) -> Tuple[float, float]:
@@ -3503,13 +3511,17 @@ class LiveDisplay(RunCallback):
     # one display is ever live at a time in a process (a batch runs its slots sequentially),
     # so there is nothing to contend over.
     _win = None
-    _win_ax = None
-    _win_im = None
     _win_dir = None
+    #: device pixels the panel fills in the window (the render thread draws its copies at it)
+    _win_px = None
+    #: what the window shows, kept to redraw it when the window's pixels change
+    _win_src = None
 
-    def _window_show(self, png: Optional[str] = None, fig: Optional[Figure] = None) -> None:
-        """Show ``png`` (or the current pixels of offscreen ``fig``) in the live window.
-        Main thread only; a plain imshow, so it costs ~0.1 s whatever the panel is."""
+    def _window_show(self, png: Optional[str] = None, fig: Optional[Figure] = None,
+                     img: Optional[np.ndarray] = None) -> None:
+        """Show a panel in the live window, pixel for pixel: offscreen ``fig`` drawn at the
+        window's size, else ``img`` (the render thread's copy at that size), else ``png``
+        resampled to it.  Main thread only."""
         if not self.show:
             return
         if self.inline:
@@ -3519,57 +3531,33 @@ class LiveDisplay(RunCallback):
             return                                  # also pins rcParams["toolbar"] = "None" before the window exists
         try:
             import matplotlib.pyplot as plt
-            if fig is not None:
-                fig.canvas.draw()
-                img = np.asarray(fig.canvas.buffer_rgba())
-            elif png:
-                img = plt.imread(png)
-            else:
-                return
             C = LiveDisplay                       # the window lives on the class (see above)
-            created = False
             if C._win is None or not plt.fignum_exists(C._win.number):
-                plt.ion()
-                w_in, h_in = panel_size(self.dpi)
-                C._win = plt.figure(figsize=(w_in * self.window_scale, h_in * self.window_scale), dpi=self.dpi)
-                C._win.patch.set_facecolor("black")
-                ax = C._win.add_axes([0, 0, 1, 1]); ax.set_axis_off()
-                C._win_ax, C._win_im, C._win_dir = ax, None, None
-                plt.show(block=False)
-                created = True
+                self._open_window(plt)
             if C._win_dir != self.run_dir:         # a batch moved on to the next run
                 C._win_dir = self.run_dir
                 try:
                     C._win.canvas.manager.set_window_title(f"klip-tpe live -- {os.path.basename(self.run_dir)}")
                 except Exception:
                     pass
-            if created:
-                # One size for the whole run: window_scale x the panel, never resized.  The
-                # title is set first, because on macOS the window is found by its title.
-                C._win.canvas.flush_events()
-                off = fix_window_size(C._win)
-                w_px, h_px = (int(v) for v in np.round(C._win.get_size_inches() * C._win.dpi))
-                plat = window_platform(C._win)
-                where = matplotlib.get_backend() + (f" on {plat}" if plat else "")
-                note = ""
-                if not off:
-                    note = " (a resized window returns to this size"
-                    note += ("; pip install pyobjc-framework-Cocoa to remove the resize control)"
-                             if "macosx" in matplotlib.get_backend().lower() else ")")
-                self._say(None, f"live window: {where}, {w_px} x {h_px} px, fixed size{note}")
-            if C._win_im is None or C._win_im.get_array().shape[:2] != img.shape[:2]:
-                C._win_ax.clear(); C._win_ax.set_axis_off()
-                # lanczos: crisp text when the 1870-px panel is resampled to the window (nearest blurred it)
-                interp = "nearest" if abs(self.window_scale - 1.0) < 1e-3 else "lanczos"
-                # aspect "equal": a window held smaller than asked (a small screen) shows the
-                # panel whole with black margins instead of stretching it
-                C._win_im = C._win_ax.imshow(img, interpolation=interp, aspect="equal",
-                                             interpolation_stage="rgba", resample=True)
-            else:
-                C._win_im.set_data(img)
+            box = panel_box(C._win, PANEL_PX)
+            if fig is not None and png and _fills((int(fig.bbox.width), int(fig.bbox.height)), box):
+                fig = None                         # the PNG just written from it is that size: no second draw
+            if fig is not None:
+                img = screen_copy(fig, box)        # drawn at the window's size: sharp text
+            elif img is not None and not _fills(img, box):
+                img = None                         # drawn for an earlier window size
+            if img is None and png:
+                img = plt.imread(png)
+            if img is None:
+                return
+            C._win_src = (png, img)
+            C._win_px = show_panel(C._win, img, PANEL_PX)
             C._win.canvas.draw_idle()
             C._win.canvas.flush_events()           # no show()/pause -> the window is never raised
-            keep_window_size(C._win)
+            note = keep_window_size(C._win)
+            if note:
+                self._say(None, f"live window: {note}")
             # the WINDOW is shared, the pump clock is not: a display that has just taken the
             # window over should service the event loop at once rather than inherit the
             # previous one's throttle (and shared clocks leak between runs in one process)
@@ -3578,6 +3566,46 @@ class LiveDisplay(RunCallback):
         except Exception as exc:
             self._say(None, f"live window update failed: {exc!r}")
             self.show = False
+
+    def _open_window(self, plt) -> None:
+        """Open the shared live window at ``window_scale`` x the panel, shrunk to fit the
+        screen, with resizing off before it first appears (:func:`winsize.open_panel_window`)."""
+        C = LiveDisplay
+        plt.ion()
+        C._win, info = open_panel_window(PANEL_PX, self.window_scale, self.dpi,
+                                         f"klip-tpe live -- {os.path.basename(self.run_dir)}")
+        C._win_dir, C._win_px, C._win_src = self.run_dir, None, None
+        import matplotlib
+        dpr = float(getattr(C._win.canvas, "device_pixel_ratio", 1.0) or 1.0)   # 2 on a 2x screen
+        w_px, h_px = (int(v) for v in np.round(np.asarray(C._win.get_size_inches()) * C._win.dpi / dpr))
+        where = matplotlib.get_backend() + (f" on {info['platform']}" if info["platform"] else "")
+        size = f"{w_px} x {h_px} px"
+        if info["scale"] < info["asked"] - 1e-3:
+            size += f" (the panel at {info['scale']:.2f}, the largest that fits the screen)"
+        note = ""
+        if not info["fixed"]:
+            note = " (a resized window returns to this size"
+            note += ("; pip install pyobjc-framework-Cocoa to remove the resize control)"
+                     if "macosx" in matplotlib.get_backend().lower() else ")")
+        self._say(None, f"live window: {where}, {size}, fixed size{note}")
+
+    def _relayout(self) -> None:
+        """Redraw the panel when the window's pixels change (a move to a screen with another
+        scale, or a size the window manager held it at), and have the render thread draw
+        its copies at the new size."""
+        C = LiveDisplay
+        win = self._win
+        if win is None or C._win_src is None:
+            return
+        box = panel_box(win, PANEL_PX)
+        if C._win_px is not None and tuple(box) == tuple(C._win_px):
+            return
+        png, img = C._win_src
+        if png and os.path.exists(png):
+            import matplotlib.pyplot as plt
+            img = plt.imread(png)
+        C._win_px = show_panel(win, img, PANEL_PX)
+        win.canvas.draw_idle()
 
     def _inline_show(self, png: Optional[str] = None, fig: Optional[Figure] = None) -> None:
         """Jupyter: push the panel into one output cell, updated in place (an IPython
@@ -3620,7 +3648,22 @@ class LiveDisplay(RunCallback):
         return self._rex
 
     def _submit_render(self, png: Optional[str], fn, *args, **kw) -> None:
-        fut = self._render_pool().submit(fn, *args, **kw)
+        """Run ``fn`` on the render thread.  When it draws a panel for the window, a second
+        draw at the window's own pixel size follows (~1 s, against ~4 s for the panel), so
+        the window shows text rendered for its screen instead of resampled to it.  None is
+        returned where the PNG is already that size."""
+        want = LiveDisplay._win_px if (png and self.show and not self.inline) else None
+
+        def _job():
+            fn(*args, **kw)
+            box = LiveDisplay._win_px or want      # the window's newest size
+            if not box:
+                return None
+            f = self._figure()
+            if _fills((int(f.bbox.width), int(f.bbox.height)), box):
+                return None                        # the PNG on disk is that size already
+            return screen_copy(f, box)
+        fut = self._render_pool().submit(_job)
         self._renders.append((fut, png))
         from .parallel import IDLE_HOOKS
         if self.show and self._show_latest not in IDLE_HOOKS:
@@ -3730,7 +3773,10 @@ class LiveDisplay(RunCallback):
             import matplotlib.pyplot as plt
             if plt.fignum_exists(self._win.number):
                 self._win.canvas.flush_events()
-                keep_window_size(self._win)
+                note = keep_window_size(self._win)
+                if note:
+                    self._say(None, f"live window: {note}")
+                self._relayout()
         except Exception:
             pass
 
@@ -3751,16 +3797,16 @@ class LiveDisplay(RunCallback):
         for fut, png in self._renders:
             if fut.done():
                 try:
-                    fut.result()
+                    r = fut.result()
                     if png:
-                        latest = png
+                        latest = (png, r if isinstance(r, np.ndarray) else None)
                 except Exception as exc:
                     self._say(None, f"render failed: {exc!r}")
             else:
                 keep.append((fut, png))
         self._renders = keep
         if latest and self.show and not self._intro_on:
-            self._window_show(png=latest)
+            self._window_show(png=latest[0], img=latest[1])
 
     def _wait_renders(self) -> None:
         for fut in list(getattr(self, "_movies", []) or []):
@@ -4403,7 +4449,7 @@ class LiveDisplay(RunCallback):
             if r is not None:
                 self._paths.append(png); self._ann_frames.append(png)
                 self._step += 1
-                self._window_show(png=png)
+                self._window_show(png=png, fig=self._figure() if self.show and not self.inline else None)
                 if self.movie:
                     self._submit_progress_movie(result.annulus)     # final per-annulus progress movie
                 self._guard(runner, "final frame (white)", render_step, ad, i, imgs,

@@ -151,10 +151,21 @@ def view(run_dir: Optional[str] = None, root: Optional[str] = None, interval: fl
         note = prefer_x11_on_wayland()               # before the toolkit starts (see winsize)
         if note:
             log(f"klip-tpe view: {note}")
-        for cand in ([os.environ["KLIP_TPE_BACKEND"]] if os.environ.get("KLIP_TPE_BACKEND")
-                     else ["MacOSX", "QtAgg", "TkAgg", "GTK3Agg"]):
+        import sys
+        matplotlib.rcParams["toolbar"] = "None"
+        import matplotlib.pyplot as plt
+        # pyplot first: without it matplotlib.use only records the name, so the first
+        # candidate always "worked", MacOSX included on Linux, and the window then failed
+        if os.environ.get("KLIP_TPE_BACKEND"):
+            cands = [os.environ["KLIP_TPE_BACKEND"]]
+        elif sys.platform == "darwin":
+            cands = ["MacOSX", "QtAgg", "TkAgg"]
+        else:
+            cands = ["QtAgg", "TkAgg", "GTK3Agg"]
+        for cand in cands:
             try:
                 matplotlib.use(cand, force=True)
+                plt.close(plt.figure())                  # loads the toolkit: fails here if it is missing
                 break
             except Exception:
                 continue
@@ -171,26 +182,14 @@ def view(run_dir: Optional[str] = None, root: Optional[str] = None, interval: fl
 
     img = plt.imread(cur[0]) if cur else None
     h, w = (img.shape[0], img.shape[1]) if img is not None else (990, 1850)
-    dpi = 100.0
-    fig = plt.figure(figsize=(w / dpi * scale, h / dpi * scale), dpi=dpi)
-    fig.patch.set_facecolor("black")
-    ax = fig.add_axes([0, 0, 1, 1])
-    ax.set_axis_off()
-    # aspect "equal": a window held smaller than asked shows the panel whole, not stretched
-    im = ax.imshow(img, interpolation="lanczos" if abs(scale - 1) > 1e-3 else "nearest",
-                   aspect="equal", interpolation_stage="rgba") if img is not None else None
-    txt = fig.text(0.005, 0.004, "", color="#9adcff", fontsize=7, family="monospace", va="bottom")
-    try:
-        fig.canvas.manager.set_window_title(f"klip-tpe view -- {os.path.basename(d)}")
-    except Exception:
-        pass
+    # hidden, fitted to the screen and fixed before it first appears, like the live window
+    from .winsize import keep_window_size, open_panel_window, panel_box, show_panel
     plt.ion()
-    plt.show(block=False)
-    # one size for as long as it is open, like the live window (the title is set first:
-    # on macOS the window is found by it)
-    from .winsize import fix_window_size, keep_window_size
-    fig.canvas.flush_events()
-    fix_window_size(fig)
+    fig, info = open_panel_window((w, h), scale, 100.0, f"klip-tpe view -- {os.path.basename(d)}")
+    if info["scale"] < info["asked"] - 1e-3:
+        log(f"klip-tpe view: the {w} x {h} panel is shown at {info['scale']:.2f} to fit the screen")
+    box = show_panel(fig, img, (w, h)) if img is not None else None
+    txt = fig.text(0.005, 0.004, "", color="#9adcff", fontsize=7, family="monospace", va="bottom")
 
     shown = cur[1] if cur else -1.0
     prev = st
@@ -200,16 +199,8 @@ def view(run_dir: Optional[str] = None, root: Optional[str] = None, interval: fl
             p = newest_panel(d)
             if p and p[1] > shown:
                 try:
-                    a = plt.imread(p[0])
-                    if im is None:
-                        im = ax.imshow(a, interpolation="nearest", aspect="equal",
-                                       interpolation_stage="rgba")
-                    elif im.get_array().shape[:2] != a.shape[:2]:
-                        ax.clear(); ax.set_axis_off()
-                        im = ax.imshow(a, interpolation="nearest", aspect="equal",
-                                       interpolation_stage="rgba")
-                    else:
-                        im.set_data(a)
+                    img = plt.imread(p[0])
+                    box = show_panel(fig, img, (w, h))
                     shown = p[1]
                 except Exception:
                     pass                        # a half-written PNG: just try again next tick
@@ -229,7 +220,12 @@ def view(run_dir: Optional[str] = None, root: Optional[str] = None, interval: fl
             t_end = time.time() + interval
             while plt.fignum_exists(fig.number):
                 fig.canvas.flush_events()
-                keep_window_size(fig)
+                note = keep_window_size(fig)
+                if note:
+                    log(f"klip-tpe view: {note}")
+                if img is not None and box is not None and tuple(panel_box(fig, (w, h))) != tuple(box):
+                    box = show_panel(fig, img, (w, h))      # the window's pixels changed
+                    fig.canvas.draw_idle()
                 left = t_end - time.time()
                 if left <= 0:
                     break

@@ -415,7 +415,7 @@ def test_the_benchmark_slots_get_a_display_too(demos, monkeypatch, tmp_path):
 def test_the_live_window_is_shared_across_displays():
     """One window for a whole batch: dozens of slots must not open dozens of windows."""
     from klip_tpe.display import LiveDisplay
-    for name in ("_win", "_win_ax", "_win_im", "_win_dir"):
+    for name in ("_win", "_win_dir", "_win_px", "_win_src"):
         assert name in vars(LiveDisplay), f"{name} must be a class attribute to be shared"
 
 

@@ -247,8 +247,8 @@ def _protocol_args(p):
                         "cell in place), --show auto (inline inside a notebook, window otherwise)")
     p.add_argument("--aliens", action="store_true", help="play the IDL launch movie during the first calibration (+ intro.gif)")
     p.add_argument("--window-scale", type=float, default=1.0,
-                   help="live window size as a fraction of the 1850x990 panel (1.0 = the IDL window, 1:1 pixels); "
-                        "the window keeps this size")
+                   help="live window size as a fraction of the 1850x990 panel (1.0 = the IDL window, 1:1 pixels), "
+                        "shrunk to fit a smaller screen; the window keeps this size")
     p.add_argument("--no-fm-curve", dest="fm_curve", action="store_false", default=True,
                    help="skip the KLIP-FM cross-check curve after each annulus (A 9.1)")
     p.add_argument("--fm-preview", dest="fm_preview", action="store_true", default=True,
@@ -681,8 +681,22 @@ def cmd_view(a):
                           scale=a.window_scale, once=a.once))
 
 
+class _Version(argparse.Action):
+    """``--version``: one unwrapped line (argparse's own version action wraps a long path)."""
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS, default=argparse.SUPPRESS, help=None):
+        super().__init__(option_strings=option_strings, dest=dest, default=default, nargs=0, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        from .version import describe
+        print(describe())
+        parser.exit()
+
+
 def _build_parser():
     ap = argparse.ArgumentParser(prog="klip-tpe", description="KLIP-TPE reduction-parameter optimizer")
+    ap.add_argument("--version", action=_Version,
+                    help="print the version, the git commit and where klip_tpe is imported from")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     for cmd, hlp in (("near", "run the optimizer on NEAR / pyNOMIC data (--instrument)"),

@@ -1,7 +1,36 @@
 # Changelog
 
-## Unreleased — 2026-10-10 (the live window keeps one size; tutorials 3, 5 and 6 with outputs; the trace figure)
+## Unreleased — 2026-10-10 (the live window keeps one size and shows the panel sharp; tutorials 3, 5 and 6 with outputs; the trace figure)
 
+- **The live window opens at its size, keeps it, and shows the panel sharp.**  On a 1920 ×
+  1080 GNOME session the 1850 × 990 window (the CLI default, `--window-scale 1`) opened
+  maximized.  GNOME maximizes a resizable window that covers most of the screen as it
+  appears, and the window was fixed only after it appeared.  The 1850 × 990 panel was then
+  resampled into the larger window, which blurred the text.  Two seconds later the window was
+  un-maximized, and every later put-back aimed at the maximized size it had adopted while it
+  settled.  Reproduced on mutter 46, the GNOME of Ubuntu 24.04.  Now:
+  - `winsize.open_panel_window` makes the window hidden, shrinks the panel to the room on the
+    screen, fixes the size, and only then shows it.  On 1920 × 1080 the window opens at
+    1850 × 990, and a title double-click and Super+Up leave it there.  On 1440 × 900 it opens
+    at 1424 × 762 (the panel at 0.77), and the log says so.
+  - The panel is drawn pixel for pixel on the screen's own pixels (`winsize.show_panel`,
+    centered on black, never stretched).  After each panel the render thread draws the figure
+    once more at the window's pixel size (about 1 s, against about 4 s for the panel), so the
+    text is rendered for the screen instead of resampled to it.  Checked at scale 1, at 2×
+    (3700 × 1980 device pixels) and at GNOME's fractional 1.5× (2775 × 1485).
+  - With GNOME's fractional scaling the window stays native Wayland.  There GNOME draws an
+    XWayland window at scale 1 and enlarges it, which blurs it.  The layout is read from
+    mutter's `DisplayConfig` through `gdbus`.  Desktops other than GNOME keep the window
+    native, since they draw a Wayland window's frame themselves.  `KLIP_TPE_WAYLAND=x11`
+    forces XWayland.
+  - A maximized size or a larger one is never adopted, and put-backs stop after ten that do
+    not take (a tiling window manager), with one line in the log.
+  - Every run's log starts with the version, the git commit and the folder klip-tpe runs
+    from (`klip-tpe 0.1.0 (git d2fbb74) from ...`), and `klip-tpe --version` prints the
+    same line.  A copy installed with `pip install .` reads `(installed copy)`.  It keeps the
+    code it was installed with when the repository is updated.
+  - `klip-tpe view` picked the macOS backend on Linux and failed, since `matplotlib.use` only
+    records a name before pyplot is imported.  It now tries Qt, Tk and GTK in turn.
 - **The live window holds its size on GNOME's Wayland desktop too.**  On Ubuntu's GNOME
   session (port 3389 remote login included) the window could still be maximized and resized,
   and then jumped back and forth.  A native Wayland Qt window draws its own frame, and GNOME
