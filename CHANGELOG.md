@@ -1,7 +1,21 @@
 # Changelog
 
-## Unreleased — 2026-10-10 (the live window keeps one size)
+## Unreleased — 2026-10-10 (the live window keeps one size; tutorials 3, 5 and 6 with outputs)
 
+- **Notebooks 3, 5 and 6 are stored with their outputs**, from runs on a Mac with the MAST
+  data and the STPSF cache.  The searches took 11.1 and 13.4 minutes (tutorial 3), 116.5
+  minutes (tutorial 5) and 18.8 minutes (tutorial 6).  The text now quotes what the runs
+  give.  Tutorial 3: the planet's S/N in each `mode` at the default configuration (ADI 14.1,
+  RDI 12.3, ADI+RDI 12.8), the two re-calibrations that make its log 320 evaluations long,
+  both validated winners, and why the PSF-filter winner gives the planet 13.3, less than
+  default ADI (only the injections are optimized).  Tutorial 5: the calibration contrast of
+  9.95 × 10⁻⁵, and the k-scan's edge hit at the cap of 20, with how to raise it.  Tutorial 6:
+  its run time against tutorial 5's.  Home-directory paths in the outputs are written as `~`.
+- Tutorials 1 to 6 read more plainly: colons that joined two sentences are two sentences, and
+  in tutorial 6 the inner dust belt and planets d and e are placed inside the annulus's inner
+  edge, and e at 1.2 λ/D closer in than a radial stamp library can be trusted.
+  `docs/TUTORIALS.md` gives the measured run times and says that building a notebook without
+  `--execute` replaces its stored outputs.
 - **The live window keeps one size, `window_scale` × 1850 × 990 px, for the whole run.**
   `klip_tpe.winsize.fix_window_size` switches the toolkit's resizing off: Tk
   `resizable(False, False)`, Qt `setFixedSize`, GTK `set_resizable(False)`, wx min = max

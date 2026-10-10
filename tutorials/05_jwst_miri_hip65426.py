@@ -84,8 +84,8 @@ print(f"{len(files)} calints under {DATA}, {len(in_filt)} in {FILTER}"
 # alone. A mixture with no background pointings to fix it raises an error.
 #
 # On paired 1000-evaluation runs that differed only in this, the calibration contrast fell
-# from 2.27 × 10⁻⁴ to 1.63 × 10⁻⁴: the same default configuration reached S/N 5 on a source
-# 28% fainter once the library was consistent. The k-scan changed shape too. With the
+# from 2.27 × 10⁻⁴ to 1.63 × 10⁻⁴. Once the library was consistent, the same default
+# configuration reached S/N 5 on a source 28% fainter. The k-scan changed shape too. With the
 # mismatch it was flat to 1.5% over k = 4 to 20, with k = 1 on top, because the leading KL
 # mode was the pedestal. With a consistent library, low k is clearly penalized and more modes
 # keep helping.
@@ -264,7 +264,7 @@ if HAVE_DATA:
 # | `EE` | 0.4660 at 4.50 px | the model PSF unocculted through the Lyot stop |
 # | `T_optics` | 1.0 | `PHOTMJSR` of the coronagraphic mode already carries its optics |
 #
-# This gives `star_flux = 1.1239e5`. Two steps in it are worth copying.
+# This gives `star_flux = 1.1238e5`. Two steps in it are worth copying.
 #
 # **Anchor the ratio rather than recomputing.** The Planck-through-the-bandpass recipe gives
 # 3.3% less than the independently checked F444W value of 0.40259 Jy, about that value's own
@@ -303,8 +303,8 @@ if HAVE_DATA:
 # %% [markdown]
 # ## 5. Reducer, Space and Objective, and the Check That Comes First
 #
-# `psf="stpsf"` routes MIRI to `miri.library`: radial stamps with the two-dimensional
-# throughput attached. The model's `azimuth_dependent` flag tells `inject_sources` to evaluate
+# `psf="stpsf"` routes MIRI to `miri.library`, which attaches the two-dimensional throughput
+# to radial stamps. The model's `azimuth_dependent` flag tells `inject_sources` to evaluate
 # the throughput per frame, because a source at a fixed sky PA moves across the boundaries as
 # the telescope rolls, so its attenuation differs from frame to frame. The run log should say
 # `injection miri_library`. A `LibraryPSF` with a radial `throughput_fn` would also run, and
@@ -351,8 +351,8 @@ if HAVE_DATA and STAR_FLUX is not None:
 # The budget is tutorial 1's: 300 evaluations with 40 of warm-up, three injection draws averaged
 # per trial, and the six best candidates validated on eight fresh injection sets each. On these
 # data a single draw scatters by 0.84 in S/N, the example `RunConfig.n_remeasure` documents.
-# With pyKLIP the run takes several hours. Everything else about the search is tutorial 1. What
-# is MIRI's is in what has already been built above.
+# With pyKLIP the run took just under two hours on a Mac. Everything else about the search is
+# tutorial 1. What is MIRI's is in what has already been built above.
 #
 # One setting is about the picture rather than the score. The four injected sources step across
 # the band in radius, and the innermost one passes within 1.6 FWHM of HIP 65426 b whenever it
@@ -374,11 +374,16 @@ if HAVE_DATA and STAR_FLUX is not None:
     print(f"\n{(time.time() - t0) / 60:.1f} min -> {RUN_DIR}")
 
 # %% [markdown]
-# The calibration contrast is a sensitivity: the contrast at which the default configuration
-# sees an injected source at S/N ≈ 5. It says nothing about the flux scale on its own. On the
-# full program it settled at 1.63 × 10⁻⁴ (section 1), and HIP 65426 b, at 4.95 × 10⁻⁴ in
-# Carter et al. (2023, Table 3), sits 3.0× above it, as a clear detection at this separation
-# should. The flux-scale check is the one in section 4.
+# The calibration contrast is a sensitivity, the contrast at which the default configuration
+# sees an injected source at S/N ≈ 5. It says nothing about the flux scale on its own. Here it
+# settled at 9.95 × 10⁻⁵, for injected sources between 1.4″ and 3.3″, and HIP 65426 b, at
+# 4.95 × 10⁻⁴ in Carter et al. (2023, Table 3), is five times brighter. The flux-scale check is
+# the one in section 4.
+#
+# The calibration's k-scan picked 20 modes, the top of its range, and the log warns that this
+# is an edge hit. The data want more modes than the cap of 20 allows, and the cap limits the
+# search as well. For a real analysis, raise it, to 40 for example, with `k_klip_max` in
+# `make_space` and `k_max` in `make_guard`. The validated winner is evaluation 275, at 8.15.
 #
 # ## 7. Notes for Real MIRI Work
 #

@@ -234,8 +234,8 @@ if HAVE_DATA and STAR_FLUX is not None:
 # %% [markdown]
 # The search uses tutorial 1's budget: 300 evaluations with 40 of warm-up, three injection
 # draws averaged per trial, and the six best candidates validated on eight fresh injection
-# sets each. It has not been timed on these data, but with 9 science and 18 reference frames it
-# runs faster than tutorial 5.
+# sets each. It took 19 minutes on a Mac, against just under two hours for tutorial 5, which
+# reduces 82 science and 90 reference frames where this one has 9 and 18.
 #
 # The four injected sources step across the band in radius, and the inner two sit about a FWHM
 # on either side of b's separation. With `KNOWN` empty nothing keeps them off the planets. An
@@ -272,16 +272,16 @@ if HAVE_DATA and STAR_FLUX is not None:
 #
 # ## 7. Where This System Is Hard
 #
-# * **The inner dust belt** lies at about 0.15″ to 0.37″, inside this annulus (0.74″ to 3.97″).
-#   An annulus that reaches in that far contains extended emission at every position angle,
-#   because a ring around the star covers them all, so `forbidden_pa` cannot keep the
-#   injections off it. `pixel_mask` can take it out of the noise estimate (tutorial 4).
+# * **The inner dust belt** lies at about 0.15″ to 0.37″, inside the inner edge of this annulus
+#   (0.74″ to 3.97″). An annulus that reaches in that far contains extended emission at every
+#   position angle, because a ring around the star covers them all, so `forbidden_pa` cannot
+#   keep the injections off it. `pixel_mask` can take it out of the noise estimate (tutorial 4).
 # * **Which planets the run sees.** In this annulus only b lies where the injections go. c, at
-#   0.95″, sits inside the inner edge of the injection band, and d and e lie inside the annulus.
-#   A wider annulus brings more of them in. Each planet in `KNOWN` then removes a zone of
-#   1.5 FWHM radius on top of the dead zones, and a narrow annulus can run short of legal
-#   injection positions.
-# * **e is at about 0.4″**, about 1.2 λ/D at 10.65 µm. That is inside the region where a radial
-#   stamp library can be trusted on a 4QPM, and in the regime `min_throughput` masks rather than
-#   extrapolates into. Treat any contrast quoted inside about 2 λ/D as a statement about the
-#   mask rather than the reduction.
+#   0.95″, sits inside the inner edge of the injection band, and d and e lie inside the
+#   annulus's inner edge. A wider annulus brings more of them in. Each planet in `KNOWN` then
+#   removes a zone of 1.5 FWHM radius on top of the dead zones, and a narrow annulus can run
+#   short of legal injection positions.
+# * **e is at about 0.4″**, about 1.2 λ/D at 10.65 µm. That is closer in than a radial stamp
+#   library can be trusted on a 4QPM, and in the regime that `min_throughput` is meant to mask
+#   rather than extrapolate into. Treat any contrast quoted inside about 2 λ/D as a statement
+#   about the mask rather than the reduction.

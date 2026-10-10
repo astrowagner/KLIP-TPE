@@ -206,7 +206,7 @@ print("sampler knows:", sampler.known, f"(exclusion radius {sampler.excl_fwhm} F
 # A bright companion can bias the run in a fourth way. Its light enters the KLIP basis, and
 # the part of it beyond 1.5 FWHM (PSF lobes, the negative wings ADI leaves) still reaches the
 # noise rings. On the ground the speckles dominate that light. Where the speckle floor is far
-# below the companion, as on JWST, remove the companion before every reduction:
+# below the companion, as on JWST, remove the companion before every reduction.
 # `klip_tpe.companion.fit_negative_companion` fits its position and contrast, and
 # `RunConfig(subtract_known=[(rho, pa, contrast)])` subtracts it with a negative injection.
 # `companion.companion_snr` measures a companion's S/N without the search metric's biases.

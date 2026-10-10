@@ -62,7 +62,7 @@ print(f"science exposures: {len(sci_files)}, reference exposures: {len(ref_files
 # Stage-2 `calints` products flag bad pixels in the `DQ` extension and leave their repair and
 # the frame alignment to post-processing. Each small-grid-dither reference exposure also sits
 # at its own sub-pixel offset. Subtracting such references leaves a residual far brighter than
-# any planet. Try it: the planet is undetectable without this section.
+# any planet. Without this section the planet is undetectable.
 #
 # **In production, use spaceKLIP's `ImageTools`** (`quick_cleaning`, `align_frames` and so
 # on). It does this properly and writes `STARCENX/Y` into the headers, and `load_spaceklip`
@@ -165,7 +165,7 @@ if HAVE_DATA:
 # That would put the companion 0.8 px inside its own separation and mismatch its KLIP
 # throughput against the injected fakes.
 #
-# There is no off-axis image of the star to centroid: HIP 65426 and the reference star are
+# There is no off-axis image of the star to centroid. HIP 65426 and the reference star are
 # behind MASK335R in every exposure. A 180° symmetry fit to the coronagraphic residual is
 # dominated by speckles, and on these data it moved the center by 2 px between the rolls.
 # The companion itself works. Derotating about a center that is off by `δ` puts it at
@@ -211,7 +211,7 @@ if HAVE_DATA:
 #
 # `spaceklip.make_reducer` builds a `PyKLIPReducer` per partition (one here), with λ/D from
 # the filter and D = 6.5 m. The searched block is small. With four frames there is nothing to
-# bin, so `make_space` pins `bin` at 1. `search_angles=False` leaves out the angular exclusion:
+# bin, so `make_space` pins `bin` at 1. `search_angles=False` leaves out the angular exclusion.
 # `angsep` stays 0, which for pyKLIP excludes only the frames with no motion at all, the frame
 # itself and its same-roll twin. What remains is the high-pass filter, `n_ang` (pyKLIP's
 # `subsections`) and `k_klip` (`numbasis`).
@@ -236,8 +236,8 @@ if HAVE_DATA:
 # | `EE` | 0.696 at 16.5 px | the model PSF unocculted through the Lyot stop (an imaging PSF gives 0.928 and counts the stop twice) |
 # | `T_optics` | 1.0 | `PHOTMJSR` for `PUPIL=MASKRND` already carries the coronagraphic optics |
 #
-# One term is deliberately not in `flux_unit`: the occulter's spatial transmission `T(ρ)`,
-# which multiplies the injection inside `inject_sources`. Folding it into the star flux, or
+# One term is deliberately not in `flux_unit`. The occulter's spatial transmission `T(ρ)`
+# multiplies the injection inside `inject_sources` instead. Folding it into the star flux, or
 # applying it twice, gets the contrast axis wrong by `1/T`.
 #
 # `T_optics` is 1 because STPSF's `calc_psf` normalizes at the entrance pupil and propagates
@@ -246,7 +246,7 @@ if HAVE_DATA:
 # substrate, but so did every flux standard observed through them. `PHOTMJSR` for this pupil
 # (2.486, against about 0.4 for CLEAR imaging) was derived in the same optical train, so the
 # MJy/sr in the file already put an off-mask source at its true flux. `EE` is a fraction of the
-# Lyot-stop PSF, in which the stop's own 0.18 cancels. The planet confirms it: with nothing
+# Lyot-stop PSF, in which the stop's own 0.18 cancels. The planet confirms it. With nothing
 # tuned, HIP 65426 b measures ΔF444W = 8.796 ± 0.092, against the 8.703 ± 0.055 of Carter et al.
 # (2023), a difference of 0.9σ (`scripts/check_hip65426_contrast.py`, and
 # `docs/FLUX_CALIBRATION.md`).
@@ -305,7 +305,7 @@ if HAVE_DATA:
 # A default RDI reduction with 10 KL modes. HIP 65426 b is the point source at 0.82″, PA 150°
 # (circled). Its core has three bars with six faint lobes around it, as in Carter et al.
 # (2023, Fig. 3). That is what an off-axis source behind MASK335R looks like through the round
-# Lyot stop. `mode="ADI"` here shows what the other roll's two frames can do.
+# Lyot stop. The cell after it runs the same reduction in all three modes.
 
 # %%
 if HAVE_DATA:
@@ -329,13 +329,16 @@ if HAVE_DATA:                                    # the same reduction in each mo
         print(f"mode={m:8s} planet S/N {float(s_[0]):5.1f}")
 
 # %% [markdown]
+# At the default configuration `ADI` gives the planet the highest S/N, 14.1 against 12.3 with
+# `RDI` and 12.8 with `ADI+RDI`.
+#
 # ## 4. Optimize
 #
 # The budget is tutorial 1's, 300 evaluations with 40 of warm-up and the six best candidates
 # validated on eight fresh injection sets each, but with one injection draw per trial instead
-# of three. With pyKLIP doing the reductions, this search took about two hours on a Mac, and
-# the forward-modeled one in section 5 takes as long again. `n_remeasure=3` (tutorial 1,
-# section 3) ranks the trials better and costs about twice as much.
+# of three. With pyKLIP doing the reductions, this search took 11 minutes on a Mac, and the
+# forward-modeled one in section 5 took 13. `n_remeasure=3` (tutorial 1, section 3) ranks the
+# trials better and costs about twice as much.
 #
 # Each evaluation injects companions into the science frames only, so the reference library is
 # never contaminated. It reduces with and without them and scores the difference. The four
@@ -372,6 +375,23 @@ if HAVE_DATA:
         a.imshow(im, origin="lower", cmap="inferno", vmin=v[0], vmax=v[1]); a.set_title(t)
         a.plot(xb, yb, "o", mfc="none", mec="c", ms=20); a.set_xticks([]); a.set_yticks([])
     plt.tight_layout()
+
+# %% [markdown]
+# The calibration was checked again after ten evaluations. The median of the five best scores
+# was 7.7, above the 4 to 6 window, so the contrast went from 3.0 × 10⁻⁵ to 1.95 × 10⁻⁵ and the
+# annulus restarted. Ten evaluations later the median was 3.9, below the window, and the
+# contrast went to 2.5 × 10⁻⁵, so the log counts 320 evaluations in all. The best search score,
+# 10.3 at evaluation 216, validated at 8.2. Evaluation 66 validated at 8.6 and is the winner.
+# It uses `ADI` with 13 modes, one subsection and no high-pass filter (`filter=0`).
+#
+# HIP 65426 b goes from S/N 12.3 in the default reduction to 13.3. That is less than the 14.1
+# `ADI` gives it at the default configuration (section 3). Only the injections were optimized.
+# They sit near the detection limit, and the planet is far above it (tutorial 1, section 5).
+#
+# The planet stays in the frames in this tutorial. A companion this bright spreads light over
+# its KLIP sector, beyond the 1.5 FWHM that `known=` excludes. For a contrast curve near it,
+# subtract it before every reduction with `RunConfig(subtract_known=...)` (tutorial 4,
+# section 4).
 
 # %%
 if HAVE_DATA:
@@ -427,6 +447,10 @@ if HAVE_DATA:
         if k in ("mode", "filter", "n_ang", "k_klip")))
 
 # %% [markdown]
+# Two thirds of the filters were forward-modeled (`fm_fraction`). The forward-modeled search
+# picks `RDI` with 8 modes, two subsections and a high-pass filter (`filter=4`). HIP 65426 b
+# reaches S/N 14.1, against 13.3 with the PSF-filter winner and 12.3 in the default reduction.
+#
 # ## 6. Notes for Real JWST Work
 #
 # * **Preprocessing sets the floor.** Section 1 is the minimum. spaceKLIP's `ImageTools`
@@ -441,7 +465,7 @@ if HAVE_DATA:
 #   positions and works on any annulus.
 # * **What is searched** here is the number of KL modes, the high-pass filter, the azimuthal
 #   subdivision and pyKLIP's `mode`, four dimensions. Any other backend option
-#   (`annuli_spacing`, `algo`, `corr_smooth` and so on) becomes searchable the same way: add a
+#   (`annuli_spacing`, `algo`, `corr_smooth` and so on) becomes searchable the same way, as a
 #   `Param` with that name.
 # * **STPSF from the headers.** `make_reducer(dsets, psf="stpsf")` builds the same model from
 #   the instrument mode, which it reads from a dataset header. The datasets here carry none, so

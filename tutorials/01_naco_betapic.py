@@ -130,7 +130,7 @@ plt.title("default KLIP (k=10, 8-22 px)"); plt.colorbar();
 # **Keep the injections clear of β Pic b.** `known=` stops an injection from landing within
 # `excl_fwhm` = 1.5 FWHM of the planet, the IDL convention. That is enough for the search score,
 # which subtracts the S/N that the same reduction gives at each injection site without the
-# injection, so the planet cancels. It is not enough for the eye: an injection 2 FWHM from a
+# injection, so the planet cancels. It is not enough for the eye. An injection 2 FWHM from a
 # planet this bright sits next to it in every image of the live panel. The cell below sets
 # 4 FWHM (0.39″). At this radius that also keeps every injection at least 49° in position angle
 # from the disk (PA 29° and 209°). Tutorial 4 shows what the radius does.
@@ -166,7 +166,7 @@ plt.title("default KLIP (k=10, 8-22 px)"); plt.colorbar();
 # Without the display, the whole run takes 2.5 to 5 minutes on one core. The cost per
 # evaluation grows as the optimizer moves toward more expensive configurations, so the second
 # half is slower than the first. `max_workers="auto"` above already gave the reducer every
-# core. Drawing the live panel costs CPU on top of that: on one core, 60 evaluations took 43 s
+# core. Drawing the live panel costs CPU on top of that. On one core, 60 evaluations took 43 s
 # without it and 290 s with a panel for every evaluation. The cell below therefore draws every
 # second evaluation. Raise `every` if the run feels slow, or set `show=False` to keep the PNGs
 # without the window. When the panel cannot keep up, the display skips panels and logs a

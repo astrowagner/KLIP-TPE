@@ -200,7 +200,7 @@ Image(filename=os.path.join(RUN_DIR, "annulus01", "partition_map.png"), width=80
 # * **More partitions.** Add nights or epochs as more `Dataset`s. `make_space(max_drop=3)` (or
 #   `--max-drop` on the command line) gives the selection more slots when there are many.
 # * **One shared block.** `make_space(red, per_night=False)` tunes one parameter set for all
-#   partitions: fewer dimensions and faster convergence, but less flexibility.
+#   partitions, with fewer dimensions and faster convergence but less flexibility.
 # * **RDI.** Give `load_cube(..., ref_cube=...)` a reference-star cube. The reducer then builds
 #   its KL basis from the references (`rdi_mode="rdi"`), or from the references plus the
 #   angularly excluded science frames (`"ardi"`, the default). `datasets.fetch("sphere_sao206462")`

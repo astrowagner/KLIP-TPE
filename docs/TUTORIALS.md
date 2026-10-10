@@ -3,10 +3,9 @@
 The tutorials are Jupyter notebooks in `tutorials/`. Each one is written as
 `tutorials/NN_name.py`, with `# %%` cell markers, and `python tutorials/_build_notebooks.py`
 turns the scripts into `.ipynb` files (`--execute` also runs them and stores the outputs).
-Notebooks 1, 2 and 4 run on data the package downloads itself. They are stored with their
-outputs, so they read as documents without running anything. Notebooks 3, 5 and 6 need JWST
-data from MAST and the STPSF model of the coronagraph, and they are stored without outputs
-until they are run on a machine that has both.
+All six are stored with their outputs, so they read as documents without running anything.
+Notebooks 1, 2 and 4 run on data the package downloads itself. Notebooks 3, 5 and 6 need
+JWST data from MAST and the STPSF model of the coronagraph.
 
 | # | Notebook | Data | What it covers |
 |---|---|---|---|
@@ -54,11 +53,11 @@ stops with that file's name.
 
 Tutorial 1 makes about 1,300 reductions, which take 2.5 to 5 minutes on one core without the
 display. With the live panel it took 13 minutes on a two-core machine. Tutorial 2 took 27
-minutes on the same machine with the panel. Each of tutorial 3's two searches took about two
-hours on a Mac with pyKLIP doing the reductions. Tutorial 4 runs in about a minute, because it
-makes no search. Tutorials 5 and 6 have not been timed. With pyKLIP, tutorial 5 takes several
-hours, and tutorial 6, with 9 science and 18 reference frames, runs faster. Most of the time
-with the display goes into drawing it. `every=2` in `LiveDisplay` draws every second
+minutes on the same machine with the panel. On a Mac, with pyKLIP doing the reductions,
+tutorial 3's two searches took 11 and 13 minutes, tutorial 5's just under two hours (82
+science and 90 reference frames), and tutorial 6's 19 minutes (9 and 18). Tutorial 4 runs in
+about a minute, because it makes no search. Most of the time with the display goes into
+drawing it. `every=2` in `LiveDisplay` draws every second
 evaluation, and `show=False` removes the window but keeps the frames on disk
 ([BUDGET.md](BUDGET.md) has both measurements).
 
@@ -66,10 +65,11 @@ evaluation, and `show=False` removes the window but keeps the frames on disk
 
 ```
 python tutorials/_build_notebooks.py --execute --only 01_ 02_ 04_   # the three that download their own data
-python tutorials/_build_notebooks.py --only 03_ 05_ 06_             # rebuild the structure without running
-python tutorials/_build_notebooks.py --execute --only 05_
+python tutorials/_build_notebooks.py --execute --only 05_           # one JWST notebook
+python tutorials/_build_notebooks.py --only 03_                     # rewrite without running
 ```
 
-Without the MAST files, notebooks 3, 5 and 6 skip their cells and say so. With the files but
-without the STPSF model, they stop with the name of the missing cache file, which also stops a
-`--execute` over all six.
+Without `--execute`, the builder writes the notebook without outputs, in place of the stored
+one. Without the MAST files, notebooks 3, 5 and 6 skip their cells and say so. With the files
+but without the STPSF model, they stop with the name of the missing cache file, which also
+stops a `--execute` over all six.
