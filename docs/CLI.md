@@ -168,7 +168,8 @@ options:
                         (+ intro.gif)
   --window-scale WINDOW_SCALE
                         live window size as a fraction of the 1850x990 panel
-                        (1.0 = the IDL window, 1:1 pixels)
+                        (1.0 = the IDL window, 1:1 pixels); the window keeps
+                        this size
   --no-fm-curve         skip the KLIP-FM cross-check curve after each annulus
                         (A 9.1)
   --fm-preview          live KLIP-FM preview at each new best (A 9.3; one
@@ -394,7 +395,8 @@ options:
                         (+ intro.gif)
   --window-scale WINDOW_SCALE
                         live window size as a fraction of the 1850x990 panel
-                        (1.0 = the IDL window, 1:1 pixels)
+                        (1.0 = the IDL window, 1:1 pixels); the window keeps
+                        this size
   --no-fm-curve         skip the KLIP-FM cross-check curve after each annulus
                         (A 9.1)
   --fm-preview          live KLIP-FM preview at each new best (A 9.3; one

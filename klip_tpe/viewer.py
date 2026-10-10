@@ -172,8 +172,9 @@ def view(run_dir: Optional[str] = None, root: Optional[str] = None, interval: fl
     fig.patch.set_facecolor("black")
     ax = fig.add_axes([0, 0, 1, 1])
     ax.set_axis_off()
+    # aspect "equal": a window held smaller than asked shows the panel whole, not stretched
     im = ax.imshow(img, interpolation="lanczos" if abs(scale - 1) > 1e-3 else "nearest",
-                   aspect="auto", interpolation_stage="rgba") if img is not None else None
+                   aspect="equal", interpolation_stage="rgba") if img is not None else None
     txt = fig.text(0.005, 0.004, "", color="#9adcff", fontsize=7, family="monospace", va="bottom")
     try:
         fig.canvas.manager.set_window_title(f"klip-tpe view -- {os.path.basename(d)}")
@@ -181,6 +182,11 @@ def view(run_dir: Optional[str] = None, root: Optional[str] = None, interval: fl
         pass
     plt.ion()
     plt.show(block=False)
+    # one size for as long as it is open, like the live window (the title is set first:
+    # on macOS the window is found by it)
+    from .winsize import fix_window_size, keep_window_size
+    fig.canvas.flush_events()
+    fix_window_size(fig)
 
     shown = cur[1] if cur else -1.0
     prev = st
@@ -192,11 +198,11 @@ def view(run_dir: Optional[str] = None, root: Optional[str] = None, interval: fl
                 try:
                     a = plt.imread(p[0])
                     if im is None:
-                        im = ax.imshow(a, interpolation="nearest", aspect="auto",
+                        im = ax.imshow(a, interpolation="nearest", aspect="equal",
                                        interpolation_stage="rgba")
                     elif im.get_array().shape[:2] != a.shape[:2]:
                         ax.clear(); ax.set_axis_off()
-                        im = ax.imshow(a, interpolation="nearest", aspect="auto",
+                        im = ax.imshow(a, interpolation="nearest", aspect="equal",
                                        interpolation_stage="rgba")
                     else:
                         im.set_data(a)
@@ -219,6 +225,7 @@ def view(run_dir: Optional[str] = None, root: Optional[str] = None, interval: fl
             t_end = time.time() + interval
             while plt.fignum_exists(fig.number):
                 fig.canvas.flush_events()
+                keep_window_size(fig)
                 left = t_end - time.time()
                 if left <= 0:
                     break

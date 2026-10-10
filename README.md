@@ -142,7 +142,7 @@ SNR = 5 contrast curve, the BEST / TEST parameter vectors, elapsed / ETA / total
 time, night-effect panels and the corner plot; single-partition runs show parameter
 importance instead of the night panels.
 
-* `show=True` — a 1850 × 990 matplotlib window (MacOSX / Qt / Tk), 1:1 pixels; `window_scale=0.6` to shrink.
+* `show=True` — a 1850 × 990 matplotlib window (MacOSX / Qt / Tk) of fixed size, 1:1 pixels; `window_scale=0.6` to shrink.
 * `show="inline"` — inside Jupyter, the panel updates in place in one output cell.
 * `show="auto"` — inline in a notebook, window otherwise.
 * `every`, `pdf_every`, `movie_every` — render / PDF / progress-movie cadence.  Frames go to

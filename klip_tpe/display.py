@@ -53,6 +53,7 @@ from .metrics import radprof, source_xy, star_center
 from .plots import (PHASE_COLORS, PHASE_ORDER, SEARCH_LABEL, VALID_LABEL, _annulus_records, _bins_for,
                     _config, _locked_rc, _metric_name, _space, load_run)
 from .runner import RunCallback
+from .winsize import fix_window_size, keep_window_size
 
 __all__ = ["AnnulusData", "LiveDisplay", "annulus_from_run", "render_step", "render_steps",
            "render_calibration", "render_validation", "render_corner", "render_landscapes",
@@ -3520,6 +3521,7 @@ class LiveDisplay(RunCallback):
             else:
                 return
             C = LiveDisplay                       # the window lives on the class (see above)
+            created = False
             if C._win is None or not plt.fignum_exists(C._win.number):
                 plt.ion()
                 w_in, h_in = panel_size(self.dpi)
@@ -3528,22 +3530,38 @@ class LiveDisplay(RunCallback):
                 ax = C._win.add_axes([0, 0, 1, 1]); ax.set_axis_off()
                 C._win_ax, C._win_im, C._win_dir = ax, None, None
                 plt.show(block=False)
+                created = True
             if C._win_dir != self.run_dir:         # a batch moved on to the next run
                 C._win_dir = self.run_dir
                 try:
                     C._win.canvas.manager.set_window_title(f"klip-tpe live -- {os.path.basename(self.run_dir)}")
                 except Exception:
                     pass
+            if created:
+                # One size for the whole run: window_scale x the panel, never resized.  The
+                # title is set first, because on macOS the window is found by its title.
+                C._win.canvas.flush_events()
+                off = fix_window_size(C._win)
+                w_px, h_px = (int(v) for v in np.round(C._win.get_size_inches() * self.dpi))
+                note = ""
+                if not off:
+                    note = " (a resized window returns to this size"
+                    note += ("; pip install pyobjc-framework-Cocoa to remove the resize control)"
+                             if "macosx" in matplotlib.get_backend().lower() else ")")
+                self._say(None, f"live window: {w_px} x {h_px} px, fixed size{note}")
             if C._win_im is None or C._win_im.get_array().shape[:2] != img.shape[:2]:
                 C._win_ax.clear(); C._win_ax.set_axis_off()
                 # lanczos: crisp text when the 1870-px panel is resampled to the window (nearest blurred it)
                 interp = "nearest" if abs(self.window_scale - 1.0) < 1e-3 else "lanczos"
-                C._win_im = C._win_ax.imshow(img, interpolation=interp, aspect="auto",
+                # aspect "equal": a window held smaller than asked (a small screen) shows the
+                # panel whole with black margins instead of stretching it
+                C._win_im = C._win_ax.imshow(img, interpolation=interp, aspect="equal",
                                              interpolation_stage="rgba", resample=True)
             else:
                 C._win_im.set_data(img)
             C._win.canvas.draw_idle()
             C._win.canvas.flush_events()           # no show()/pause -> the window is never raised
+            keep_window_size(C._win)
             # the WINDOW is shared, the pump clock is not: a display that has just taken the
             # window over should service the event loop at once rather than inherit the
             # previous one's throttle (and shared clocks leak between runs in one process)
@@ -3555,7 +3573,9 @@ class LiveDisplay(RunCallback):
 
     def _inline_show(self, png: Optional[str] = None, fig: Optional[Figure] = None) -> None:
         """Jupyter: push the panel into one output cell, updated in place (an IPython
-        display handle), scaled to ``window_scale`` x the panel width."""
+        display handle), at ``window_scale`` x the panel size.  Width and height are both
+        given and the image is unconfined, so it keeps that size whatever the width of the
+        notebook, and an update does not collapse the cell while the new frame loads."""
         try:
             from IPython.display import Image, display
         except Exception as exc:
@@ -3573,8 +3593,8 @@ class LiveDisplay(RunCallback):
                     data = f.read()
             else:
                 return
-            w = int(round(PANEL_PX[0] * self.window_scale))
-            img = Image(data=data, format="png", width=w)
+            w, h = (int(v * self.window_scale) for v in PANEL_PX)          # as the window rounds it
+            img = Image(data=data, format="png", width=w, height=h, unconfined=True)
             if self._handle is None:
                 self._handle = display(img, display_id=True)
             else:
@@ -3702,6 +3722,7 @@ class LiveDisplay(RunCallback):
             import matplotlib.pyplot as plt
             if plt.fignum_exists(self._win.number):
                 self._win.canvas.flush_events()
+                keep_window_size(self._win)
         except Exception:
             pass
 

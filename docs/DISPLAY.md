@@ -9,8 +9,12 @@ file by file.  The panel and the product set are those of the IDL optimizer
 ![panel](img/step_display.png)
 
 Black window, 1850 × 990 px (`window_scale` shrinks it; `show="inline"` puts it in a
-Jupyter output cell).  Every evaluation renders one frame (`steps/stepNNNN.png`), on a
-worker thread so the evaluation loop never waits for it.
+Jupyter output cell).  The window keeps that size for the whole run.  Tk, Qt and GTK
+windows cannot be resized.  With the macOS backend the resize control goes when PyObjC is
+installed (`pip install pyobjc-framework-Cocoa`); without it a resized window returns to
+its size.  The inline panel has a fixed size as well, whatever the width of the notebook.
+`klip-tpe view` behaves the same way.  Every evaluation renders one frame
+(`steps/stepNNNN.png`), on a worker thread so the evaluation loop never waits for it.
 
 **Top row — images** (KLIP image, σ-stretch, image colour map)
 

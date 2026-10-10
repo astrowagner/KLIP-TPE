@@ -247,7 +247,8 @@ def _protocol_args(p):
                         "cell in place), --show auto (inline inside a notebook, window otherwise)")
     p.add_argument("--aliens", action="store_true", help="play the IDL launch movie during the first calibration (+ intro.gif)")
     p.add_argument("--window-scale", type=float, default=1.0,
-                   help="live window size as a fraction of the 1850x990 panel (1.0 = the IDL window, 1:1 pixels)")
+                   help="live window size as a fraction of the 1850x990 panel (1.0 = the IDL window, 1:1 pixels); "
+                        "the window keeps this size")
     p.add_argument("--no-fm-curve", dest="fm_curve", action="store_false", default=True,
                    help="skip the KLIP-FM cross-check curve after each annulus (A 9.1)")
     p.add_argument("--fm-preview", dest="fm_preview", action="store_true", default=True,

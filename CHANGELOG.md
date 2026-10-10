@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — 2026-10-10 (the live window keeps one size)
+
+- **The live window keeps one size, `window_scale` × 1850 × 990 px, for the whole run.**
+  `klip_tpe.winsize.fix_window_size` switches the toolkit's resizing off: Tk
+  `resizable(False, False)`, Qt `setFixedSize`, GTK `set_resizable(False)`, wx min = max
+  size.  matplotlib's macOS backend has no such switch, so there the resize control is
+  removed through PyObjC when it is installed (`pip install pyobjc-framework-Cocoa`).
+  Without it, `keep_window_size`, called on every GUI turn, puts a resized window back.  A
+  size the window manager will not give up for 2 s (a screen smaller than the window) is
+  kept instead of being fought over.  The run log says which applies: `live window: 1017 x
+  544 px, fixed size`.  Checked on QtAgg under Xvfb: a resize to 500 × 300 leaves the window
+  at 1017 × 544, and with the switch lifted a resize to 600 × 400 is put back.
+- The panel is drawn with `aspect="equal"`, so a window held smaller than asked shows it
+  whole with black margins instead of stretched.
+- `klip-tpe view` does the same, and the Jupyter inline panel is given its width and
+  height and shown unconfined, so the notebook's width no longer rescales it and an update
+  no longer collapses the cell while the next frame loads.
+
 ## Unreleased — 2026-10-08 (the dead-dimension check warns and reads the frame tags; display cadence; tutorials and docs reviewed)
 
 - **The command line's dead-dimension check warns instead of stopping** (`--strict-liveness`
