@@ -3588,6 +3588,8 @@ class LiveDisplay(RunCallback):
             note += ("; pip install pyobjc-framework-Cocoa to remove the resize control)"
                      if "macosx" in matplotlib.get_backend().lower() else ")")
         self._say(None, f"live window: {where}, {size}, fixed size{note}")
+        if info.get("note"):
+            self._say(None, f"live window: {info['note']}")
 
     def _relayout(self) -> None:
         """Redraw the panel when the window's pixels change (a move to a screen with another

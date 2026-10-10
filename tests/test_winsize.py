@@ -414,6 +414,34 @@ def test_other_desktops_and_missing_pieces_keep_qt_native(monkeypatch):
     assert "QT_QPA_PLATFORM" not in os.environ and "libxcb-cursor0" in note
 
 
+def test_tk_forced_leaves_the_toolkit_variables_alone(monkeypatch):
+    """Tk draws only through X11, so the Qt and GTK platform variables change nothing."""
+    _wayland_env(monkeypatch, {"logical": False, "scales": [1.0], "native_x11": False})
+    monkeypatch.setenv("KLIP_TPE_BACKEND", "TkAgg")
+    assert winsize.prefer_x11_on_wayland() is None and "QT_QPA_PLATFORM" not in os.environ
+
+
+def test_an_x11_window_gnome_enlarges_is_reported(monkeypatch):
+    """The NEAR2 launcher's viewer runs on Tk.  Under fractional scaling GNOME enlarges an X11
+    window, so the panel is soft whatever is drawn, and the log says how to get a native one."""
+    _wayland_env(monkeypatch, {"logical": True, "scales": [1.5], "native_x11": False})
+    fig = _Fig(_tk())
+    monkeypatch.setattr(winsize, "window_platform", lambda f: "x11")
+    monkeypatch.setattr(winsize.matplotlib, "get_backend", lambda: "tkagg")
+    note = winsize.x11_scaled_note(fig)
+    assert note and "1.5x" in note and "PyQt6" in note
+    monkeypatch.setattr(winsize.matplotlib, "get_backend", lambda: "qtagg")
+    assert "QT_QPA_PLATFORM" in winsize.x11_scaled_note(fig)
+    for sc in ({"logical": False, "scales": [2.0], "native_x11": False},     # physical layout: 1:1
+               {"logical": True, "scales": [1.0], "native_x11": False},
+               {"logical": True, "scales": [1.5], "native_x11": True}):      # GNOME 47+ native scaling
+        _wayland_env(monkeypatch, sc)
+        assert winsize.x11_scaled_note(fig) is None
+    _wayland_env(monkeypatch, {"logical": True, "scales": [1.5], "native_x11": False})
+    monkeypatch.setattr(winsize, "window_platform", lambda f: "wayland")
+    assert winsize.x11_scaled_note(fig) is None
+
+
 # -------------------------------------------------------------------- wiring
 def test_the_live_window_and_the_viewer_both_hold_their_size():
     here = os.path.dirname(winsize.__file__)

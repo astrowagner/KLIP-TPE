@@ -188,6 +188,8 @@ def view(run_dir: Optional[str] = None, root: Optional[str] = None, interval: fl
     fig, info = open_panel_window((w, h), scale, 100.0, f"klip-tpe view -- {os.path.basename(d)}")
     if info["scale"] < info["asked"] - 1e-3:
         log(f"klip-tpe view: the {w} x {h} panel is shown at {info['scale']:.2f} to fit the screen")
+    if info.get("note"):
+        log(f"klip-tpe view: {info['note']}")
     box = show_panel(fig, img, (w, h)) if img is not None else None
     txt = fig.text(0.005, 0.004, "", color="#9adcff", fontsize=7, family="monospace", va="bottom")
 

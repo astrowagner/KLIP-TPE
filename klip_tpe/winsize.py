@@ -37,8 +37,8 @@ import numpy as np
 import matplotlib
 
 __all__ = ["PIN_GRACE", "MAX_MISSES", "prefer_x11_on_wayland", "open_panel_window",
-           "fix_window_size", "keep_window_size", "window_platform", "screen_room", "panel_box",
-           "fit_image", "screen_copy", "show_panel"]
+           "fix_window_size", "keep_window_size", "window_platform", "x11_scaled_note", "screen_room",
+           "panel_box", "fit_image", "screen_copy", "show_panel"]
 
 #: seconds after the window opens during which a smaller size the window manager gives it is
 #: kept (a screen smaller than the room it reported).  A maximized or larger window is always
@@ -130,6 +130,8 @@ def prefer_x11_on_wayland() -> Optional[str]:
     choice = os.environ.get("KLIP_TPE_WAYLAND", "").strip().lower()
     if choice in ("native", "wayland", "1", "yes"):
         return None
+    if os.environ.get("KLIP_TPE_BACKEND", "").strip().lower().startswith("tk"):
+        return None                 # Tk is X11 only: nothing to choose (open_panel_window notes a blur)
     forced = choice in ("x11", "xwayland")
     if not forced and "gnome" not in os.environ.get("XDG_CURRENT_DESKTOP", "").lower():
         return None                 # other desktops (KDE) draw the frame of a Wayland window themselves
@@ -160,6 +162,31 @@ def prefer_x11_on_wayland() -> Optional[str]:
             "the window manager holds its size; KLIP_TPE_WAYLAND=native keeps it native") if set_ \
         else "Wayland session"
     return head + note
+
+
+def x11_scaled_note(fig) -> Optional[str]:
+    """A line for the log when ``fig``'s window runs through XWayland on a GNOME session with
+    fractional scaling: GNOME then draws it at scale 1 and enlarges it, so the panel cannot be
+    pixel-sharp.  Says how to get a native window instead.  None otherwise."""
+    if window_platform(fig) != "x11" or not sys.platform.startswith("linux"):
+        return None
+    if not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("XDG_SESSION_TYPE") == "wayland"):
+        return None
+    if "gnome" not in os.environ.get("XDG_CURRENT_DESKTOP", "").lower():
+        return None
+    sc = _gnome_scaling_once()
+    if not sc or not sc["logical"] or sc["native_x11"] or not sc["scales"]:
+        return None
+    s = max(sc["scales"], key=lambda v: abs(v - 1.0))
+    if abs(s - 1.0) <= 1e-3:
+        return None
+    if "tk" in matplotlib.get_backend().lower():
+        fix = ("Tk draws only through X11; with PyQt6 installed (pip install PyQt6) and "
+               "KLIP_TPE_BACKEND unset, the window opens native and sharp")
+    else:
+        fix = "without QT_QPA_PLATFORM=xcb or KLIP_TPE_WAYLAND=x11 the window opens native and sharp"
+    return (f"GNOME runs this X11 window at scale 1 and enlarges it {s:g}x, so the panel is soft; "
+            + fix)
 
 
 def window_platform(fig) -> str:
@@ -254,7 +281,8 @@ def open_panel_window(px: Tuple[int, int], scale: float, dpi: float, title: str)
     A window shown first and fixed afterwards opened at the wrong size on GNOME, which
     maximizes a resizable window that covers most of the screen as it appears.  Returns
     ``(fig, info)``.  ``info`` holds the scale used and the scale asked for, the room on the
-    screen, whether the toolkit's resizing is off, and where the window lives."""
+    screen, whether the toolkit's resizing is off, where the window lives, and a line for
+    the log when GNOME will blur it (:func:`x11_scaled_note`)."""
     import matplotlib.pyplot as plt
     interactive = plt.isinteractive()
     plt.ioff()                      # in interactive mode pyplot shows a new window at once
@@ -285,7 +313,7 @@ def open_panel_window(px: Tuple[int, int], scale: float, dpi: float, title: str)
     except Exception:
         pass
     return fig, {"scale": used, "asked": float(scale), "room": room, "fixed": fixed,
-                 "platform": window_platform(fig)}
+                 "platform": window_platform(fig), "note": x11_scaled_note(fig)}
 
 
 def _win_size(mgr, win, kind) -> Optional[Tuple[int, int]]:

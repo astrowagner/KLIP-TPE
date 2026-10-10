@@ -21,7 +21,8 @@ through XWayland, where GNOME's window manager holds its size.  Qt needs `libxcb
 for that (`sudo apt install libxcb-cursor0`), and the log says when it is missing.  With
 fractional scaling on, the window stays native, because GNOME would enlarge an XWayland
 window and blur it.  A double-click can then still maximize the window, and it returns to
-its size within half a second.  `KLIP_TPE_WAYLAND=native` keeps the window native, and
+its size within half a second.  Tk draws only through X11, so there a Tk window is soft, and
+the log says to install PyQt6 for a native one.  `KLIP_TPE_WAYLAND=native` keeps the window native, and
 `KLIP_TPE_WAYLAND=x11` sends it through XWayland in every case.  With the macOS backend the
 resize control goes when PyObjC is installed (`pip install pyobjc-framework-Cocoa`).  The
 run log starts with the klip-tpe version, its git commit and the folder it runs from (the

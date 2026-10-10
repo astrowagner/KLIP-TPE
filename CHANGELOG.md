@@ -25,6 +25,9 @@
     forces XWayland.
   - A maximized size or a larger one is never adopted, and put-backs stop after ten that do
     not take (a tiling window manager), with one line in the log.
+  - A window that runs through X11 on a GNOME session with fractional scaling, as a Tk window
+    always does, gets a line in the log: GNOME enlarges it, so the panel is soft, and with
+    PyQt6 installed and `KLIP_TPE_BACKEND` unset the window opens native and sharp.
   - Every run's log starts with the version, the git commit and the folder klip-tpe runs
     from (`klip-tpe 0.1.0 (git d2fbb74) from ...`), and `klip-tpe --version` prints the
     same line.  A copy installed with `pip install .` reads `(installed copy)`.  It keeps the
