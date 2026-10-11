@@ -123,11 +123,12 @@ def contrast_curve(clean_img: np.ndarray, sample_r_as: Sequence[float], sample_s
 
 
 def stitch_annuli(images: Sequence[np.ndarray], edges: Sequence[float], fwhm: float,
-                  legacy: bool = False, pad: float = 2.0) -> Tuple[np.ndarray, np.ndarray]:
+                  legacy: bool = False, pad: float = 2.0, pad_ends: bool = False) -> Tuple[np.ndarray, np.ndarray]:
     """Sensitivity-weighted stitch of per-annulus images.  Weight of annulus ``ia`` =
     ``1 / median(sigma(r))^2`` over its interior ``[in+fwhm, out-fwhm]`` (normalised
     to the max), tile mask ``edge_ia - pad <= r <= edge_ia+1 + pad``; overlaps are
-    weighted means.  ``legacy=True`` uses equal weights."""
+    weighted means.  The first inner edge and the last outer edge are not padded unless
+    ``pad_ends`` (the IDL pads them).  ``legacy=True`` uses equal weights."""
     n = len(images)
     if n == 0:
         raise ValueError("no images")
@@ -148,7 +149,9 @@ def stitch_annuli(images: Sequence[np.ndarray], edges: Sequence[float], fwhm: fl
     num = np.zeros((ny, nx))
     den = np.zeros((ny, nx))
     for ia, img in enumerate(images):
-        tile = (rr >= edges[ia] - pad) & (rr <= edges[ia + 1] + pad) & np.isfinite(img)
+        pin = pad if (ia > 0 or pad_ends) else 0.0
+        pout = pad if (ia < n - 1 or pad_ends) else 0.0
+        tile = (rr >= edges[ia] - pin) & (rr <= edges[ia + 1] + pout) & np.isfinite(img)
         num[tile] += w[ia] * img[tile]
         den[tile] += w[ia]
     out = num / np.where(den > 0, den, np.nan)

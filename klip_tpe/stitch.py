@@ -6,7 +6,8 @@ per-partition stacks) and calls in here for the *how*:
 
 * :func:`tile_mask` / :func:`stitch_tiles` -- NaN-aware weighted mean over radial tiles
   ``edge_ia - pad <= r <= edge_ia+1 + pad`` (running stitch: equal weights; final
-  stitch: the sensitivity weights of :func:`klip_tpe.products.stitch_annuli`).
+  stitch: the sensitivity weights of :func:`klip_tpe.products.stitch_annuli`).  A run
+  pads only the edges where two annuli meet (``RunConfig.edge_padding``).
 * :func:`stitch_stacks` -- the same for per-partition stacks onto the union of
   partition ids (NaN where an annulus did not use a partition).
 * :func:`seam_pixels` -- pixels inside the searched span still NaN after stitching.
@@ -44,16 +45,27 @@ def _radius(shape) -> np.ndarray:
     return np.hypot(xx - cx, yy - cy)
 
 
-def tile_mask(shape, rin: float, rout: float, pad: float = 2.0) -> np.ndarray:
-    """Boolean tile ``rin - pad <= r <= rout + pad``."""
+def tile_mask(shape, rin: float, rout: float, pad: Any = 2.0) -> np.ndarray:
+    """Boolean tile ``rin - pad_in <= r <= rout + pad_out``.  ``pad`` is one value for both
+    edges or a ``(pad_in, pad_out)`` pair."""
+    pin, pout = _pair(pad)
     rr = _radius(shape)
-    return (rr >= rin - pad) & (rr <= rout + pad)
+    return (rr >= rin - pin) & (rr <= rout + pout)
+
+
+def _pair(pad: Any) -> Tuple[float, float]:
+    if isinstance(pad, (tuple, list, np.ndarray)):
+        return float(pad[0]), float(pad[1])
+    return float(pad), float(pad)
 
 
 def stitch_tiles(images: Sequence[Optional[np.ndarray]], zones: Sequence[Tuple[float, float]],
-                 weights: Optional[Sequence[float]] = None, pad: float = 2.0) -> np.ndarray:
+                 weights: Optional[Sequence[float]] = None, pad: float = 2.0,
+                 pads: Optional[Sequence[Tuple[float, float]]] = None) -> np.ndarray:
     """NaN-aware weighted mean of ``images`` over their tiles (``None`` entries skipped).
-    ``zones`` are ``(rin, rout)`` in px; overlaps (±pad) are weighted means."""
+    ``zones`` are ``(rin, rout)`` in px; overlaps (±pad) are weighted means.  ``pads``
+    gives each tile its own ``(pad_in, pad_out)``: the runner pads only the edges between
+    two annuli (``RunConfig.edge_padding``)."""
     ref = next((im for im in images if im is not None), None)
     if ref is None:
         raise ValueError("no images to stitch")
@@ -61,10 +73,11 @@ def stitch_tiles(images: Sequence[Optional[np.ndarray]], zones: Sequence[Tuple[f
     w = np.ones(len(images)) if weights is None else np.asarray(weights, float)
     num = np.zeros((ny, nx))
     den = np.zeros((ny, nx))
-    for im, (rin, rout), wi in zip(images, zones, w):
+    pads = [(pad, pad)] * len(images) if pads is None else list(pads)
+    for im, (rin, rout), wi, pd in zip(images, zones, w, pads):
         if im is None or im.shape != (ny, nx):
             continue
-        m = tile_mask((ny, nx), rin, rout, pad) & np.isfinite(im)
+        m = tile_mask((ny, nx), rin, rout, pd) & np.isfinite(im)
         num[m] += wi * im[m]
         den[m] += wi
     return num / np.where(den > 0, den, np.nan)
@@ -72,10 +85,12 @@ def stitch_tiles(images: Sequence[Optional[np.ndarray]], zones: Sequence[Tuple[f
 
 def stitch_stacks(stacks: Sequence[Optional[np.ndarray]], part_ids: Sequence[Optional[Sequence[Any]]],
                   zones: Sequence[Tuple[float, float]], weights: Optional[Sequence[float]] = None,
-                  pad: float = 2.0) -> Tuple[Optional[np.ndarray], List[str]]:
+                  pad: float = 2.0, pads: Optional[Sequence[Tuple[float, float]]] = None
+                  ) -> Tuple[Optional[np.ndarray], List[str]]:
     """Stitch per-partition stacks ``(npart_ia, ny, nx)`` onto the union of partition ids
     (sorted by first appearance).  Returns ``(cube (nunion, ny, nx), ids)``; NaN where an
-    annulus did not use a partition.  ``(None, [])`` when nothing is available."""
+    annulus did not use a partition.  ``(None, [])`` when nothing is available.  ``pads``
+    as for :func:`stitch_tiles`."""
     union: List[str] = []
     for ids, st in zip(part_ids, stacks):
         if st is None or ids is None:
@@ -90,10 +105,11 @@ def stitch_stacks(stacks: Sequence[Optional[np.ndarray]], part_ids: Sequence[Opt
     w = np.ones(len(stacks)) if weights is None else np.asarray(weights, float)
     num = np.zeros((len(union), ny, nx))
     den = np.zeros((len(union), ny, nx))
-    for st, ids, (rin, rout), wi in zip(stacks, part_ids, zones, w):
+    pads = [(pad, pad)] * len(stacks) if pads is None else list(pads)
+    for st, ids, (rin, rout), wi, pd in zip(stacks, part_ids, zones, w, pads):
         if st is None or ids is None or st.shape[-2:] != (ny, nx):
             continue
-        tile = tile_mask((ny, nx), rin, rout, pad)
+        tile = tile_mask((ny, nx), rin, rout, pd)
         for j, p in enumerate(ids):
             if j >= st.shape[0]:
                 break

@@ -16,9 +16,17 @@ import numpy as np
 
 from .injection import GaussianPSF, inject_sources
 from .metrics import Source
-from .reducer import Dataset, KLIPReducer, ReductionRequest, ReductionResult, Reducer
+from .reducer import Dataset, KLIPReducer, ReductionRequest, ReductionResult, Reducer, _flag
 
 __all__ = ["SyntheticReducer", "make_synthetic_partitions", "synthetic_klip_dataset"]
+
+
+def _outside_zone(rr: np.ndarray, p: Dict[str, Any]) -> np.ndarray:
+    """Pixels outside the zone a KLIP reduction would cover: the annulus padded by 2 px on
+    each edge the runner marks (``pad_in`` / ``pad_out``, both by default)."""
+    pin = 2.0 if _flag(p.get("pad_in", True)) else 0.0
+    pout = 2.0 if _flag(p.get("pad_out", True)) else 0.0
+    return (rr < float(p.get("inrad", 0)) - pin) | (rr > float(p.get("outrad", 45)) + pout)
 
 
 class SyntheticReducer(Reducer):
@@ -82,7 +90,7 @@ class SyntheticReducer(Reducer):
         yy, xx = np.mgrid[0:self.size, 0:self.size]
         c = (self.size - 1) / 2.0
         rr = np.hypot(xx - c, yy - c)
-        img[(rr < float(p.get("inrad", 0)) - 2) | (rr > float(p.get("outrad", 45)) + 2)] = np.nan
+        img[_outside_zone(rr, p)] = np.nan
         return img
 
     def _image(self, p: Dict[str, Any], k: int, injections, rng) -> np.ndarray:
@@ -94,7 +102,7 @@ class SyntheticReducer(Reducer):
         for (dx, dy, amp) in ((9, 4, 6.0), (-7, 8, 4.0), (3, -11, 5.0)):
             img += amp * self.noise0 * np.exp(-0.5 * ((xx - c - dx) ** 2 + (yy - c - dy) ** 2) / (self.fwhm / 2.3548) ** 2)
         rr = np.hypot(xx - c, yy - c)
-        img[(rr < float(p.get("inrad", 0)) - 2) | (rr > float(p.get("outrad", 45)) + 2)] = np.nan
+        img[_outside_zone(rr, p)] = np.nan
         if injections:
             thr = self.throughput(k, bin_, filt)
             frame = np.zeros((1, self.size, self.size), np.float32)

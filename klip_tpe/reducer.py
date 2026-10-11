@@ -116,6 +116,13 @@ class Dataset:
         return int(self.cube.shape[0])
 
 
+def _flag(v) -> bool:
+    """A yes/no request parameter: True for True, 1, "1", "yes", "true"."""
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "yes", "true", "y", "on")
+    return bool(v)
+
+
 class KLIPReducer(Reducer):
     """Reference annular KLIP/ADI reducer.
 
@@ -412,8 +419,13 @@ class KLIPReducer(Reducer):
         k = int(max(round(p["k_klip"]), 1))
         bin_ = int(max(round(p["bin"]), 1))
         filt = int(round(p["filter"]))
-        inrad = max(float(p["inrad"]) - self.zone_pad, 0.0)
-        outrad = min(float(p["outrad"]) + self.zone_pad, self.outrad_cap)
+        # the KLIP zone is the annulus padded by zone_pad on each edge the runner marks: by
+        # default only an edge shared with another annulus (RunConfig.edge_padding).  A
+        # request without the marks pads both, as the IDL does.
+        pad_in = self.zone_pad if _flag(p.get("pad_in", True)) else 0.0
+        pad_out = self.zone_pad if _flag(p.get("pad_out", True)) else 0.0
+        inrad = max(float(p["inrad"]) - pad_in, 0.0)
+        outrad = min(float(p["outrad"]) + pad_out, self.outrad_cap)
         inrad = min(inrad, outrad - 1.0)
         ds = self.data
         cube = self._inject(req.injections) if req.injections else ds.cube

@@ -378,17 +378,20 @@ def param_verify(history: History, space: SearchSpace, reduce_fn: Callable[..., 
 # C.4.3  stitch  (near2m_pvstitch, param_verify 367-394)
 # ----------------------------------------------------------------------------
 def stitch_param_maps(results: Sequence[Dict[str, Any]], zones: Sequence[Tuple[float, float]],
-                      out_dir: Optional[str] = None, kinds: Sequence[str] = PV_KINDS) -> Dict[str, np.ndarray]:
+                      out_dir: Optional[str] = None, kinds: Sequence[str] = PV_KINDS,
+                      pads: Optional[Sequence[Tuple[float, float]]] = None) -> Dict[str, np.ndarray]:
     """Merge per-annulus maps: each annulus contributes its finite pixels in
     ``rlo-1 <= r <= rhi+1``; overlaps (2-px seams) are averaged, elsewhere NaN.
     ``results`` are :func:`param_verify_cubes` dicts (or ``{kind: map}``);
-    ``zones`` the matching ``(rlo, rhi)`` in px.  Writes
-    ``paramverify_<kind>_stitched.fits`` when ``out_dir`` is given.  DEVIATION:
+    ``zones`` the matching ``(rlo, rhi)`` in px.  ``pads`` gives each zone its own
+    ``(pad_in, pad_out)`` in place of 1 px (the runner pads only where annuli meet).
+    Writes ``paramverify_<kind>_stitched.fits`` when ``out_dir`` is given.  DEVIATION:
     star centre ``(n-1)/2`` (IDL ``n/2``)."""
     out: Dict[str, np.ndarray] = {}
     for kind in kinds:
         acc = wgt = None
-        for res, (rlo, rhi) in zip(results, zones):
+        for j, (res, (rlo, rhi)) in enumerate(zip(results, zones)):
+            pin, pout = (1.0, 1.0) if pads is None else (float(pads[j][0]), float(pads[j][1]))
             m = res.get(kind) if isinstance(res, dict) else None
             if m is None:
                 continue
@@ -401,7 +404,7 @@ def stitch_param_maps(results: Sequence[Dict[str, Any]], zones: Sequence[Tuple[f
                 rr = np.hypot(xx - cx, yy - cy)
             if m.shape != acc.shape:
                 continue
-            z = (rr >= rlo - 1.0) & (rr <= rhi + 1.0) & np.isfinite(m)
+            z = (rr >= rlo - pin) & (rr <= rhi + pout) & np.isfinite(m)
             acc[z] += m[z]
             wgt[z] += 1.0
         if acc is None:

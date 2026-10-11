@@ -120,6 +120,13 @@ run_dir/
   bench_summary.txt                              one row for benchmark tables
 ```
 
+Each annulus is reduced over its zone padded by 2 px where it meets another annulus, and
+its stitch tile overlaps the neighbor by 2 px there.  The inner edge of the innermost
+annulus and the outer edge of the outermost are neither padded nor overlapped, so the
+reduction and the stitch end where the searched range ends.  `--edge-padding all` pads
+those two edges as well, as the IDL does.  A run started before this option existed
+resumes with every edge padded.
+
 `klip-tpe plots --run-dir <dir>` regenerates the diagnostic PNGs (`plots/`);
 `klip_tpe.display.plot_annulus_books(run_dir, ia)` the books; `klip-tpe render --run-dir <dir>`
 (`render_steps`) draws every evaluation's step panel again from the saved crops, including the

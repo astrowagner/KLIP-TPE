@@ -165,6 +165,13 @@ class RunConfig:
         blind candidate search on the running and final stitches (``cand/``).
     legacy_stitch
         equal-weight final stitch and no seam trim of the contrast curve.
+    edge_padding
+        where annulus edges are padded.  ``"between"`` (the default, and unlike the IDL):
+        only an edge shared by two annuli.  The reduction zone there takes the reducer's
+        ``zone_pad``, the stitch tile 2 px and a seam re-run 3 px, while the run's
+        innermost inner edge and outermost outer edge are reduced and stitched as given.
+        ``"all"`` pads every edge, as the IDL does.  A run saved before this field existed
+        resumes with ``"all"``, so its evaluations stay comparable.
     partition_weighting
         ``'equal'`` | ``'sqrt_texp'`` pass-through to a :class:`PartitionedReducer`.
     fm_curve
@@ -278,6 +285,7 @@ class RunConfig:
     cand_snrmin: float = 2.0
     cand_verify_top: int = 5
     legacy_stitch: bool = False
+    edge_padding: str = "between"         # "between" (only where annuli meet) | "all" (every edge, the IDL)
     partition_weighting: Optional[str] = None
     fm_curve: bool = True
     fm_preview: bool = True              # live KLIP-FM preview at each new best (IDL: 'after 1st best')
@@ -320,6 +328,8 @@ class RunConfig:
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "RunConfig":
         d = dict(d)
+        # a run saved before edge_padding existed padded every edge: it resumes that way
+        d.setdefault("edge_padding", "all")
         d["calibration"] = _from_dict_filtered(CalibrationConfig, d.get("calibration", {}))
         d["validation"] = _from_dict_filtered(ValidationConfig, d.get("validation", {}))
         return _from_dict_filtered(cls, d)
@@ -698,6 +708,34 @@ class Runner:
             a_out = float(min(a_in + float(cfg.params["width"]), self.cfg.r_cap))
         return a_in, a_out
 
+    def _pad_edges(self, a_in: float, a_out: float) -> Tuple[bool, bool]:
+        """Whether a zone's inner and outer edges are padded (:attr:`RunConfig.edge_padding`).
+
+        ``"between"`` pads only an edge another annulus shares.  The run's innermost edge is
+        the first annulus' inner edge.  Its outermost edge is the last annulus' outer edge,
+        or with ``opt_width`` an outer edge that leaves no room for another annulus (at
+        ``r_cap``, or closer to it than the smallest width, where the run stops)."""
+        if str(self.cfg.edge_padding).lower() == "all":
+            return True, True
+        e = [float(v) for v in (self.cfg.ann_edges or [])]
+        if self.cfg.opt_width:
+            lo = e[0] if e else 0.0
+            w_lo = float(self.cfg.width_range[0]) if self.cfg.width_range else 0.0
+            outer_end = a_out >= self.cfg.r_cap - 0.5 or self.cfg.r_cap - a_out < w_lo
+        else:
+            lo, hi = (e[0], e[-1]) if len(e) >= 2 else (0.0, e[0] if e else 70.0)
+            outer_end = a_out >= hi - 1e-6
+        return a_in > lo + 1e-6, not outer_end
+
+    def _tile_pads(self, zones: Sequence[Tuple[float, float]], pad: float = 2.0) -> List[Tuple[float, float]]:
+        """``(pad_in, pad_out)`` in px for each stitch tile: ``pad`` on an edge between
+        annuli, 0 at the run's innermost and outermost edges (:meth:`_pad_edges`)."""
+        out = []
+        for a_in, a_out in zones:
+            pin, pout = self._pad_edges(float(a_in), float(a_out))
+            out.append((pad if pin else 0.0, pad if pout else 0.0))
+        return out
+
     def _band(self, ia: int, cfg: Optional[Config] = None) -> Tuple[float, float]:
         """Injection band (arcsec), inset by ``inject_inset_fwhm`` FWHM from each edge
         (opt_width: both bounds at the zone mid-radius, A §3.1)."""
@@ -891,6 +929,13 @@ class Runner:
             dd.pop("width", None)
             dd.update({k: v for k, v in ia_over.items() if k not in self.space.bases or zone is not None})
             per[pid] = dd
+        # which zone edges the reducer pads: by default only those shared with another annulus
+        z_in = float(params.get("inrad", ia_over["inrad"]))
+        z_out = float(params.get("outrad", ia_over["outrad"]))
+        pad_in, pad_out = self._pad_edges(z_in, z_out)
+        params.update(pad_in=pad_in, pad_out=pad_out)
+        for dd in per.values():
+            dd.update(pad_in=pad_in, pad_out=pad_out)
         cfg2 = Config(params, per, cfg.selected, cfg.x)
         if (fm_sources is None and sources and not k_scan and self.reducer.supports_fm
                 and getattr(self.objective.metric, "needs_fm", False)):
@@ -2522,7 +2567,8 @@ class Runner:
         hdr = {"ANNULUS": ia + 1, "NEVAL": neval, "RUNNING": 1, "NANN": len(cleans), "PHASE": "final" if at_end else "eval",
                "IMGTYPE": f"running equal-weight stitch{self._flat_tag}", "EDGES": ",".join(f"{z[0]:.1f}" for z in zones)
                + f",{zones[-1][1]:.1f}"}
-        st = self._maybe_flatten(stitch_tiles(cleans, zones))
+        pads = self._tile_pads(zones)
+        st = self._maybe_flatten(stitch_tiles(cleans, zones, pads=pads))
         files = {"clean": os.path.join(self.run_dir, "klip_stitched_running.fits")}
         _write_fits(files["clean"], st, hdr)
         snr = snr_map(st, self.fwhm)
@@ -2530,7 +2576,8 @@ class Runner:
         _write_fits(files["snr"], snr, dict(hdr, IMGTYPE="running stitched S/N map (Mawet)"))
         out = {"clean": st, "snr": snr, "zones": zones}
         if any(i is not None for i in injs):
-            sti = self._maybe_flatten(stitch_tiles([i if i is not None else c for i, c in zip(injs, cleans)], zones))
+            sti = self._maybe_flatten(stitch_tiles([i if i is not None else c for i, c in zip(injs, cleans)], zones,
+                                                   pads=pads))
             hi = dict(hdr, IMGTYPE="running equal-weight stitch (injected)", INJNSRC=len(sources))
             for j, s in enumerate(sources):
                 hi[f"INJRHO{j+1}"], hi[f"INJPA{j+1}"] = float(s[0]), float(s[1])
@@ -2542,7 +2589,7 @@ class Runner:
             out["inj"] = sti
         if at_end and any(s is not None for s in stacks):
             w = self._stitch_weights(cleans, zones)
-            cube, ids = stitch_stacks(stacks, parts, zones, w)
+            cube, ids = stitch_stacks(stacks, parts, zones, w, pads=pads)
             if cube is not None:
                 hc = dict(hdr, IMGTYPE="running stitched per-partition cube (clean)", NNIGHT=len(ids))
                 for j, p in enumerate(ids):
@@ -2693,7 +2740,7 @@ class Runner:
             zones.append(tuple(pv.get("zone", (r.inrad, r.outrad))))
         if not maps:
             return None
-        return stitch_param_maps(maps, zones, out_dir=self.run_dir)
+        return stitch_param_maps(maps, zones, out_dir=self.run_dir, pads=self._tile_pads(zones, pad=1.0))
 
     def _candidates_hook(self, ia: int, final: bool = False, stitched: Optional[Dict[str, Any]] = None
                          ) -> Optional[List[Dict[str, Any]]]:
@@ -2913,8 +2960,10 @@ class Runner:
         zones = [tuple(d["zone"]) for _, d in items]
         edges = [z[0] for z in zones] + [zones[-1][1]]
         w = self._stitch_weights(cleans, zones)
-        st = stitch_tiles(cleans, zones, w)
-        # seam patching: pixels inside the searched span left NaN -> padded re-run of that annulus' winner
+        pads = self._tile_pads(zones)
+        st = stitch_tiles(cleans, zones, w, pads=pads)
+        # seam patching: pixels inside the searched span left NaN -> a re-run of that annulus'
+        # winner, its zone padded by 3 px on each edge shared with another annulus
         seam = seam_pixels(st, edges[0], edges[-1])
         npatch = 0
         t_seam = time.time()
@@ -2930,7 +2979,9 @@ class Runner:
                 try:
                     self.ia = r.annulus
                     cfg = self._config_from_dict(r.winner_config)
-                    zone = (max(zones[j][0] - 3.0, 0.0), min(zones[j][1] + 3.0, self.cfg.r_cap))
+                    pin, pout = self._pad_edges(*zones[j])
+                    zone = (max(zones[j][0] - (3.0 if pin else 0.0), 0.0),
+                            min(zones[j][1] + (3.0 if pout else 0.0), self.cfg.r_cap))
                     img_p = self._reduce(cfg, None, tag=f"a{r.annulus+1}_seam", zone=zone).image
                     if img_p is not None and img_p.shape == st.shape:
                         st[m] = img_p[m]
@@ -2973,7 +3024,7 @@ class Runner:
             allsrc.extend(d.get("sources") or [])
         if any(d.get("inj") is not None for _, d in items):
             sti = self._maybe_flatten(stitch_tiles([d["inj"] if d.get("inj") is not None else d["clean"]
-                                                    for _, d in items], zones, w))
+                                                    for _, d in items], zones, w, pads=pads))
             hi = dict(hdr, IMGTYPE=f"validated-winner injected stitch{self._flat_tag}", INJNSRC=len(allsrc))
             for j, s in enumerate(allsrc):
                 hi[f"INJRHO{j+1}"], hi[f"INJPA{j+1}"] = float(s[0]), float(s[1])
@@ -2991,7 +3042,7 @@ class Runner:
             stacks = [d.get(key) for _, d in items]
             if not any(s is not None for s in stacks):
                 continue
-            cube, ids = stitch_stacks(stacks, [d.get("parts") for _, d in items], zones, w)
+            cube, ids = stitch_stacks(stacks, [d.get("parts") for _, d in items], zones, w, pads=pads)
             if cube is None:
                 continue
             hc = dict(hdr, IMGTYPE=f"stitched per-partition cube ({'injected' if 'inj' in key else 'clean'})",

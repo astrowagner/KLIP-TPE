@@ -51,7 +51,8 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic}]
                         [--no-param-verify] [--n-remeasure N] [--n-pv N_PV]
                         [--pv-divmin PV_DIVMIN] [--candidates]
                         [--write-setup-files] [--no-setup-files]
-                        [--legacy-stitch] [--display] [--no-display]
+                        [--legacy-stitch] [--edge-padding {between,all}]
+                        [--display] [--no-display]
                         [--display-every DISPLAY_EVERY]
                         [--pdf-every PDF_EVERY] [--movie-every MOVIE_EVERY]
                         [--show [SHOW]] [--aliens]
@@ -150,6 +151,10 @@ options:
   --write-setup-files
   --no-setup-files
   --legacy-stitch       equal-weight stitch, no contrast-curve seam trim
+  --edge-padding {between,all}
+                        pad annulus edges only where two annuli meet (between,
+                        the default) or on every edge including the innermost
+                        and outermost (all, as the IDL does)
   --display             live display: per-eval step panels, books, progress
                         movie (default on)
   --no-display
@@ -279,7 +284,8 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic}]
                      [--param-verify] [--no-param-verify] [--n-remeasure N]
                      [--n-pv N_PV] [--pv-divmin PV_DIVMIN] [--candidates]
                      [--write-setup-files] [--no-setup-files]
-                     [--legacy-stitch] [--display] [--no-display]
+                     [--legacy-stitch] [--edge-padding {between,all}]
+                     [--display] [--no-display]
                      [--display-every DISPLAY_EVERY] [--pdf-every PDF_EVERY]
                      [--movie-every MOVIE_EVERY] [--show [SHOW]] [--aliens]
                      [--window-scale WINDOW_SCALE] [--no-fm-curve]
@@ -377,6 +383,10 @@ options:
   --write-setup-files
   --no-setup-files
   --legacy-stitch       equal-weight stitch, no contrast-curve seam trim
+  --edge-padding {between,all}
+                        pad annulus edges only where two annuli meet (between,
+                        the default) or on every edge including the innermost
+                        and outermost (all, as the IDL does)
   --display             live display: per-eval step panels, books, progress
                         movie (default on)
   --no-display

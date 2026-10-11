@@ -235,6 +235,9 @@ def _protocol_args(p):
     p.add_argument("--write-setup-files", dest="write_setup_files", action="store_true", default=True)
     p.add_argument("--no-setup-files", dest="write_setup_files", action="store_false")
     p.add_argument("--legacy-stitch", action="store_true", help="equal-weight stitch, no contrast-curve seam trim")
+    p.add_argument("--edge-padding", choices=("between", "all"), default=None,
+                   help="pad annulus edges only where two annuli meet (between, the default) or on every edge "
+                        "including the innermost and outermost (all, as the IDL does)")
     p.add_argument("--display", dest="display", action="store_true", default=True,
                    help="live display: per-eval step panels, books, progress movie (default on)")
     p.add_argument("--no-display", dest="display", action="store_false")
@@ -272,7 +275,8 @@ def _protocol_config(a) -> dict:
                 write_setup_files=a.write_setup_files, legacy_stitch=a.legacy_stitch,
                 partition_weighting=a.weighting, fm_curve=a.fm_curve, fm_preview=a.fm_preview,
                 pair_area_midpoint=not getattr(a, "ladder_pair", False),
-                liveness_check=getattr(a, "liveness_check", "warn"))
+                liveness_check=getattr(a, "liveness_check", "warn"),
+                **({"edge_padding": a.edge_padding} if getattr(a, "edge_padding", None) else {}))
 
 
 def build_near_space(red, a):
@@ -567,7 +571,7 @@ def cmd_replay(a):
     if space.names != log.names:
         print("WARNING: space names differ from the IDL log header; mapping by name where possible")
     cfg = RunConfig(ann_edges=a.ann_edges, n_iter=1, n_init=1, seed=a.seed, contrast0=a.contrast,
-                    calibration=CalibrationConfig(forced=[a.contrast]))
+                    calibration=CalibrationConfig(forced=[a.contrast]), edge_padding="all")   # the IDL's zones
     r = Runner(red, space, objective, sampler, cfg, a.run_dir, throughput_fn=thr, log=lambda s: None)
     r.contrast = a.contrast
     fin = np.flatnonzero(np.isfinite(log.score))
@@ -623,7 +627,8 @@ def cmd_compare(a):
     space.project = guard
     cfg = RunConfig(ann_edges=list(a.ann_edges), n_iter=1, n_init=1, seed=a.seed, contrast0=a.contrast,
                     calibration=CalibrationConfig(forced=[a.contrast]), validation=ValidationConfig(n_top=1, n_valid=1),
-                    fm_curve=False, save_fits=False, write_setup_files=False, param_verify=False)
+                    fm_curve=False, save_fits=False, write_setup_files=False, param_verify=False,
+                    edge_padding="all")                  # the IDL pads every zone edge
     r = Runner(red, space, objective, sampler, cfg, os.path.join(a.out, "_runner"), throughput_fn=thr,
                log=lambda s: None)
     r.contrast = a.contrast

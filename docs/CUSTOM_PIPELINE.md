@@ -145,6 +145,11 @@ class MyPipeline(ExternalReducer):
         return ReductionResult(image.astype("float32"), weight=1.0, meta={"anything": "you like"})
 ```
 
+`req.params` holds the annulus as `inrad`, `outrad` (px), with `pad_in` and `pad_out` saying
+whether to pad each edge for the overlap with a neighboring annulus.  A run sets them True
+only on an edge another annulus shares, so the innermost and outermost edges are reduced as
+given (`RunConfig.edge_padding`).
+
 `frame_angles()` must give the parallactic angles so the reference-count guardrail and the
 binning-span rule can work; if you cannot, set `space.project = None` and leave
 `angsep/anglemax` out of the space. Injections must follow the same PA convention as the

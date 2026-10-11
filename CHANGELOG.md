@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased — 2026-10-11 (annulus edges padded only where two annuli meet)
+
+- **Only the edges between annuli are padded.**  The inner edge of the innermost annulus and
+  the outer edge of the outermost were padded like every other edge: the KLIP zone by the
+  reducer's `zone_pad` (2 px), the stitch tile by 2 px, a seam re-run by 3 px and a
+  param_verify map by 1 px.  Now each of these applies only to an edge another annulus
+  shares, so the reduction and the stitch end where the searched range ends.  On
+  `--ann-edges 8 20 32` the stitch used to reach from 6 to 34 px, and now runs from 8 to 32
+  px, with the two annuli still overlapping at 20 px.
+  - `RunConfig.edge_padding` (`--edge-padding`): `"between"`, the default, or `"all"`,
+    which pads every edge as the IDL does.  With `opt_width` an outer edge counts as the
+    last when it reaches `r_cap`, or leaves less than the smallest width, where the run
+    stops.
+  - The runner marks each reduction request with `pad_in` / `pad_out`, and `KLIPReducer`,
+    with the pyKLIP and VIP backends and `FunctionReducer` behind it, pads only the marked
+    edges.  A request without the marks pads both, so direct reducer calls are unchanged.
+  - A run saved before the field existed resumes with `"all"`, so its evaluations stay
+    comparable.  `klip-tpe compare`, `klip-tpe replay` and `--from-idl-setup` keep `"all"`,
+    since they reproduce IDL reductions.
+  - `stitch_tiles`, `stitch_stacks` and `param_verify.stitch_param_maps` take per-tile
+    pads, and `products.stitch_annuli` leaves the two end edges unpadded unless `pad_ends`.
+
 ## Unreleased — 2026-10-10 (the live window keeps one size and shows the panel sharp; tutorials 3, 5 and 6 with outputs; the trace figure)
 
 - **The live window opens at its size, keeps it, and shows the panel sharp.**  On a 1920 ×
