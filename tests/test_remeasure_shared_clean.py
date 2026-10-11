@@ -9,9 +9,10 @@ at ``n_remeasure = 3`` that was 6 reductions where 4 do (found by the NEAR2 / ID
   same per-draw scores -- so nothing a run records changes, and a run started on the old
   code can be resumed on the new one;
 * one clean reduction per trial, and ``n`` injected ones;
-* on a parallel reducer at most two reductions at a time (the pair the thread budget was
-  sized for), and the later draws do overlap, which is where the wall-time saving is;
-* a first draw that failed leaves nothing to share, and the later draws reduce their own;
+* on a parallel reducer the clean and all ``n`` injected reductions are in flight together,
+  one round per trial (the NEAR2 session's change 2, 2026-10-11);
+* a clean reduction that failed leaves nothing to share, and the later draws reduce their
+  own; a failed injected reduction fails only its draw;
 * the k-scan modes keep the per-draw loop (each draw picks its own k, hence its own clean).
 """
 from __future__ import annotations
@@ -95,7 +96,7 @@ def test_one_clean_reduction_per_trial_and_the_same_trial(tmp_path):
     assert (cs["clean"], cs["inj"]) == (n, 3 * n), "one clean reduction per trial, three injected"
 
 
-def test_parallel_reducer_pairs_the_later_draws(tmp_path):
+def test_a_parallel_reducer_runs_the_trial_as_one_round(tmp_path):
     each, space = _runner(tmp_path, "each", share=False)
     par, _ = _runner(tmp_path, "par", share=True, workers=2)
     st = _instrument(par, delay=0.05)
@@ -104,7 +105,7 @@ def test_parallel_reducer_pairs_the_later_draws(tmp_path):
     rb, _, _ = par.evaluate_mean(x, "tpe", tag="t")
     _same_trial(ra, rb)
     assert (st["clean"], st["inj"]) == (1, 3)
-    assert st["max"] == 2, f"two reductions at a time, never more (saw {st['max']})"
+    assert st["max"] == 4, f"the clean and the three draws together (saw {st['max']})"
     par.reducer.close()
 
 
@@ -149,7 +150,7 @@ def test_draws_are_reported_in_order(tmp_path):
     par.reducer.close()
 
 
-def test_a_failed_first_draw_leaves_the_later_draws_their_own_clean(tmp_path):
+def test_a_failed_clean_leaves_the_later_draws_their_own_clean(tmp_path):
     r, space = _runner(tmp_path, "flaky", share=True)
     st = _instrument(r)
     counted = r._reduce
@@ -157,7 +158,7 @@ def test_a_failed_first_draw_leaves_the_later_draws_their_own_clean(tmp_path):
 
     def flaky(cfg_, sources, k_scan=False, tag="", **kw):
         calls["n"] += 1
-        if calls["n"] == 1:
+        if calls["n"] == 1 and not sources:
             raise RuntimeError("simulated reducer crash")
         return counted(cfg_, sources, k_scan, tag, **kw)
     r._reduce = flaky
@@ -165,6 +166,27 @@ def test_a_failed_first_draw_leaves_the_later_draws_their_own_clean(tmp_path):
     assert out.meta["draw_failed"] == 1 and out.score is not None
     assert st["clean"] == 2, "draws 2 and 3 had nothing to share and reduced their own"
     assert clean is not None
+
+
+def test_a_failed_injected_reduction_fails_only_its_draw(tmp_path):
+    """The clean image came back, so the later draws share it: the same scores as the
+    per-draw loop, which reduced the clean image again for each."""
+    each, space = _runner(tmp_path, "each", share=False)
+    r, _ = _runner(tmp_path, "flaky", share=True)
+    st = _instrument(r)
+    counted = r._reduce
+
+    def flaky(cfg_, sources, k_scan=False, tag="", **kw):
+        if tag == "t_d1_inj":
+            raise RuntimeError("simulated reducer crash")
+        return counted(cfg_, sources, k_scan, tag, **kw)
+    r._reduce = flaky
+    x = r._project(space.default_vector(), is_random=False)
+    out, _, clean = r.evaluate_mean(x, "tpe", tag="t")
+    assert out.meta["draw_failed"] == 1 and out.meta["draw_scores"][0] is None
+    assert st["clean"] == 1 and clean is not None
+    ref, _, _ = each.evaluate_mean(x, "tpe", tag="t")
+    assert out.meta["draw_scores"][1:] == pytest.approx(ref.meta["draw_scores"][1:], abs=1e-9)
 
 
 def test_kscan_modes_keep_the_per_draw_loop(tmp_path):

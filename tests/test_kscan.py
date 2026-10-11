@@ -15,10 +15,12 @@ rest of ``test_runner.py`` they run in the quick suite.
 import pytest
 
 class _ScanStub:
-    """Just enough of a Runner for ``_scan_k``: the curve is dictated per draw."""
+    """Just enough of a Runner for ``_scan_k``: the curve is dictated per draw.  A serial
+    reducer, so the draws' reductions run one after another, in order."""
 
     def __init__(self, draws):
         import types
+        import numpy as np
         from klip_tpe.runner import CalibrationConfig, Runner
         self._draws, self._i, self.msgs = list(draws), 0, []
         self.cfg = types.SimpleNamespace(
@@ -27,8 +29,10 @@ class _ScanStub:
         self.objective = types.SimpleNamespace(
             metric=types.SimpleNamespace(needs_clean=False),
             score_raw=lambda img, src, clean: types.SimpleNamespace(score=float(img)))
-        self.rng = None
-        self._scan_k = types.MethodType(Runner._scan_k, self)
+        self.rng = np.random.default_rng(0)
+        self.reducer = types.SimpleNamespace()
+        for name in ("_scan_k", "_run_ordered", "_parallel_reducer"):
+            setattr(self, name, types.MethodType(getattr(Runner, name), self))
 
     def _k_scan_max(self):
         return len(self._draws[0])

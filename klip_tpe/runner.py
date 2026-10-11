@@ -33,12 +33,14 @@ Protocol extensions over the plain loop (see the IDL spec, notes A/C):
 """
 from __future__ import annotations
 
+import contextlib
 import glob
 import json
 import os
 import pickle
 import shutil
 import tempfile
+import threading
 import time
 import warnings
 from dataclasses import asdict, dataclass, field, fields, replace
@@ -267,7 +269,7 @@ class RunConfig:
     kfit_order: int = 2
     save_fits: bool = True
     save_eval_images: bool = True         # per-eval injected/clean crops (annulusNN/evals/, IDL evalNNNN_score_inj)
-    batch: int = 1                        # proposals per ask (>1 = batched, same posterior)
+    batch: int = 1                        # proposals per ask, evaluated concurrently (>1: one posterior, another trajectory)
     bench_tag: str = "none"
     notes: str = ""
     # --- protocol extensions (defaults reproduce the previous behaviour) ---
@@ -1140,10 +1142,14 @@ class Runner:
         diagnostics (``kbest``, ``kpn``, the scan curve)."""
         kmax = self._k_scan_max()
         cfgk = self._with_k(cfg, kmax)
-        scan = self._reduce(cfgk, sources, k_scan=True, tag=tag + "_scan")
-        cscan = None
+        calls = [lambda: self._reduce(cfgk, sources, k_scan=True, tag=tag + "_scan")]
         if self.objective.metric.needs_clean:
-            cscan = self._reduce(cfgk, None, k_scan=True, tag=tag + "_cscan")
+            calls.append(lambda: self._reduce(cfgk, None, k_scan=True, tag=tag + "_cscan"))
+        got = [r for _, r in self._run_ordered(calls, len(calls) if self._parallel_reducer() else 1)]
+        for r in got:                                  # the first failure, in the old order
+            if isinstance(r, BaseException):
+                raise r
+        scan, cscan = got[0], (got[1] if len(got) > 1 else None)
         nk = int(scan.image.shape[0])
         info: Dict[str, Any] = {}
         stack = scan.stack
@@ -1184,6 +1190,78 @@ class Runner:
     def _needs_clean(self, raw_only: bool = False) -> bool:
         return bool((self.objective.needs_clean and not raw_only) or self.objective.metric.needs_clean)
 
+    # -- reductions in flight ----------------------------------------------------
+    def _parallel_reducer(self) -> bool:
+        """Whether the reducer can serve several reductions at once (a partitioned reducer
+        with a worker budget of 2 or more)."""
+        return getattr(self.reducer, "max_workers", 1) >= 2
+
+    def _reduction_window(self, n_sel: Optional[int] = None) -> int:
+        """How many independent reductions to keep in flight: enough partition jobs to fill
+        the reducer's worker slots, plus one so the next is queued while a result is being
+        scored.  1 on a serial reducer."""
+        if not self._parallel_reducer():
+            return 1
+        slots = int(getattr(self.reducer, "job_slots", lambda: 2)() or 2)
+        n = max(int(n_sel or len(getattr(self.reducer, "reducers", {}) or {}) or 1), 1)
+        return max(2, -(-slots // n) + 1)
+
+    def _memory_note(self) -> None:
+        """The reducer's line on its worker processes' memory, when it has one (Linux):
+        what a pool of this size needs, for choosing ``--workers`` / ``--threads-per-job``."""
+        note = getattr(self.reducer, "memory_note", None)
+        line = self._guard("worker memory", note) if callable(note) else None
+        if line:
+            self.log(f"  {line}")
+
+    def _start_workers(self) -> None:
+        """Start the reducer's worker processes, if it has any, from this thread.  A forked
+        worker inherits every lock the parent's other threads held at the fork, held, so
+        the pool is started before any reduction thread exists (and, from :meth:`run`,
+        before the heartbeat thread).  Starting it again is a no-op."""
+        start = getattr(self.reducer, "start_workers", None)
+        if callable(start):
+            self._guard("worker pool", start)
+
+    def _run_ordered(self, calls: Sequence[Callable[[], Any]], window: int):
+        """Run ``calls`` (no-argument callables, each one reduction) with at most ``window``
+        in flight, and yield ``(i, result)`` in the order given.  A call that raises yields
+        its exception as the result, so the caller decides what a failure means.  The
+        reductions are pure functions of their arguments, so the schedule changes when
+        they finish, never what they return.  Waiting services the live window."""
+        calls = list(calls)
+        if window <= 1 or len(calls) <= 1:
+            for i, fn in enumerate(calls):
+                try:
+                    res = fn()
+                except Exception as exc:          # noqa: BLE001 - handed to the caller
+                    res = exc
+                yield i, res
+            return
+        import concurrent.futures as _cf
+        from .parallel import pump_wait
+        self._start_workers()
+        ex = _cf.ThreadPoolExecutor(max_workers=min(int(window), len(calls)), thread_name_prefix="klip-red")
+        finished = False
+        try:
+            futs: Dict[int, Any] = {}
+            nxt = 0
+            for i in range(len(calls)):
+                while nxt < len(calls) and nxt - i < window:
+                    futs[nxt] = ex.submit(calls[nxt])
+                    nxt += 1
+                f = futs.pop(i)
+                try:
+                    res = pump_wait([f])[0]
+                except Exception as exc:          # noqa: BLE001
+                    res = exc
+                yield i, res
+            finished = True
+        finally:
+            # left early (an interrupt, a caller that has what it needs): drop what has not
+            # started instead of waiting for it
+            ex.shutdown(wait=finished, cancel_futures=not finished)
+
     def evaluate(self, x: np.ndarray, phase: str, contrast: Optional[float] = None,
                  sources: Optional[Sequence[Source]] = None, raw_only: bool = False,
                  tag: str = "eval", clean: Optional[EvalImages] = None
@@ -1211,6 +1289,7 @@ class Runner:
         k_used = None
         given_clean, clean = clean, None
         kinfo: Dict[str, Any] = {}
+        sr = None
         try:
             if self._kscan_active():
                 given_clean = None
@@ -1238,17 +1317,31 @@ class Runner:
                 inj = self._reduce(cfg, sources, tag=tag + "_inj")
                 if need_clean:
                     clean = self._reduce(cfg, None, tag=tag + "_clean")
-            fmkw = self._fm_for(inj, clean)
-            if raw_only:
-                sr = self.objective.score_raw(inj.image, sources, None if clean is None else clean.image, **fmkw)
-            else:
-                sr = self.objective.score_search(inj.image, sources, None if clean is None else clean.image, **fmkw)
+            sr = self._score_images(inj, clean, sources, raw_only)
             failed = False
         except Exception as exc:  # a failed reduction scores as failed, never as a stale image
             self.log(f"  evaluation failed: {exc!r}")
             inj = EvalImages(np.full((2, 2), np.nan))
             sr = None
             failed = True
+        rec = self._eval_record(cfg, phase, contrast, sources, inj, sr, failed, k_used, kinfo, t0)
+        return rec, inj, clean
+
+    def _score_images(self, inj: EvalImages, clean: Optional[EvalImages], sources: Sequence[Source],
+                      raw_only: bool = False):
+        """The objective on one injected image (and the clean one), as :meth:`evaluate`
+        scores it."""
+        fmkw = self._fm_for(inj, clean)
+        if raw_only:
+            return self.objective.score_raw(inj.image, sources, None if clean is None else clean.image, **fmkw)
+        return self.objective.score_search(inj.image, sources, None if clean is None else clean.image, **fmkw)
+
+    def _eval_record(self, cfg: Config, phase: str, contrast: float, sources: Sequence[Source],
+                     inj: EvalImages, sr, failed: bool, k_used: Any = None,
+                     kinfo: Optional[Dict[str, Any]] = None, t0: Optional[float] = None) -> EvalRecord:
+        """The :class:`EvalRecord` of one scored (or failed) evaluation."""
+        kinfo = kinfo or {}
+        t0 = time.time() if t0 is None else t0
         if k_used is None:
             k_used = cfg.params.get("k_klip")
             if cfg.per_partition:
@@ -1272,7 +1365,7 @@ class Runner:
             partition_snr={} if failed else self._score_stack(inj.stack, inj.partitions, sources,
                                                              getattr(inj, "fm_stack", None)),
             k_used=k_used, contrast=contrast, wall_s=time.time() - t0, meta=meta)
-        return rec, inj, clean
+        return rec
 
     def replay_draws(self, recorded) -> None:
         """From now on, inject ``recorded`` draws in order wherever this runner would draw
@@ -1304,11 +1397,12 @@ class Runner:
         configuration, not on where the sources went, so reducing it per draw only repeated
         it -- ``2n`` reductions where ``n + 1`` do (6 where 4 do at ``n = 3``).  Every draw's
         positions are drawn first, in order, by the same generator calls the per-draw loop
-        made, so positions and scores are the ones that loop produced; and on a parallel
-        reducer the injected reductions after the first run two at a time, the pair the
-        thread budget was already sized for, so the saving shows in wall time too.  The
-        k-scan modes keep the per-draw loop: each draw picks its own k there, and with it
-        its own clean image.
+        made, so positions and scores are the ones that loop produced.  On a parallel
+        reducer the clean and all ``n`` injected reductions then go out together, one round
+        (``(n + 1) x partitions`` jobs), and each draw is scored, in order, as soon as its
+        image and the clean are back.  The schedule changes when a reduction finishes, not
+        what it returns.  The k-scan modes keep the per-draw loop: each draw picks its own k
+        there, and with it its own clean image.
         """
         n = int(self.cfg.n_remeasure if n is None else n)
         if n <= 1:
@@ -1316,8 +1410,45 @@ class Runner:
         if not self.SHARE_CLEAN or self._kscan_active():
             return self._evaluate_draws_each(x, phase, tag, n, on_draw)
         t0 = time.time()
-        draws = [self._draw_sources(self.space.decode(x), self.contrast) for _ in range(n)]
-        recs, last = [], (None, None, None)
+        cfg = self.space.decode(x)
+        draws = [self._draw_sources(cfg, self.contrast) for _ in range(n)]
+        stream = self._run_ordered(self._trial_calls(cfg, draws, tag), len(draws) + 1 if self._parallel_reducer() else 1)
+        try:
+            return self._trial_finish(x, cfg, phase, tag, draws, stream, on_draw, t0)
+        finally:
+            stream.close()
+
+    def _trial_calls(self, cfg: Config, draws: Sequence[Sequence[Source]], tag: str) -> List[Callable[[], Any]]:
+        """The reductions of one trial, in the order :meth:`_trial_finish` reads them: the
+        clean image (when the objective needs one), then each draw's injected image.  Tags
+        as the per-draw evaluations named them (a single draw as :meth:`evaluate` does)."""
+        one = len(draws) == 1
+        calls: List[Callable[[], Any]] = []
+        if self._needs_clean():
+            ctag = f"{tag}_clean" if one else f"{tag}_d1_clean"
+            calls.append(lambda: self._reduce(cfg, None, tag=ctag))
+        for j, d in enumerate(draws):
+            srcs = [Source(s.rho, s.theta, self.contrast) for s in d]
+            itag = f"{tag}_inj" if one else f"{tag}_d{j + 1}_inj"
+            calls.append(lambda srcs=srcs, itag=itag: self._reduce(cfg, srcs, tag=itag))
+        return calls
+
+    def _trial_finish(self, x: np.ndarray, cfg: Config, phase: str, tag: str,
+                      draws: Sequence[Sequence[Source]], stream, on_draw, t0: float, combine: bool = True
+                      ) -> Tuple[EvalRecord, EvalImages, Optional[EvalImages]]:
+        """Score one trial from ``stream`` (:meth:`_run_ordered` over :meth:`_trial_calls`),
+        draw by draw, in order.  ``combine=False`` with a single draw returns that draw as
+        :meth:`evaluate` would (no ``draw_*`` entries in its record).
+
+        Failures behave as the per-draw schedule did.  A draw whose injected reduction
+        fails is a failed draw.  When the clean reduction fails, draw 1 fails with it and
+        the later draws reduce their own clean images, one draw at a time.  Either way the
+        trial takes exactly its own reductions off ``stream``, which a concurrent batch
+        shares between its proposals."""
+        n = len(draws)
+        contrast = self.contrast
+        recs: List[EvalRecord] = []
+        last: Tuple[Any, Any, Any] = (None, None, None)
 
         def _done(j, out):
             nonlocal last
@@ -1327,28 +1458,43 @@ class Runner:
             if on_draw is not None:
                 on_draw(j, n, rec, inj, clean)
 
-        # draw 1 as a single evaluation: the injected and the clean image, concurrently on a
-        # parallel reducer
-        first = self.evaluate(x, phase, sources=draws[0], tag=f"{tag}_d1")
-        shared = first[2]
-        _done(0, first)
-        rest = list(range(1, n))
-        # A failed first draw leaves no clean image to share; the later draws then reduce
-        # their own, as they always did, one draw at a time.
-        pair = (getattr(self.reducer, "max_workers", 1) >= 2 and len(rest) > 1
-                and (shared is not None or not self._needs_clean()))
-        if pair:
-            import concurrent.futures as _cf
-            from .parallel import pump_wait
-            with _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="klip-draw") as ex:
-                futs = [ex.submit(self.evaluate, x, phase, sources=draws[j], tag=f"{tag}_d{j+1}", clean=shared)
-                        for j in rest]
-                for j, f in zip(rest, futs):
-                    _done(j, pump_wait([f])[0])       # reported in draw order, from this thread
-        else:
-            for j in rest:
-                _done(j, self.evaluate(x, phase, sources=draws[j], tag=f"{tag}_d{j+1}", clean=shared))
+        shared, clean_exc = None, None
+        if self._needs_clean():
+            _, res = next(stream)
+            if isinstance(res, BaseException):
+                clean_exc = res
+            else:
+                shared = res
+        for j in range(n):
+            srcs = [Source(s.rho, s.theta, contrast) for s in draws[j]]
+            _, res = next(stream)
+            if clean_exc is not None:
+                # draw 1 fails with its clean image (the injected failure is reported first,
+                # as it was), and the later draws reduce their own
+                self.log(f"  evaluation failed: {(res if isinstance(res, BaseException) else clean_exc)!r}")
+                rec = self._eval_record(cfg, phase, contrast, srcs, EvalImages(np.full((2, 2), np.nan)),
+                                        None, True, t0=t0)
+                _done(0, (rec, EvalImages(np.full((2, 2), np.nan)), None))
+                for _ in range(1, n):                 # the other draws' images, made without a clean one
+                    next(stream)
+                for jj in range(1, n):
+                    _done(jj, self.evaluate(x, phase, sources=draws[jj], tag=f"{tag}_d{jj + 1}"))
+                break
+            clean = shared
+            try:
+                if isinstance(res, BaseException):
+                    clean = None                      # as evaluate() returned it for a failed reduction
+                    raise res
+                inj = res
+                sr = self._score_images(inj, shared, srcs)
+                failed = False
+            except Exception as exc:                  # noqa: BLE001
+                self.log(f"  evaluation failed: {exc!r}")
+                inj, sr, failed = EvalImages(np.full((2, 2), np.nan)), None, True
+            _done(j, (self._eval_record(cfg, phase, contrast, srcs, inj, sr, failed, t0=t0), inj, clean))
         rec, inj, clean = last
+        if not combine and n == 1:
+            return rec, inj, clean
         return self._combine_draws(recs, rec, wall=time.time() - t0), inj, clean
 
     #: share one clean reduction between the draws of an averaged trial (see
@@ -1405,14 +1551,31 @@ class Runner:
         try:
             kmax = self._k_scan_max()
             curves = []
+            cfgk = self._with_k(cfg0, kmax)
+            needs = bool(self.objective.metric.needs_clean)
+            # every draw first, in order, keeping the generator state after each: a failure
+            # in draw m puts it back where the draw-by-draw loop stopped
+            plan = []
             for _ in range(max(int(self.cfg.calibration.n_remeasure), 1)):
                 src = self.sampler.sample(nsrc, rlo, rhi, self.rng, contrast)
-                scan = self._reduce(self._with_k(cfg0, kmax), src, k_scan=True, tag="calib_scan")
-                cscan = self._reduce(self._with_k(cfg0, kmax), None, k_scan=True, tag="calib_cscan") \
-                    if self.objective.metric.needs_clean else None
-                curves.append([self.objective.score_raw(scan.image[kk], src,
-                                                        None if cscan is None else cscan.image[kk]).score
-                               for kk in range(scan.image.shape[0])])
+                plan.append((src, self.rng.bit_generator.state))
+            calls: List[Callable[[], Any]] = []
+            for src, _ in plan:
+                calls.append(lambda src=src: self._reduce(cfgk, src, k_scan=True, tag="calib_scan"))
+                if needs:
+                    calls.append(lambda: self._reduce(cfgk, None, k_scan=True, tag="calib_cscan"))
+            per = 2 if needs else 1
+            with contextlib.closing(self._run_ordered(calls, len(calls) if self._parallel_reducer() else 1)) as st:
+                for m, (src, state) in enumerate(plan):
+                    got = [next(st)[1] for _ in range(per)]
+                    bad = next((r for r in got if isinstance(r, BaseException)), None)
+                    if bad is not None:
+                        self.rng.bit_generator.state = state
+                        raise bad
+                    scan, cscan = got[0], (got[1] if needs else None)
+                    curves.append([self.objective.score_raw(scan.image[kk], src,
+                                                            None if cscan is None else cscan.image[kk]).score
+                                   for kk in range(scan.image.shape[0])])
             n = min(len(c) for c in curves)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", RuntimeWarning)        # all-NaN slices are a legal answer
@@ -1522,24 +1685,40 @@ class Runner:
             vals = []
             src = []
             errors: List[BaseException] = []
-            for _ in range(cc.n_remeasure):
-                src = self.sampler.sample(nsrc, rlo, rhi, self.rng, contrast)
-                try:
-                    inj = self._reduce(cfgk, src, tag="calib_inj")
-                    clean = self._reduce(cfgk, None, tag="calib_clean") if self.objective.needs_clean else None
-                    r = self.objective.score_search(inj.image, src, None if clean is None else clean.image,
-                                                    **self._fm_for(inj, clean))
-                    vals.append(r.score)
-                    # keep the last measurement for the display (on_calibration images)
-                    self._calib_images = {
-                        "inj": inj, "clean": clean, "sources": list(src), "contrast": contrast, "config": cfgk,
-                        "per_source": [None if not np.isfinite(v) else float(v) for v in r.per_source],
-                        "clean_per_source": None if r.clean_per_source is None
-                        else [None if not np.isfinite(v) else float(v) for v in r.clean_per_source]}
-                except Exception as exc:
-                    self.log(f"  calibration reduction failed: {exc!r}")
-                    vals.append(np.nan)
-                    errors.append(exc)
+            # the remeasurements' positions first, in order (every draw happens whatever
+            # fails), then their reductions together, scored in order
+            draws = [self.sampler.sample(nsrc, rlo, rhi, self.rng, contrast) for _ in range(cc.n_remeasure)]
+            need_c = bool(self.objective.needs_clean)
+            calls: List[Callable[[], Any]] = []
+            for d in draws:
+                calls.append(lambda d=d, cfgk=cfgk: self._reduce(cfgk, d, tag="calib_inj"))
+                if need_c:
+                    calls.append(lambda cfgk=cfgk: self._reduce(cfgk, None, tag="calib_clean"))
+            with contextlib.closing(self._run_ordered(calls, len(calls) if self._parallel_reducer() else 1)) \
+                    as stream:
+                for src in draws:
+                    got_inj = next(stream)[1]
+                    got_cln = next(stream)[1] if need_c else None
+                    try:
+                        if isinstance(got_inj, BaseException):
+                            raise got_inj
+                        inj = got_inj
+                        if isinstance(got_cln, BaseException):
+                            raise got_cln
+                        clean = got_cln
+                        r = self.objective.score_search(inj.image, src, None if clean is None else clean.image,
+                                                        **self._fm_for(inj, clean))
+                        vals.append(r.score)
+                        # keep the last measurement for the display (on_calibration images)
+                        self._calib_images = {
+                            "inj": inj, "clean": clean, "sources": list(src), "contrast": contrast, "config": cfgk,
+                            "per_source": [None if not np.isfinite(v) else float(v) for v in r.per_source],
+                            "clean_per_source": None if r.clean_per_source is None
+                            else [None if not np.isfinite(v) else float(v) for v in r.clean_per_source]}
+                    except Exception as exc:
+                        self.log(f"  calibration reduction failed: {exc!r}")
+                        vals.append(np.nan)
+                        errors.append(exc)
             if trial == 0 and errors and len(errors) == len(vals):
                 # Not a calibration problem: the DEFAULT reduction of this annulus does not run
                 # at all -- and every evaluation of the search uses the same reducer on the
@@ -1716,7 +1895,11 @@ class Runner:
             nb = max(1, min(c.batch, n_iter - len(self.history)))
             t_loop = time.time()
             props = opt.ask(self.history, self.rng, nb)
-            for pr in props:
+            if nb > 1 and self._batch_concurrent():
+                if self._search_batch(ia, n_iter, props, t_loop):
+                    return self._search_annulus(ia, 0)
+                continue
+            for b, pr in enumerate(props):
                 phase = pr.flags.get("phase", "tpe")
                 is_random = phase in ("warmup", "explore", "random")
                 x = self._project(pr.x, is_random=is_random)   # optimizer already tied link_params
@@ -1724,55 +1907,117 @@ class Runner:
                 rec, inj, clean = self.evaluate_mean(
                     x, phase, tag=f"a{ia+1}_e{len(self.history)+1}",
                     on_draw=lambda j, nd, r, i_, c_: self._on_draw(ia, j, nd, r, i_, c_))
-                i = self._append(rec)
-                bi, bs = self.history.best()
-                if i == bi and inj.image is not None and inj.image.ndim == 2:
-                    self._set_best_images(rec, inj, clean)
-                self._save_eval_images(rec, inj, clean)
-                self._emit("on_eval", rec, inj, clean, i == bi)
-                elapsed = time.time() - self.wall0 + self.wall_prev
-                loop_s = time.time() - t_loop                    # propose + reduce + score + display
-                _sd = rec.meta.get("draw_sd")
-                _dn = rec.meta.get("draw_n")
-                self.log(f"[ann {ia+1}] eval {i+1}/{n_iter} {phase:<7s} score={rec.score if rec.score is None else round(rec.score,3)}"
-                         + (f" (mean of {_dn}" + (f", sd {_sd:.2f})" if _sd is not None else ")") if _dn else "")
-                         + f" raw={rec.raw_score if rec.raw_score is None else round(rec.raw_score,3)}"
-                         f" best={bs:.3f}@{bi+1}  contrast={self.contrast:.2e}  reduce {rec.wall_s:.0f}s / loop {loop_s:.0f}s"
-                         f"  ({elapsed/3600:.2f} h)")
-                self.checkpoint(routine=True)
-                if c.stitch_every and c.stitch_every > 0 and (i + 1) % int(c.stitch_every) == 0:
-                    self._guard("running stitch", self._running_stitch, ia)
+                if self._after_eval(ia, n_iter, phase, rec, inj, clean, t_loop, checkpoint=b == len(props) - 1):
+                    return self._search_annulus(ia, 0)
                 t_loop = time.time()
-                # re-calibration revisit
-                cc = c.calibration
-                if (not self._extend_mode and i + 1 == cc.recal_check and self._recal_done < cc.recal_budget
-                        and cc.recal_budget > 0
-                        and not (cc.forced and len(cc.forced) > ia and cc.forced[ia] and cc.forced[ia] > 0)):
-                    yv = self.history.y[1:cc.recal_check] if c.seed_default else self.history.y[:cc.recal_check]
-                    yv = yv[np.isfinite(yv)]
-                    if yv.size >= 3:
-                        top = np.sort(yv)[::-1][:cc.recal_ntop]
-                        mwu = float(np.median(top))
-                        if not (cc.target[0] <= mwu <= cc.target[1]):
-                            # the cap is the smaller of the two: `ceiling` (IDL cmax_cal, off by
-                            # default) and `max_contrast` (the physical one, 0.1 by default)
-                            caps = [v for v in (cc.ceiling, cc.max_contrast) if v is not None]
-                            cap = min(caps) if caps else None
-                            if mwu < cc.target[0] and cap is not None and self.contrast >= 0.999 * cap:
-                                self.log(f"  re-cal: median top-{cc.recal_ntop} S/N {mwu:.2f} below {cc.target}, but the "
-                                         f"contrast is already at its cap {cap:.2e} -- a source brighter than that is "
-                                         f"not a calibration; continuing at {self.contrast:.2e}")
-                            else:
-                                fac = float(np.clip(cc.aim / max(mwu, 0.1), cc.step_clip[0], cc.step_clip[1]))
-                                newc = self.contrast * fac
-                                if cap is not None:
-                                    newc = min(newc, cap)
-                                self.log(f"  re-cal: median top-{cc.recal_ntop} S/N {mwu:.2f} outside "
-                                         f"{cc.target}; contrast {self.contrast:.2e} -> {newc:.2e}; restarting annulus")
-                                self.contrast = newc
-                                self._recal_done += 1
-                                self._reset_history(ia)
-                                return self._search_annulus(ia, 0)
+
+    def _batch_concurrent(self) -> bool:
+        """Whether a batch of proposals (``RunConfig.batch > 1``) is evaluated concurrently:
+        on a parallel reducer, outside the k-scan modes (where each draw picks its own k and
+        the draws stay one after another)."""
+        return self._parallel_reducer() and self.SHARE_CLEAN and not self._kscan_active()
+
+    def _search_batch(self, ia: int, n_iter: int, props, t_loop: float) -> bool:
+        """Evaluate a batch of proposals concurrently (``RunConfig.batch``, ``--batch``).
+
+        Each proposal is projected, its eval index assigned and its draws' positions drawn
+        at ask time, in proposal order -- the generator calls a one-at-a-time batch makes.
+        Then every proposal's clean and injected reductions go out together, and the trials
+        are scored and appended in index order, so the history does not depend on which
+        finishes first.  The same batch evaluated one proposal at a time gives the same
+        history.  Returns True when a re-calibration restarted the annulus.
+
+        The checkpoint is taken once the whole batch is in, as for a batch evaluated one
+        proposal at a time: a run stopped part way through a batch resumes at its start,
+        asks for the same proposals and reduces them again, so the resumed run is the one
+        that never stopped.  ``wall_s`` of each trial counts from the batch's dispatch."""
+        n = max(int(self.cfg.n_remeasure), 1)
+        prepared = []
+        for b, pr in enumerate(props):
+            phase = pr.flags.get("phase", "tpe")
+            x = self._project(pr.x, is_random=phase in ("warmup", "explore", "random"))
+            cfg = self.space.decode(x)
+            draws = [self._draw_sources(cfg, self.contrast) for _ in range(n)]
+            prepared.append((phase, x, cfg, draws, f"a{ia+1}_e{len(self.history) + 1 + b}",
+                             self.rng.bit_generator.state))
+        calls: List[Callable[[], Any]] = []
+        for _, _, cfg, draws, tag, _ in prepared:
+            calls += self._trial_calls(cfg, draws, tag)
+        t0 = time.time()
+        on_draw = (lambda j, nd, r, i_, c_: self._on_draw(ia, j, nd, r, i_, c_)) if n > 1 else None
+        with contextlib.closing(self._run_ordered(calls, len(calls))) as stream:
+            for b, (phase, x, cfg, draws, tag, rng_after) in enumerate(prepared):
+                self._hb_eval(ia, len(self.history) + 1, n_iter, phase)
+                rec, inj, clean = self._trial_finish(x, cfg, phase, tag, draws, stream, on_draw, t0,
+                                                     combine=n > 1)
+                if self._after_eval(ia, n_iter, phase, rec, inj, clean, t_loop, rng_state=rng_after,
+                                    checkpoint=b == len(prepared) - 1):
+                    return True
+                t_loop = time.time()
+        return False
+
+    def _after_eval(self, ia: int, n_iter: int, phase: str, rec: EvalRecord, inj: EvalImages,
+                    clean: Optional[EvalImages], t_loop: float,
+                    rng_state: Optional[Dict[str, Any]] = None, checkpoint: bool = True) -> bool:
+        """Record one search trial: history, best images, files, display, log, checkpoint,
+        running stitch, and the re-calibration revisit.  Returns True when the revisit
+        reset the annulus (the caller restarts its search).  ``rng_state``: the generator
+        state right after this trial's draws, restored before such a reset when later
+        proposals of a concurrent batch have drawn already.  ``checkpoint=False`` inside a
+        batch: the batch is checkpointed once, after its last trial."""
+        c = self.cfg
+        i = self._append(rec)
+        bi, bs = self.history.best()
+        if i == bi and inj.image is not None and inj.image.ndim == 2:
+            self._set_best_images(rec, inj, clean)
+        self._save_eval_images(rec, inj, clean)
+        self._emit("on_eval", rec, inj, clean, i == bi)
+        elapsed = time.time() - self.wall0 + self.wall_prev
+        loop_s = time.time() - t_loop                    # propose + reduce + score + display
+        _sd = rec.meta.get("draw_sd")
+        _dn = rec.meta.get("draw_n")
+        self.log(f"[ann {ia+1}] eval {i+1}/{n_iter} {phase:<7s} score={rec.score if rec.score is None else round(rec.score,3)}"
+                 + (f" (mean of {_dn}" + (f", sd {_sd:.2f})" if _sd is not None else ")") if _dn else "")
+                 + f" raw={rec.raw_score if rec.raw_score is None else round(rec.raw_score,3)}"
+                 f" best={bs:.3f}@{bi+1}  contrast={self.contrast:.2e}  reduce {rec.wall_s:.0f}s / loop {loop_s:.0f}s"
+                 f"  ({elapsed/3600:.2f} h)")
+        if checkpoint:
+            self.checkpoint(routine=True)
+        if c.stitch_every and c.stitch_every > 0 and (i + 1) % int(c.stitch_every) == 0:
+            self._guard("running stitch", self._running_stitch, ia)
+        # re-calibration revisit
+        cc = c.calibration
+        if (not self._extend_mode and i + 1 == cc.recal_check and self._recal_done < cc.recal_budget
+                and cc.recal_budget > 0
+                and not (cc.forced and len(cc.forced) > ia and cc.forced[ia] and cc.forced[ia] > 0)):
+            yv = self.history.y[1:cc.recal_check] if c.seed_default else self.history.y[:cc.recal_check]
+            yv = yv[np.isfinite(yv)]
+            if yv.size >= 3:
+                top = np.sort(yv)[::-1][:cc.recal_ntop]
+                mwu = float(np.median(top))
+                if not (cc.target[0] <= mwu <= cc.target[1]):
+                    # the cap is the smaller of the two: `ceiling` (IDL cmax_cal, off by
+                    # default) and `max_contrast` (the physical one, 0.1 by default)
+                    caps = [v for v in (cc.ceiling, cc.max_contrast) if v is not None]
+                    cap = min(caps) if caps else None
+                    if mwu < cc.target[0] and cap is not None and self.contrast >= 0.999 * cap:
+                        self.log(f"  re-cal: median top-{cc.recal_ntop} S/N {mwu:.2f} below {cc.target}, but the "
+                                 f"contrast is already at its cap {cap:.2e} -- a source brighter than that is "
+                                 f"not a calibration; continuing at {self.contrast:.2e}")
+                    else:
+                        fac = float(np.clip(cc.aim / max(mwu, 0.1), cc.step_clip[0], cc.step_clip[1]))
+                        newc = self.contrast * fac
+                        if cap is not None:
+                            newc = min(newc, cap)
+                        self.log(f"  re-cal: median top-{cc.recal_ntop} S/N {mwu:.2f} outside "
+                                 f"{cc.target}; contrast {self.contrast:.2e} -> {newc:.2e}; restarting annulus")
+                        self.contrast = newc
+                        self._recal_done += 1
+                        if rng_state is not None:
+                            self.rng.bit_generator.state = rng_state   # as if the batch had stopped here
+                        self._reset_history(ia)
+                        return True
+        return False
 
     #: a stage is worth a log line once it has run this many times the recent median
     #: evaluation -- generous, because the honest spread of an evaluation on a shared
@@ -1854,41 +2099,58 @@ class Runner:
             trials, trial_imgs, trial_src, trial_ps, samples_r, samples_s = [], [], [], [], [], []
             clean = None
             part = self._load_validation_trials(ia, ci, cands)
+            calls: List[Callable[[], Any]] = []
             if part is not None:       # interrupted inside this candidate: continue after its last trial
                 clean = part["clean"]
                 trials, trial_imgs, trial_src, trial_ps = part["trials"], part["trial_imgs"], part["trial_src"], part["trial_ps"]
                 samples_r, samples_s = part["samples_r"], part["samples_s"]
                 self.log(f"  validation cand {ci+1}/{len(cands)}: resuming after trial {len(trials)}/{vc.n_valid}")
             else:
-                try:
-                    clean = self._reduce(cfg, None, tag=f"a{ia+1}_val{ci}_clean")
-                except Exception as exc:
-                    self.log(f"  validation clean reduction failed: {exc!r}")
+                calls.append(lambda cfg=cfg, ci=ci: self._reduce(cfg, None, tag=f"a{ia+1}_val{ci}_clean"))
+            # Every remaining trial's positions first, in order, by the same generator calls
+            # the trial-by-trial loop made; each trial's record keeps the generator state
+            # right after its own draw.  Then the clean image and the trials go out together,
+            # a window at a time, and are scored in trial order: the same trials, sooner.
+            plan = []
             for t in range(len(trials), vc.n_valid):
                 rlo, rhi = self._band(ia, cfg)
                 src = self.sampler.sample(self._nsrc(ia), rlo, rhi, self.rng, self.contrast)
-                self.hb.stage(f"annulus {ia + 1} validation: candidate {ci + 1}/{len(cands)} "
-                              f"trial {t + 1}/{vc.n_valid}", write=False, annulus=ia)
-                try:
-                    inj = self._reduce(cfg, src, tag=f"a{ia+1}_val{ci}_t{t}")
-                    r = self.objective.score_raw(inj.image, src, None if clean is None else clean.image,
-                                                 **self._fm_for(inj, clean))
-                    trials.append(r.score)
-                    trial_imgs.append(inj)
-                    trial_src.append(src)
-                    trial_ps.append([None if not np.isfinite(v) else float(v) for v in r.per_source])
-                    for s, v in zip(src, r.per_source):
-                        samples_r.append(s.rho)
-                        samples_s.append(v)
-                    self._emit("on_validation_trial", ia, ci, len(cands), e, t, vc.n_valid, inj, clean, list(src),
-                               r, list(trials))
-                except Exception as exc:
-                    self.log(f"  validation trial failed: {exc!r}")
-                    trials.append(np.nan)
-                    trial_imgs.append(None)
-                    trial_src.append(src)
-                    trial_ps.append([])
-                self._save_validation_trials(ia, ci, cands, clean, trials, trial_imgs, trial_src, trial_ps, samples_r, samples_s)
+                plan.append((t, src, self.rng.bit_generator.state))
+                calls.append(lambda cfg=cfg, ci=ci, t=t, src=src: self._reduce(cfg, src, tag=f"a{ia+1}_val{ci}_t{t}"))
+            with contextlib.closing(self._run_ordered(calls, self._reduction_window(len(cfg.selected)))) as stream:
+                if part is None:
+                    _, res = next(stream)
+                    if isinstance(res, BaseException):
+                        self.log(f"  validation clean reduction failed: {res!r}")
+                    else:
+                        clean = res
+                for t, src, rng_state in plan:
+                    _, res = next(stream)
+                    self.hb.stage(f"annulus {ia + 1} validation: candidate {ci + 1}/{len(cands)} "
+                                  f"trial {t + 1}/{vc.n_valid}", write=False, annulus=ia)
+                    try:
+                        if isinstance(res, BaseException):
+                            raise res
+                        inj = res
+                        r = self.objective.score_raw(inj.image, src, None if clean is None else clean.image,
+                                                     **self._fm_for(inj, clean))
+                        trials.append(r.score)
+                        trial_imgs.append(inj)
+                        trial_src.append(src)
+                        trial_ps.append([None if not np.isfinite(v) else float(v) for v in r.per_source])
+                        for s, v in zip(src, r.per_source):
+                            samples_r.append(s.rho)
+                            samples_s.append(v)
+                        self._emit("on_validation_trial", ia, ci, len(cands), e, t, vc.n_valid, inj, clean, list(src),
+                                   r, list(trials))
+                    except Exception as exc:
+                        self.log(f"  validation trial failed: {exc!r}")
+                        trials.append(np.nan)
+                        trial_imgs.append(None)
+                        trial_src.append(src)
+                        trial_ps.append([])
+                    self._save_validation_trials(ia, ci, cands, clean, trials, trial_imgs, trial_src, trial_ps,
+                                                 samples_r, samples_s, rng_state)
             vs = np.array(trials, float)
             vscore = nanmedian_even(vs)
             commit = -1
@@ -1946,12 +2208,15 @@ class Runner:
     #: the per-trial lists a validation candidate accumulates, in the order they are kept
     _VT_LISTS = ("trials", "trial_imgs", "trial_src", "trial_ps", "samples_r", "samples_s")
 
-    def _save_validation_trials(self, ia, ci, cands, clean, trials, trial_imgs, trial_src, trial_ps, samples_r, samples_s) -> None:
+    def _save_validation_trials(self, ia, ci, cands, clean, trials, trial_imgs, trial_src, trial_ps, samples_r,
+                                samples_s, rng_state: Optional[Dict[str, Any]] = None) -> None:
         """Intra-candidate checkpoint (one validation trial can take minutes).
 
         ``val_candNN_trials.pkl`` is an append-only stream of pickles: a header with the
         candidate list and the clean reduction, written once, then one record per finished
-        trial holding that trial's entries and the RNG state after its draw.  Until
+        trial holding that trial's entries and the RNG state after its draw (``rng_state``,
+        taken when the positions were drawn; validation draws every trial's positions before
+        it reduces any).  Until
         2026-10-08 the file was rewritten whole after every trial -- the clean image and
         every trial image so far, ~1,300 image sets per candidate at 50 trials -- and
         checkpoint.json with it, the whole search history once per trial (found by the
@@ -1971,7 +2236,7 @@ class Runner:
                                 protocol=pickle.HIGHEST_PROTOCOL)
                 on_disk = {k: 0 for k in self._VT_LISTS}
             rec = {k: list(lists[k][on_disk[k]:]) for k in self._VT_LISTS}
-            rec["rng"] = self.rng.bit_generator.state
+            rec["rng"] = self.rng.bit_generator.state if rng_state is None else rng_state
             with open(path, "ab") as f:
                 pickle.dump(rec, f, protocol=pickle.HIGHEST_PROTOCOL)
             self._vt_on_disk[key] = {k: len(lists[k]) for k in self._VT_LISTS}
@@ -2209,10 +2474,12 @@ class Runner:
         elif ntot and nok < ntot:
             self.log(f"  note: {ntot - nok}/{ntot} evaluations failed")
         self.log(f"  search done: best {bs:.3f} at eval {bi+1}")
+        self._memory_note()
         table, vwin, winner = ([], -1, {})
         if self.cfg.validation.n_valid >= 1 and self.cfg.validation.n_top >= 1:
             table, vwin, winner = self.validate(ia)
             self._emit("on_validation", table, winner)
+            self._memory_note()
         validated = vwin >= 0
         if not validated:
             x = self.history.X[bi]
@@ -2695,10 +2962,16 @@ class Runner:
                 m = np.flatnonzero(np.all(np.abs(hist.X - np.asarray(x, float)[None, :]) < 1e-9, axis=1))
                 if m.size:
                     cfg = self._apply_k_flag(cfg, hist.flags[int(m[-1])].get("k"))
-            clean = self._reduce(cfg, None, tag=f"a{ia+1}_pv_clean", zone=(rlo, rhi))
-            inj = self._reduce(cfg, sources, tag=f"a{ia+1}_pv_inj", zone=(rlo, rhi))
-            try:
-                np.savez(cpath, clean=clean.image, inj=inj.image)
+            calls = [lambda: self._reduce(cfg, None, tag=f"a{ia+1}_pv_clean", zone=(rlo, rhi)),
+                     lambda: self._reduce(cfg, sources, tag=f"a{ia+1}_pv_inj", zone=(rlo, rhi))]
+            clean, inj = [r for _, r in self._run_ordered(calls, 2 if self._parallel_reducer() else 1)]
+            for r in (clean, inj):
+                if isinstance(r, BaseException):
+                    raise r
+            try:                                   # written whole, then renamed: configs run concurrently
+                tmp = cpath + f".{os.getpid()}.{threading.get_ident()}.tmp.npz"
+                np.savez(tmp, clean=clean.image, inj=inj.image)
+                os.replace(tmp, cpath)
             except Exception:
                 pass
             return clean.image, inj.image
@@ -2714,7 +2987,10 @@ class Runner:
                            pv_divmin=float(self.cfg.pv_divmin), n_init=self.cfg.per_annulus(self.cfg.n_init, ia),
                            nsrc=self._nsrc(ia), rng=rng, known=list(getattr(self.sampler, "known", ()) or ()),
                            angle_convention=self.reducer.angle_convention,
-                           flatten=self.flatten_products, log=self.log)
+                           flatten=self.flatten_products, log=self.log,
+                           # several configurations in flight, each its clean + injected pair
+                           run_calls=lambda cs: self._run_ordered(
+                               cs, max(1, self._reduction_window(len(cfg_w.selected)) // 2)))
         if res is not None:
             res["zone"] = (rlo, rhi)
             self._pv_results[ia] = res
@@ -2831,6 +3107,7 @@ class Runner:
     def run(self) -> List[AnnulusResult]:
         self._auto_resume()            # any run is resumable, however it was constructed
         self._register()
+        self._start_workers()          # before the heartbeat thread: the fork copies one thread
         self.hb.start()                # from here on the directory says whether this is alive
         try:
             out = self._run()

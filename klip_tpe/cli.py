@@ -34,6 +34,7 @@ def _near_objects(a, log=print):
     red = near.make_reducer(root, a.nights, frames=frames, use_library=not a.no_library,
                             weighting=a.weighting, max_workers=a.workers, pool=a.pool, fast=a.fast, log=log,
                             n_min_ref=a.n_min_ref, backend=getattr(a, "backend", "klip"))
+    _set_threads_per_job(red, a)
     objective, sampler = near.default_config(red, clean_subtract=not a.no_clean_subtract,
                                              metric=getattr(a, "metric", "mawet"),
                                              known=[tuple(k) for k in (a.known or [])])
@@ -45,6 +46,12 @@ def _near_objects(a, log=print):
     except Exception:
         thr = near.analytic_throughput
     return red, objective, sampler, guard, thr
+
+
+def _set_threads_per_job(red, a) -> None:
+    """``--threads-per-job``, before the worker pool starts (it sizes the pool)."""
+    if hasattr(red, "threads_per_job"):
+        red.threads_per_job = max(int(getattr(a, "threads_per_job", 4) or 4), 1)
 
 
 def _generic_objects(a, log=print):
@@ -88,6 +95,7 @@ def _generic_objects(a, log=print):
                                truenorth=a.truenorth, star_flux=star_flux or None, weighting=a.weighting,
                                max_workers=a.workers, pool=a.pool, fast=a.fast, n_min_ref=a.n_min_ref,
                                backend=getattr(a, "backend", "klip"), log=log)
+    _set_threads_per_job(red, a)
     objective, sampler = generic.default_config(red, clean_subtract=not a.no_clean_subtract,
                                                 known=[tuple(k) for k in (a.known or [])],
                                                 metric=getattr(a, "metric", "mawet"))
@@ -135,6 +143,7 @@ def _nomic_objects(a, log=print):
                              n_min_ref=a.n_min_ref, truenorth=a.truenorth, log=log,
                              fwhm_px=a.fwhm_px, diam_m=a.diam, psf=(a.psf[0] if a.psf else "airy"), r_ee_px=a.r_ee,
                              backend=getattr(a, "backend", "klip"))
+    _set_threads_per_job(red, a)
     objective, sampler = nomic.default_config(red, clean_subtract=not a.no_clean_subtract,
                                               metric=getattr(a, "metric", "mawet"),
                                               known=[tuple(k) for k in (a.known or [])])
@@ -192,6 +201,9 @@ def _add_near_args(p):
                    help="worker budget: 'auto' (default) = all cores, an integer pins it, -k = all but k")
     p.add_argument("--pool", default="auto", choices=["auto", "processes", "threads"],
                    help="how the budget is spent: forked worker processes (default; the IDL bridges) or threads")
+    p.add_argument("--threads-per-job", type=int, default=4,
+                   help="threads per partition job (default 4). The pool gets workers / threads-per-job "
+                        "processes, never fewer than min(workers, 2 x partitions)")
     p.add_argument("--weighting", default="equal", choices=["equal", "sqrt_texp"])
     p.add_argument("--fast", action="store_true", help="single-basis KLIP (angsep/anglemax not searched)")
     p.add_argument("--no-library", action="store_true")
@@ -235,6 +247,9 @@ def _protocol_args(p):
     p.add_argument("--write-setup-files", dest="write_setup_files", action="store_true", default=True)
     p.add_argument("--no-setup-files", dest="write_setup_files", action="store_false")
     p.add_argument("--legacy-stitch", action="store_true", help="equal-weight stitch, no contrast-curve seam trim")
+    p.add_argument("--batch", type=int, default=1,
+                   help="proposals evaluated at a time, concurrently (default 1). TPE proposes a batch from "
+                        "one posterior, which changes the search's trajectory")
     p.add_argument("--edge-padding", choices=("between", "all"), default=None,
                    help="pad annulus edges only where two annuli meet (between, the default) or on every edge "
                         "including the innermost and outermost (all, as the IDL does)")
@@ -276,6 +291,7 @@ def _protocol_config(a) -> dict:
                 partition_weighting=a.weighting, fm_curve=a.fm_curve, fm_preview=a.fm_preview,
                 pair_area_midpoint=not getattr(a, "ladder_pair", False),
                 liveness_check=getattr(a, "liveness_check", "warn"),
+                batch=max(int(getattr(a, "batch", 1) or 1), 1),
                 **({"edge_padding": a.edge_padding} if getattr(a, "edge_padding", None) else {}))
 
 

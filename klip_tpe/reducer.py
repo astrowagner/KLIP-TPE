@@ -15,6 +15,7 @@ code with the night-specific plumbing removed.
 from __future__ import annotations
 
 import concurrent.futures as cf
+import threading
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -639,23 +640,36 @@ class PartitionedReducer(Reducer):
         variance is pathological here because an over-subtracted night has low
         scatter *and* low throughput) or ``'sqrt_texp'`` (``Reducer.partition_weight``).
     max_workers
-        >1 dispatches partitions (and the clean pass) concurrently with a thread
-        pool; numpy releases the GIL in the heavy linear algebra.
+        the thread budget.  >1 dispatches partition jobs to forked worker processes (or
+        a thread pool, when forking is unavailable).
+    threads_per_job
+        threads each partition job uses for its per-target work.  The process pool gets
+        ``max_workers // threads_per_job`` processes, and never fewer than the
+        ``min(max_workers, 2 x partitions)`` it had before, so the runner can keep as many
+        reductions in flight as the budget can serve (a trial's clean and all its draws,
+        several validation trials).  Per-job scaling is flat past about 4 threads.
     """
 
     name = "partitioned"
+    # class defaults, so an instance made without __init__ still works; __init__ sets its own
+    threads_per_job = 4
+    _threads_fallback = False
+    _start_lock = threading.Lock()
 
     def __init__(self, reducers: Dict[Any, Reducer], weighting: str = "equal", max_workers=1,
-                 pool: str = "auto", log=None):
+                 pool: str = "auto", log=None, threads_per_job: int = 4):
         if not reducers:
             raise ValueError("need at least one partition")
         from .parallel import resolve_workers
         self.reducers = dict(reducers)
         self.weighting = weighting
         self.max_workers = resolve_workers(max_workers)
+        self.threads_per_job = max(int(threads_per_job or 4), 1)
         self.pool_kind = pool            # auto | processes | threads
         self._log = log or (lambda s: None)
         self._procs = None
+        self._threads_fallback = False   # worker processes could not be started
+        self._start_lock = threading.Lock()    # the runner keeps several reductions in flight
         if self.max_workers > 1:
             from .parallel import pin_blas
             pin_blas()                      # one BLAS thread per worker thread (no oversubscription)
@@ -689,8 +703,8 @@ class PartitionedReducer(Reducer):
 
     def start_workers(self) -> str:
         """Start the worker processes (IDL bridges) once the data are loaded.  Returns the
-        pool kind in use: ``processes`` (forked workers, one per thread of the budget, up
-        to 2 x partitions), ``threads`` (fallback / requested) or ``serial``.
+        pool kind in use: ``processes`` (forked workers, :meth:`n_procs` of them),
+        ``threads`` (fallback / requested) or ``serial``.
 
         Which one a run got is written to its log, here rather than at the call site: the
         command line used to report it and a script that built its own runner reported
@@ -702,7 +716,9 @@ class PartitionedReducer(Reducer):
         if not self._pool_logged:
             self._pool_logged = True
             from .parallel import describe
-            self._log(f"  parallel: {describe(self.max_workers, len(self.reducers))}; pool = {kind}")
+            procs = (getattr(self._procs, "n", None) or self.n_procs()) if kind == "processes" else None
+            self._log(f"  parallel: {describe(self.max_workers, len(self.reducers), procs, self.job_threads())}"
+                      f"; pool = {kind}")
             if kind == "threads" and self.pool_kind in ("auto", "processes"):
                 self._log("    threads share the GIL, so expect several times less throughput than "
                           "worker processes: worth fixing rather than living with.")
@@ -711,17 +727,66 @@ class PartitionedReducer(Reducer):
     def _pool_kind_now(self) -> str:
         if self.max_workers <= 1:
             return "serial"
+        with self._start_lock:
+            return self._pool_kind_locked()
+
+    def _pool_kind_locked(self) -> str:
         if self._procs is not None:
             return "processes"
-        if self.pool_kind in ("auto", "processes"):
+        if self.pool_kind in ("auto", "processes") and not self._threads_fallback:
             try:
                 from .parallel import ProcessPool
-                n = min(self.max_workers, 2 * len(self.reducers))
-                self._procs = ProcessPool(self.reducers, n, log=self._log)
+                self._procs = ProcessPool(self.reducers, self.n_procs(), log=self._log)
                 return "processes"
             except Exception as exc:
                 self._log(f"  parallel: worker processes unavailable ({exc!r}); using threads")
+                self._threads_fallback = True
         return "threads"
+
+    def n_procs(self) -> int:
+        """Worker processes for the budget: one per ``threads_per_job`` threads, and never
+        fewer than ``min(max_workers, 2 x partitions)`` (the count before 2026-10-11)."""
+        b = int(self.max_workers)
+        return max(b // self.threads_per_job, min(b, 2 * len(self.reducers)), 1)
+
+    def job_threads(self, n_sel: Optional[int] = None) -> int:
+        """Per-target threads for one partition job.  With worker processes the budget is
+        shared out by process, so every job gets ``max_workers // processes`` whatever else
+        is in flight.  The thread-pool fallback keeps the old rule: the injected and the
+        clean reduction of ``n_sel`` partitions share the budget."""
+        if self._procs is not None or (self.max_workers > 1 and self.pool_kind != "threads"
+                                       and not self._threads_fallback):
+            return max(int(self.max_workers) // self.n_procs(), 1)
+        n = len(self.reducers) if n_sel is None else int(n_sel)
+        conc = 2 if self.max_workers >= 2 else 1
+        return max(int(self.max_workers) // max(conc * n, 1), 1)
+
+    def job_slots(self) -> int:
+        """Partition jobs that can run at the same time: the worker processes, the
+        thread-pool size, or 1 when serial."""
+        if self.max_workers <= 1:
+            return 1
+        if self._procs is not None:
+            return int(getattr(self._procs, "n", None) or self.n_procs())
+        if self.pool_kind != "threads" and not self._threads_fallback:
+            return self.n_procs()
+        return int(self.max_workers)
+
+    def memory_note(self) -> Optional[str]:
+        """A log line on the worker processes' memory (Linux), for sizing the pool against
+        the machine: their peak resident sets, and what they hold together now.  None
+        without worker processes or off Linux."""
+        mem = getattr(self._procs, "memory", None)
+        m = mem() if callable(mem) else None
+        if not m:
+            return None
+        from .parallel import mem_available
+        gb = 1024.0 ** 3
+        pk = sorted(m["peak"])
+        avail = mem_available()
+        return (f"worker memory: {len(pk)} processes peaked at {pk[len(pk) // 2] / gb:.2f} GB each (largest "
+                f"{pk[-1] / gb:.2f} GB, each counting the data it shares), {m['pss'] / gb:.1f} GB together now "
+                f"(shared data counted once)" + (f", {avail / gb:.0f} GB available" if avail else ""))
 
     def _map(self, jobs):
         if self.max_workers > 1 and len(jobs) > 1:
@@ -730,8 +795,9 @@ class PartitionedReducer(Reducer):
             if self._procs is not None:
                 pid_of = {id(r): pid for pid, r in self.reducers.items()}
                 return self._procs.map([(pid_of[id(r)], req) for r, req in jobs])
-            if self._pool is None:
-                self._pool = cf.ThreadPoolExecutor(max_workers=self.max_workers)
+            with self._start_lock:
+                if self._pool is None:
+                    self._pool = cf.ThreadPoolExecutor(max_workers=self.max_workers)
             # pump_wait, not map(): the main thread must keep servicing the GUI event loop
             # while the partitions reduce, or the live window is marked unresponsive
             from .parallel import pump_wait
@@ -754,10 +820,7 @@ class PartitionedReducer(Reducer):
         with the same partition weights as the science image); ``extras`` the
         nosub / cadi reference images."""
         sel = list(config.selected if selected is None else selected)
-        # thread budget: partitions in parallel, the remainder as per-target threads inside each
-        # (the runner reduces the injected and clean cubes concurrently -> halve for that)
-        conc = 2 if self.max_workers >= 2 else 1
-        per = max(self.max_workers // max(conc * len(sel), 1), 1)
+        per = self.job_threads(len(sel))          # per-target threads inside each partition job
         jobs = [(self.reducers[pid], ReductionRequest(config.params_for(pid), injections, k_scan,
                                                       f"{tag}_{pid}", fm_sources=fm_sources, extras=extras,
                                                       threads=per))
@@ -791,7 +854,7 @@ class PartitionedReducer(Reducer):
 
     def describe(self) -> Dict[str, Any]:
         d = super().describe()
-        d.update(weighting=self.weighting, max_workers=self.max_workers,
+        d.update(weighting=self.weighting, max_workers=self.max_workers, threads_per_job=self.threads_per_job,
                  partitions={str(k): r.describe() for k, r in self.reducers.items()})
         return d
 

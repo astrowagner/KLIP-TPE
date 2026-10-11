@@ -28,6 +28,7 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic}]
                         [--group-smooth GROUP_SMOOTH]
                         [--max-frames MAX_FRAMES] [--workers WORKERS]
                         [--pool {auto,processes,threads}]
+                        [--threads-per-job THREADS_PER_JOB]
                         [--weighting {equal,sqrt_texp}] [--fast]
                         [--no-library] [--no-clean-subtract] [--ladder-pair]
                         [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
@@ -51,9 +52,9 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic}]
                         [--no-param-verify] [--n-remeasure N] [--n-pv N_PV]
                         [--pv-divmin PV_DIVMIN] [--candidates]
                         [--write-setup-files] [--no-setup-files]
-                        [--legacy-stitch] [--edge-padding {between,all}]
-                        [--display] [--no-display]
-                        [--display-every DISPLAY_EVERY]
+                        [--legacy-stitch] [--batch BATCH]
+                        [--edge-padding {between,all}] [--display]
+                        [--no-display] [--display-every DISPLAY_EVERY]
                         [--pdf-every PDF_EVERY] [--movie-every MOVIE_EVERY]
                         [--show [SHOW]] [--aliens]
                         [--window-scale WINDOW_SCALE] [--no-fm-curve]
@@ -81,6 +82,10 @@ options:
   --pool {auto,processes,threads}
                         how the budget is spent: forked worker processes
                         (default; the IDL bridges) or threads
+  --threads-per-job THREADS_PER_JOB
+                        threads per partition job (default 4). The pool gets
+                        workers / threads-per-job processes, never fewer than
+                        min(workers, 2 x partitions)
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --no-library
@@ -151,6 +156,9 @@ options:
   --write-setup-files
   --no-setup-files
   --legacy-stitch       equal-weight stitch, no contrast-curve seam trim
+  --batch BATCH         proposals evaluated at a time, concurrently (default
+                        1). TPE proposes a batch from one posterior, which
+                        changes the search's trajectory
   --edge-padding {between,all}
                         pad annulus edges only where two annuli meet (between,
                         the default) or on every edge including the innermost
@@ -263,6 +271,7 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic}]
                      [--group-min-frames GROUP_MIN_FRAMES]
                      [--group-smooth GROUP_SMOOTH] [--max-frames MAX_FRAMES]
                      [--workers WORKERS] [--pool {auto,processes,threads}]
+                     [--threads-per-job THREADS_PER_JOB]
                      [--weighting {equal,sqrt_texp}] [--fast] [--no-library]
                      [--no-clean-subtract] [--ladder-pair]
                      [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
@@ -284,8 +293,8 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic}]
                      [--param-verify] [--no-param-verify] [--n-remeasure N]
                      [--n-pv N_PV] [--pv-divmin PV_DIVMIN] [--candidates]
                      [--write-setup-files] [--no-setup-files]
-                     [--legacy-stitch] [--edge-padding {between,all}]
-                     [--display] [--no-display]
+                     [--legacy-stitch] [--batch BATCH]
+                     [--edge-padding {between,all}] [--display] [--no-display]
                      [--display-every DISPLAY_EVERY] [--pdf-every PDF_EVERY]
                      [--movie-every MOVIE_EVERY] [--show [SHOW]] [--aliens]
                      [--window-scale WINDOW_SCALE] [--no-fm-curve]
@@ -313,6 +322,10 @@ options:
   --pool {auto,processes,threads}
                         how the budget is spent: forked worker processes
                         (default; the IDL bridges) or threads
+  --threads-per-job THREADS_PER_JOB
+                        threads per partition job (default 4). The pool gets
+                        workers / threads-per-job processes, never fewer than
+                        min(workers, 2 x partitions)
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --no-library
@@ -383,6 +396,9 @@ options:
   --write-setup-files
   --no-setup-files
   --legacy-stitch       equal-weight stitch, no contrast-curve seam trim
+  --batch BATCH         proposals evaluated at a time, concurrently (default
+                        1). TPE proposes a batch from one posterior, which
+                        changes the search's trajectory
   --edge-padding {between,all}
                         pad annulus edges only where two annuli meet (between,
                         the default) or on every edge including the innermost
@@ -495,6 +511,7 @@ usage: klip-tpe resume [-h] [--instrument {near,nomic,generic}]
                        [--group-min-frames GROUP_MIN_FRAMES]
                        [--group-smooth GROUP_SMOOTH] [--max-frames MAX_FRAMES]
                        [--workers WORKERS] [--pool {auto,processes,threads}]
+                       [--threads-per-job THREADS_PER_JOB]
                        [--weighting {equal,sqrt_texp}] [--fast] [--no-library]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
@@ -525,6 +542,10 @@ options:
   --pool {auto,processes,threads}
                         how the budget is spent: forked worker processes
                         (default; the IDL bridges) or threads
+  --threads-per-job THREADS_PER_JOB
+                        threads per partition job (default 4). The pool gets
+                        workers / threads-per-job processes, never fewer than
+                        min(workers, 2 x partitions)
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --no-library
@@ -627,6 +648,7 @@ usage: klip-tpe extend [-h] [--instrument {near,nomic,generic}]
                        [--group-min-frames GROUP_MIN_FRAMES]
                        [--group-smooth GROUP_SMOOTH] [--max-frames MAX_FRAMES]
                        [--workers WORKERS] [--pool {auto,processes,threads}]
+                       [--threads-per-job THREADS_PER_JOB]
                        [--weighting {equal,sqrt_texp}] [--fast] [--no-library]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
@@ -654,6 +676,10 @@ options:
   --pool {auto,processes,threads}
                         how the budget is spent: forked worker processes
                         (default; the IDL bridges) or threads
+  --threads-per-job THREADS_PER_JOB
+                        threads per partition job (default 4). The pool gets
+                        workers / threads-per-job processes, never fewer than
+                        min(workers, 2 x partitions)
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --no-library
@@ -779,6 +805,7 @@ usage: klip-tpe replay [-h] [--instrument {near,nomic,generic}]
                        [--group-min-frames GROUP_MIN_FRAMES]
                        [--group-smooth GROUP_SMOOTH] [--max-frames MAX_FRAMES]
                        [--workers WORKERS] [--pool {auto,processes,threads}]
+                       [--threads-per-job THREADS_PER_JOB]
                        [--weighting {equal,sqrt_texp}] [--fast] [--no-library]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
@@ -809,6 +836,10 @@ options:
   --pool {auto,processes,threads}
                         how the budget is spent: forked worker processes
                         (default; the IDL bridges) or threads
+  --threads-per-job THREADS_PER_JOB
+                        threads per partition job (default 4). The pool gets
+                        workers / threads-per-job processes, never fewer than
+                        min(workers, 2 x partitions)
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --no-library
@@ -911,6 +942,7 @@ usage: klip-tpe compare [-h] [--instrument {near,nomic,generic}]
                         [--group-smooth GROUP_SMOOTH]
                         [--max-frames MAX_FRAMES] [--workers WORKERS]
                         [--pool {auto,processes,threads}]
+                        [--threads-per-job THREADS_PER_JOB]
                         [--weighting {equal,sqrt_texp}] [--fast]
                         [--no-library] [--no-clean-subtract] [--ladder-pair]
                         [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
@@ -946,6 +978,10 @@ options:
   --pool {auto,processes,threads}
                         how the budget is spent: forked worker processes
                         (default; the IDL bridges) or threads
+  --threads-per-job THREADS_PER_JOB
+                        threads per partition job (default 4). The pool gets
+                        workers / threads-per-job processes, never fewer than
+                        min(workers, 2 x partitions)
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --no-library

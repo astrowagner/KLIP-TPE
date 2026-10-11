@@ -155,12 +155,32 @@ def pin_blas(limit: int = 1) -> bool:
     return True
 
 
-def describe(workers: int, n_partitions: int) -> str:
-    conc = 2 if workers >= 2 else 1
-    per = max(workers // max(conc * n_partitions, 1), 1)
-    return (f"{workers} workers on {cpu_count()} cores: injected + clean reductions "
-            f"{'concurrent' if conc == 2 else 'sequential'}, {min(workers, conc * n_partitions)} partition jobs in "
-            f"parallel, {per} target thread(s) per partition job")
+def mem_available() -> Optional[int]:
+    """Bytes of memory the kernel says are available to new work (Linux ``MemAvailable``),
+    or None."""
+    try:
+        with open("/proc/meminfo") as f:
+            for ln in f:
+                if ln.startswith("MemAvailable:"):
+                    return int(ln.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def describe(workers: int, n_partitions: int, procs: Optional[int] = None,
+             per_job: Optional[int] = None) -> str:
+    """The run log's line about the worker budget.  ``procs`` / ``per_job``: the worker
+    processes and per-target threads per job (the thread-pool fallback passes None)."""
+    if procs is None:
+        conc = 2 if workers >= 2 else 1
+        per = max(workers // max(conc * n_partitions, 1), 1) if per_job is None else per_job
+        return (f"{workers} workers on {cpu_count()} cores: injected + clean reductions "
+                f"{'concurrent' if conc == 2 else 'sequential'}, {min(workers, conc * n_partitions)} partition "
+                f"jobs in parallel, {per} target thread(s) per partition job")
+    return (f"{workers} workers on {cpu_count()} cores: {procs} worker processes x {per_job} target thread(s), "
+            f"{n_partitions} partitions per reduction, so {max(procs // max(n_partitions, 1), 1)} "
+            f"reduction(s) at full width at once")
 
 
 # ----------------------------------------------------------------------------
@@ -275,7 +295,15 @@ class ProcessPool:
         _install_signal_reaper()
         self._next = 0
         self._lock = threading.Lock()
-        self._pending: dict = {}
+        self._futures: dict = {}           # job id -> Future, settled by the collector
+        self._closed = False
+        # One thread reads every result and settles the job's future.  Several callers map
+        # at once (the runner keeps a trial's reductions in flight together).  When each
+        # caller read the queue itself, a result another caller picked up sat in a dict
+        # until its owner's next read timed out: up to a second per reduction, more than a
+        # synthetic reduction takes.  Started after the fork, so no worker has it.
+        self._collector = threading.Thread(target=self._collect, name="klip-pool-results", daemon=True)
+        self._collector.start()
 
     @staticmethod
     def _queues(ctx, tries: int = 3):
@@ -300,49 +328,83 @@ class ProcessPool:
     def alive(self) -> bool:
         return all(p.is_alive() for p in self.procs)
 
+    def memory(self) -> Optional[dict]:
+        """Linux only, None elsewhere: each worker's peak resident set (``VmHWM``, which
+        counts in full the copy-on-write data it shares with the parent and the other
+        workers) and the pool's proportional set now (``Pss``, every shared page split
+        between the processes using it), in bytes."""
+        peaks, pss = [], 0
+        for p in self.procs:
+            try:
+                with open(f"/proc/{p.pid}/status") as f:
+                    peaks += [int(ln.split()[1]) * 1024 for ln in f if ln.startswith("VmHWM:")]
+                with open(f"/proc/{p.pid}/smaps_rollup") as f:
+                    pss += sum(int(ln.split()[1]) * 1024 for ln in f if ln.startswith("Pss:"))
+            except (OSError, ValueError, IndexError):
+                return None
+        return {"peak": peaks, "pss": pss} if len(peaks) == len(self.procs) else None
+
     def map(self, jobs):
         """``jobs = [(pid, request), ...]`` -> results in order (thread-safe: several
-        callers may map concurrently)."""
+        callers may map concurrently).  A failed job raises its exception.  Waiting from
+        the main thread services the live window (:func:`pump_wait`)."""
+        futs = []
         with self._lock:
-            ids = []
+            if self._closed or not self._collector.is_alive():
+                raise RuntimeError("klip-tpe worker pool is closed")
             for pid, req in jobs:
-                jid = self._next; self._next += 1
-                ids.append(jid)
+                jid = self._next
+                self._next += 1
+                f = cf.Future()
+                self._futures[jid] = f
+                futs.append(f)
                 self.inq.put((jid, pid, req))
-        want = set(ids)
-        got = {}
-        while want:
-            with self._lock:
-                for jid in list(want):
-                    if jid in self._pending:
-                        got[jid] = self._pending.pop(jid); want.discard(jid)
-            if not want:
+        return pump_wait(futs)
+
+    def _collect(self) -> None:
+        """The collector thread: every result off the queue to its job's future, and every
+        outstanding job failed when a worker has died (it can never come back) or the pool
+        closes."""
+        while not self._closed:
+            try:
+                item = self.outq.get(timeout=1.0)
+            except _queue.Empty:
+                try:
+                    if not self._closed and not self.alive():
+                        dead = [p.name for p in self.procs if not p.is_alive()]
+                        self._fail_all(lambda n: RuntimeError(
+                            f"klip-tpe worker(s) {', '.join(dead)} died while {n} job(s) were outstanding, "
+                            f"so this evaluation can never complete. The run checkpoints after every "
+                            f"evaluation -- restart it with  klip-tpe resume"))
+                except Exception:
+                    pass
+                continue
+            except Exception:                  # the queue went away (interpreter exit)
+                break
+            if item is None:                   # close()
                 break
             try:
-                jid, res = self.outq.get(timeout=0.1 if IDLE_HOOKS else 1.0)
-            except _queue.Empty:
-                if not self.alive():
-                    dead = [p.name for p in self.procs if not p.is_alive()]
-                    raise RuntimeError(
-                        f"klip-tpe worker(s) {', '.join(dead)} died while {len(want)} job(s) were "
-                        f"outstanding, so this evaluation can never complete. The run checkpoints "
-                        f"after every evaluation -- restart it with  klip-tpe resume")
-                run_idle_hooks()
-                continue
-            if jid in want:
-                got[jid] = res; want.discard(jid)
-            else:
+                jid, res = item
                 with self._lock:
-                    self._pending[jid] = res
-        out = []
-        for jid in ids:
-            r = got[jid]
-            if isinstance(r, BaseException):
-                raise r
-            out.append(r)
-        return out
+                    f = self._futures.pop(jid, None)
+                if f is not None and not f.done():
+                    if isinstance(res, BaseException):
+                        f.set_exception(res)
+                    else:
+                        f.set_result(res)
+            except Exception:
+                pass
+        self._fail_all(lambda n: RuntimeError(f"klip-tpe worker pool closed with {n} job(s) outstanding"))
+
+    def _fail_all(self, make_exc) -> None:
+        with self._lock:
+            futs, self._futures = self._futures, {}
+        for f in futs.values():
+            if not f.done():
+                f.set_exception(make_exc(len(futs)))
 
     def close(self):
+        self._closed = True
         for _ in self.procs:
             try:
                 self.inq.put(None)
@@ -352,6 +414,10 @@ class ProcessPool:
             p.join(timeout=5)
             if p.is_alive():
                 p.terminate()
+        try:
+            self.outq.put(None)                # wakes the collector
+        except Exception:
+            pass
 
     def __del__(self):
         try:

@@ -63,22 +63,47 @@ cell that shows the newest step panel and the log tail, and a resume cell.
 
 ## Cores
 
-`--workers auto` (the default; `max_workers="auto"` in the API) uses every core the process
-can see.  The budget is spent like IDL's bridges: after the nights are loaded the reducer forks
-`min(workers, 2 × nights)` worker processes that share the loaded cubes (copy-on-write, nothing
-is pickled but requests and the small result images); the injected and the clean reduction of
-an evaluation run concurrently, each mapping its selected nights onto those workers (with
-`--n-remeasure N` a trial reduces its clean image once, with the first draw, and the other
-injected reductions then run two at a time); whatever
-budget is left over becomes per-target threads inside each night's KLIP loop; BLAS is pinned to
-one thread per worker.  `--pool threads` keeps everything in one process (slower: Python's GIL
-limits the thread version to roughly one to two cores' worth of work), `--workers 8` pins the
-budget, `--workers -2` leaves two cores free.  The startup log prints the plan, e.g.
-`parallel: 12 workers on 12 cores: injected + clean reductions concurrent, 12 partition jobs in
-parallel, 1 target thread(s) per partition job; pool = processes`.
+`--workers auto` uses every core the process can see (the default, `max_workers="auto"` in
+the API).  `--workers 8` pins the budget and `--workers -2` leaves two cores free.  The budget
+is spent like IDL's bridges.  After the nights are loaded the reducer forks
+`workers / threads-per-job` worker processes, and never fewer than `min(workers, 2 × nights)`.
+They share the loaded cubes copy-on-write, and only requests and the small result images
+cross between processes.  Each partition job runs its per-target KLIP work on
+`--threads-per-job` threads (4 by default, since a job gains little past about 4), and BLAS
+is pinned to one thread per worker thread.  `--pool threads` keeps everything in one process.
+It is slower, since Python's GIL limits the thread version to roughly one to two cores' worth
+of work.
 
-Memory: six NEAR nights are ~2000 frames × 150² each and are shared by the workers; each
-worker holds one binned cube while it reduces — a few GB in total.
+The runner keeps as many reductions in flight as the pool can serve, and takes their results
+in order:
+
+* A trial reduces its clean image and all `--n-remeasure` injected images in one round.  Each
+  draw is scored as soon as its image and the clean image are back.
+* Validation reduces a candidate's clean image and its trials several at a time, enough to
+  fill the pool, and reports the trials in order.
+* param_verify, the calibration remeasurements and the k-scan pair work the same way.
+
+Every draw's positions are drawn first, in the order a one-at-a-time loop draws them.  The
+schedule changes when a reduction finishes, not what it returns, so a run writes the records a
+one-at-a-time loop writes, and a resumed run continues exactly where it stopped.
+
+A trial of N nights at `--n-remeasure 3` is 4N partition jobs, so for six nights
+`--workers 96` (24 processes of 4 threads) runs a trial in one round.  The startup log prints
+the plan:
+
+```
+parallel: 96 workers on 192 cores: 24 worker processes x 4 target thread(s), 6 partitions per reduction, so 4 reduction(s) at full width at once; pool = processes
+```
+
+`--batch B` evaluates B proposals at a time, concurrently (default 1).  TPE proposes them
+from one posterior, so a batched search follows a different trajectory from `--batch 1`.  The
+batch size is recorded in `run_setup.txt`.  A batch is checkpointed once all of it is in, so
+a run stopped part way through a batch resumes at its start and repeats it exactly.
+
+Six NEAR nights are ~2000 frames × 150² each, and the workers share them.  Each running job
+holds its own binned cube and KL bases.  On Linux the log reports, after the
+search and after validation, the workers' peak resident memory and what they hold together,
+which is what a given pool size needs on that machine.
 
 ## Interruptions
 
@@ -162,7 +187,8 @@ that record. Anything you pass explicitly wins over the record, so
 `klip-tpe resume --workers 4` changes the worker count and nothing else. It refuses to
 resume a run that is still going, rather than putting two writers on one directory.
 
-Runs checkpoint after **every** evaluation, so an interrupted run loses at most one.
+Runs checkpoint after **every** evaluation, so an interrupted run loses at most one.  With
+`--batch B` they checkpoint after every batch, and an interrupted run repeats that batch.
 
 ### The live window
 

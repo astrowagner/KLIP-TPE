@@ -1,5 +1,60 @@
 # Changelog
 
+## Unreleased — 2026-10-11 (several reductions in flight: one round per trial, validation in parallel, a pool sized by the thread budget, `--batch`)
+
+From the NEAR2 session's note of 2026-10-11 (proposals 1 to 4).  The first three change when
+a reduction runs, never what it returns.  A run writes the records the one-at-a-time schedule
+wrote, and a stopped run resumes to them.
+
+- **The worker pool hands each result to its caller at once.**  Every caller of
+  `ProcessPool.map` read the shared result queue itself.  A result another caller read first
+  waited until its owner's next read timed out, 0.1 s with a live window in the process and
+  1 s without one.  A trial's injected and clean reductions are two such callers.  With six
+  jobs of 0.5 s each on 12 processes, a round of the two took 1.13 s on average instead of
+  0.50 s.  One collector thread now settles each job's future, and the round takes 0.50 s.  A
+  synthetic run on 4 worker processes took 32 s against 5.6 s on one process, and now takes
+  5.8 s.  A worker that dies still fails the jobs it held.
+- **A trial's reductions go out in one round.**  On a parallel reducer the clean image and all
+  `--n-remeasure` injected images are reduced together, `(n + 1) x partitions` jobs, and each
+  draw is scored as soon as its image and the clean image are back.  They went in two rounds:
+  the first draw with the clean image, then the other draws two at a time.  The positions are
+  drawn first, in order, and the tags stay `a1_e123_d2_inj`.  A failed clean reduction still
+  fails the first draw, and the later draws reduce their own.
+- **Validation runs several trials at a time.**  A candidate's trial positions are drawn
+  first, in order, each record keeping the generator state after its own draw.  The clean
+  image and the trials are then reduced a few at a time, enough to fill the pool, and scored,
+  checkpointed and reported in trial order.  param_verify reduces its configurations' clean
+  and injected pairs the same way, and so do the calibration remeasurements, the calibration
+  k-scan and the scan pair of the k-scan modes.  The KLIP-FM curve is a single reduction.
+- **The worker pool is sized by the thread budget.**  `PartitionedReducer` forked
+  `min(workers, 2 x partitions)` processes, 12 for NEAR2's six nights whatever `--workers`
+  said, so a larger budget only raised the threads per job.  It now forks
+  `workers // threads_per_job` processes, never fewer than before, and gives each job
+  `workers // processes` threads.  `--threads-per-job` sets it (default 4).  At
+  `--workers 96` six nights get 24 processes of 4 threads, and a trial at `--n-remeasure 3`
+  (24 partition jobs) runs in one round.  At `--workers 50` the pool stays at 12 processes.
+  The thread-pool fallback keeps its old rule.
+- **`--batch B` evaluates B proposals concurrently** (`RunConfig.batch`, default 1).  Each
+  proposal is projected, given its eval index and its draws in proposal order.  Then all
+  their reductions go out together, and the trials are scored and appended in index order.
+  The same batch evaluated one proposal at a time gives the same history.  TPE proposes a
+  batch from one posterior, which changes the search's trajectory, so it stays off by
+  default, and `run_setup.txt` records it.
+  - A batch is checkpointed once it is all in, also when it is evaluated one proposal at a
+    time.  A run stopped part way through a batch resumes at its start and repeats it
+    exactly.
+  - A re-calibration inside a batch drops the proposals after it and puts the generator back
+    where a one-at-a-time loop leaves it.
+- After the search and after validation the log reports the worker processes' peak resident
+  memory and what they hold together (Linux), for sizing the pool against the machine.
+- The worker processes are forked before the heartbeat thread and before any reduction
+  thread starts.
+- `tests/test_concurrency.py` compares a serial run with the same run on worker processes,
+  record for record, with reductions finishing out of order on purpose.  Runs stopped
+  mid-round, mid-validation-chunk and mid-batch resume to the same records.  A concurrent
+  batch matches the batch evaluated one proposal at a time, with a re-calibration and a
+  failed clean reduction inside it.
+
 ## Unreleased — 2026-10-11 (annulus edges padded only where two annuli meet)
 
 - **Only the edges between annuli are padded.**  The inner edge of the innermost annulus and
