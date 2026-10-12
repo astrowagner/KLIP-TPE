@@ -17,9 +17,44 @@ import numpy as np
 from scipy import ndimage
 
 __all__ = ["frame_selection_mask", "bin_frames", "bin_groups", "bin_by_groups", "bin_angles",
-           "highpass", "destripe", "rotate_ccw", "derotate", "nw_ang_comb", "nw_ang_comb_ref",
+           "highpass", "highpass_stack", "destripe", "rotate_ccw", "derotate", "nw_ang_comb", "nw_ang_comb_ref",
            "klip_basis", "zone_indices", "klip_annular", "klip_fm_zone", "arcdist_deg",
            "reference_mask", "KLIPParams"]
+
+
+# ----------------------------------------------------------------------------
+# frame blocks on the job's threads
+# ----------------------------------------------------------------------------
+#: float64 bytes one block of frames may take per temporary array: about 5 frames of
+#: 150 x 150, which stays in cache (larger blocks ran slower than frame by frame)
+BLOCK_BYTES = 1_000_000
+
+
+def frame_blocks(n: int, threads: int = 1, frame_px: int = 0) -> List[Tuple[int, int]]:
+    """Contiguous ``[lo, hi)`` ranges over ``n`` frames: at least two per thread, and none
+    whose float64 copy (``frame_px`` pixels a frame) exceeds :data:`BLOCK_BYTES`."""
+    n = int(n)
+    if n <= 0:
+        return []
+    k = 1 if threads <= 1 else min(n, 2 * int(threads))
+    if frame_px > 0:
+        k = max(k, -(-n * int(frame_px) * 8 // BLOCK_BYTES))
+    k = min(k, n)
+    edges = np.linspace(0, n, k + 1).round().astype(int)
+    return [(int(a), int(b)) for a, b in zip(edges[:-1], edges[1:]) if b > a]
+
+
+def run_blocks(fn, blocks: Sequence[Tuple[int, int]], threads: int = 1) -> None:
+    """``fn(lo, hi)`` for every block, on ``threads`` threads of the process-wide pool.
+    Each block writes only its own frames, so the result is the same whatever the order
+    the blocks run in."""
+    blocks = list(blocks)
+    if int(threads) <= 1 or len(blocks) <= 1:
+        for lo, hi in blocks:
+            fn(lo, hi)
+        return
+    from .parallel import target_pool
+    list(target_pool(int(threads)).map(lambda b: fn(*b), blocks))
 
 
 # ----------------------------------------------------------------------------
@@ -98,32 +133,42 @@ def bin_groups(angles: np.ndarray, bin_: int, dth_max_deg: float) -> np.ndarray:
     return _bin_groups(angles, b, dth_max_deg)
 
 
-def bin_by_groups(cube: np.ndarray, grp: np.ndarray) -> np.ndarray:
+def bin_by_groups(cube: np.ndarray, grp: np.ndarray, threads: int = 1, dtype=np.float32) -> np.ndarray:
     """Mean-combine the frames of each group (``bin_type='mean'``; the model cube is
-    always mean-binned, reduce_near_2 L1792-1806)."""
+    always mean-binned, reduce_near_2 L1792-1806).  ``threads``: groups go to that many
+    threads, each group combined as before.  ``dtype=np.float64`` sums and keeps the means
+    in double precision, for frames that still carry their background."""
     ng = int(grp.max()) + 1 if grp.size else 0
-    bc = np.empty((ng,) + cube.shape[1:], np.float32)
-    for g in range(ng):
-        w = np.flatnonzero(grp == g)
-        bc[g] = cube[w].mean(axis=0) if w.size > 1 else cube[w[0]]
+    bc = np.empty((ng,) + cube.shape[1:], dtype)
+    acc = None if np.dtype(dtype) == np.float32 else dtype
+
+    def block(lo, hi):
+        for g in range(lo, hi):
+            w = np.flatnonzero(grp == g)
+            bc[g] = cube[w].mean(axis=0, dtype=acc) if w.size > 1 else cube[w[0]]
+    run_blocks(block, frame_blocks(ng, threads), threads)
     return bc
 
 
 def bin_frames(cube: np.ndarray, angles: np.ndarray, bin_: int, dth_max_deg: float,
-               return_groups: bool = False):
+               return_groups: bool = False, threads: int = 1, then=None, dtype=np.float32):
     """Mean-combine consecutive frames into bins of at most ``bin_`` frames, closing
     a bin early when its PA span would exceed ``dth_max_deg``.  Drops all-zero bins
     (``bads``, reduce_near_2 L1747-1761).  With ``return_groups`` also returns
     ``(grp, keep)`` so a companion cube can be binned identically
-    (:func:`bin_by_groups` followed by ``[keep]``)."""
+    (:func:`bin_by_groups` followed by ``[keep]``).  ``then``: applied to the binned
+    cube before the all-zero test (the high-pass, when it follows the binning); ``dtype``
+    the precision of the means (:func:`bin_by_groups`)."""
     angles = np.asarray(angles, float)
     grp = bin_groups(angles, bin_, dth_max_deg)
     if int(round(max(bin_, 1))) <= 1:
         bc, ba = np.asarray(cube, np.float32), angles.copy()
     else:
-        bc = bin_by_groups(cube, grp)
+        bc = bin_by_groups(cube, grp, threads=threads, dtype=dtype)
         ng = grp.max() + 1
         ba = np.bincount(grp, weights=angles, minlength=ng) / np.bincount(grp, minlength=ng)
+    if then is not None:
+        bc = then(bc)
     tot = np.array([np.nansum(f) for f in bc])
     keep = tot != 0
     if return_groups:
@@ -142,26 +187,54 @@ def highpass(img: np.ndarray, width: int, nan_aware: bool = False) -> np.ndarray
     w = int(width)
     if w <= 1:
         return np.asarray(img, np.float32)
+    return _highpass_frames(img, w, nan_aware)
+
+
+def _highpass_frames(img: np.ndarray, width: int, nan_aware: bool) -> np.ndarray:
+    """:func:`highpass` of one frame ``(ny, nx)`` or of a block of frames ``(n, ny, nx)``,
+    each frame filtered on its own: the boxcar spans the last two axes only, which
+    ``ndimage`` computes line by line exactly as it does for a single frame."""
+    w = int(width)
     if w % 2 == 0:
         w += 1
     img = np.asarray(img, np.float64)
+    size = (1,) * (img.ndim - 2) + (w, w)
     if nan_aware:
         fin = np.isfinite(img)
-        num = ndimage.uniform_filter(np.where(fin, img, 0.0), w, mode="constant")
-        den = ndimage.uniform_filter(fin.astype(float), w, mode="constant")
+        num = ndimage.uniform_filter(np.where(fin, img, 0.0), size, mode="constant")
+        den = ndimage.uniform_filter(fin.astype(float), size, mode="constant")
         with np.errstate(invalid="ignore", divide="ignore"):
             sm = np.where(den > 0, num / den, np.nan)
     else:
-        sm = ndimage.uniform_filter(img, w, mode="constant")
+        sm = ndimage.uniform_filter(img, size, mode="constant")
     h = w // 2
     out = img - sm
-    out[:h, :] = 0.0
-    out[-h:, :] = 0.0
-    out[:, :h] = 0.0
-    out[:, -h:] = 0.0
+    out[..., :h, :] = 0.0
+    out[..., -h:, :] = 0.0
+    out[..., :, :h] = 0.0
+    out[..., :, -h:] = 0.0
     # NaN pixels stay NaN (smooth without /nan propagates them anyway)
     out[~np.isfinite(img)] = np.nan
     return out.astype(np.float32)
+
+
+def highpass_stack(cube: np.ndarray, width: int, nan_aware: bool = False, threads: int = 1) -> np.ndarray:
+    """:func:`highpass` of every frame of ``cube``, the same numbers frame for frame.
+
+    The frames are filtered a block at a time, one ``ndimage`` call per block, which runs
+    its loop without holding the GIL, so the blocks can share ``threads`` threads.  Frame
+    by frame, the per-call overhead held the GIL and left a job's other threads idle."""
+    cube = np.asarray(cube)
+    if int(width) <= 1:
+        return np.asarray(cube, np.float32)
+    out = np.empty(cube.shape, np.float32)
+    if cube.shape[0] == 0:
+        return out
+
+    def block(lo, hi):
+        out[lo:hi] = _highpass_frames(cube[lo:hi], width, nan_aware)
+    run_blocks(block, frame_blocks(cube.shape[0], threads, int(np.prod(cube.shape[1:]))), threads)
+    return out
 
 
 # ----------------------------------------------------------------------------
@@ -235,35 +308,63 @@ def rotate_ccw(img: np.ndarray, angle_deg: float, cval: float = np.nan, order: i
     cx, cy = (nx - 1) / 2.0, (ny - 1) / 2.0
     a = np.deg2rad(angle_deg)
     ca, sa = np.cos(a), np.sin(a)
-    yy, xx = np.mgrid[0:ny, 0:nx]
-    dx, dy = xx - cx, yy - cy
+    dx, dy = _centred_grid(ny, nx)
     xs = cx + ca * dx + sa * dy
     ys = cy - sa * dx + ca * dy
     fin = np.isfinite(img)
-    out = ndimage.map_coordinates(np.where(fin, img, 0.0), [ys, xs], order=order, mode="constant", cval=0.0)
-    # stencil validity: 1 where every contributing input pixel is finite and inside
-    w = ndimage.map_coordinates(fin.astype(float), [ys, xs], order=order, mode="constant", cval=0.0)
     inside = (xs >= 0) & (xs <= nx - 1) & (ys >= 0) & (ys <= ny - 1)
-    if mode == "propagate":
-        out[(w < 1.0 - 1e-6) & inside] = np.nan
-    else:                                  # "zero": NaN neighbours count as 0, no-coverage -> NaN
-        out[(w <= 1e-6) & inside] = np.nan
+    if order == 1 and fin.all():
+        # Every bilinear stencil of a point inside the frame lies on finite input pixels,
+        # so the validity weight below would be 1 there and mark nothing: skip it.  A
+        # finite input is every rotation nw_ang_comb makes, three per frame.
+        out = ndimage.map_coordinates(img, [ys, xs], order=1, mode="constant", cval=0.0)
+    else:
+        out = ndimage.map_coordinates(np.where(fin, img, 0.0), [ys, xs], order=order, mode="constant", cval=0.0)
+        # stencil validity: 1 where every contributing input pixel is finite and inside
+        w = ndimage.map_coordinates(fin.astype(float), [ys, xs], order=order, mode="constant", cval=0.0)
+        if mode == "propagate":
+            out[(w < 1.0 - 1e-6) & inside] = np.nan
+        else:                                  # "zero": NaN neighbours count as 0, no-coverage -> NaN
+            out[(w <= 1e-6) & inside] = np.nan
     out[~inside] = cval
     return out
 
 
-def derotate(cube: np.ndarray, angles: np.ndarray, truenorth: float = 0.0) -> np.ndarray:
-    """Rotate every frame CCW by ``angle + truenorth`` (sky North up after this)."""
+_GRIDS: Dict[Tuple[int, int], Tuple[np.ndarray, np.ndarray]] = {}
+
+
+def _centred_grid(ny: int, nx: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Pixel offsets ``(x - cx, y - cy)`` from the frame centre, kept per frame shape
+    (read-only) instead of rebuilt for every rotation."""
+    g = _GRIDS.get((ny, nx))
+    if g is None:
+        yy, xx = np.mgrid[0:ny, 0:nx]
+        g = (xx - (nx - 1) / 2.0, yy - (ny - 1) / 2.0)
+        for arr in g:
+            arr.setflags(write=False)
+        if len(_GRIDS) >= 16:
+            _GRIDS.clear()
+        _GRIDS[(ny, nx)] = g
+    return g
+
+
+def derotate(cube: np.ndarray, angles: np.ndarray, truenorth: float = 0.0, threads: int = 1) -> np.ndarray:
+    """Rotate every frame CCW by ``angle + truenorth`` (sky North up after this).
+    ``threads``: the frames go to that many threads, each rotated as before."""
     out = np.empty_like(cube, dtype=np.float32)
-    for i in range(cube.shape[0]):
-        out[i] = rotate_ccw(cube[i], float(angles[i]) + truenorth)
+
+    def block(lo, hi):
+        for i in range(lo, hi):
+            out[i] = rotate_ccw(cube[i], float(angles[i]) + truenorth)
+    run_blocks(block, frame_blocks(cube.shape[0], threads), threads)
     return out
 
 
 # ----------------------------------------------------------------------------
 # noise-weighted ADI combination (nw_ang_comb.pro)
 # ----------------------------------------------------------------------------
-def nw_ang_comb(derot_cube: np.ndarray, angles: np.ndarray, ref_cube: Optional[np.ndarray] = None) -> np.ndarray:
+def nw_ang_comb(derot_cube: np.ndarray, angles: np.ndarray, ref_cube: Optional[np.ndarray] = None,
+                threads: int = 1) -> np.ndarray:
     """Coverage-weighted inverse-variance mean of an already-derotated cube.  The
     per-pixel temporal variance is measured in the pupil frame (frames rotated back
     by ``angles``), floored at ``median(var>0)*1e-6``, rotated forward again and
@@ -272,21 +373,28 @@ def nw_ang_comb(derot_cube: np.ndarray, angles: np.ndarray, ref_cube: Optional[n
     ``ref_cube`` (``nw_ang_comb_ref.pro``): measure the variance -- i.e. the
     weights -- on this derotated cube (the SCIENCE residuals) instead of on the
     input, so a noiseless model cube is averaged with exactly the weights the
-    science frames received (the linear forward model of the nwadi combine)."""
+    science frames received (the linear forward model of the nwadi combine).
+
+    ``threads``: the rotations, three per frame, go to that many threads.  The weighted
+    sums are still taken in frame order, so the result is the one-thread result."""
     n = derot_cube.shape[0]
     if n == 1:
         return np.asarray(derot_cube[0], float)
     src = derot_cube if ref_cube is None else ref_cube
     A = np.empty(derot_cube.shape, np.float64)
-    for i in range(n):
-        A[i] = rotate_ccw(np.where(np.isfinite(derot_cube[i]), derot_cube[i], 0.0), -float(angles[i]), cval=0.0)
+
+    def back(cube, dst):
+        def block(lo, hi):
+            for i in range(lo, hi):
+                dst[i] = rotate_ccw(np.where(np.isfinite(cube[i]), cube[i], 0.0), -float(angles[i]), cval=0.0)
+        return block
+    run_blocks(back(derot_cube, A), frame_blocks(n, threads), threads)
     A[~np.isfinite(A)] = 0.0
     if ref_cube is None:
         V = A
     else:
         V = np.empty(derot_cube.shape, np.float64)
-        for i in range(n):
-            V[i] = rotate_ccw(np.where(np.isfinite(src[i]), src[i], 0.0), -float(angles[i]), cval=0.0)
+        run_blocks(back(src, V), frame_blocks(n, threads), threads)
         V[~np.isfinite(V)] = 0.0
     var = np.var(V, axis=0, ddof=1)
     pos = var[var > 0]
@@ -295,14 +403,35 @@ def nw_ang_comb(derot_cube: np.ndarray, angles: np.ndarray, ref_cube: Optional[n
     num = np.zeros(A.shape[1:])
     den = np.zeros(A.shape[1:])
     cov = np.isfinite(derot_cube)
-    for i in range(n):
+
+    def weigh(i):
+        """frame i's weighted image and weight, back in the sky frame"""
         Ai = rotate_ccw(A[i], float(angles[i]), cval=0.0)
         Vi = np.maximum(rotate_ccw(var, float(angles[i]), cval=0.0), vfloor)
         Ai[~np.isfinite(Ai)] = 0.0
         Vi[~np.isfinite(Vi)] = vfloor
         inv = cov[i] / Vi
-        num += Ai * inv
-        den += inv
+        return Ai * inv, inv
+    if int(threads) <= 1:
+        for i in range(n):
+            wi, inv = weigh(i)
+            num += wi
+            den += inv
+    else:
+        # a span of frames at a time on the threads, then added up in frame order
+        span = max(2 * int(threads), int(BLOCK_BYTES // max(A[0].nbytes, 1)))
+        for s0 in range(0, n, span):
+            s1 = min(s0 + span, n)
+            wimg = np.empty((s1 - s0,) + A.shape[1:])
+            winv = np.empty((s1 - s0,) + A.shape[1:])
+
+            def fwd(lo, hi, s0=s0, wimg=wimg, winv=winv):
+                for i in range(s0 + lo, s0 + hi):
+                    wimg[i - s0], winv[i - s0] = weigh(i)
+            run_blocks(fwd, frame_blocks(s1 - s0, threads), threads)
+            for j in range(s1 - s0):
+                num += wimg[j]
+                den += winv[j]
     out = num / np.maximum(den, 1e-30)
     out[den <= 0] = np.nan
     return out

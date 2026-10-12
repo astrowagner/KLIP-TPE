@@ -8,8 +8,12 @@ risk:
 2. a trial's clean image and all its draws reduced in one round;
 3. validation trials, param_verify configurations, calibration remeasurements and the
    k-scan pair reduced several at a time and taken in order;
-4. ``RunConfig.batch`` (``--batch``): that many proposals evaluated concurrently, opt-in
-   because TPE then proposes them from one posterior.
+4. ``RunConfig.batch`` (``--batch``): that many trials in flight, opt-in because TPE then
+   proposes from an older posterior.
+
+and the second note, the same day: a batch keeps its trials in flight (a new proposal as
+soon as the oldest trial is in, ``batch_mode="pipeline"``), and the pool sends the longest
+job first.
 
 What must hold:
 
@@ -18,9 +22,12 @@ What must hold:
 * draws, validation trials and trials of a batch are reported in order, from the main
   thread, however their reductions finish;
 * a run stopped part way through a trial or a validation chunk resumes to those records;
-* a concurrent batch gives the history the same batch gives one proposal at a time, and a
-  run stopped part way through a batch resumes to it;
-* the worker pool hands each result to the caller that asked for it, at once.
+* a batch, pipelined or whole, gives the same history on one process and on many, a
+  re-calibration and a failed clean reduction inside it included;
+* a pipelined run stopped with trials in flight resumes to the run that never stopped, and
+  a run stopped part way through a whole batch resumes at the batch's start;
+* the worker pool hands each result to the caller that asked for it, at once, and takes
+  the waiting job with the smallest key first.
 """
 from __future__ import annotations
 
@@ -367,13 +374,13 @@ def test_the_k_scan_modes_give_the_serial_run_on_worker_processes(tmp_path):
 
 # ------------------------------------------------------------ 4. concurrent batches
 @pytest.mark.slow
-@pytest.mark.parametrize("n_remeasure", [1, 3])
-def test_a_concurrent_batch_is_the_batch_one_proposal_at_a_time(tmp_path, n_remeasure):
-    """A serial reducer evaluates a batch one proposal at a time; worker processes evaluate
-    it at once.  A re-calibration lands inside a batch here (at eval 6 of 1 + 3 + 3), so
-    the proposals after it are dropped and the generator goes back to where the one-at-a-
-    time loop left it."""
-    over = dict(batch=3, n_remeasure=n_remeasure)
+@pytest.mark.parametrize("mode,n_remeasure", [("sync", 1), ("sync", 3), ("pipeline", 1), ("pipeline", 3)])
+def test_a_batch_is_the_same_on_one_process_and_on_many(tmp_path, mode, n_remeasure):
+    """A serial reducer reduces a batch's trials one at a time; worker processes reduce them
+    together.  A re-calibration lands inside a batch here (at eval 6 of 1 + 3 + 3, or with
+    two trials still in flight), so the trials after it are dropped and the generator goes
+    back to where it was after the trial that triggered it."""
+    over = dict(batch=3, n_remeasure=n_remeasure, batch_mode=mode)
     logs, runs = {}, []
     for w in (1, 4):
         red, space, obj, samp, cfg = _objs(workers=w, **over)
@@ -402,11 +409,11 @@ def test_a_concurrent_batch_is_the_batch_one_proposal_at_a_time(tmp_path, n_reme
 
 
 @pytest.mark.slow
-def test_a_batch_stopped_part_way_resumes_at_its_start(tmp_path):
-    """The batch is checkpointed whole: stopped after its first proposal was recorded, the
-    resumed run asks for the same batch again and is the run that never stopped (the first
-    proposal is in results.jsonl twice, and the readers keep the first)."""
-    over = dict(batch=3, calibration=CalibrationConfig(recal_budget=0))
+def test_a_whole_batch_stopped_part_way_resumes_at_its_start(tmp_path):
+    """``batch_mode="sync"`` checkpoints a batch whole: stopped after its first proposal was
+    recorded, the resumed run asks for the same batch again and is the run that never
+    stopped (the first proposal is in results.jsonl twice, and the readers keep the first)."""
+    over = dict(batch=3, batch_mode="sync", calibration=CalibrationConfig(recal_budget=0))
     red, space, obj, samp, cfg = _objs(workers=4, **over)
     Runner(red, space, obj, samp, cfg, str(tmp_path / "ref"), log=QUIET).run()
     red, space, obj, samp, cfg = _objs(workers=4, **over)
@@ -430,11 +437,12 @@ def test_a_batch_stopped_part_way_resumes_at_its_start(tmp_path):
 
 
 @pytest.mark.slow
-def test_a_failed_clean_inside_a_batch_fails_only_its_trial(tmp_path):
+@pytest.mark.parametrize("mode", ["sync", "pipeline"])
+def test_a_failed_clean_inside_a_batch_fails_only_its_trial(tmp_path, mode):
     """The first proposal's clean reduction fails: its first draw fails with it, its later
     draws reduce their own clean images, as one at a time, and the next proposal still gets
     its own reductions, not the leftovers of this one."""
-    over = dict(batch=3, calibration=CalibrationConfig(recal_budget=0))
+    over = dict(batch=3, batch_mode=mode, calibration=CalibrationConfig(recal_budget=0))
 
     def crash(orig, cfg_, sources, k_scan, tag, **kw):
         if tag == "a1_e2_d1_clean":
@@ -450,3 +458,131 @@ def test_a_failed_clean_inside_a_batch_fails_only_its_trial(tmp_path):
     e2 = _records(tmp_path / "w4")[1]
     assert e2["index"] == 1 and e2["meta"]["draw_failed"] == 1 and e2["score"] is not None
     _same_run(tmp_path / "w1", tmp_path / "w4", *runs)
+
+
+# ------------------------------------------------------------ pipelined batches
+def test_runs_saved_before_batch_mode_resume_with_whole_batches():
+    from klip_tpe import RunConfig
+    cfg = RunConfig(ann_edges=[8, 30], batch=4)
+    assert cfg.batch_mode == "pipeline"
+    d = json.loads(json.dumps(cfg.to_dict()))
+    assert RunConfig.from_dict(d).batch_mode == "pipeline"
+    d.pop("batch_mode")
+    assert RunConfig.from_dict(d).batch_mode == "sync"
+
+
+@pytest.mark.slow
+def test_a_pipelined_run_stopped_in_flight_resumes_exactly(tmp_path):
+    """Stopped while three trials are in flight, the checkpoint holds them, and the resume
+    reduces them again before it asks for anything new: the same records as the run that
+    never stopped, none twice."""
+    over = dict(batch=3, calibration=CalibrationConfig(recal_budget=0))
+    red, space, obj, samp, cfg = _objs(workers=4, **over)
+    Runner(red, space, obj, samp, cfg, str(tmp_path / "ref"), log=QUIET).run()
+    red, space, obj, samp, cfg = _objs(workers=4, **over)
+    d = tmp_path / "cut"
+    r = Runner(red, space, obj, samp, cfg, str(d), log=QUIET)
+    _wrap(r, _cut_at("a1_e7_d2_inj"))
+    with pytest.raises(Interrupt):
+        r.run()
+    st = json.load(open(os.path.join(str(d), "checkpoint.json")))
+    assert [x["index"] for x in _records(d)] == list(range(len(st["history"]["y"])))
+    assert [p["tag"] for p in st["pending"]] == [f"a1_e{k}" for k in range(len(st["history"]["y"]) + 1,
+                                                                         len(st["history"]["y"]) + 4)]
+    tags = []
+    r2 = Runner.resume(str(d), red, obj, samp, log=QUIET)
+
+    def spy(orig, cfg_, sources, k_scan, tag, **kw):
+        tags.append(tag)
+        return orig(cfg_, sources, k_scan=k_scan, tag=tag, **kw)
+    _wrap(r2, spy)
+    r2.run()
+    assert "a1_e7_d2_inj" in tags
+    idx = [x["index"] for x in _records(d) if x["annulus"] == 0]
+    assert idx == sorted(set(idx)), "an evaluation recorded twice"
+    _same_run(tmp_path / "ref", d)
+
+
+@pytest.mark.slow
+def test_the_pipeline_counts_its_pending_trials(tmp_path):
+    """Trials in flight count toward the warm-up and the grid: guided proposals start at
+    eval n_init, and a grid search never proposes a cell twice."""
+    over = dict(batch=3, n_remeasure=1, n_iter=[12, 6], calibration=CalibrationConfig(recal_budget=0),
+                validation=ValidationConfig(n_top=1, n_valid=1), param_verify=False)
+    red, space, obj, samp, cfg = _objs(workers=4, **over)
+    Runner(red, space, obj, samp, cfg, str(tmp_path / "tpe"), log=QUIET).run()
+    ph = [x["phase"] for x in _records(tmp_path / "tpe") if x["annulus"] == 0]
+    assert ph[:4] == ["seed", "warmup", "warmup", "warmup"] and "warmup" not in ph[4:]
+    cells = {}
+    for b in (1, 3):
+        red, space, obj, samp, cfg = _objs(workers=4, search_mode="grid", **dict(over, batch=b))
+        Runner(red, space, obj, samp, cfg, str(tmp_path / f"grid{b}"), log=QUIET).run()
+        cells[b] = [x["x"] for x in _records(tmp_path / f"grid{b}") if x["phase"] == "grid" and x["annulus"] == 0]
+    assert len(cells[3]) == 11 and cells[3] == cells[1], "the grid's cells, in the grid's order"
+
+
+@pytest.mark.slow
+def test_the_pipeline_keeps_its_trials_in_flight(tmp_path):
+    """Reductions of three trials at once (two each: the clean and one draw), and the next
+    trial's go out before the finished trial's files are written."""
+    over = dict(batch=3, n_remeasure=1, n_iter=[10, 6], calibration=CalibrationConfig(recal_budget=0),
+                validation=ValidationConfig(n_top=1, n_valid=1), param_verify=False)
+    red, space, obj, samp, cfg = _objs(workers=4, **over)
+    r = Runner(red, space, obj, samp, cfg, str(tmp_path / "run"), log=QUIET)
+    lock = threading.Lock()
+    st = {"now": 0, "max": 0, "order": []}
+
+    def count(orig, cfg_, sources, k_scan, tag, **kw):
+        with lock:
+            st["now"] += 1
+            st["max"] = max(st["max"], st["now"])
+            st["order"].append(("start", tag))
+        try:
+            time.sleep(0.02)
+            return orig(cfg_, sources, k_scan=k_scan, tag=tag, **kw)
+        finally:
+            with lock:
+                st["now"] -= 1
+    _wrap(r, count)
+    order = []
+    calls, saved = r._trial_calls, r._save_eval_images
+
+    def sent(cfg_, draws, tag):
+        order.append(("sent", tag))
+        return calls(cfg_, draws, tag)
+
+    def written(rec, *a, **kw):
+        order.append(("written", f"a{rec.annulus + 1}_e{rec.index + 1}"))
+        return saved(rec, *a, **kw)
+    r._trial_calls, r._save_eval_images = sent, written
+    r.run()
+    assert st["max"] >= 6, f"three trials' reductions in flight together (saw {st['max']})"
+    # e2 in, e5 asked and sent (2 + 3), and only then e2's files
+    assert order.index(("sent", "a1_e5")) < order.index(("written", "a1_e2"))
+    assert order.index(("sent", "a1_e4")) < order.index(("written", "a1_e2"))
+
+
+@pytest.mark.slow
+def test_a_recalibration_in_the_pipeline_rewinds_the_generator(tmp_path):
+    """The re-calibration after eval 6 drops evals 7-8 in flight and restarts from the
+    generator as it stood right after eval 6 drew its positions, as if 7 and 8 had never
+    been asked."""
+    red, space, obj, samp, cfg = _objs(workers=4, batch=3)
+    logs = []
+    r = Runner(red, space, obj, samp, cfg, str(tmp_path / "run"), log=logs.append)
+    after_draws, at_reset = {}, []
+    calls, apply_ = r._trial_calls, r._recal_apply
+
+    def sent(cfg_, draws, tag):
+        after_draws.setdefault(tag, r.rng.bit_generator.state)
+        return calls(cfg_, draws, tag)
+
+    def reset(ia, rc):
+        if rc[0] == "reset" and not at_reset:
+            at_reset.append(r.rng.bit_generator.state)
+        return apply_(ia, rc)
+    r._trial_calls, r._recal_apply = sent, reset
+    r.run()
+    assert any("restarting annulus" in s for s in logs) and at_reset
+    assert at_reset[0] == after_draws["a1_e6"]
+    assert after_draws["a1_e8"] != after_draws["a1_e6"], "evals 7 and 8 had drawn by then"

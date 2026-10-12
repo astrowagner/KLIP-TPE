@@ -53,6 +53,7 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic}]
                         [--pv-divmin PV_DIVMIN] [--candidates]
                         [--write-setup-files] [--no-setup-files]
                         [--legacy-stitch] [--batch BATCH]
+                        [--batch-mode {pipeline,sync}]
                         [--edge-padding {between,all}] [--display]
                         [--no-display] [--display-every DISPLAY_EVERY]
                         [--pdf-every PDF_EVERY] [--movie-every MOVIE_EVERY]
@@ -156,9 +157,14 @@ options:
   --write-setup-files
   --no-setup-files
   --legacy-stitch       equal-weight stitch, no contrast-curve seam trim
-  --batch BATCH         proposals evaluated at a time, concurrently (default
-                        1). TPE proposes a batch from one posterior, which
+  --batch BATCH         trials in flight at once (default 1). TPE then
+                        proposes from a posterior a few trials old, which
                         changes the search's trajectory
+  --batch-mode {pipeline,sync}
+                        with --batch: send the next proposal as soon as the
+                        oldest trial is in (pipeline, the default), or propose
+                        whole batches from one posterior and wait for all of a
+                        batch (sync)
   --edge-padding {between,all}
                         pad annulus edges only where two annuli meet (between,
                         the default) or on every edge including the innermost
@@ -294,6 +300,7 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic}]
                      [--n-pv N_PV] [--pv-divmin PV_DIVMIN] [--candidates]
                      [--write-setup-files] [--no-setup-files]
                      [--legacy-stitch] [--batch BATCH]
+                     [--batch-mode {pipeline,sync}]
                      [--edge-padding {between,all}] [--display] [--no-display]
                      [--display-every DISPLAY_EVERY] [--pdf-every PDF_EVERY]
                      [--movie-every MOVIE_EVERY] [--show [SHOW]] [--aliens]
@@ -396,9 +403,14 @@ options:
   --write-setup-files
   --no-setup-files
   --legacy-stitch       equal-weight stitch, no contrast-curve seam trim
-  --batch BATCH         proposals evaluated at a time, concurrently (default
-                        1). TPE proposes a batch from one posterior, which
+  --batch BATCH         trials in flight at once (default 1). TPE then
+                        proposes from a posterior a few trials old, which
                         changes the search's trajectory
+  --batch-mode {pipeline,sync}
+                        with --batch: send the next proposal as soon as the
+                        oldest trial is in (pipeline, the default), or propose
+                        whole batches from one posterior and wait for all of a
+                        batch (sync)
   --edge-padding {between,all}
                         pad annulus edges only where two annuli meet (between,
                         the default) or on every edge including the innermost

@@ -68,8 +68,11 @@ the API).  `--workers 8` pins the budget and `--workers -2` leaves two cores fre
 is spent like IDL's bridges.  After the nights are loaded the reducer forks
 `workers / threads-per-job` worker processes, and never fewer than `min(workers, 2 × nights)`.
 They share the loaded cubes copy-on-write, and only requests and the small result images
-cross between processes.  Each partition job runs its per-target KLIP work on
-`--threads-per-job` threads (4 by default, since a job gains little past about 4), and BLAS
+cross between processes.  A partition job runs its per-target KLIP work, its high-pass,
+binning, derotation and combination on its own threads.  `--threads-per-job` (4 by default)
+sets the average.  A job expected to take long, a big night at a small bin, gets more threads,
+up to four times as many, and a light one gets one.  A free worker takes the waiting job
+expected to take longest.  The images do not depend on the thread count or the order.  BLAS
 is pinned to one thread per worker thread.  `--pool threads` keeps everything in one process.
 It is slower, since Python's GIL limits the thread version to roughly one to two cores' worth
 of work.
@@ -92,16 +95,24 @@ A trial of N nights at `--n-remeasure 3` is 4N partition jobs, so for six nights
 the plan:
 
 ```
-parallel: 96 workers on 192 cores: 24 worker processes x 4 target thread(s), 6 partitions per reduction, so 4 reduction(s) at full width at once; pool = processes
+parallel: 96 workers on 192 cores: 24 worker processes x 4 thread(s) per job (1 to 16 by the job's expected cost, longest first), 6 partitions per reduction, so 4 reduction(s) at full width at once; pool = processes
 ```
 
-`--batch B` evaluates B proposals at a time, concurrently (default 1).  TPE proposes them
-from one posterior, so a batched search follows a different trajectory from `--batch 1`.  The
-batch size is recorded in `run_setup.txt`.  A batch is checkpointed once all of it is in, so
-a run stopped part way through a batch resumes at its start and repeats it exactly.
+`--batch B` keeps B trials in flight (default 1).  As soon as the oldest trial is in, the next
+proposal is asked from the history so far and its reductions go out, before the finished
+trial's files, display and checkpoint are written.  The trials still in flight count toward
+the warm-up and the grid.  TPE proposes from a history a few trials old, so a batched search
+follows a different trajectory from `--batch 1`, and the same seed gives the same trajectory
+on any machine.  The checkpoint records the trials in flight, and a resume reduces them again
+before it asks for anything new.  `--batch-mode sync` proposes each batch from one posterior
+and waits for all of it before the next.  It checkpoints once a batch is in, so a run stopped
+part way through a batch repeats that batch.  A run started before `--batch-mode` existed
+resumes with `sync`, and the k-scan modes always use it.  `run_setup.txt` records both
+settings.
 
 Six NEAR nights are ~2000 frames × 150² each, and the workers share them.  Each running job
-holds its own binned cube and KL bases.  On Linux the log reports, after the
+holds its own binned cube and KL bases, and each worker keeps its latest injected cube of every
+night it has reduced, about 0.85 GB for six NEAR nights.  On Linux the log reports, after the
 search and after validation, the workers' peak resident memory and what they hold together,
 which is what a given pool size needs on that machine.
 
@@ -188,7 +199,8 @@ that record. Anything you pass explicitly wins over the record, so
 resume a run that is still going, rather than putting two writers on one directory.
 
 Runs checkpoint after **every** evaluation, so an interrupted run loses at most one.  With
-`--batch B` they checkpoint after every batch, and an interrupted run repeats that batch.
+`--batch-mode sync` they checkpoint after every batch, and an interrupted run repeats that
+batch.
 
 ### The live window
 

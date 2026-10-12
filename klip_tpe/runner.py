@@ -33,6 +33,7 @@ Protocol extensions over the plain loop (see the IDL spec, notes A/C):
 """
 from __future__ import annotations
 
+import collections
 import contextlib
 import glob
 import json
@@ -174,6 +175,14 @@ class RunConfig:
         innermost inner edge and outermost outer edge are reduced and stitched as given.
         ``"all"`` pads every edge, as the IDL does.  A run saved before this field existed
         resumes with ``"all"``, so its evaluations stay comparable.
+    batch / batch_mode
+        ``batch > 1`` keeps that many trials in flight.  ``"pipeline"`` (the default): when
+        the oldest trial is in, the next proposal is asked from the history so far and goes
+        out, so ``batch`` trials are always reducing.  ``"sync"``: the optimizer proposes
+        ``batch`` trials from one posterior and the next batch waits for all of them.  Either
+        way the history is appended in index order and a seed gives one trajectory, but not
+        the trajectory of ``batch = 1``.  A run saved before ``batch_mode`` existed resumes
+        with ``"sync"``.  The k-scan modes always use ``"sync"``.
     partition_weighting
         ``'equal'`` | ``'sqrt_texp'`` pass-through to a :class:`PartitionedReducer`.
     fm_curve
@@ -269,7 +278,8 @@ class RunConfig:
     kfit_order: int = 2
     save_fits: bool = True
     save_eval_images: bool = True         # per-eval injected/clean crops (annulusNN/evals/, IDL evalNNNN_score_inj)
-    batch: int = 1                        # proposals per ask, evaluated concurrently (>1: one posterior, another trajectory)
+    batch: int = 1                        # trials in flight (>1: another trajectory than 1, see batch_mode)
+    batch_mode: str = "pipeline"          # "pipeline" (a new proposal when the oldest trial is in) | "sync"
     bench_tag: str = "none"
     notes: str = ""
     # --- protocol extensions (defaults reproduce the previous behaviour) ---
@@ -332,6 +342,8 @@ class RunConfig:
         d = dict(d)
         # a run saved before edge_padding existed padded every edge: it resumes that way
         d.setdefault("edge_padding", "all")
+        # and one saved before batch_mode evaluated its batches whole
+        d.setdefault("batch_mode", "sync")
         d["calibration"] = _from_dict_filtered(CalibrationConfig, d.get("calibration", {}))
         d["validation"] = _from_dict_filtered(ValidationConfig, d.get("validation", {}))
         return _from_dict_filtered(cls, d)
@@ -507,6 +519,47 @@ def _write_fits(path: str, data: np.ndarray, header: Optional[Dict[str, Any]] = 
         np.save(path.replace(".fits.gz", "").replace(".fits", "") + ".npy", data)
 
 
+class _ReductionQueue:
+    """Reductions submitted over time and taken back in the order submitted: the stream a
+    pipelined search feeds its trials' reductions into and :meth:`Runner._trial_finish`
+    reads.  ``window`` threads run them, and the rest wait their turn.  With a window of 1
+    each reduction runs on this thread when its result is taken.  A reduction that raises
+    yields its exception as the result."""
+
+    def __init__(self, window: int):
+        self.serial = int(window) <= 1
+        self._ex = None
+        if not self.serial:
+            import concurrent.futures as _cf
+            self._ex = _cf.ThreadPoolExecutor(max_workers=int(window), thread_name_prefix="klip-red")
+        self._items: collections.deque = collections.deque()
+        self._n = 0
+
+    def submit(self, fn: Callable[[], Any]) -> None:
+        self._items.append(fn if self.serial else self._ex.submit(fn))
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> Tuple[int, Any]:
+        if not self._items:
+            raise StopIteration
+        it = self._items.popleft()
+        i, self._n = self._n, self._n + 1
+        try:
+            if self.serial:
+                return i, it()
+            from .parallel import pump_wait
+            return i, pump_wait([it])[0]
+        except Exception as exc:          # noqa: BLE001 - handed to the caller
+            return i, exc
+
+    def close(self) -> None:
+        """Drop what has not started; what is running finishes on its own."""
+        if self._ex is not None:
+            self._ex.shutdown(wait=False, cancel_futures=True)
+
+
 # ----------------------------------------------------------------------------
 # runner
 # ----------------------------------------------------------------------------
@@ -612,6 +665,8 @@ class Runner:
         self._k_default = int(self.cfg.defaults.get("k_klip", 10) or 10)
         self._resumed = False
         self._extend_mode = False
+        self._inflight = None              # trials in flight in a pipelined search (checkpointed)
+        self._resume_pending = None        # ... and those a checkpoint had in flight
         self._vt_on_disk: Dict[Tuple[int, int], Optional[Dict[str, int]]] = {}   # validation trial records written
         self._ann_images: Dict[int, Dict[str, Any]] = {}       # per-annulus winner images (memory cache)
         self._ann_histories: Dict[int, History] = {}           # completed annuli's histories
@@ -1891,6 +1946,14 @@ class Runner:
         n_iter = c.per_annulus(c.n_iter, ia)
         opt = self._make_optimizer(ia)
         n_init = opt.n_init
+        if self._pipelined():
+            if self._search_pipeline(ia, n_iter, opt):
+                return self._search_annulus(ia, 0)
+            return
+        if int(c.batch) > 1:
+            why = " (each trial picks its k as it runs, so batches go whole)" \
+                if str(c.batch_mode).lower() == "pipeline" else ""
+            self.log(f"[ann {ia+1}] batches of {int(c.batch)} trials, each batch whole{why}")
         while len(self.history) < n_iter:
             nb = max(1, min(c.batch, n_iter - len(self.history)))
             t_loop = time.time()
@@ -1965,8 +2028,20 @@ class Runner:
         state right after this trial's draws, restored before such a reset when later
         proposals of a concurrent batch have drawn already.  ``checkpoint=False`` inside a
         batch: the batch is checkpointed once, after its last trial."""
-        c = self.cfg
         i = self._append(rec)
+        self._eval_bookkeeping(ia, n_iter, i, phase, rec, inj, clean, t_loop, checkpoint)
+        rc = self._recal_check(ia, i)
+        if rc is None:
+            return False
+        if rc[0] == "reset" and rng_state is not None:
+            self.rng.bit_generator.state = rng_state   # as if the batch had stopped here
+        return self._recal_apply(ia, rc)
+
+    def _eval_bookkeeping(self, ia: int, n_iter: int, i: int, phase: str, rec: EvalRecord, inj: EvalImages,
+                          clean: Optional[EvalImages], t_loop: float, checkpoint: bool = True) -> None:
+        """Everything after a trial enters the history at index ``i``: best images, its
+        files, the display, the log line, the checkpoint and the running stitch."""
+        c = self.cfg
         bi, bs = self.history.best()
         if i == bi and inj.image is not None and inj.image.ndim == 2:
             self._set_best_images(rec, inj, clean)
@@ -1985,39 +2060,171 @@ class Runner:
             self.checkpoint(routine=True)
         if c.stitch_every and c.stitch_every > 0 and (i + 1) % int(c.stitch_every) == 0:
             self._guard("running stitch", self._running_stitch, ia)
-        # re-calibration revisit
+
+    def _recal_check(self, ia: int, i: int) -> Optional[Tuple[str, float, Optional[float], Optional[float]]]:
+        """The re-calibration revisit after the trial at index ``i``, decided but not acted
+        on: None, ``("capped", S/N, cap, None)`` (a note only) or ``("reset", S/N, cap,
+        new contrast)``."""
+        c = self.cfg
         cc = c.calibration
-        if (not self._extend_mode and i + 1 == cc.recal_check and self._recal_done < cc.recal_budget
+        if not (not self._extend_mode and i + 1 == cc.recal_check and self._recal_done < cc.recal_budget
                 and cc.recal_budget > 0
                 and not (cc.forced and len(cc.forced) > ia and cc.forced[ia] and cc.forced[ia] > 0)):
-            yv = self.history.y[1:cc.recal_check] if c.seed_default else self.history.y[:cc.recal_check]
-            yv = yv[np.isfinite(yv)]
-            if yv.size >= 3:
-                top = np.sort(yv)[::-1][:cc.recal_ntop]
-                mwu = float(np.median(top))
-                if not (cc.target[0] <= mwu <= cc.target[1]):
-                    # the cap is the smaller of the two: `ceiling` (IDL cmax_cal, off by
-                    # default) and `max_contrast` (the physical one, 0.1 by default)
-                    caps = [v for v in (cc.ceiling, cc.max_contrast) if v is not None]
-                    cap = min(caps) if caps else None
-                    if mwu < cc.target[0] and cap is not None and self.contrast >= 0.999 * cap:
-                        self.log(f"  re-cal: median top-{cc.recal_ntop} S/N {mwu:.2f} below {cc.target}, but the "
-                                 f"contrast is already at its cap {cap:.2e} -- a source brighter than that is "
-                                 f"not a calibration; continuing at {self.contrast:.2e}")
-                    else:
-                        fac = float(np.clip(cc.aim / max(mwu, 0.1), cc.step_clip[0], cc.step_clip[1]))
-                        newc = self.contrast * fac
-                        if cap is not None:
-                            newc = min(newc, cap)
-                        self.log(f"  re-cal: median top-{cc.recal_ntop} S/N {mwu:.2f} outside "
-                                 f"{cc.target}; contrast {self.contrast:.2e} -> {newc:.2e}; restarting annulus")
-                        self.contrast = newc
-                        self._recal_done += 1
-                        if rng_state is not None:
-                            self.rng.bit_generator.state = rng_state   # as if the batch had stopped here
-                        self._reset_history(ia)
-                        return True
-        return False
+            return None
+        yv = self.history.y[1:cc.recal_check] if c.seed_default else self.history.y[:cc.recal_check]
+        yv = yv[np.isfinite(yv)]
+        if yv.size < 3:
+            return None
+        top = np.sort(yv)[::-1][:cc.recal_ntop]
+        mwu = float(np.median(top))
+        if cc.target[0] <= mwu <= cc.target[1]:
+            return None
+        # the cap is the smaller of the two: `ceiling` (IDL cmax_cal, off by default) and
+        # `max_contrast` (the physical one, 0.1 by default)
+        caps = [v for v in (cc.ceiling, cc.max_contrast) if v is not None]
+        cap = min(caps) if caps else None
+        if mwu < cc.target[0] and cap is not None and self.contrast >= 0.999 * cap:
+            return ("capped", mwu, cap, None)
+        fac = float(np.clip(cc.aim / max(mwu, 0.1), cc.step_clip[0], cc.step_clip[1]))
+        newc = self.contrast * fac
+        if cap is not None:
+            newc = min(newc, cap)
+        return ("reset", mwu, cap, newc)
+
+    def _recal_apply(self, ia: int, rc) -> bool:
+        """Act on :meth:`_recal_check`: log the note, or rescale the contrast and restart the
+        annulus (True)."""
+        kind, mwu, cap, newc = rc
+        cc = self.cfg.calibration
+        if kind == "capped":
+            self.log(f"  re-cal: median top-{cc.recal_ntop} S/N {mwu:.2f} below {cc.target}, but the "
+                     f"contrast is already at its cap {cap:.2e} -- a source brighter than that is "
+                     f"not a calibration; continuing at {self.contrast:.2e}")
+            return False
+        self.log(f"  re-cal: median top-{cc.recal_ntop} S/N {mwu:.2f} outside "
+                 f"{cc.target}; contrast {self.contrast:.2e} -> {newc:.2e}; restarting annulus")
+        self.contrast = newc
+        self._recal_done += 1
+        self._reset_history(ia)
+        return True
+
+    # -- pipelined batches (RunConfig.batch_mode "pipeline") ----------------------
+    def _pipelined(self) -> bool:
+        """Whether this annulus search keeps ``batch`` trials in flight
+        (:meth:`_search_pipeline`).  Not in the k-scan modes, where each draw picks its own k
+        while it is evaluated, and so draws positions mid-trial."""
+        c = self.cfg
+        return (int(c.batch) > 1 and str(getattr(c, "batch_mode", "sync")).lower() == "pipeline"
+                and self.SHARE_CLEAN and not self._kscan_active())
+
+    def _search_pipeline(self, ia: int, n_iter: int, opt) -> bool:
+        """The annulus search with ``batch`` trials always in flight.
+
+        The first ``batch`` proposals are asked together.  From then on, each time the
+        oldest trial is scored it enters the history, the next proposal is asked from that
+        history (the pending trials count toward the warm-up and the grid, but cannot train
+        the model), its positions are drawn and its reductions go out, and only then are the
+        finished trial's files, display, log line and checkpoint done.  Every generator call
+        happens on this thread in index order, so a seed gives one run whatever the machine
+        and however the reductions finish.  The checkpoint records the trials in flight, and
+        a resume reduces them again before it asks for anything new: the resumed run is the
+        run that never stopped.  A re-calibration drops the trials in flight and puts the
+        generator back where it was after the trial that triggered it.  Returns True when a
+        re-calibration restarted the annulus."""
+        c = self.cfg
+        b = int(c.batch)
+        n = max(int(c.n_remeasure), 1)
+        per_trial = n + (1 if self._needs_clean() else 0)
+        q = _ReductionQueue(b * per_trial if self._parallel_reducer() else 1)
+        if not q.serial:
+            self._start_workers()
+        pend: collections.deque = collections.deque()
+        self._inflight = pend
+        on_draw = (lambda j, nd, r, i_, c_: self._on_draw(ia, j, nd, r, i_, c_)) if n > 1 else None
+
+        def dispatch(item):
+            item["t0"] = time.time()
+            for fn in self._trial_calls(item["cfg"], item["draws"], item["tag"]):
+                q.submit(fn)
+            pend.append(item)
+
+        def ask(k_new):
+            for pr in opt.ask(self._ask_history(pend), self.rng, k_new):
+                phase = pr.flags.get("phase", "tpe")
+                x = self._project(pr.x, is_random=phase in ("warmup", "explore", "random"))
+                cfg = self.space.decode(x)
+                draws = [self._draw_sources(cfg, self.contrast) for _ in range(n)]
+                dispatch({"phase": phase, "x": x, "cfg": cfg, "draws": draws,
+                          "tag": f"a{ia+1}_e{len(self.history) + len(pend) + 1}",
+                          "rng_after": self.rng.bit_generator.state})
+
+        try:
+            for item in self._take_resume_pending():
+                dispatch(item)
+            if not pend and len(self.history) < n_iter:
+                self.log(f"[ann {ia+1}] {b} trials in flight: the next goes out as soon as the oldest is in")
+                ask(min(b, n_iter - len(self.history)))
+            t_loop = time.time()
+            while pend:
+                item = pend[0]
+                self._hb_eval(ia, len(self.history) + 1, n_iter, item["phase"])
+                rec, inj, clean = self._trial_finish(item["x"], item["cfg"], item["phase"], item["tag"],
+                                                     item["draws"], q, on_draw, item["t0"], combine=n > 1)
+                pend.popleft()
+                i = self._append(rec)
+                rc = self._recal_check(ia, i)
+                if rc is not None and rc[0] == "reset":
+                    pend.clear()
+                    q.close()                       # the dropped trials' reductions that have not started
+                    self.rng.bit_generator.state = item["rng_after"]
+                    self._eval_bookkeeping(ia, n_iter, i, item["phase"], rec, inj, clean, t_loop)
+                    return self._recal_apply(ia, rc)
+                if len(self.history) + len(pend) < n_iter:
+                    ask(1)                          # the pool keeps working through what follows
+                self._eval_bookkeeping(ia, n_iter, i, item["phase"], rec, inj, clean, t_loop)
+                if rc is not None:
+                    self._recal_apply(ia, rc)
+                t_loop = time.time()
+            return False
+        finally:
+            self._inflight = None
+            q.close()
+
+    def _ask_history(self, pend) -> History:
+        """The history the optimizer proposes from: the trials scored so far, then the
+        pending ones as unscored rows.  They advance the warm-up count and the grid, and
+        cannot train the model."""
+        if not pend:
+            return self.history
+        h = History(self.history.ndim, self.history.X.copy(), self.history.y.copy(), list(self.history.flags))
+        for it in pend:
+            h.append(it["x"], np.nan, {"phase": it["phase"], "pending": True})
+        return h
+
+    def _pending_state(self) -> Optional[List[Dict[str, Any]]]:
+        """The trials in flight, as the checkpoint stores them (JSON)."""
+        pend = getattr(self, "_inflight", None)
+        if not pend:
+            return None
+        return [{"phase": it["phase"], "x": [float(v) for v in it["x"]], "tag": it["tag"],
+                 "draws": [[list(s.as_tuple()) for s in d] for d in it["draws"]],
+                 "rng_after": it["rng_after"]} for it in pend]
+
+    def _take_resume_pending(self) -> List[Dict[str, Any]]:
+        """The trials a checkpoint had in flight, rebuilt for :meth:`_search_pipeline` (once).
+        They must continue this annulus' history: the first is its next evaluation."""
+        raw, self._resume_pending = getattr(self, "_resume_pending", None), None
+        nxt = f"a{self.ia + 1}_e{len(self.history) + 1}"
+        if raw and raw[0].get("tag") != nxt:
+            self.log(f"  (checkpoint's trials in flight start at {raw[0].get('tag')}, not {nxt}: asked again)")
+            raw = None
+        items = []
+        for d in raw or []:
+            x = np.asarray(d["x"], float)
+            items.append({"phase": d["phase"], "x": x, "cfg": self.space.decode(x), "tag": d["tag"],
+                          "draws": [[Source(*s) for s in dr] for dr in d["draws"]],
+                          "rng_after": d["rng_after"]})
+        return items
 
     #: a stage is worth a log line once it has run this many times the recent median
     #: evaluation -- generous, because the honest spread of an evaluation on a shared
@@ -2366,6 +2573,8 @@ class Runner:
         self.ia = ia
         if resume_index is None:
             self._hooks_done.pop(ia, None)      # a fresh or extended pass re-runs its post-annulus hooks
+        if resume_index is None or extend is not None:
+            self._resume_pending = None         # trials in flight belong to the search that was stopped
         a_in, a_out = self._annulus(ia)
         cc = self.cfg.calibration
         if extend is not None:
@@ -3408,6 +3617,9 @@ class Runner:
             "wall_s": time.time() - self.wall0 + self.wall_prev,
             "records_count": self.records_count,
             "hooks_done": {str(k): list(v) for k, v in self._hooks_done.items()},
+            # proposals asked and dispatched but not yet in the history (RunConfig.batch_mode
+            # "pipeline"): a resume reduces them again before it asks for anything new
+            "pending": self._pending_state(),
         }
         text = json.dumps(st, default=_json_default)
         if routine and time.time() - getattr(self, "_ckpt_written", 0.0) < self.CHECKPOINT_EVERY_S:
@@ -3532,6 +3744,7 @@ class Runner:
         self._hooks_done = {int(k): list(v) for k, v in (st.get("hooks_done") or {}).items()}
         self.ia = int(st["ia"])
         self.history = None if st["history"] is None else History.from_dict(st["history"])
+        self._resume_pending = None if st.get("annulus_done") else st.get("pending")
         if st.get("annulus_done"):
             if self.history is not None:
                 self._ann_histories[self.ia] = self.history

@@ -51,6 +51,19 @@ _pools: dict = {}
 _reaper_installed = False
 
 
+def _after_fork_in_child() -> None:
+    """A forked worker inherits the parent's thread pools without their threads: work
+    submitted to one would wait forever.  It also inherits ``_lock`` as it stood, possibly
+    held by a parent thread that does not exist here.  Start both afresh."""
+    global _lock
+    _lock = threading.Lock()
+    _pools.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_in_child)
+
+
 def _install_signal_reaper() -> None:
     """Terminate worker pools on SIGTERM/SIGHUP as well as on a normal exit, so that
     ``pkill`` or a closed terminal does not leave workers behind."""
@@ -169,23 +182,26 @@ def mem_available() -> Optional[int]:
 
 
 def describe(workers: int, n_partitions: int, procs: Optional[int] = None,
-             per_job: Optional[int] = None) -> str:
+             per_job: Optional[int] = None, cap: Optional[int] = None) -> str:
     """The run log's line about the worker budget.  ``procs`` / ``per_job``: the worker
-    processes and per-target threads per job (the thread-pool fallback passes None)."""
+    processes and threads per job (the thread-pool fallback passes None); ``cap``: the
+    most threads a job expected to be long can get."""
     if procs is None:
         conc = 2 if workers >= 2 else 1
         per = max(workers // max(conc * n_partitions, 1), 1) if per_job is None else per_job
         return (f"{workers} workers on {cpu_count()} cores: injected + clean reductions "
                 f"{'concurrent' if conc == 2 else 'sequential'}, {min(workers, conc * n_partitions)} partition "
                 f"jobs in parallel, {per} target thread(s) per partition job")
-    return (f"{workers} workers on {cpu_count()} cores: {procs} worker processes x {per_job} target thread(s), "
-            f"{n_partitions} partitions per reduction, so {max(procs // max(n_partitions, 1), 1)} "
-            f"reduction(s) at full width at once")
+    scaled = f" (1 to {cap} by the job's expected cost, longest first)" if cap and cap > 1 else ""
+    return (f"{workers} workers on {cpu_count()} cores: {procs} worker processes x {per_job} thread(s) per "
+            f"job{scaled}, {n_partitions} partitions per reduction, so "
+            f"{max(procs // max(n_partitions, 1), 1)} reduction(s) at full width at once")
 
 
 # ----------------------------------------------------------------------------
 # forked worker processes (the IDL "bridges"): one copy of the loaded data, N processes
 # ----------------------------------------------------------------------------
+import heapq
 import multiprocessing as _mp
 import pickle
 import queue as _queue
@@ -296,6 +312,8 @@ class ProcessPool:
         self._next = 0
         self._lock = threading.Lock()
         self._futures: dict = {}           # job id -> Future, settled by the collector
+        self._waiting: list = []           # heap of (key, job id, pid, request) not yet sent
+        self._busy = 0                     # jobs sent to the workers and not back yet
         self._closed = False
         # One thread reads every result and settles the job's future.  Several callers map
         # at once (the runner keeps a trial's reductions in flight together).  When each
@@ -344,22 +362,37 @@ class ProcessPool:
                 return None
         return {"peak": peaks, "pss": pss} if len(peaks) == len(self.procs) else None
 
-    def map(self, jobs):
+    def map(self, jobs, keys=None):
         """``jobs = [(pid, request), ...]`` -> results in order (thread-safe: several
         callers may map concurrently).  A failed job raises its exception.  Waiting from
-        the main thread services the live window (:func:`pump_wait`)."""
+        the main thread services the live window (:func:`pump_wait`).
+
+        ``keys``: one sort key per job.  A worker that comes free takes the waiting job with
+        the smallest key, so a caller can send long jobs first.  Without keys, and between
+        equal keys, jobs go in the order they came."""
         futs = []
         with self._lock:
             if self._closed or not self._collector.is_alive():
                 raise RuntimeError("klip-tpe worker pool is closed")
-            for pid, req in jobs:
+            for k, (pid, req) in enumerate(jobs):
                 jid = self._next
                 self._next += 1
                 f = cf.Future()
                 self._futures[jid] = f
                 futs.append(f)
-                self.inq.put((jid, pid, req))
+                key = 0.0 if keys is None else float(keys[k])
+                heapq.heappush(self._waiting, (key, jid, pid, req))
+            self._dispatch()
         return pump_wait(futs)
+
+    def _dispatch(self) -> None:
+        """Send waiting jobs, smallest key first, until every worker has one (call with
+        the lock held).  Only as many jobs as workers are ever in the queue, so the order
+        is decided here, when a worker comes free, not when a job was submitted."""
+        while self._waiting and self._busy < self.n:
+            _, jid, pid, req = heapq.heappop(self._waiting)
+            self.inq.put((jid, pid, req))
+            self._busy += 1
 
     def _collect(self) -> None:
         """The collector thread: every result off the queue to its job's future, and every
@@ -387,6 +420,8 @@ class ProcessPool:
                 jid, res = item
                 with self._lock:
                     f = self._futures.pop(jid, None)
+                    self._busy = max(self._busy - 1, 0)
+                    self._dispatch()
                 if f is not None and not f.done():
                     if isinstance(res, BaseException):
                         f.set_exception(res)
@@ -399,6 +434,7 @@ class ProcessPool:
     def _fail_all(self, make_exc) -> None:
         with self._lock:
             futs, self._futures = self._futures, {}
+            self._waiting = []
         for f in futs.values():
             if not f.done():
                 f.set_exception(make_exc(len(futs)))

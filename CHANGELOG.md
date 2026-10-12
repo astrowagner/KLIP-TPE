@@ -1,5 +1,69 @@
 # Changelog
 
+## Unreleased — 2026-10-11 (pipelined batches, a job's per-frame steps on its threads, the longest job first; high-pass after binning under test)
+
+From the NEAR2 session's second note of 2026-10-11.  It measured da36baf on patrick at 1.66x
+(`--workers 96`) and 2.50x (`--workers 192 --batch 2`), with the machine at about 10% CPU.
+
+- **`--batch` keeps its trials in flight.**  A whole batch waited for its slowest trial, often
+  one with a KLIP-heavy job, while most of the pool idled.  Now, as soon as the oldest trial is
+  in, it enters the history, the next proposal is asked and its reductions go out, and only
+  then are the finished trial's files, display and checkpoint written.
+  - Every generator call still happens on the main thread in index order, so a seed gives one
+    trajectory on any machine and however the reductions finish.  The trials in flight enter
+    the optimizer's history unscored, so they count toward the warm-up and the grid.  Guided
+    proposals start at eval `n_init`, and a grid never repeats a cell.
+  - The checkpoint records the trials in flight (`pending`), and a resume reduces them again
+    before it asks for anything new, so the resumed run is the run that never stopped.
+  - A re-calibration drops the trials in flight and puts the generator back where it was
+    after the trial that triggered it.
+  - `RunConfig.batch_mode` (`--batch-mode`): `"pipeline"`, the default, or `"sync"`, whole
+    batches as in da36baf.  A run saved before the field existed resumes with `"sync"`.  The
+    k-scan modes, whose draws pick their k as they run, use `"sync"`.
+- **A partition job runs its per-frame steps on its own threads.**  The high-pass, binning,
+  derotation and `nw_ang_comb` ran on one core, and only the KLIP loop used the job's threads.
+  - The high-pass filters a few frames per `ndimage` call, which runs without the GIL.  Frame
+    by frame, the per-call overhead held it.
+  - Derotation and the rotations of `nw_ang_comb` go to the job's threads, and `nw_ang_comb`
+    still sums in frame order.
+  - A rotation of a finite frame skips its validity interpolation, which marks nothing there.
+    All three rotations per frame in `nw_ang_comb` are of finite frames, so at 229 binned
+    frames of 150 x 150 it took 2.1 s and now takes 1.1 s on one thread.
+  - Every step gives the same numbers on any thread count, bit for bit, and so does a whole
+    reduction, checked against the previous code on real KLIP reductions.  One 2024-frame job
+    of 150 x 150 frames went from 2.2 to 1.5 s at bin 22 and from 4.4 to 2.6 s at bin 8, on two
+    threads of a two-core sandbox.
+- **The longest job first, and threads by expected cost.**  `KLIPReducer.cost_estimate`
+  predicts a job's single-thread time from the frames kept, the frames after binning, the zone
+  and the reference counts.
+  - A job gets threads in proportion to its predicted cost against the mean of the latest
+    jobs, a power of two from 1 to 4 x `--threads-per-job`, so the average stays at
+    `--threads-per-job`.
+  - The worker pool keeps only as many jobs in its queue as it has workers, and a free worker
+    takes the waiting job with the smallest key.  Among jobs submitted together that is the
+    longest.  An older job goes ahead of a newer one unless the newer is longer by more than
+    the time between them.
+  - A lone partition job goes to the workers too, instead of running in the runner's process.
+  - Neither the thread count nor the order changes an image.
+- **A forked worker starts its thread pools afresh.**  It inherited the parent's per-target
+  pools without their threads, and work submitted to a pool that had all its threads never
+  ran, so the worker hung.  The command line starts its workers before any reduction and is
+  not expected to have met this.  In the test suite, a pool started after earlier tests had
+  used the thread pools did hang.
+- **High-pass after binning, under test.**  `hp_order="binned"` in a reduction's parameters
+  bins the frames first and high-passes the binned frames.  The means are taken in double
+  precision, since the frames still carry their background when they are binned.  It is off
+  by default and not on the command line.  `scripts/compare_highpass_order.py` re-reduces a
+  run's evaluations both ways and reports the image and score differences against the run's
+  own draw-to-draw spread, and one job's time both ways.  On two synthetic nights the scores
+  agreed to 8 x 10^-7 and the images to 4 x 10^-6 of their scatter, also under a 10^4-count
+  pedestal.  A 2024-frame job at bin 22 took 1.06 s instead of 1.52 s on one thread.
+- `tests/test_job_threads.py` checks the steps and whole reductions across thread counts, the
+  cost estimate, the thread plan, the pool's order and a worker forked after the parent used
+  its thread pools.  `tests/test_concurrency.py` adds the pipeline on one process and on many,
+  a resume with trials in flight, the warm-up and the grid, and the generator after a
+  re-calibration.
+
 ## Unreleased — 2026-10-11 (several reductions in flight: one round per trial, validation in parallel, a pool sized by the thread budget, `--batch`)
 
 From the NEAR2 session's note of 2026-10-11 (proposals 1 to 4).  The first three change when

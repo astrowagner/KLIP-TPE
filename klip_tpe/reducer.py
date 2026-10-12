@@ -14,8 +14,10 @@ code with the night-specific plumbing removed.
 """
 from __future__ import annotations
 
+import collections
 import concurrent.futures as cf
 import threading
+import time
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -23,8 +25,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .injection import InjectionModel, inject_sources
-from .klip import (KLIPParams, bin_by_groups, bin_frames, derotate, destripe, frame_selection_mask,
-                   highpass, klip_annular, nw_ang_comb)
+from .klip import (KLIPParams, arcdist_deg, bin_by_groups, bin_frames, bin_groups, derotate, destripe,
+                   frame_selection_mask, highpass_stack, klip_annular, nw_ang_comb)
 from .metrics import Source
 from .space import Config
 
@@ -40,7 +42,7 @@ class ReductionRequest:
     tag: str = ""
     fm_sources: Optional[Sequence[Source]] = None   # KLIP-FM test sources (model cube, never added to the data)
     extras: bool = False                            # also produce the nosub (clean pass) / cadi (injected pass) reference image
-    threads: int = 1                                # per-target KLIP threads for this partition (set by PartitionedReducer)
+    threads: int = 1                                # this partition job's threads: the per-target KLIP loop and the per-frame steps (set by PartitionedReducer)
 
 
 @dataclass
@@ -89,6 +91,13 @@ class Reducer:
         return None
 
     def matched_filter_kernel(self, rho_as: float):
+        return None
+
+    def cost_estimate(self, params: Dict[str, Any], k_scan: bool = False, n_inject: int = 0,
+                      fm: bool = False) -> Optional[float]:
+        """Rough single-thread seconds one :meth:`reduce` with ``params`` takes, used only to
+        schedule partition jobs (the longest first, and threads by cost).  None: unknown,
+        and the jobs keep a flat thread count in submission order."""
         return None
 
     def describe(self) -> Dict[str, Any]:
@@ -188,6 +197,7 @@ class KLIPReducer(Reducer):
         self.defaults.update(defaults or {})
         self._inj_cache: Dict[Tuple, np.ndarray] = {}
         self._fm_cache: Dict[Tuple, np.ndarray] = {}
+        self._cost_cache: Dict[Tuple, float] = {}
         #: optional searched reference library (:mod:`klip_tpe.reflib`).  Set through
         #: :meth:`set_reference_library`; when it is None every RDI/ARDI reduction uses
         #: the whole reference cube as one shared basis, which is the previous behaviour.
@@ -216,6 +226,61 @@ class KLIPReducer(Reducer):
         """Max PA span inside one temporal bin: half a FWHM (``1.028 lambda/D``) of
         motion at ``outrad``."""
         return float(np.rad2deg(0.5 * 1.028 * self.lam_over_d_px / max(outrad, 1.0)))
+
+    def cost_estimate(self, params: Dict[str, Any], k_scan: bool = False, n_inject: int = 0,
+                      fm: bool = False) -> Optional[float]:
+        """Rough single-thread seconds of one :meth:`reduce`, for scheduling only.
+
+        From the frames kept, the frames after binning and the KLIP zone: the high-pass of
+        every kept frame, the derotation and combination of every binned frame, and the
+        per-target KL bases (binned frames x references squared x zone pixels).  The
+        coefficients come from 2024-frame, 150 x 150 timings on one 2.8 GHz core, and only
+        the ratios between jobs are used."""
+        try:
+            p = dict(self.defaults)
+            p.update({k: v for k, v in params.items() if v is not None})
+            k = int(max(round(p["k_klip"]), 1))
+            bin_ = int(max(round(p["bin"]), 1))
+            filt = int(round(p["filter"]))
+            n_ang = int(max(round(p["n_ang"]), 1))
+            inrad = max(float(p["inrad"]), 0.0)
+            outrad = min(float(p["outrad"]), self.outrad_cap)
+            key = (k, bin_, filt > 1, n_ang, round(inrad, 2), round(outrad, 2), p["corr_thresh"], p["noise_max"],
+                   p["coronoise_max"], round(float(p["angsep"]), 3), round(float(p["anglemax"]), 2),
+                   bool(p["fast"]), bool(k_scan), int(n_inject), bool(fm))
+            hit = self._cost_cache.get(key)
+            if hit is not None:
+                return hit
+            ds = self.data
+            keep = frame_selection_mask(ds.nframes, ds.tags, p["corr_thresh"], p["noise_max"],
+                                        p["coronoise_max"], bin_, k)
+            ang = np.asarray(ds.angles, float)[keep]
+            n_kept = int(ang.size)
+            m = int(bin_groups(ang, bin_, self.dth_max_deg(outrad)).max()) + 1 if n_kept else 0
+            npix = int(np.prod(ds.cube.shape[1:]))
+            zone = np.pi * max(outrad ** 2 - inrad ** 2, 1.0)
+            span = float(ang.max() - ang.min()) if n_kept > 1 else 0.0
+            sep = float(p["angsep"]) * abs(arcdist_deg(inrad, outrad, self.lam_over_d_px))
+            amax = float(p["anglemax"])
+            if bool(p["fast"]) or (sep <= 0 and amax >= span):
+                klip = 2.2e-10 * m * m * zone                        # one basis per sector
+            else:
+                frac = 1.0 if span <= 0 else min(1.0, max(2.0 * (amax - sep), 0.0) / span)
+                mref = max(min(float(m), m * frac), 4.0)
+                klip = 2.2e-10 * m * mref * mref * zone + 2e-4 * m * n_ang
+            raw = (1.5e-8 if filt > 1 else 2e-9) * n_kept * npix     # high-pass, copies, binning
+            post = 3.6e-7 * m * npix                                 # post high-pass, derotate, combine
+            cost = raw + post * (k if k_scan else 1) + klip
+            if fm:
+                cost += raw + post + klip                            # the model cube follows the data
+            if n_inject:
+                cost += 3e-5 * n_inject * ds.nframes
+            if len(self._cost_cache) > 4096:
+                self._cost_cache.clear()
+            self._cost_cache[key] = float(cost)
+            return float(cost)
+        except Exception:
+            return None
 
     def _inject(self, sources: Sequence[Source]) -> np.ndarray:
         key = tuple(s.as_tuple() for s in sources)
@@ -393,7 +458,7 @@ class KLIPReducer(Reducer):
                              f"fix bin so the exclusion stays meaningful")
         return out[np.asarray(bkeep, bool)]
 
-    def _reference_cube(self, filt: int, meta: Dict[str, Any]) -> Optional[np.ndarray]:
+    def _reference_cube(self, filt: int, meta: Dict[str, Any], threads: int = 1) -> Optional[np.ndarray]:
         """RDI reference frames: centre-cropped to the science FOV and given the
         first high-pass (``smooth(/nan)``, reduce_near_2 L1864-1867).  Not frame
         selected, not binned (the file is required to be pre-registered/binned)."""
@@ -410,7 +475,7 @@ class KLIPReducer(Reducer):
             oy, ox = (ref.shape[1] - ny) // 2, (ref.shape[2] - nx) // 2
             ref = ref[:, oy:oy + ny, ox:ox + nx]
         if filt > 1:
-            ref = np.stack([highpass(f, filt, nan_aware=True) for f in ref])
+            ref = highpass_stack(ref, filt, nan_aware=True, threads=threads)
         return ref
 
     # -- main entry ----------------------------------------------------------
@@ -432,6 +497,8 @@ class KLIPReducer(Reducer):
         cube = self._inject(req.injections) if req.injections else ds.cube
         angles = ds.angles
         meta: Dict[str, Any] = {}
+        # the job's threads: the per-target KLIP loop, and the per-frame steps around it
+        nth = int(max(getattr(req, "threads", 1) or 1, 1))
         do_fm = bool(req.fm_sources)
         if do_fm and req.k_scan:
             meta["fm_note"] = "KLIP-FM skipped: not supported with k_scan"
@@ -441,25 +508,34 @@ class KLIPReducer(Reducer):
         keep = frame_selection_mask(ds.nframes, ds.tags, p["corr_thresh"], p["noise_max"],
                                     p["coronoise_max"], bin_, k)
         dth = self.dth_max_deg(outrad)
+        # ``hp_order="binned"`` (under test, off by default): bin first, then high-pass the
+        # binned frames.  Both are linear, so the images agree to rounding, and the high-pass
+        # costs 1/bin as much.  The means are taken in double precision: binned before the
+        # high-pass, the frames still carry their background.  The IDL high-passes every
+        # frame before binning, and a destriped cube keeps that order (not linear).
+        hp_binned = str(p.get("hp_order", "raw")).lower() == "binned" and filt > 1 and not p["do_destripe"]
 
         def prep(c):
             """frame selection, high-pass, destripe and binning of a science cube"""
             a_ = angles
             if not keep.all():
                 c, a_ = c[keep], a_[keep]
+            if hp_binned:
+                return bin_frames(c, a_, bin_, dth, return_groups=True, threads=nth, dtype=np.float64,
+                                  then=lambda bc: highpass_stack(bc, filt, nan_aware=False, threads=nth))
             if filt > 1:
-                c = np.stack([highpass(f, filt, nan_aware=False) for f in c])
+                c = highpass_stack(c, filt, nan_aware=False, threads=nth)
             if p["do_destripe"]:
                 # reduce_near_2 L1672-1677: 90 deg (columns) then 0 deg (rows); science only
                 clip = float(p["destripe_clip"])
                 c = np.stack([destripe(destripe(f, 90.0, clip), 0.0, clip) for f in c])
-            return bin_frames(c, a_, bin_, dth, return_groups=True)
+            return bin_frames(c, a_, bin_, dth, return_groups=True, threads=nth)
 
         if mcube is not None:
             if not keep.all():
                 mcube = mcube[keep]
-            if filt > 1:
-                mcube = np.stack([highpass(f, filt, nan_aware=False) for f in mcube])
+            if filt > 1 and not hp_binned:
+                mcube = highpass_stack(mcube, filt, nan_aware=False, threads=nth)
         bcube, bang, grp, bkeep = prep(cube)
         if bcube.shape[0] == 0:
             # bin_frames drops bins whose nansum is zero.  np.nansum of an ALL-NaN frame is
@@ -475,14 +551,18 @@ class KLIPReducer(Reducer):
                 f"masked cube must be cropped to its finite region before it reaches the "
                 f"reducer.")
         if mcube is not None:
-            mb = bin_by_groups(mcube, grp) if bin_ > 1 else np.asarray(mcube, np.float32)
+            if hp_binned:
+                mb = bin_by_groups(mcube, grp, threads=nth, dtype=np.float64) if bin_ > 1 else mcube
+                mb = highpass_stack(mb, filt, nan_aware=False, threads=nth)
+            else:
+                mb = bin_by_groups(mcube, grp, threads=nth) if bin_ > 1 else np.asarray(mcube, np.float32)
             mcube = mb[bkeep]
 
         ref_basis = fm_ref = None
         ref_lib = ref_keep = None
         rdi_mode = str(p["rdi_mode"]).lower()
         if p["use_rdi"]:
-            ref = self._reference_cube(filt, meta)
+            ref = self._reference_cube(filt, meta, threads=nth)
             if self._reflib_spec is not None:
                 # Searched library: the basis cube is [science | references] in that order,
                 # because the group row indices the library hands back address it that way,
@@ -529,12 +609,14 @@ class KLIPReducer(Reducer):
             if req.extras:
                 if req.injections:
                     # classical ADI (L2072-2086): 2nd high-pass, median PSF in the detector frame, derotate, median
-                    c2 = np.stack([highpass(f, filt, nan_aware=True) for f in bcube]) if filt > 1 else bcube
+                    c2 = highpass_stack(bcube, filt, nan_aware=True, threads=nth) if filt > 1 else bcube
                     c2 = c2 - np.nanmedian(c2, axis=0)
-                    cadi = np.asarray(np.nanmedian(derotate(c2, bang, self.truenorth), axis=0), np.float32)
+                    cadi = np.asarray(np.nanmedian(derotate(c2, bang, self.truenorth, threads=nth), axis=0),
+                                      np.float32)
                 else:
                     # no subtraction (L2087-2096): derotate + median stack of the selected/filtered/binned cube
-                    nosub = np.asarray(np.nanmedian(derotate(bcube, bang, self.truenorth), axis=0), np.float32)
+                    nosub = np.asarray(np.nanmedian(derotate(bcube, bang, self.truenorth, threads=nth), axis=0),
+                                       np.float32)
         if self.mask_fn is not None:
             img = np.stack([self.mask_fn(im) for im in img]) if req.k_scan else self.mask_fn(img)
         meta.update(info)
@@ -558,18 +640,19 @@ class KLIPReducer(Reducer):
         res, info = out[0], out[1]
         fm_res = out[2] if len(out) > 2 else None
         ct = p["comb_type"]
+        nth = int(max(getattr(req, "threads", 1) or 1, 1))
 
         def _post(rc: np.ndarray) -> np.ndarray:
             if filt > 1:
-                rc = np.stack([highpass(f, filt, nan_aware=True) for f in rc])
-            return derotate(rc, bang, self.truenorth)
+                rc = highpass_stack(rc, filt, nan_aware=True, threads=nth)
+            return derotate(rc, bang, self.truenorth, threads=nth)
 
         def _combine(dr: np.ndarray, ref: Optional[np.ndarray] = None) -> np.ndarray:
             if ct == "median":
                 return np.nanmedian(dr, axis=0)
             if ct == "mean":
                 return np.nanmean(dr, axis=0)
-            return nw_ang_comb(dr, bang, ref_cube=ref)
+            return nw_ang_comb(dr, bang, ref_cube=ref, threads=nth)
 
         fm_img = None
         if req.k_scan:
@@ -655,6 +738,7 @@ class PartitionedReducer(Reducer):
     threads_per_job = 4
     _threads_fallback = False
     _start_lock = threading.Lock()
+    _recent_costs = None
 
     def __init__(self, reducers: Dict[Any, Reducer], weighting: str = "equal", max_workers=1,
                  pool: str = "auto", log=None, threads_per_job: int = 4):
@@ -670,6 +754,7 @@ class PartitionedReducer(Reducer):
         self._procs = None
         self._threads_fallback = False   # worker processes could not be started
         self._start_lock = threading.Lock()    # the runner keeps several reductions in flight
+        self._recent_costs = None        # costs of the latest partition jobs (see _plan)
         if self.max_workers > 1:
             from .parallel import pin_blas
             pin_blas()                      # one BLAS thread per worker thread (no oversubscription)
@@ -717,7 +802,11 @@ class PartitionedReducer(Reducer):
             self._pool_logged = True
             from .parallel import describe
             procs = (getattr(self._procs, "n", None) or self.n_procs()) if kind == "processes" else None
-            self._log(f"  parallel: {describe(self.max_workers, len(self.reducers), procs, self.job_threads())}"
+            per = self.job_threads()
+            costed = bool(procs) and all(getattr(type(r), "cost_estimate", Reducer.cost_estimate)
+                                         is not Reducer.cost_estimate for r in self.reducers.values())
+            cap = min(4 * per, int(self.max_workers)) if costed else None
+            self._log(f"  parallel: {describe(self.max_workers, len(self.reducers), procs, per, cap)}"
                       f"; pool = {kind}")
             if kind == "threads" and self.pool_kind in ("auto", "processes"):
                 self._log("    threads share the GIL, so expect several times less throughput than "
@@ -788,13 +877,15 @@ class PartitionedReducer(Reducer):
                 f"{pk[-1] / gb:.2f} GB, each counting the data it shares), {m['pss'] / gb:.1f} GB together now "
                 f"(shared data counted once)" + (f", {avail / gb:.0f} GB available" if avail else ""))
 
-    def _map(self, jobs):
-        if self.max_workers > 1 and len(jobs) > 1:
+    def _map(self, jobs, keys=None):
+        if self.max_workers > 1 and (len(jobs) > 1 or self._procs is not None):
             if self.pool_kind != "threads" and self._procs is None:
                 self.start_workers()
             if self._procs is not None:
+                # a lone job goes to the workers too: the runner keeps several reductions in
+                # flight, and run here they would share this process's GIL
                 pid_of = {id(r): pid for pid, r in self.reducers.items()}
-                return self._procs.map([(pid_of[id(r)], req) for r, req in jobs])
+                return self._procs.map([(pid_of[id(r)], req) for r, req in jobs], keys)
             with self._start_lock:
                 if self._pool is None:
                     self._pool = cf.ThreadPoolExecutor(max_workers=self.max_workers)
@@ -820,12 +911,24 @@ class PartitionedReducer(Reducer):
         with the same partition weights as the science image); ``extras`` the
         nosub / cadi reference images."""
         sel = list(config.selected if selected is None else selected)
-        per = self.job_threads(len(sel))          # per-target threads inside each partition job
+        kind = self.start_workers() if self.max_workers > 1 else "serial"
+        per = self.job_threads(len(sel))          # threads inside each partition job
         jobs = [(self.reducers[pid], ReductionRequest(config.params_for(pid), injections, k_scan,
                                                       f"{tag}_{pid}", fm_sources=fm_sources, extras=extras,
                                                       threads=per))
                 for pid in sel]
-        results = self._map(jobs)
+        keys = None
+        plan = self._plan(jobs, per) if kind == "processes" else None
+        if plan is not None:
+            threads, walls = plan
+            for (_, req), t in zip(jobs, threads):
+                req.threads = t
+            now = time.monotonic()
+            # the job expected to run longest goes first among those submitted together;
+            # one submitted later goes ahead of an earlier one only when it is longer by
+            # more than the time between them, so a trial's jobs are not held back for long
+            keys = [now - w for w in walls]
+        results = self._map(jobs, keys)
         stack = np.stack([r.image for r in results])
         w = np.array([self.partition_weight(pid) for pid in sel], float)
         img = combine_stack(stack, w)
@@ -851,6 +954,36 @@ class PartitionedReducer(Reducer):
                                 extras=req.extras)
         return ReductionResult(ev.image, 1.0, {"partitions": ev.partitions}, fm_image=ev.fm_image,
                                nosub=ev.nosub, cadi=ev.cadi)
+
+    def _plan(self, jobs, base: int):
+        """Threads and expected wall time of each partition job, from the partitions'
+        :meth:`Reducer.cost_estimate`, or None when one has no estimate.
+
+        Threads scale with the job's expected cost against the mean of the latest jobs,
+        rounded to a power of two between 1 and ``4 x base``: a big night at a small bin gets
+        many, a light job one, and over many jobs the mean stays near ``base``
+        (``--threads-per-job``).  The images do not depend on the thread count."""
+        costs = []
+        for r, req in jobs:
+            f = getattr(r, "cost_estimate", None)
+            c = f(req.params, k_scan=req.k_scan, n_inject=len(req.injections or ()),
+                  fm=bool(req.fm_sources)) if callable(f) else None
+            if c is None or not np.isfinite(c) or c <= 0:
+                return None
+            costs.append(float(c))
+        with self._start_lock:
+            if self._recent_costs is None:
+                self._recent_costs = collections.deque(maxlen=max(64, 4 * self.n_procs()))
+            self._recent_costs.extend(costs)
+            mean = float(np.mean(self._recent_costs))
+        cap = max(1, min(4 * int(base), int(self.max_workers)))
+        threads = []
+        for c in costs:
+            t = base * c / max(mean, 1e-12)
+            t = 1 if t <= 1.0 else 2 ** int(round(np.log2(t)))
+            threads.append(int(min(max(t, 1), cap)))
+        walls = [c / t ** 0.85 for c, t in zip(costs, threads)]
+        return threads, walls
 
     def describe(self) -> Dict[str, Any]:
         d = super().describe()

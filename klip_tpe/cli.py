@@ -248,8 +248,12 @@ def _protocol_args(p):
     p.add_argument("--no-setup-files", dest="write_setup_files", action="store_false")
     p.add_argument("--legacy-stitch", action="store_true", help="equal-weight stitch, no contrast-curve seam trim")
     p.add_argument("--batch", type=int, default=1,
-                   help="proposals evaluated at a time, concurrently (default 1). TPE proposes a batch from "
-                        "one posterior, which changes the search's trajectory")
+                   help="trials in flight at once (default 1). TPE then proposes from a posterior a few "
+                        "trials old, which changes the search's trajectory")
+    p.add_argument("--batch-mode", choices=("pipeline", "sync"), default=None,
+                   help="with --batch: send the next proposal as soon as the oldest trial is in "
+                        "(pipeline, the default), or propose whole batches from one posterior and wait "
+                        "for all of a batch (sync)")
     p.add_argument("--edge-padding", choices=("between", "all"), default=None,
                    help="pad annulus edges only where two annuli meet (between, the default) or on every edge "
                         "including the innermost and outermost (all, as the IDL does)")
@@ -292,6 +296,7 @@ def _protocol_config(a) -> dict:
                 pair_area_midpoint=not getattr(a, "ladder_pair", False),
                 liveness_check=getattr(a, "liveness_check", "warn"),
                 batch=max(int(getattr(a, "batch", 1) or 1), 1),
+                **({"batch_mode": a.batch_mode} if getattr(a, "batch_mode", None) else {}),
                 **({"edge_padding": a.edge_padding} if getattr(a, "edge_padding", None) else {}))
 
 
