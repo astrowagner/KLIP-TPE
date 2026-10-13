@@ -46,6 +46,7 @@ import matplotlib.ticker
 from matplotlib import colors as mcolors
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 
@@ -688,7 +689,9 @@ def annulus_from_records(records: Sequence[Dict[str, Any]], space: Dict[str, Any
         # a single displayed image reads as that image's measurement.
         extra={"draws": [{k: (r.get("meta") or {}).get(k)
                           for k in ("draw_scores", "draw_n", "draw_sd", "draw_spread", "draw_failed")}
-                         for r in recs]})
+                         for r in recs],
+               # dispatch until the last reduction was back (EvalRecord.reduce_s, NaN in older runs)
+               "reduce": np.array([np.nan if r.get("reduce_s") is None else float(r["reduce_s"]) for r in recs])})
 
 
 def annulus_from_run(run_dir: str, ia: int, run: Optional[Dict[str, Any]] = None,
@@ -1711,15 +1714,19 @@ def draw_walk(fig, cs: Dict[str, Any], ad: AnnulusData, title: str, rect=(0.07, 
     yb = ad.running_best()
     imp = np.array([np.isfinite(ad.y[e]) and ad.y[e] >= yb[e] and (e == 0 or not np.isfinite(yb[e - 1]) or ad.y[e] > yb[e - 1])
                     for e in evw])
+    seg_colors = ["#bbbbbb" if r else PHASE_COLORS["tpe"] for r in rnd[1:]]
     x0, y0, w, h = rect
     gs = GridSpec(d - 1, d - 1, left=x0, bottom=y0, right=x0 + w, top=y0 + h, wspace=0.08, hspace=0.08, figure=fig)
     for i in range(1, d):
         for j in range(i):
             ax = fig.add_subplot(gs[i - 1, j])
             ax.grid(False)
-            for k in range(len(evw) - 1):
-                ax.plot(Xw[k:k + 2, j], Xw[k:k + 2, i], color="#bbbbbb" if rnd[k + 1] else PHASE_COLORS["tpe"],
-                        lw=0.9, alpha=0.8)
+            # one collection of the walk's segments, in order, instead of one line per step:
+            # a 5,000-evaluation annulus made 180,000 artists per partition page, and the
+            # book took minutes on the run's main thread at the end of the annulus
+            if len(evw) > 1:
+                seg = np.stack([Xw[:-1][:, [j, i]], Xw[1:][:, [j, i]]], axis=1)
+                ax.add_collection(LineCollection(seg, colors=seg_colors, linewidths=0.9, alpha=0.8))
             if imp.sum() >= 2:
                 ax.plot(Xw[imp, j], Xw[imp, i], "o-", color=PHASE_COLORS["local"], ms=3, lw=1.2)
             ax.scatter([Xw[-1, j]], [Xw[-1, i]], s=30, marker="s", facecolor="none", edgecolor="black", lw=1.0)
@@ -2218,7 +2225,8 @@ def _live_curve(clean: Optional[np.ndarray], ad: AnnulusData, i: int) -> Optiona
 def render_step_classic(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[str] = None,
                 out_pdf: Optional[str] = None, curves: Sequence[Tuple[str, Dict[str, Any], Dict[str, Any]]] = (),
                 elapsed_s: float = np.nan, eta_s: float = np.nan, cmap: str = "inferno", dpi: int = 110,
-                fig: Optional[Figure] = None, step_label: str = "", contrast_note: Optional[str] = None) -> Figure:
+                fig: Optional[Figure] = None, step_label: str = "", contrast_note: Optional[str] = None,
+                timing: Optional[Dict[str, Any]] = None) -> Figure:
     """The original klip-tpe live panel (grid of package-style panels); kept as
     ``style="classic"`` of :func:`render_step`.  ``contrast_note``
     is shown in the contrast panel when no curve can be drawn (why the preview is
@@ -2281,7 +2289,7 @@ def render_step_classic(ad: AnnulusData, i: int, images: StepImages, out_png: Op
                        sources=images.fm_sources, flatten=False, vrange=_fm_range(images.fm_image))
         else:
             ax_t = fig.add_subplot(gs[0:2, 4])
-        panel_text(ax_t, _step_text(ad, i, bi, elapsed_s, eta_s))
+        panel_text(ax_t, _step_text(ad, i, bi, elapsed_s, eta_s, timing))
         ttl = (f"{ad.run_name}   annulus {ad.annulus + 1}/{ad.nann}  [{ad.inrad:.1f}, {ad.outrad:.1f}] px "
                f"({ad.inrad * ad.pxscale:.2f}-{ad.outrad * ad.pxscale:.2f}\")   eval {i + 1}/{ad.n_iter}   {step_label}")
         fig.suptitle(ttl, fontsize=11, x=0.035, ha="left")
@@ -2553,7 +2561,8 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
                 elapsed_s: float = np.nan, eta_s: float = np.nan, cmap: str = "inferno", dpi: int = 100,
                 fig: Optional[Figure] = None, step_label: str = "", contrast_note: Optional[str] = None,
                 style: str = "idl", white: bool = False, loop_s: float = np.nan, last_s: float = np.nan,
-                eta_full_s: float = np.nan, corner_partition: Optional[str] = "__cycle__") -> Figure:
+                eta_full_s: float = np.nan, corner_partition: Optional[str] = "__cycle__",
+                timing: Optional[Dict[str, Any]] = None) -> Figure:
     """The main live panel for evaluation ``i`` of ``ad``.  ``eta_s`` / ``eta_full_s`` are
     IDL's ``rem_ann`` / ``rem`` (remaining for this annulus / for the whole run).
 
@@ -2567,7 +2576,7 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
     ``style="classic"`` is the previous klip-tpe layout."""
     if style == "classic":
         return render_step_classic(ad, i, images, out_png, out_pdf, curves, elapsed_s, eta_s, cmap, dpi, fig,
-                                   step_label, contrast_note)
+                                   step_label, contrast_note, timing=timing)
     with _rc(idl=True, dark=not white):
         if fig is None:
             fig = Figure(figsize=panel_size(dpi), dpi=dpi)
@@ -2735,18 +2744,21 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
                     best_pt=_best_pt(ad, cs, pid), cur_pt=cur_pt, cands=_cands(ad, cs, pid), top_mask=top_rows,
                     compact=True, max_points=CORNER_MAX_POINTS)
         # ---- upper-right triangle: elapsed/ETA, night panels, legend ------------------------
-        wall = ad.wall[np.isfinite(ad.wall)]
-        red_s = float(np.mean(wall[-50:])) if wall.size else np.nan
-        last_red = float(wall[-1]) if wall.size else np.nan
         tot = elapsed_s + eta_full_s if np.isfinite(elapsed_s) and np.isfinite(eta_full_s) else np.nan
+        # A trial's own time: from its dispatch until it was processed (eval), and until its
+        # last reduction was back (reduce), over the last 50 trials and for this one.  With
+        # several trials in flight the interval between two evaluations is the throughput,
+        # not the time any of them takes, so it gets its own line and keeps the ETAs.
+        tt = _trial_times(ad, i, timing)
+        flight = int((timing or {}).get("flight") or 0)
         # durations with explicit units (only the 'done' line is a clock time)
         eta_lines = [f"Elapsed  {_fmt_dur(elapsed_s)}", f"ETA(ann)  {_fmt_dur(eta_s)}",
                      f"ETA(full)  {_fmt_dur(eta_full_s)}", f"Est. total  {_fmt_dur(tot)}",
                      f"done  {_fmt_clock(time.time() + eta_full_s) if np.isfinite(eta_full_s) else '--'}",
-                     (f"avg {loop_s:.1f} s/eval" if np.isfinite(loop_s) else "avg -- s/eval")
-                     + (f"  ({red_s:.1f} s reduce)" if np.isfinite(red_s) else ""),
-                     (f"last {last_s:.1f} s/eval" if np.isfinite(last_s) else "last -- s/eval")
-                     + (f"  ({last_red:.1f} s reduce)" if np.isfinite(last_red) else "")]
+                     "avg  eval {}  (reduce {})".format(*(_sec(v) for v in tt["avg"])),
+                     "last eval {}  (reduce {})".format(*(_sec(v) for v in tt["last"])),
+                     (f"1 done every {loop_s:.1f} s" + (f"  ({flight} in flight)" if flight else ""))
+                     if np.isfinite(loop_s) else "1 done every --"]
         fig.text(hx0 + 0.41 * (hx1 - hx0), 0.668, "\n".join(eta_lines), fontsize=7, va="top", ha="center", linespacing=1.5)
         px0, px1 = hx0 + 0.50 * (hx1 - hx0) + 0.030, hx1 - 0.004
         hN, ptop = 0.086, 0.625
@@ -2781,7 +2793,27 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
     return fig
 
 
-def _step_text(ad: AnnulusData, i: int, bi: int, elapsed_s: float, eta_s: float) -> List[str]:
+def _trial_times(ad: AnnulusData, i: int, timing: Optional[Dict[str, Any]]) -> Dict[str, Tuple[float, float]]:
+    """``{"avg": (eval, reduce), "last": (eval, reduce)}`` in seconds, NaN when unknown.
+
+    ``timing`` comes from the live display (:meth:`LiveDisplay._timing`): ``eval`` is a
+    trial's whole time, from its dispatch until it was processed, and ``reduce`` the part
+    until its last reduction was back.  Without it -- a panel drawn after the run, or a
+    validation trial -- only the records' reduction times are known."""
+    if timing and timing.get("avg") is not None:
+        return {"avg": tuple(timing["avg"]), "last": tuple(timing["last"])}
+    rd = np.asarray((ad.extra or {}).get("reduce", ()), float)
+    fin = rd[:i + 1][np.isfinite(rd[:i + 1])]
+    last = float(rd[i]) if 0 <= i < rd.size and np.isfinite(rd[i]) else np.nan
+    return {"avg": (np.nan, float(np.mean(fin[-50:])) if fin.size else np.nan), "last": (np.nan, last)}
+
+
+def _sec(v: float) -> str:
+    return f"{v:.1f} s" if np.isfinite(v) else "--"
+
+
+def _step_text(ad: AnnulusData, i: int, bi: int, elapsed_s: float, eta_s: float,
+               timing: Optional[Dict[str, Any]] = None) -> List[str]:
     if not (0 <= i < ad.n):
         return ["no evaluation"]
     ph = ad.phases[i]
@@ -2822,7 +2854,8 @@ def _step_text(ad: AnnulusData, i: int, bi: int, elapsed_s: float, eta_s: float)
     lines += [
         f"contrast   {ad.contrast[i]:.3e}   sources {len(ad.sources[i])}",
         f"k          {kstr}",
-        f"wall       {ad.wall[i]:.1f} s/eval   elapsed {_fmt_hms(elapsed_s)}   ETA {_fmt_hms(eta_s)}",
+        "eval       {}  (reduce {})   elapsed {}   ETA {}".format(
+            *(_sec(v) for v in _trial_times(ad, i, timing)["last"]), _fmt_hms(elapsed_s), _fmt_hms(eta_s)),
         "",
     ]
     lines += ad.config_lines(i, "-- current config --")
@@ -4113,8 +4146,8 @@ class LiveDisplay(RunCallback):
         """Keep the live image current between a trial's remeasurements.
 
         Deliberately light: it refreshes the images the next panel will use and nothing
-        else.  It does NOT touch ``_eval_times`` (the source of s/eval and both ETAs), the
-        ``_records`` list, or the panel cadence counter -- a draw is part of a trial, not a
+        else.  It does NOT touch ``_eval_times`` (the source of the completion rate and both
+        ETAs), the ``_records`` list, or the panel cadence counter -- a draw is part of a trial, not a
         trial, and counting it as one would divide the ETA by ``n_remeasure`` and report the
         gap between draws as the cost of an evaluation.  The trial's own panel arrives
         through :meth:`on_eval` once the draws are averaged, showing the last draw's image
@@ -4129,17 +4162,46 @@ class LiveDisplay(RunCallback):
             self._say(runner, f"on_draw failed: {exc!r}")
 
     def on_eval(self, runner, record, inj, clean, is_best: bool) -> None:
+        self._trial_noted = False
         try:
             self._on_eval(runner, record, inj, clean, is_best)
         except Exception as exc:
             self._say(runner, f"on_eval failed: {exc!r}\n" + traceback.format_exc(limit=3))
+        finally:
+            if not self._trial_noted:
+                self._note_trial(record)
+
+    def _note_trial(self, record) -> None:
+        """This trial's own times for the panel: ``eval`` from its dispatch until now, when
+        the runner has processed it (the display is the last thing it does) and so has the
+        display, and ``reduce`` until its last reduction was back."""
+        t = (getattr(record, "meta", None) or {}).get("t_dispatch")
+        rd = getattr(record, "reduce_s", None)
+        tt = self.__dict__.setdefault("_trial_times", [])
+        tt.append((time.time() - float(t) if t is not None else np.nan, np.nan if rd is None else float(rd)))
+        if len(tt) > 200:                                # only the last 50 are ever read
+            del tt[:-200]
+        self._trial_noted = True
+
+    def _timing(self, runner, per: float) -> Dict[str, Any]:
+        """The panel's timing (:func:`_trial_times`): the mean eval and reduce times of the
+        last 50 trials, the newest trial's, and how many trials are in flight."""
+        tt = self.__dict__.get("_trial_times") or [(np.nan, np.nan)]
+
+        def mean(vals):
+            v = np.array([x for x in vals if np.isfinite(x)], float)
+            return float(v.mean()) if v.size else np.nan
+        last50 = tt[-50:]
+        return {"avg": (mean([e for e, _ in last50]), mean([r for _, r in last50])), "last": tt[-1],
+                "every": per, "flight": max(int(getattr(runner.cfg, "batch", 1) or 1), 1)}
 
     def _on_eval(self, runner, record, inj, clean, is_best: bool) -> None:
         # Time every evaluation, before any gate decides whether this one gets a panel.
-        # These timestamps are the run's clock: the panel's "s/eval" and both ETAs are
-        # derived from them, so sampling them only on the evaluations that happen to be
-        # drawn reports the interval between *panels* instead -- a run evaluating every
-        # 8 s read 80 s/eval once one panel in ten was being drawn, and the ETA with it.
+        # These timestamps are the run's clock: the panel's completion rate ("1 done every")
+        # and both ETAs are derived from them, so sampling them only on the evaluations that
+        # happen to be drawn reports the interval between *panels* instead -- a run
+        # evaluating every 8 s read 80 s/eval once one panel in ten was being drawn, and the
+        # ETA with it.
         self._eval_times = getattr(self, "_eval_times", [])
         self._eval_times.append(time.time())
         if len(self._eval_times) > 200:                 # only the last 50 are ever read
@@ -4170,13 +4232,33 @@ class LiveDisplay(RunCallback):
             self._records[record.index] = rec
         else:
             self._records.append(rec)
-        ad = self._data(runner)
         i = record.index
         cur_inj = None if inj is None else inj.image
         cur_clean = None if clean is None else clean.image
         if cur_inj is not None and (np.ndim(cur_inj) != 2 or cur_inj.shape[0] < 4):
             cur_inj = None
-        if self._calib_pending and record.phase == "seed" and self._calib_info is not None:
+        if cur_inj is not None or cur_clean is not None:
+            self._last_images = {"inj": cur_inj, "clean": cur_clean, "index": i}
+        last = (i + 1) >= _per_annulus(runner.cfg.n_iter, runner.ia)      # AnnulusData.n_iter
+        # The PDF and the progress movie are due every pdf_every / movie_every EVALUATIONS,
+        # whatever the panel cadence.  Both used to be decided after the ``every`` gate, so
+        # with every=2 and pdf_every=10 the panel of evaluation 10 was never drawn (only
+        # evaluations 1, 3, 5, ... are) and neither came round until the annulus ended.
+        pdf_due = bool(self.pdf_every) and ((i + 1) % self.pdf_every == 0 or last)
+        movie_due = bool(self.movie and self.movie_every and self.save_png) and \
+            ((i + 1) % self.movie_every == 0 or last)
+        drawn = bool(is_best or last or pdf_due or (i % self.every == 0))
+        calib = bool(self._calib_pending and record.phase == "seed" and self._calib_info is not None)
+        if not (drawn or calib):
+            # Nothing of this evaluation is drawn.  The annulus' data and the contrast preview
+            # are for the panel, and the data is rebuilt from every record so far: 66 ms at
+            # 5,000 evaluations, on the thread that sets a pipelined search's pace, for a
+            # panel drawn one evaluation in --display-every.
+            if movie_due:
+                self._submit_progress_movie(runner.ia)
+            return
+        ad = self._data(runner)
+        if calib:
             self._calib_pending = False
             self._guard(runner, "calibration panel", render_calibration, ad, self._calib_info,
                         os.path.join(self._ann_dir(runner.ia), "calibration_panel.png"), clean=cur_clean, inj=cur_inj,
@@ -4187,17 +4269,7 @@ class LiveDisplay(RunCallback):
         self._live_reason = None if live else f"eval {i + 1}: {reason}"
         if is_best and live:
             self._best_curve = live
-        if cur_inj is not None or cur_clean is not None:
-            self._last_images = {"inj": cur_inj, "clean": cur_clean, "index": i}
-        last = (i + 1) >= ad.n_iter
-        # The PDF and the progress movie are due every pdf_every / movie_every EVALUATIONS,
-        # whatever the panel cadence.  Both used to be decided after the ``every`` gate, so
-        # with every=2 and pdf_every=10 the panel of evaluation 10 was never drawn (only
-        # evaluations 1, 3, 5, ... are) and neither came round until the annulus ended.
-        pdf_due = bool(self.pdf_every) and ((i + 1) % self.pdf_every == 0 or last)
-        movie_due = bool(self.movie and self.movie_every and self.save_png) and \
-            ((i + 1) % self.movie_every == 0 or last)
-        if not (is_best or last or pdf_due or (i % self.every == 0)):
+        if not drawn:
             if movie_due:
                 self._submit_progress_movie(runner.ia)
             return
@@ -4231,8 +4303,10 @@ class LiveDisplay(RunCallback):
         elapsed = time.time() - runner.wall0 + runner.wall_prev
         # the clock was stamped at the top of this call, for every evaluation, panel or not
         et = self._eval_times[-50:]
-        per = (et[-1] - et[0]) / (len(et) - 1) if len(et) >= 2 else np.nan       # full loop time per eval
-        last = et[-1] - et[-2] if len(et) >= 2 else np.nan                         # this evaluation's loop time
+        # the interval between two finished evaluations: the throughput, which sets both ETAs.
+        # With several trials in flight it is not the time any one evaluation takes
+        per = (et[-1] - et[0]) / (len(et) - 1) if len(et) >= 2 else np.nan
+        last = et[-1] - et[-2] if len(et) >= 2 else np.nan
         eta, eta_full = self._eta_estimate(runner, ad, per)             # IDL rem_ann / rem
         png = os.path.join(self.run_dir, "steps", f"step{self._step:04d}.png") if self.save_png else None
         pdf = os.path.join(self._ann_dir(runner.ia), f"eval_{i + 1:04d}_panel.pdf") if pdf_due else None
@@ -4248,10 +4322,13 @@ class LiveDisplay(RunCallback):
         # nights, keying on the evaluation index would visit only nights 1, 3 and 5 for ever.
         pid = self._next_corner_partition(ad)
 
+        self._note_trial(record)        # its time so far: everything but drawing this panel
+        timing = self._timing(runner, per)
+
         def _job(fig=None):
             render_step(ad, i, imgs, png, pdf, curves=curves, elapsed_s=elapsed, eta_s=eta, eta_full_s=eta_full,
                         cmap=self.cmap, dpi=self.dpi, fig=self._figure(), loop_s=per, last_s=last, step_label=label,
-                        contrast_note=note, corner_partition=pid)
+                        contrast_note=note, corner_partition=pid, timing=timing)
         # the step panel renders on a worker thread (Agg figure, ~2-4 s) so the evaluation loop
         # does not wait for it; the window shows each panel as soon as it is finished
         self._submit_render(png, _job)

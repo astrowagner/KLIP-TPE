@@ -69,13 +69,16 @@ def test_nothing_to_resume_is_simply_a_new_run(tmp_path, monkeypatch):
 
 
 def test_a_broken_checkpoint_does_not_stop_the_run(tmp_path, monkeypatch):
-    """Bookkeeping must never be load-bearing: a truncated checkpoint starts a new search
-    with a word of explanation, rather than raising on the way in."""
+    """Bookkeeping must never be load-bearing: a truncated checkpoint, with no readable
+    copy beside it, starts a new search with a word of explanation, rather than raising on
+    the way in.  (With a readable checkpoint.prev.json the run resumes from that:
+    tests/test_crash_durability.py.)"""
     monkeypatch.setenv("KLIP_TPE_DATA", str(tmp_path / "home"))
     d = tmp_path / "run"
     _run(d, n_iter=8, n_init=3, seed=3)
-    with open(os.path.join(str(d), "checkpoint.json"), "w") as f:
-        f.write('{"config": {"truncated"')
+    for name in ("checkpoint.json", "checkpoint.prev.json"):
+        with open(os.path.join(str(d), name), "w") as f:
+            f.write('{"config": {"truncated"')
     logs = []
     red, space, obj, samp, cfg = build_synthetic_run(n_iter=8, n_init=3, seed=3)
     r2 = Runner(red, space, obj, samp, cfg, str(d), log=logs.append)

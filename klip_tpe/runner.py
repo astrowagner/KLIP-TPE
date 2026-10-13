@@ -10,8 +10,10 @@ Outputs in ``run_dir``::
     run_setup.txt / run_setup.json   full configuration, search space, defaults
     results.txt                      one row per evaluation (IDL-compatible layout)
     results.jsonl                    one JSON record per evaluation (positions, per-source S/N ...)
-    checkpoint.json                  search state (atomic; taken every evaluation, written at most every
-                                     10 s and on any exit; resume also reads a sync client's copies of it)
+    checkpoint.json                  search state (taken every evaluation, written at most every 10 s and
+                                     on any exit; atomic and fsynced, so it survives a machine crash;
+                                     resume also reads a sync client's copies of it)
+    checkpoint.prev.json             the save before the newest (a crash mid-write leaves one of the two)
     annulusNN/                       calibration log, validation table, winner record, FITS products,
                                      evalNNNN_setup.txt / calibNNNN_setup.txt / valid_candNN_setup.txt /
                                      final_setup.txt, verify_report.txt, verify_curve.txt, param_verify/
@@ -40,7 +42,6 @@ import json
 import os
 import pickle
 import shutil
-import tempfile
 import threading
 import time
 import warnings
@@ -49,7 +50,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-from . import __version__
+from . import __version__, durable
 from .heartbeat import Heartbeat
 from .liveness import liveness_mode
 from .metrics import (Objective, Source, mawet_peak_snr, nanmedian_even, radprof, source_xy,
@@ -63,6 +64,8 @@ __all__ = ["RunConfig", "CalibrationConfig", "ValidationConfig", "EvalRecord", "
            "load_checkpoint", "checkpoint_candidates"]
 
 SCAN_MODES = ("scan", "scan_rescore")
+
+_UNSYNCED_LOCK = threading.Lock()      # guards Runner._unsynced
 
 
 # ----------------------------------------------------------------------------
@@ -370,6 +373,11 @@ class EvalRecord:
     contrast: float
     wall_s: float
     meta: Dict[str, Any] = field(default_factory=dict)
+    #: from the trial's dispatch until the last of its reductions was back (s).  ``wall_s``
+    #: runs on to its scoring, which with several trials in flight also holds the wait for
+    #: workers and for the main thread to reach it.  ``meta['t_dispatch']`` is the dispatch
+    #: time itself (epoch s), from which the display counts the trial's whole time.
+    reduce_s: Optional[float] = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), default=_json_default)
@@ -426,13 +434,32 @@ def _json_default(o):
     return str(o)
 
 
-def _atomic_write(path: str, text: str) -> None:
-    d = os.path.dirname(os.path.abspath(path))
-    os.makedirs(d, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp_", suffix=".json")
-    with os.fdopen(fd, "w") as f:
-        f.write(text)
-    os.replace(tmp, path)
+def _secs(v: Optional[float]) -> str:
+    """A duration for a log line: ``1.6s``, ``212s``, or ``--`` when unknown."""
+    if v is None or not np.isfinite(v):
+        return "--"
+    return f"{v:.1f}s" if v < 100 else f"{v:.0f}s"
+
+
+def _atomic_write(path: str, text: Union[str, bytes], keep: Optional[str] = None) -> None:
+    """Replace ``path`` atomically and durably (:func:`klip_tpe.durable.write`).  After a
+    crash of the machine it holds the old contents or all of the new, never nothing.
+    ``keep`` moves the version being replaced to that name first."""
+    durable.write(path, text, keep=keep)
+
+
+#: the save before the newest, kept beside checkpoint.json (see :meth:`Runner._write_checkpoint`)
+CHECKPOINT_PREV = "checkpoint.prev.json"
+
+
+def _read_checkpoint(path: str) -> Dict[str, Any]:
+    """The state in a checkpoint file.  Raises when the file cannot be read or is not a
+    klip-tpe checkpoint (a 0-byte file left by a crash, a sync client's placeholder)."""
+    with open(path) as f:
+        st = json.load(f)
+    if not (isinstance(st, dict) and all(k in st for k in ("config", "space", "rng_state", "ia"))):
+        raise ValueError("not a klip-tpe checkpoint")
+    return st
 
 
 def checkpoint_candidates(run_dir: str) -> List[str]:
@@ -445,13 +472,19 @@ def checkpoint_candidates(run_dir: str) -> List[str]:
     return ([main] if os.path.exists(main) else []) + others
 
 
-def _checkpoint_progress(st: Dict[str, Any]) -> Tuple[int, int, int, float]:
+def _checkpoint_progress(st: Dict[str, Any]) -> Tuple[int, int, int, int, float]:
     """How far a checkpoint had got: evaluations recorded, then annuli finished, then
-    post-annulus hooks run, then wall time -- each only ever grows within a run."""
+    post-annulus hooks run, then wall time -- each only ever grows within a run.
+
+    Ahead of all of these, the number of :meth:`Runner.extend` calls behind it.  An extend
+    that re-validates an annulus records no new evaluation and goes back to an earlier
+    annulus, so by the other counts its saves trail the finished run's.  They come later
+    all the same, and ``checkpoint.prev.json`` (or a backup copy) of the finished run must
+    not outrank them."""
     hooks = st.get("hooks_done") or {}
     n_hooks = sum(len(v) for v in hooks.values()) if isinstance(hooks, dict) else 0
-    return (int(st.get("records_count") or 0), int(st.get("ia") or 0) + (1 if st.get("annulus_done") else 0),
-            n_hooks, float(st.get("wall_s") or 0.0))
+    return (int(st.get("extends") or 0), int(st.get("records_count") or 0),
+            int(st.get("ia") or 0) + (1 if st.get("annulus_done") else 0), n_hooks, float(st.get("wall_s") or 0.0))
 
 
 def load_checkpoint(run_dir: str, log: Optional[Callable[[str], None]] = None
@@ -467,42 +500,48 @@ def load_checkpoint(run_dir: str, log: Optional[Callable[[str], None]] = None
     the run over.  So every copy is read and the one furthest along wins -- which is also
     right if a stale resume had happened in between, since its evaluations replay the same
     configurations from the same RNG state.  Ties go to ``checkpoint.json``.
+
+    The run keeps the save before the newest as ``checkpoint.prev.json``, and it is one of
+    the copies.  It wins only when ``checkpoint.json`` is missing or unreadable, which a
+    crash of the machine in the middle of replacing it can leave.
     """
     say = log or (lambda s: None)
     main = os.path.join(run_dir, "checkpoint.json")
-    best, bad, main_key = None, [], None
+    best, bad, main_st = None, [], None
     for p in checkpoint_candidates(run_dir):
         try:
-            with open(p) as f:
-                st = json.load(f)
-            if not (isinstance(st, dict) and all(k in st for k in ("config", "space", "rng_state", "ia"))):
-                raise ValueError("not a klip-tpe checkpoint")
+            st = _read_checkpoint(p)
         except Exception as exc:
             bad.append((os.path.basename(p), exc))
             continue
         key = _checkpoint_progress(st)
         if p == main:
-            main_key = key
+            main_st = st
         if best is None or key > best[0]:
             best = (key, st, p)
     for name, exc in bad:
         say(f"  checkpoint: {name} unreadable ({exc!r}) -- skipped")
     if best is None:
         return None, None
+    n_best = int(best[1].get("records_count") or 0)
     if best[2] != main:
-        if main_key is not None:
-            was = f"at {main_key[0]} evaluations"
+        if main_st is not None:
+            was = f"at {int(main_st.get('records_count') or 0)} evaluations"
         else:
             was = "unreadable" if os.path.exists(main) else "missing"
-        say(f"  checkpoint: resuming from {os.path.basename(best[2])} ({best[0][0]} evaluations) -- "
-            f"checkpoint.json is {was}.  A file-sync client (Dropbox?) moved the newest save aside.")
+        if os.path.basename(best[2]) == CHECKPOINT_PREV and main_st is None:
+            say(f"  checkpoint: resuming from {CHECKPOINT_PREV} ({n_best} evaluations), the save before "
+                f"the newest -- checkpoint.json is {was}, as the machine stopping while it was replaced leaves it.")
+        else:
+            say(f"  checkpoint: resuming from {os.path.basename(best[2])} ({n_best} evaluations) -- "
+                f"checkpoint.json is {was}.  A file-sync client (Dropbox?) moved the newest save aside.")
     res = os.path.join(run_dir, "results.jsonl")
     if os.path.exists(res):
         try:
-            with open(res) as f:
-                n_lines = sum(1 for _ in f)
-            if n_lines < best[0][0]:
-                say(f"  checkpoint: it counts {best[0][0]} evaluations but results.jsonl holds {n_lines} lines -- "
+            with open(res, "rb") as f:            # complete lines: a crash can leave half of one
+                n_lines = sum(chunk.count(b"\n") for chunk in iter(lambda: f.read(1 << 20), b""))
+            if n_lines < n_best:
+                say(f"  checkpoint: it counts {n_best} evaluations but results.jsonl holds {n_lines} lines -- "
                     f"that file may have been replaced by a sync client; the search resumes from the checkpoint")
         except Exception:
             pass
@@ -586,10 +625,10 @@ class RunCallback:
         """One remeasurement of a trial under ``RunConfig.n_remeasure > 1``, before the draws
         are averaged into the trial's score.  ``record`` is that draw alone.
 
-        Deliberately NOT ``on_eval``: the display times every ``on_eval`` to derive s/eval and
-        both ETAs, and counts them for its panel cadence, so feeding draws through it would
-        report the interval between draws as the cost of a trial and divide the ETA by
-        ``n_remeasure``.  A callback that ignores this hook loses nothing -- the averaged
+        Deliberately NOT ``on_eval``: the display times every ``on_eval`` to derive the
+        completion rate and both ETAs, and counts them for its panel cadence, so feeding
+        draws through it would report the interval between draws as the cost of a trial and
+        divide the ETA by ``n_remeasure``.  A callback that ignores this hook loses nothing -- the averaged
         trial still arrives through ``on_eval``.
         """
         ...
@@ -674,7 +713,10 @@ class Runner:
         self._hooks_done: Dict[int, List[str]] = {}             # post-annulus hooks completed (checkpointed)
         self._last_final = False
         self._ckpt_written = 0.0                                # when checkpoint.json was last written
-        self._ckpt_pending: Optional[str] = None                # a routine checkpoint held back (see checkpoint)
+        self._ckpt_pending: Optional[Dict[str, Any]] = None     # a routine checkpoint held back (see checkpoint)
+        self._ckpt_main_ok: Optional[bool] = None               # checkpoint.json worth keeping as .prev? (None: look)
+        self._unsynced: set = set()                             # files the next checkpoint write fsyncs first
+        self._extends = 0                                       # Runner.extend calls behind this state
         #: proof of life, stamped from its own thread: the run's own files advance once per
         #: completed evaluation, which on a loaded machine cannot tell a slow reduction from
         #: a dead process.  See :mod:`klip_tpe.heartbeat`.
@@ -1357,6 +1399,7 @@ class Runner:
                     rlo, rhi = self._band(self.ia, cfg)
                     sources = self.sampler.sample(self._nsrc(self.ia), rlo, rhi, self.rng, contrast)
             need_clean = self._needs_clean(raw_only)
+            t_reduced = None
             if need_clean and given_clean is not None:
                 inj = self._reduce(cfg, sources, tag=tag + "_inj")
                 clean = given_clean
@@ -1372,6 +1415,7 @@ class Runner:
                 inj = self._reduce(cfg, sources, tag=tag + "_inj")
                 if need_clean:
                     clean = self._reduce(cfg, None, tag=tag + "_clean")
+            t_reduced = time.time()
             sr = self._score_images(inj, clean, sources, raw_only)
             failed = False
         except Exception as exc:  # a failed reduction scores as failed, never as a stale image
@@ -1379,7 +1423,8 @@ class Runner:
             inj = EvalImages(np.full((2, 2), np.nan))
             sr = None
             failed = True
-        rec = self._eval_record(cfg, phase, contrast, sources, inj, sr, failed, k_used, kinfo, t0)
+            t_reduced = time.time()
+        rec = self._eval_record(cfg, phase, contrast, sources, inj, sr, failed, k_used, kinfo, t0, t_reduced)
         return rec, inj, clean
 
     def _score_images(self, inj: EvalImages, clean: Optional[EvalImages], sources: Sequence[Source],
@@ -1393,8 +1438,10 @@ class Runner:
 
     def _eval_record(self, cfg: Config, phase: str, contrast: float, sources: Sequence[Source],
                      inj: EvalImages, sr, failed: bool, k_used: Any = None,
-                     kinfo: Optional[Dict[str, Any]] = None, t0: Optional[float] = None) -> EvalRecord:
-        """The :class:`EvalRecord` of one scored (or failed) evaluation."""
+                     kinfo: Optional[Dict[str, Any]] = None, t0: Optional[float] = None,
+                     t_reduced: Optional[float] = None) -> EvalRecord:
+        """The :class:`EvalRecord` of one scored (or failed) evaluation.  ``t0``: when its
+        reductions were dispatched, ``t_reduced``: when the last of them was back."""
         kinfo = kinfo or {}
         t0 = time.time() if t0 is None else t0
         if k_used is None:
@@ -1403,7 +1450,8 @@ class Runner:
                 k_used = {str(p): cfg.per_partition[p].get("k_klip") for p in cfg.selected}
         meta = {"failed": failed, "selected": [str(s) for s in cfg.selected],
                 "zone": list(self._zone(self.ia, cfg)),
-                "angle_convention": str(getattr(self.reducer, "angle_convention", "pa"))}
+                "angle_convention": str(getattr(self.reducer, "angle_convention", "pa")),
+                "t_dispatch": float(t0)}
         if kinfo:
             meta["kbest"] = kinfo.get("kbest")
             if "kpn" in kinfo:
@@ -1419,7 +1467,8 @@ class Runner:
             else [None if not np.isfinite(v) else float(v) for v in sr.clean_per_source],
             partition_snr={} if failed else self._score_stack(inj.stack, inj.partitions, sources,
                                                              getattr(inj, "fm_stack", None)),
-            k_used=k_used, contrast=contrast, wall_s=time.time() - t0, meta=meta)
+            k_used=k_used, contrast=contrast, wall_s=time.time() - t0, meta=meta,
+            reduce_s=None if t_reduced is None else float(t_reduced - t0))
         return rec
 
     def replay_draws(self, recorded) -> None:
@@ -1467,11 +1516,25 @@ class Runner:
         t0 = time.time()
         cfg = self.space.decode(x)
         draws = [self._draw_sources(cfg, self.contrast) for _ in range(n)]
-        stream = self._run_ordered(self._trial_calls(cfg, draws, tag), len(draws) + 1 if self._parallel_reducer() else 1)
+        back: List[float] = []
+        stream = self._run_ordered(self._timed(self._trial_calls(cfg, draws, tag), back),
+                                   len(draws) + 1 if self._parallel_reducer() else 1)
         try:
-            return self._trial_finish(x, cfg, phase, tag, draws, stream, on_draw, t0)
+            return self._trial_finish(x, cfg, phase, tag, draws, stream, on_draw, t0, back=back)
         finally:
             stream.close()
+
+    @staticmethod
+    def _timed(calls: Sequence[Callable[[], Any]], back: List[float]) -> List[Callable[[], Any]]:
+        """``calls``, each noting in ``back`` when it returned: when its reduction was back."""
+        def one(fn):
+            def run():
+                try:
+                    return fn()
+                finally:
+                    back.append(time.time())
+            return run
+        return [one(fn) for fn in calls]
 
     def _trial_calls(self, cfg: Config, draws: Sequence[Sequence[Source]], tag: str) -> List[Callable[[], Any]]:
         """The reductions of one trial, in the order :meth:`_trial_finish` reads them: the
@@ -1489,7 +1552,8 @@ class Runner:
         return calls
 
     def _trial_finish(self, x: np.ndarray, cfg: Config, phase: str, tag: str,
-                      draws: Sequence[Sequence[Source]], stream, on_draw, t0: float, combine: bool = True
+                      draws: Sequence[Sequence[Source]], stream, on_draw, t0: float, combine: bool = True,
+                      back: Optional[List[float]] = None
                       ) -> Tuple[EvalRecord, EvalImages, Optional[EvalImages]]:
         """Score one trial from ``stream`` (:meth:`_run_ordered` over :meth:`_trial_calls`),
         draw by draw, in order.  ``combine=False`` with a single draw returns that draw as
@@ -1499,7 +1563,8 @@ class Runner:
         fails is a failed draw.  When the clean reduction fails, draw 1 fails with it and
         the later draws reduce their own clean images, one draw at a time.  Either way the
         trial takes exactly its own reductions off ``stream``, which a concurrent batch
-        shares between its proposals."""
+        shares between its proposals.  ``back``: when each of this trial's reductions came
+        back (:meth:`_timed`), for the record's ``reduce_s``."""
         n = len(draws)
         contrast = self.contrast
         recs: List[EvalRecord] = []
@@ -1534,6 +1599,8 @@ class Runner:
                     next(stream)
                 for jj in range(1, n):
                     _done(jj, self.evaluate(x, phase, sources=draws[jj], tag=f"{tag}_d{jj + 1}"))
+                if back is not None:
+                    back.append(time.time())          # their reductions, and their scoring with them
                 break
             clean = shared
             try:
@@ -1548,9 +1615,13 @@ class Runner:
                 inj, sr, failed = EvalImages(np.full((2, 2), np.nan)), None, True
             _done(j, (self._eval_record(cfg, phase, contrast, srcs, inj, sr, failed, t0=t0), inj, clean))
         rec, inj, clean = last
+        t_red = max(back) if back else None
         if not combine and n == 1:
+            if t_red is not None:
+                rec.reduce_s = float(t_red - t0)
             return rec, inj, clean
-        return self._combine_draws(recs, rec, wall=time.time() - t0), inj, clean
+        return self._combine_draws(recs, rec, wall=time.time() - t0,
+                                   reduce=None if t_red is None else t_red - t0), inj, clean
 
     #: share one clean reduction between the draws of an averaged trial (see
     #: :meth:`evaluate_mean`).  False restores the per-draw loop -- a switch for the test
@@ -1571,9 +1642,11 @@ class Runner:
         return self._combine_draws(recs, rec), inj, clean
 
     @staticmethod
-    def _combine_draws(recs: List[EvalRecord], last: EvalRecord, wall: Optional[float] = None) -> EvalRecord:
-        """Average the draws' scores onto the last draw's record.  ``wall``: the trial's
-        elapsed time, when its draws overlapped (otherwise the draws' sum)."""
+    def _combine_draws(recs: List[EvalRecord], last: EvalRecord, wall: Optional[float] = None,
+                       reduce: Optional[float] = None) -> EvalRecord:
+        """Average the draws' scores onto the last draw's record.  ``wall`` and ``reduce``:
+        the trial's elapsed and reduction times, when its draws overlapped (otherwise the
+        draws' sums)."""
         def _mean(vals):
             v = [float(s) for s in vals if s is not None and np.isfinite(s)]
             return float(np.mean(v)) if v else None
@@ -1592,8 +1665,12 @@ class Runner:
         meta["draw_failed"] = int(len(recs) - len(good))
         meta["draw_sd"] = float(np.std(good, ddof=1)) if len(good) > 1 else None
         meta["draw_spread"] = float(max(good) - min(good)) if len(good) > 1 else None
+        if reduce is None:
+            parts = [getattr(r, "reduce_s", None) for r in recs]
+            reduce = float(sum(parts)) if parts and all(v is not None for v in parts) else None
         return replace(last, score=_mean(scores), raw_score=_mean([r.raw_score for r in recs]),
-                       wall_s=float(sum(r.wall_s for r in recs)) if wall is None else float(wall), meta=meta)
+                       wall_s=float(sum(r.wall_s for r in recs)) if wall is None else float(wall), meta=meta,
+                       reduce_s=None if reduce is None else float(reduce))
 
     # ------------------------------------------------------------ calibration
     def _scan_k(self, cfg0: Config, rlo: float, rhi: float, nsrc: int, contrast: float,
@@ -1907,7 +1984,7 @@ class Runner:
     def _log_row(self, rec: EvalRecord) -> None:
         names = self.space.names
         rpath = os.path.join(self.run_dir, "results.txt")
-        new = not os.path.exists(rpath)
+        new = not os.path.exists(rpath) or os.path.getsize(rpath) == 0
         with open(rpath, "a") as f:
             if new:
                 f.write("# annulus iter phase " + " ".join(names) + "   k_klip   score   raw_score   wall_s\n")
@@ -1917,9 +1994,32 @@ class Runner:
             rw = "nan" if rec.raw_score is None else f"{rec.raw_score:.4f}"
             f.write(f"{rec.annulus+1:3d} {rec.index+1:5d} {rec.phase:<7s} "
                     + " ".join(f"{v:9.4f}" for v in rec.x) + f"   {kstr}   {sc}   {rw}   {rec.wall_s:.1f}\n")
-        with open(os.path.join(self.run_dir, "results.jsonl"), "a") as f:
+        jpath = os.path.join(self.run_dir, "results.jsonl")
+        with open(jpath, "a") as f:
             f.write(rec.to_json() + "\n")
+        self._durable_later(rpath, jpath)          # on disk before a checkpoint counts this line
         self.records_count += 1
+
+    def _durable_later(self, *paths: str) -> None:
+        """Files the next checkpoint write makes durable before it writes the checkpoint
+        (:meth:`_sync_files`): what the checkpoint counts or points to, written since."""
+        with _UNSYNCED_LOCK:
+            self.__dict__.setdefault("_unsynced", set()).update(p for p in paths if p)
+
+    def _sync_files(self) -> None:
+        """fsync every file :meth:`_durable_later` collected, then their directories, then
+        the run directory (it holds the annulus directories' own entries)."""
+        with _UNSYNCED_LOCK:
+            paths = self.__dict__.get("_unsynced") or set()
+            self._unsynced = set()
+        if not paths:
+            return
+        dirs = {os.path.abspath(self.run_dir)}
+        for p in sorted(paths):
+            if durable.fsync_file(p):
+                dirs.add(os.path.dirname(os.path.abspath(p)))
+        for d in sorted(dirs, key=len, reverse=True):          # deepest first
+            durable.fsync_dir(d)
 
     def _set_best_images(self, rec: EvalRecord, inj: EvalImages, clean: Optional[EvalImages]) -> None:
         cfg = self._apply_k_flag(self._config_from_dict(rec.config), rec.k_used)
@@ -2004,15 +2104,16 @@ class Runner:
             prepared.append((phase, x, cfg, draws, f"a{ia+1}_e{len(self.history) + 1 + b}",
                              self.rng.bit_generator.state))
         calls: List[Callable[[], Any]] = []
-        for _, _, cfg, draws, tag, _ in prepared:
-            calls += self._trial_calls(cfg, draws, tag)
+        backs: List[List[float]] = [[] for _ in prepared]
+        for (_, _, cfg, draws, tag, _), back in zip(prepared, backs):
+            calls += self._timed(self._trial_calls(cfg, draws, tag), back)
         t0 = time.time()
         on_draw = (lambda j, nd, r, i_, c_: self._on_draw(ia, j, nd, r, i_, c_)) if n > 1 else None
         with contextlib.closing(self._run_ordered(calls, len(calls))) as stream:
             for b, (phase, x, cfg, draws, tag, rng_after) in enumerate(prepared):
                 self._hb_eval(ia, len(self.history) + 1, n_iter, phase)
                 rec, inj, clean = self._trial_finish(x, cfg, phase, tag, draws, stream, on_draw, t0,
-                                                     combine=n > 1)
+                                                     combine=n > 1, back=backs[b])
                 if self._after_eval(ia, n_iter, phase, rec, inj, clean, t_loop, rng_state=rng_after,
                                     checkpoint=b == len(prepared) - 1):
                     return True
@@ -2040,26 +2141,34 @@ class Runner:
     def _eval_bookkeeping(self, ia: int, n_iter: int, i: int, phase: str, rec: EvalRecord, inj: EvalImages,
                           clean: Optional[EvalImages], t_loop: float, checkpoint: bool = True) -> None:
         """Everything after a trial enters the history at index ``i``: best images, its
-        files, the display, the log line, the checkpoint and the running stitch."""
+        files, the checkpoint, the running stitch, the display and the log line.
+
+        The display comes last, so the trial is processed but for its own panel when the
+        display counts its time from the dispatch.  The log line then gives the same two
+        numbers: ``reduce`` from the dispatch until its last reduction was back, ``eval``
+        until now.  With several trials in flight neither the interval between two
+        evaluations nor ``wall_s`` is either of them (NEAR2 note, 2026-10-12).  ``t_loop``
+        is no longer used."""
         c = self.cfg
         bi, bs = self.history.best()
         if i == bi and inj.image is not None and inj.image.ndim == 2:
             self._set_best_images(rec, inj, clean)
         self._save_eval_images(rec, inj, clean)
+        if checkpoint:
+            self.checkpoint(routine=True)
+        if c.stitch_every and c.stitch_every > 0 and (i + 1) % int(c.stitch_every) == 0:
+            self._guard("running stitch", self._running_stitch, ia)
         self._emit("on_eval", rec, inj, clean, i == bi)
+        t_disp = rec.meta.get("t_dispatch")
+        eval_s = None if t_disp is None else time.time() - float(t_disp)
         elapsed = time.time() - self.wall0 + self.wall_prev
-        loop_s = time.time() - t_loop                    # propose + reduce + score + display
         _sd = rec.meta.get("draw_sd")
         _dn = rec.meta.get("draw_n")
         self.log(f"[ann {ia+1}] eval {i+1}/{n_iter} {phase:<7s} score={rec.score if rec.score is None else round(rec.score,3)}"
                  + (f" (mean of {_dn}" + (f", sd {_sd:.2f})" if _sd is not None else ")") if _dn else "")
                  + f" raw={rec.raw_score if rec.raw_score is None else round(rec.raw_score,3)}"
-                 f" best={bs:.3f}@{bi+1}  contrast={self.contrast:.2e}  reduce {rec.wall_s:.0f}s / loop {loop_s:.0f}s"
-                 f"  ({elapsed/3600:.2f} h)")
-        if checkpoint:
-            self.checkpoint(routine=True)
-        if c.stitch_every and c.stitch_every > 0 and (i + 1) % int(c.stitch_every) == 0:
-            self._guard("running stitch", self._running_stitch, ia)
+                 f" best={bs:.3f}@{bi+1}  contrast={self.contrast:.2e}"
+                 f"  reduce {_secs(rec.reduce_s)} / eval {_secs(eval_s)}  ({elapsed/3600:.2f} h)")
 
     def _recal_check(self, ia: int, i: int) -> Optional[Tuple[str, float, Optional[float], Optional[float]]]:
         """The re-calibration revisit after the trial at index ``i``, decided but not acted
@@ -2143,8 +2252,8 @@ class Runner:
         on_draw = (lambda j, nd, r, i_, c_: self._on_draw(ia, j, nd, r, i_, c_)) if n > 1 else None
 
         def dispatch(item):
-            item["t0"] = time.time()
-            for fn in self._trial_calls(item["cfg"], item["draws"], item["tag"]):
+            item["t0"], item["back"] = time.time(), []
+            for fn in self._timed(self._trial_calls(item["cfg"], item["draws"], item["tag"]), item["back"]):
                 q.submit(fn)
             pend.append(item)
 
@@ -2169,7 +2278,8 @@ class Runner:
                 item = pend[0]
                 self._hb_eval(ia, len(self.history) + 1, n_iter, item["phase"])
                 rec, inj, clean = self._trial_finish(item["x"], item["cfg"], item["phase"], item["tag"],
-                                                     item["draws"], q, on_draw, item["t0"], combine=n > 1)
+                                                     item["draws"], q, on_draw, item["t0"], combine=n > 1,
+                                                     back=item["back"])
                 pend.popleft()
                 i = self._append(rec)
                 rc = self._recal_check(ia, i)
@@ -2305,6 +2415,7 @@ class Runner:
                 continue
             trials, trial_imgs, trial_src, trial_ps, samples_r, samples_s = [], [], [], [], [], []
             clean = None
+            rng_before = self.rng.bit_generator.state   # before this candidate's draws: see _load_validation_partial
             part = self._load_validation_trials(ia, ci, cands)
             calls: List[Callable[[], Any]] = []
             if part is not None:       # interrupted inside this candidate: continue after its last trial
@@ -2387,9 +2498,10 @@ class Runner:
             if np.isfinite(vscore) and vscore > vbest:
                 vbest, vwin = vscore, ci
                 winner = dict(cand, x=x.copy(), config=cfg)
-            with open(os.path.join(self._ann_dir(ia), "validation.json"), "w") as f:
-                json.dump(table, f, indent=1, default=_json_default)
-            self._save_validation_partial(ia, ci, cands, cand)
+            # durable before the checkpoint that pairs with it (_save_validation_partial)
+            _atomic_write(os.path.join(self._ann_dir(ia), "validation.json"),
+                          json.dumps(table, indent=1, default=_json_default))
+            self._save_validation_partial(ia, ci, cands, cand, rng_before)
             self._vt_on_disk.pop((int(ia), int(ci)), None)
             try:
                 os.remove(self._val_trials_pkl(ia, ci))
@@ -2401,11 +2513,16 @@ class Runner:
     def _val_pkl(self, ia: int, ci: int) -> str:
         return os.path.join(self._ann_dir(ia), f"val_cand{ci+1:02d}.pkl")
 
-    def _save_validation_partial(self, ia: int, ci: int, cands: List[int], cand: Dict[str, Any]) -> None:
+    def _save_validation_partial(self, ia: int, ci: int, cands: List[int], cand: Dict[str, Any],
+                                 rng_before: Optional[Dict[str, Any]] = None) -> None:
+        """The finished candidate, durably, then the checkpoint (RNG state after this
+        candidate's fresh injection draws).  The pickle carries the RNG state from before
+        and after those draws as well (:meth:`_load_validation_partial`)."""
         try:
-            with open(self._val_pkl(ia, ci), "wb") as f:
-                pickle.dump({"cands": list(cands), "cand": cand}, f, protocol=pickle.HIGHEST_PROTOCOL)
-            self.checkpoint()          # RNG state after this candidate's fresh injection draws
+            _atomic_write(self._val_pkl(ia, ci),
+                          pickle.dumps({"cands": list(cands), "cand": cand, "rng_before": rng_before,
+                                        "rng": self.rng.bit_generator.state}, protocol=pickle.HIGHEST_PROTOCOL))
+            self.checkpoint()
         except Exception as exc:       # scratch only -- never fatal
             self.log(f"  (validation checkpoint not written: {exc!r})")
 
@@ -2501,6 +2618,14 @@ class Runner:
         return d
 
     def _load_validation_partial(self, ia: int, cands: List[int]) -> Dict[int, Tuple[Dict[str, Any], Dict[str, Any]]]:
+        """The candidates an interrupted pass finished, ``{ci: (row, cand)}``.
+
+        The checkpoint written after a candidate holds the RNG state after its draws, and
+        a resume normally starts from it.  A resume from the save before it
+        (``checkpoint.prev.json``, after a crash while that checkpoint was being written)
+        holds the state from before them, which would draw the same positions again for the
+        next candidate.  The pickles record both states.  When the RNG stands where one of
+        the loaded candidates began, it moves on to where the last of them ended."""
         out: Dict[int, Tuple[Dict[str, Any], Dict[str, Any]]] = {}
         if not getattr(self, "_resumed", False):
             return out
@@ -2512,6 +2637,7 @@ class Runner:
                 rows = json.load(f)
         except Exception:
             return out
+        now, began, ended = self.rng.bit_generator.state, False, None
         for ci, e in enumerate(cands):
             pk = self._val_pkl(ia, ci)
             if ci >= len(rows) or not os.path.exists(pk):
@@ -2525,6 +2651,10 @@ class Runner:
             if int(row.get("eval_index", -1)) != int(e) or list(d.get("cands", [])) != list(cands):
                 break                  # a different candidate list (history changed) -> redo
             out[ci] = (row, d["cand"])
+            began = began or (d.get("rng_before") is not None and d["rng_before"] == now)
+            ended = d.get("rng")
+        if began and ended is not None:
+            self.rng.bit_generator.state = ended
         return out
 
     # ------------------------------------------------------------- annulus loop
@@ -2616,8 +2746,10 @@ class Runner:
             self.contrast = contrast
             self._k_default = kdef
             self._recal_done = 0
-            with open(os.path.join(self._ann_dir(ia), "calibration.json"), "w") as f:
+            cpath = os.path.join(self._ann_dir(ia), "calibration.json")
+            with open(cpath, "w") as f:
                 json.dump(cinfo, f, indent=1, default=_json_default)
+            self._durable_later(cpath)
             self._emit("on_calibration", cinfo, self._calib_images)
             self._reset_history(ia)
             self._search_annulus(ia, len(self.history))
@@ -2839,6 +2971,7 @@ class Runner:
                                     self.throughput_fn, self.cfg.kfit_order, known=self._known())
                 curve = {k: [None if not np.isfinite(v) else float(v) for v in np.atleast_1d(v_)]
                          for k, v_ in cc.items() for v in [np.asarray(v_, float)]}
+                self._durable_later(os.path.join(d, "contrast_curve.txt"))
                 with open(os.path.join(d, "contrast_curve.txt"), "w") as f:
                     f.write(f"# annulus {ia+1}  injection-calibrated 5-sigma contrast  (contrast_inj={self.contrast:.3e})\n")
                     f.write("# sep_arcsec   contrast_5sig\n")
@@ -2874,6 +3007,7 @@ class Runner:
                                                 zone=(a_in, a_out))
                         hfm["IMGTYPE"] = "KLIP-FM forward-model response (clean pass, test spiral)"
                         _write_fits(os.path.join(d, "best_fm.fits"), np.asarray(fm["fm_image"], np.float32), hfm)
+                        self._durable_later(os.path.join(d, "best_fm.fits"))
                     if clean_img is None:
                         clean_img = fm["clean"]
                     winner["fm"] = fm
@@ -2883,9 +3017,11 @@ class Runner:
         if self.cfg.save_fits:
             if clean_img is not None:
                 _write_fits(os.path.join(d, "best_clean.fits"), clean_img, hdr)
+                self._durable_later(os.path.join(d, "best_clean.fits"))
                 self._best_images["clean"] = clean_img
             if inj_img is not None:
                 _write_fits(os.path.join(d, "best_inj.fits"), inj_img, hdr_inj)
+                self._durable_later(os.path.join(d, "best_inj.fits"))
                 self._best_images["inj"] = inj_img
                 # ``_best_images`` is a bundle: the image and the sources that were injected
                 # into it belong together, and every consumer treats them that way.  This
@@ -2904,6 +3040,7 @@ class Runner:
                     for j, pid in enumerate(ev.partitions or []):
                         h2[f"NIGHT{j+1}"] = str(pid)
                     _write_fits(os.path.join(d, f"best_{key}_partitions.fits"), ev.stack, h2)
+                    self._durable_later(os.path.join(d, f"best_{key}_partitions.fits"))
         # memory cache for the stitches / hooks
         ev_c, ev_i = winner.get("clean"), winner.get("inj")
         self._ann_images[ia] = {
@@ -2925,8 +3062,10 @@ class Runner:
             partitions=[str(s) for s in cfg.selected], k_used=k_used, fm_curve=fm_curve,
             per_source=[None if (v is None or not np.isfinite(v)) else float(v) for v in (winner.get("per_source") or [])],
             k_default=winner.get("k_default"))
-        with open(os.path.join(d, "winner.json"), "w") as f:
-            json.dump(res.to_dict(), f, indent=1, default=_json_default)
+        # the products above and this record are what a resume reads back for a finished
+        # annulus (_winner_from_disk, _annulus_images): on disk before the checkpoint that
+        # marks the annulus done
+        _atomic_write(os.path.join(d, "winner.json"), json.dumps(res.to_dict(), indent=1, default=_json_default))
         if self.cfg.write_setup_files:
             self._write_setup_file(os.path.join(d, "final_setup.txt"), "final", ia, int(winner["eval_index"]) + 1,
                                    cfg, sources, self.contrast, float(winner["score"]), k_used,
@@ -3129,6 +3268,7 @@ class Runner:
                                            return_maps=True)
             path = os.path.join(d, "verify_report.txt")
             write_verify_table(path, rows, maps.get("limits"), header={"run": os.path.abspath(self.run_dir)})
+            self._durable_later(path)              # the hook's checkpoint records it as done
             out.update(rows=rows, limits=maps.get("limits"), report=path)
         # per-eval injection limit curve of this annulus + the run-level accumulation
         rows_a = self._eval_injection_rows([ia])
@@ -3136,6 +3276,7 @@ class Runner:
         if lim is not None:
             write_curve_table(os.path.join(d, "verify_curve.txt"), lim,
                               header=f"annulus {ia+1}: {len(rows_a)} injections from {self.cfg.per_annulus(self.cfg.n_iter, ia)} search evals")
+            self._durable_later(os.path.join(d, "verify_curve.txt"))
             out["curve"] = lim
         done = [r.annulus for r in self.results if r is not None]
         rows_all = self._eval_injection_rows(done)
@@ -3143,6 +3284,7 @@ class Runner:
         if lim_all is not None:
             write_curve_table(os.path.join(self.run_dir, "verify_curve.txt"), lim_all,
                               header=f"annuli {','.join(str(a+1) for a in done)}: {len(rows_all)} search-eval injections")
+            self._durable_later(os.path.join(self.run_dir, "verify_curve.txt"))
         self._emit("on_verify", ia, "verify", out)
         return out
 
@@ -3164,8 +3306,11 @@ class Runner:
             key = hashlib.sha1(np.asarray(x, float).round(9).tobytes()).hexdigest()[:12]
             cpath = os.path.join(out_dir, f"cache_{key}.npz")
             if os.path.exists(cpath):
-                z = np.load(cpath)
-                return z["clean"], z["inj"]
+                try:
+                    with np.load(cpath) as z:
+                        return z["clean"], z["inj"]
+                except Exception:
+                    pass                           # unreadable (cut short by a crash): reduce it again
             cfg = self.space.decode(np.asarray(x, float))
             if self.cfg.k_mode in SCAN_MODES:
                 m = np.flatnonzero(np.all(np.abs(hist.X - np.asarray(x, float)[None, :]) < 1e-9, axis=1))
@@ -3180,7 +3325,9 @@ class Runner:
             try:                                   # written whole, then renamed: configs run concurrently
                 tmp = cpath + f".{os.getpid()}.{threading.get_ident()}.tmp.npz"
                 np.savez(tmp, clean=clean.image, inj=inj.image)
+                durable.fsync_file(tmp)            # the data on disk before the name
                 os.replace(tmp, cpath)
+                durable.fsync_dir(out_dir)
             except Exception:
                 pass
             return clean.image, inj.image
@@ -3203,6 +3350,8 @@ class Runner:
         if res is not None:
             res["zone"] = (rlo, rhi)
             self._pv_results[ia] = res
+            # the maps the final stitch reads back after a resume (_pv_stitched)
+            self._durable_later(*[p for p in (res.get("files") or {}).values() if isinstance(p, str)])
         self._emit("on_verify", ia, "param_verify", res)
         return res
 
@@ -3290,6 +3439,8 @@ class Runner:
         }
         with open(os.path.join(self.run_dir, "run_setup.json"), "w") as f:
             json.dump(d, f, indent=1, default=_json_default)
+        # written once: a resume does not write them again, so on disk with the first checkpoint
+        self._durable_later(os.path.join(self.run_dir, "run_setup.json"), os.path.join(self.run_dir, "run_setup.txt"))
         with open(os.path.join(self.run_dir, "run_setup.txt"), "w") as f:
             f.write(f"# KLIP-TPE run setup -- {time.ctime()}  (klip_tpe {__version__})\n")
             for k, v in self.cfg.to_dict().items():
@@ -3318,14 +3469,21 @@ class Runner:
         self._register()
         self._start_workers()          # before the heartbeat thread: the fork copies one thread
         self.hb.start()                # from here on the directory says whether this is alive
+        from .profiling import sampler_from_env
+        prof = sampler_from_env(self.run_dir, log=self.log, status=lambda: (
+            f"annulus {self.ia + 1}, evaluation {0 if self.history is None else len(self.history)}"))
         try:
             out = self._run()
         except BaseException:
             self.flush_checkpoint()    # the last FINISHED evaluation, not the interrupted one
             self.hb.stop()             # keep the stage it died in: that is the diagnosis
+            if prof is not None:
+                prof.stop()
             raise
         self.flush_checkpoint()
         self.hb.stop("finished")
+        if prof is not None:
+            prof.stop()
         return out
 
     def _liveness_preflight(self) -> None:
@@ -3414,8 +3572,13 @@ class Runner:
                         [r.contrast_curve for r in results], edges, self.fwhm, self.pxscale,
                         legacy=self.cfg.legacy_stitch, contrasts=[r.contrast for r in results],
                         fm_curves=[r.fm_curve for r in results])
-        with open(os.path.join(self.run_dir, "final_results.json"), "w") as f:
-            json.dump(out, f, indent=1, default=_json_default)
+            self._durable_later(os.path.join(self.run_dir, "contrast_curve.txt"))
+        # final_results.json says the run is finished (bench, klip-tpe runs): the products
+        # above reach the disk first, and it is never left empty by a crash
+        if stitched is not None:
+            self._durable_later(*[p for p in (stitched.get("files") or {}).values() if isinstance(p, str)])
+        self._sync_files()
+        _atomic_write(os.path.join(self.run_dir, "final_results.json"), json.dumps(out, indent=1, default=_json_default))
         # append to the benchmark summary (run-tagged, one row per annulus)
         with open(os.path.join(self.run_dir, "bench_summary.txt"), "a") as f:
             for r in results:
@@ -3591,55 +3754,100 @@ class Runner:
     def checkpoint(self, final_annulus: bool = False, routine: bool = False) -> None:
         """Save the search state to ``checkpoint.json``.
 
-        ``routine`` marks the save after each evaluation.  It is taken every time --
-        serialised on the spot, so it is exactly the state between two evaluations -- but
-        written at most every :attr:`CHECKPOINT_EVERY_S` seconds; one still held when the run
-        stops, by Ctrl-C or an exception as much as by finishing, is written then
-        (:meth:`flush_checkpoint`), so a resume is as exact as it always was.  Only a hard
-        kill loses the held one, and then a resume replays those few seconds of evaluations
-        from the same RNG state -- the same configurations and draws -- while the readers of
-        ``results.jsonl`` keep the first record of each index.
+        ``routine`` marks the save after each evaluation.  It is taken every time, so it is
+        exactly the state between two evaluations, but written at most every
+        :attr:`CHECKPOINT_EVERY_S` seconds; one still held when the run stops, by Ctrl-C or
+        an exception as much as by finishing, is written then (:meth:`flush_checkpoint`), so
+        a resume is as exact as it always was.  Only a hard kill loses the held one, and
+        then a resume replays those few seconds of evaluations from the same RNG state --
+        the same configurations and draws -- while the readers of ``results.jsonl`` keep the
+        first record of each index.
+
+        Taking a save is cheap (:meth:`_checkpoint_snapshot`).  It is serialised only when
+        it is written: ``json.dumps`` of the whole history after every evaluation cost a
+        time that grew with the history, on the thread that sets a pipelined search's pace
+        (4.2 MB at 5040 evaluations of NEAR2, 2026-10-12).
 
         Every other save is written at once: the end of an annulus, each post-annulus hook
-        (they are how a resume knows which hooks have run), and each validation candidate
-        and trial, whose pickles pair with the RNG state saved here.
+        (they are how a resume knows which hooks have run), and each validation candidate,
+        whose pickles pair with the RNG state saved here.
         """
         self._last_final = bool(final_annulus)
+        snap = self._checkpoint_snapshot(final_annulus)
+        if routine and time.time() - getattr(self, "_ckpt_written", 0.0) < self.CHECKPOINT_EVERY_S:
+            self._ckpt_pending = snap
+            return
+        self._write_checkpoint(self._serialize_checkpoint(snap))
+
+    def _checkpoint_snapshot(self, final_annulus: bool) -> Dict[str, Any]:
+        """The state between two evaluations, taken without serialising it.
+
+        Scalars, the RNG state and the small lists are copied.  The history and the
+        finished annuli are kept by reference, with the history's length: until the next
+        save written at once, which drops a held snapshot, the history only grows and the
+        finished annuli stay as they are, so its first ``n_hist`` rows and those objects
+        are this moment's state when :meth:`_serialize_checkpoint` reads them.
+        """
+        return {"config": self.cfg.to_dict(), "ia": self.ia, "contrast": self.contrast,
+                "k_default": getattr(self, "_k_default", None), "recal_done": self._recal_done,
+                "history": self.history, "n_hist": None if self.history is None else len(self.history),
+                "annulus_done": final_annulus, "results": list(self.results),
+                "rng_state": self.rng.bit_generator.state,
+                "wall_s": time.time() - self.wall0 + self.wall_prev,
+                "records_count": self.records_count,
+                "hooks_done": {str(k): list(v) for k, v in self._hooks_done.items()},
+                # proposals asked and dispatched but not yet in the history (RunConfig.batch_mode
+                # "pipeline"): a resume reduces them again before it asks for anything new
+                "pending": self._pending_state(),
+                "extends": int(getattr(self, "_extends", 0))}
+
+    def _serialize_checkpoint(self, snap: Dict[str, Any]) -> str:
+        """The JSON text of a snapshot from :meth:`_checkpoint_snapshot`."""
+        h = snap["history"]
         st = {
             "version": self.CKPT_VERSION, "klip_tpe_version": __version__,
-            "config": self.cfg.to_dict(), "space": self.space.to_dict(),
-            "ia": self.ia, "contrast": self.contrast, "k_default": getattr(self, "_k_default", None),
-            "recal_done": self._recal_done,
-            "history": None if self.history is None else self.history.to_dict(),
-            "annulus_done": final_annulus,
-            "results": [None if r is None else r.to_dict() for r in self.results],
-            "rng_state": self.rng.bit_generator.state,
-            "wall_s": time.time() - self.wall0 + self.wall_prev,
-            "records_count": self.records_count,
-            "hooks_done": {str(k): list(v) for k, v in self._hooks_done.items()},
-            # proposals asked and dispatched but not yet in the history (RunConfig.batch_mode
-            # "pipeline"): a resume reduces them again before it asks for anything new
-            "pending": self._pending_state(),
+            "config": snap["config"], "space": self.space.to_dict(),
+            "ia": snap["ia"], "contrast": snap["contrast"], "k_default": snap["k_default"],
+            "recal_done": snap["recal_done"],
+            "history": None if h is None else h.to_dict(snap["n_hist"]),
+            "annulus_done": snap["annulus_done"],
+            "results": [None if r is None else r.to_dict() for r in snap["results"]],
+            "rng_state": snap["rng_state"], "wall_s": snap["wall_s"], "records_count": snap["records_count"],
+            "hooks_done": snap["hooks_done"], "pending": snap["pending"], "extends": snap["extends"],
         }
-        text = json.dumps(st, default=_json_default)
-        if routine and time.time() - getattr(self, "_ckpt_written", 0.0) < self.CHECKPOINT_EVERY_S:
-            self._ckpt_pending = text
-            return
-        self._write_checkpoint(text)
+        return json.dumps(st, default=_json_default)
 
     def _write_checkpoint(self, text: str) -> None:
-        _atomic_write(os.path.join(self.run_dir, "checkpoint.json"), text)
+        """Write a serialized checkpoint so that a crash of the machine, not only of the
+        process, leaves one to resume from.
+
+        What it counts goes to disk first (:meth:`_sync_files`): the lines of
+        ``results.jsonl`` and ``results.txt`` behind ``records_count``, and the products of
+        a finished annulus or hook.  Then ``checkpoint.json`` is replaced durably, and the
+        save it replaces moves to ``checkpoint.prev.json`` -- when it is a readable
+        checkpoint, so that a damaged one never displaces a good copy.
+        """
+        self._sync_files()
+        main = os.path.join(self.run_dir, "checkpoint.json")
+        ok = getattr(self, "_ckpt_main_ok", None)
+        if ok is None:                 # first write of this process: look at what is there
+            try:
+                ok = bool(_read_checkpoint(main))
+            except Exception:
+                ok = False
+        _atomic_write(main, text, keep=os.path.join(self.run_dir, CHECKPOINT_PREV) if ok else None)
+        self._ckpt_main_ok = True
         self._ckpt_written = time.time()
         self._ckpt_pending = None
 
     def flush_checkpoint(self) -> None:
         """Write the routine checkpoint the throttle is holding, if any.  Never raises: it
         runs on the way out of an interrupted run."""
-        text = getattr(self, "_ckpt_pending", None)
-        if text is None:
+        snap = getattr(self, "_ckpt_pending", None)
+        if snap is None:
             return
         try:
-            self._write_checkpoint(text)
+            self._write_checkpoint(snap if isinstance(snap, str) else self._serialize_checkpoint(snap))
         except Exception as exc:
             try:
                 self.log(f"  (last checkpoint not written: {exc!r})")
@@ -3739,7 +3947,17 @@ class Runner:
         self._k_default = st.get("k_default") or self.cfg.defaults.get("k_klip", 10)
         self._recal_done = int(st.get("recal_done", 0))
         self.records_count = int(st.get("records_count", 0))
+        self._extends = int(st.get("extends") or 0)
         self.wall_prev = float(st.get("wall_s", 0.0))
+        # A crash can leave half a line at the end of the logs, past every line a checkpoint
+        # counted.  The next record would fuse with it, so it goes before anything appends.
+        for name in ("results.jsonl", "results.txt"):
+            try:
+                said = durable.repair_tail(os.path.join(self.run_dir, name))
+            except OSError as exc:
+                said = f"could not check its last line ({exc!r})"
+            if said:
+                self.log(f"  {name}: {said}")
         self.results = [None if d is None else AnnulusResult.from_dict(d) for d in st.get("results", [])]
         self._hooks_done = {int(k): list(v) for k, v in (st.get("hooks_done") or {}).items()}
         self.ia = int(st["ia"])
@@ -3816,6 +4034,7 @@ class Runner:
                        log=log, callbacks=callbacks)
         if r.cfg.opt_width:
             raise ValueError("extend is not supported for opt_width runs")
+        r._extends += 1                # its saves outrank the finished run's (_checkpoint_progress)
         st, _ = load_checkpoint(run_dir)               # the copy resume() just chose
         ck_ia = int(st["ia"])
         ck_hist = None if st.get("history") is None else History.from_dict(st["history"])

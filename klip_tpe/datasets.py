@@ -235,7 +235,13 @@ def fetch(name: str, quiet: bool = False) -> Dict[str, str]:
             os.close(fd)
             try:
                 urllib.request.urlretrieve(url, tmp)
-                os.replace(tmp, path)          # atomic: readers see old or new, never partial
+                # The rename is atomic, so readers see the old file or the new one, never part
+                # of one.  The fsyncs around it make it durable too: a crash of the machine
+                # cannot leave a name pointing at a file whose data never reached the disk.
+                from .durable import fsync_dir, fsync_file
+                fsync_file(tmp)
+                os.replace(tmp, path)
+                fsync_dir(d)
             finally:
                 if os.path.exists(tmp):
                     try:

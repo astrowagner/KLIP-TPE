@@ -262,6 +262,7 @@ def test_extend_validate_only_and_continue(extend_run):
     assert cc and any(float(l.split()[0]) > 30 * r1.pxscale for l in cc)
     ck = json.load(open(os.path.join(d, "checkpoint.json")))
     assert ck["config"]["n_iter"] == [8, 14] and len(ck["history"]["y"]) == 14 and ck["annulus_done"]
+    assert ck["extends"] == 1, "an extend's saves must outrank the finished run's checkpoint.prev.json"
 
 
 def test_extend_untouched_and_rejects_opt_width(extend_run):

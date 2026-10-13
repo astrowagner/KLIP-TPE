@@ -95,7 +95,7 @@ def test_routine_saves_are_held_and_flushed(tmp_path, monkeypatch):
     written = []
     real = runner_mod._atomic_write
     monkeypatch.setattr(runner_mod, "_atomic_write",
-                        lambda p, t: (written.append(os.path.basename(p)), real(p, t)))
+                        lambda p, t, **kw: (written.append(os.path.basename(p)), real(p, t, **kw)))
     ck = tmp_path / "run" / "checkpoint.json"
     for i in range(20):                        # twenty evaluations inside CHECKPOINT_EVERY_S
         r.records_count = i + 1
@@ -114,6 +114,34 @@ def test_routine_saves_are_held_and_flushed(tmp_path, monkeypatch):
     assert r._ckpt_pending is None
     st = json.loads(ck.read_text())
     assert st["records_count"] == 21 and st["annulus_done"] is True
+
+
+def test_a_held_save_says_what_it_said_when_taken(tmp_path, monkeypatch):
+    """A routine save is serialised only when it is written: ``json.dumps`` of the whole
+    history after every evaluation took longer as the history grew, on the thread that sets a
+    pipelined search's pace (NEAR2, 2026-10-12).  Written later, it is still the state of
+    the moment it was taken, not of the moment it is written."""
+    monkeypatch.setenv("KLIP_TPE_DATA", str(tmp_path / "home"))
+    taken = {}
+
+    class Grab:
+        def on_eval(self, runner, rec, inj, clean, improved=False):
+            if runner.ia == 0 and len(runner.history) == 5 and "snap" not in taken:
+                taken["now"] = json.loads(runner._serialize_checkpoint(runner._checkpoint_snapshot(False)))
+                taken["snap"] = runner._checkpoint_snapshot(False)
+
+        def __getattr__(self, name):
+            if name.startswith("on_"):
+                return lambda *a, **k: None
+            raise AttributeError(name)
+    r = Runner(*build_synthetic_run(**BUDGET), str(tmp_path / "run"), log=lambda s: None, callbacks=[Grab()])
+    r.run()
+    later = json.loads(r._serialize_checkpoint(taken["snap"]))
+    for st in (later, taken["now"]):
+        st.pop("wall_s")
+    assert later == taken["now"]
+    assert len(later["history"]["y"]) == 5 and later["records_count"] < r.records_count
+    assert later["results"] == [] and r.results, "the finished annuli came after it was taken"
 
 
 # ------------------------------------------------------------------ end to end

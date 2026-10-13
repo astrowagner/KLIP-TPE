@@ -68,7 +68,7 @@ aggregate (`Test SNR = median`, `Best median S/N orig / corr`).
 |---|---|
 | BEST / TEST | the incumbent's and this evaluation's parameter vectors: separation / PA / contrast of the injections, then every searched parameter per partition (`[k1 k2 …]`), `parts` = the partitions kept |
 | S/N landscape | the corner plot of everything sampled so far (colour = score, grey = warm-up, best boxed, current circled); the marginals share the row's axis |
-| Elapsed / ETA(ann) / ETA(full) / Est. total / done / avg / last | wall time so far; time left for this annulus and for the run (remaining evaluations at the current per-evaluation time + measured calibration and validation time per annulus + a reserve for pending re-calibrations); elapsed + remaining; the projected wall-clock finish; mean and last loop time per evaluation (with the pure reduction time in brackets) |
+| Elapsed / ETA(ann) / ETA(full) / Est. total / done / avg / last / 1 done every | wall time so far; time left for this annulus and for the run (remaining evaluations at the current completion rate + measured calibration and validation time per annulus + a reserve for pending re-calibrations); elapsed + remaining; the projected wall-clock finish; a trial's own time over the last 50 trials (`avg`) and for the newest (`last`), `eval` from its dispatch until it was processed and `reduce` until its last reduction was back; the interval between two finished evaluations and the trials in flight (`--batch`), which is the throughput and sets both ETAs |
 | night effect | per partition: median score with it included (white) vs excluded (grey) |
 | S/N vs # nights | score against the number of partitions kept |
 | legend | warm-up / TPE / best / valid / final markers |
@@ -85,6 +85,8 @@ run_dir/
   run_setup.json / run_setup.txt      configuration, space, instrument
   results.txt / results.jsonl         one row per evaluation (annulus, index, phase, x, k used, score, raw, wall)
   checkpoint.json                     written after every evaluation -> klip-tpe resume
+  checkpoint.prev.json                the save before it (a crash of the machine leaves one of the two)
+  main_thread_profile.txt             with KLIP_TPE_PROFILE_MAIN=S: where the main thread's time goes
   run.log                             (launcher) the console log
   steps/                              stepNNNN.png live frames, calib_annNN_trialNNNN.png, intro.png
   opt_steps.gif / opt_steps.mp4       the progress movie of the whole run (thinned to <= 400 frames)

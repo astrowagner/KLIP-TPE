@@ -69,10 +69,13 @@ def _style():
 # loading
 # ----------------------------------------------------------------------------
 def _load_json(path: str) -> Optional[Any]:
-    if not os.path.exists(path):
+    """The file's contents, or None when it is missing or unreadable (a 0-byte file left
+    by a crash, a checkpoint caught between its two renames)."""
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
         return None
-    with open(path) as f:
-        return json.load(f)
 
 
 def load_run(run_dir: str) -> Dict[str, Any]:

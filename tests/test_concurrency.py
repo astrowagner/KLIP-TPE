@@ -79,10 +79,14 @@ def _cut_at(at):
 
 
 def _records(d):
+    """The records without their timings (``wall_s``, ``reduce_s``, ``meta.t_dispatch``),
+    which no two runs share."""
     with open(os.path.join(str(d), "results.jsonl")) as f:
         out = [json.loads(line) for line in f]
     for r in out:
         r.pop("wall_s", None)
+        r.pop("reduce_s", None)
+        (r.get("meta") or {}).pop("t_dispatch", None)
     return out
 
 

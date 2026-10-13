@@ -9,8 +9,9 @@
 Two processes on one run directory both append -- the registry guard that refuses a second
 ``klip-tpe resume`` is best-effort, and a stale entry lets one through -- and a resume can
 re-log what it replayed.  The duplicates are real duplicates: same ``x``, same ``score``,
-only ``wall_s`` differs, because both processes evaluated the same configuration and the
-later one was fighting the first for cores.
+only the timings differ (``wall_s``, ``reduce_s``, ``meta.t_dispatch``), because both
+processes evaluated the same configuration and the later one was fighting the first for
+cores.
 
 That matters downstream.  ``Runner.annulus_history`` rebuilds a completed annulus from this
 file, and TPE fits a density to those points, so a repeated point doubles that

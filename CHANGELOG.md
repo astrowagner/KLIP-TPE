@@ -1,5 +1,95 @@
 # Changelog
 
+## Unreleased — 2026-10-12 (checkpoints that survive a machine crash, less work per evaluation on the main thread, each trial's own times on the panel)
+
+From three NEAR2 notes of 2026-10-12: the checkpoint-durability note, the 552d9cc section of
+the parallelism note, and the note on per-trial timing.
+
+- **Checkpoints survive a crash of the machine.**  patrick went down hard 2.7 h into
+  `run_20261011_145111`, and every file the run wrote in its last ~30 s came back with 0
+  bytes, `checkpoint.json` among them, so the run could not resume.  Writing a temporary file
+  and renaming it made each write atomic but not durable.
+  - Every checkpoint write fsyncs the new file before the rename and the directory after it
+    (`klip_tpe/durable.py`).  On macOS the new file also gets `F_FULLFSYNC`, since `fsync`
+    stops at the drive's cache there.
+  - The save before the newest moves to `checkpoint.prev.json` before the new one takes the
+    name, so a crash at any moment leaves one complete checkpoint.  A `checkpoint.json` that
+    cannot be read never replaces a good `checkpoint.prev.json`.  A resume still reads every
+    `checkpoint*.json` and takes the one furthest along, so the interim copies
+    (`checkpoint.bak.json`) keep working, and the backup loop can stop once patrick runs this.
+  - `results.jsonl` and `results.txt` are fsynced before each checkpoint write, so no
+    checkpoint counts a line that a crash can take away.  The products a resume reads back
+    for a finished annulus (`best_*.fits`, the partition stacks, `winner.json`,
+    `contrast_curve.txt`), the verify tables and the param_verify maps reach the disk before
+    the checkpoint that records them.  `validation.json` and `val_candNN.pkl` reach it before
+    the checkpoint that pairs with their RNG state, and are now written atomically as well.
+    `run_setup.json`, `run_setup.txt` and `calibration.json` go with the next checkpoint.
+    `final_results.json`, which marks a run finished, is written durably after the final
+    stitch it lists.
+  - The fsyncs come with the checkpoint writes, at most every 10 s in a search plus once per
+    validation candidate and post-annulus hook.  On the sandbox's disk a 4.6 MB checkpoint
+    took 9-15 ms to write with them and 5-9 ms without.
+  - A resume cuts a half line off the end of `results.jsonl` and `results.txt` before it
+    appends, since the next record would fuse with it.  `klip-tpe runs` counts complete lines
+    only, and the bench and plot readers skip a half line or an empty JSON file.  The run
+    registry starts each record on a line of its own.
+  - The validation pickles carry the RNG state from before and after their candidate's
+    draws.  A resume from `checkpoint.prev.json`, after a crash between its two renames, then
+    draws the next candidate's positions as an uninterrupted run does.
+  - An extend's saves outrank everything from before it (`extends` in the checkpoint).  A
+    re-validation adds no evaluation and goes back an annulus, so by the other counts the
+    finished run's `checkpoint.prev.json` looked further along.
+  - A param_verify cache entry cut short by a crash is reduced again instead of failing the
+    hook, which the checkpoint would then have recorded as done.  Its entries are fsynced
+    before their rename, and so are downloaded data sets.
+  - An empty `heartbeat.json` already read as "unknown" in `klip-tpe runs`, and a test now
+    keeps it that way.
+- **Less work per evaluation on the main thread.**  With four trials in flight (552d9cc) the
+  NEAR2 search slowed from 0.50 s/eval over evaluations 501-2500 to 0.67 s over 4501-5040, at
+  a constant bin mix.  Three things the main thread did after every evaluation took longer as
+  the history grew.
+  - The routine checkpoint is still taken after every evaluation, but serialized only when
+    it is written, at most every 10 s.  `json.dumps` of the whole history took ~100 ms at
+    5,040 evaluations of a 56-D space.  A save held back is written as it stood when taken.
+  - A TPE proposal computes its 48 candidates' densities with one call per dimension instead
+    of one per candidate.  The proposals and the generator state after them are the same bit
+    for bit (`tests/test_optimizers.py` compares them with the old loop).
+  - The live display rebuilt its annulus data from every record after each evaluation, 66 ms
+    at 5,000 records, for a panel drawn one evaluation in `--display-every`.  It now does
+    that, and the contrast preview, only for an evaluation it draws.
+  - The parameter-walk pages of `landscapes.pdf`, drawn on the run's main thread at the end
+    of an annulus, draw each pair's walk as one collection.  One line per step made 180,000
+    artists per partition page at 5,000 evaluations.  A page took 16 s at 1,000 evaluations,
+    growing with them, and now takes 3 s at 5,000 and looks the same.
+  - A NEAR2-shaped synthetic search (6 nights, 56 dimensions, 3 draws, 4 trials in flight,
+    fast reductions), resumed at evaluation 4,800 in the sandbox, ran evaluations 4800-5000 at
+    346-354 ms each and now runs them at 209-214 ms.  Its main thread never waited, so that is
+    the main thread's time per evaluation.  From evaluations 200-400 to 4800-5000 it now grows
+    by 38 ms.  At 5,000 evaluations scoring takes 71% of it, the TPE proposal 21% and the
+    evaluation's files 7%.  With the live display attached (`--display-every 20`) the same
+    evaluations took 1.97 s each on average and now take 1.20 s, with a median of 0.97 s in both.
+    The panel renderer holds the GIL while it draws, and on two cores it then sets the main
+    thread's pace.
+  - `KLIP_TPE_PROFILE_MAIN=S` profiles the main thread from inside a run
+    (`klip_tpe/profiling.py`).  Every `S` seconds `main_thread_profile.txt` lists the share of
+    the time each function held it, over the last `S` seconds and since the start, and the
+    share spent waiting.
+- **Each trial's own times on the panel and in `run.log`.**  With four trials in flight the
+  panel read "avg 0.6 s/eval (2.1 s reduce)".  The interval between two evaluations is the
+  throughput, and `wall_s` runs on to a trial's scoring, so it also holds the wait for workers
+  and for the main thread.
+  - A record carries `reduce_s`, from its dispatch until the last of its reductions was back,
+    and its dispatch time (`meta["t_dispatch"]`).  `wall_s` keeps its meaning.
+  - The display is now the last thing the runner does for a trial, after its files, the
+    checkpoint and the running stitch.  The panel shows `avg eval X s (reduce Y s)` over the
+    last 50 trials and `last eval X s (reduce Y s)` for the newest, with `eval` counted from
+    the dispatch until the trial was processed.  `1 done every X s (N in flight)` gives the
+    throughput, which still sets both ETAs.  The classic panel's `wall` line shows the same
+    two times.
+  - Each `run.log` evaluation line ends `reduce Xs / eval Ys`.
+  - With one trial at a time, the two numbers mean what the panel's numbers meant before
+    trials overlapped.
+
 ## Unreleased — 2026-10-11 (pipelined batches, a job's per-frame steps on its threads, the longest job first; high-pass after binning under test)
 
 From the NEAR2 session's second note of 2026-10-11.  It measured da36baf on patrick at 1.66x

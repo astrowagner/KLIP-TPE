@@ -97,7 +97,10 @@ def read_records(run_dir: str, annulus: Optional[int] = None, last_segment: bool
         for line in f:
             line = line.strip()
             if line:
-                recs.append(json.loads(line))
+                try:
+                    recs.append(json.loads(line))
+                except ValueError:     # half a line left by a crash: the resume writes it again
+                    continue
     if annulus is not None:
         recs = [r for r in recs if int(r.get("annulus", 0)) == int(annulus)]
     starts = [i for i, r in enumerate(recs) if int(r.get("index", 0)) == 0]

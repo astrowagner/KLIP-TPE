@@ -76,10 +76,13 @@ class History:
         idx = np.flatnonzero(self.valid)
         return idx[np.argsort(-self.y[idx], kind="stable")]
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {"ndim": self.ndim, "X": self.X.tolist(),
-                "y": [None if not np.isfinite(v) else float(v) for v in self.y],
-                "flags": self.flags}
+    def to_dict(self, n: Optional[int] = None) -> Dict[str, Any]:
+        """JSON-ready form.  ``n``: the first ``n`` rows only, the history as it stood when
+        it held ``n`` (rows are only ever appended)."""
+        n = len(self) if n is None else int(n)
+        return {"ndim": self.ndim, "X": self.X[:n].tolist(),
+                "y": [None if not np.isfinite(v) else float(v) for v in self.y[:n]],
+                "flags": self.flags[:n]}
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "History":
@@ -118,6 +121,25 @@ def parzen_density(x: float, s: np.ndarray, h: float, lo: float, hi: float,
     if n < 1 or hi <= lo:
         return 1.0 / max(hi - lo, 1e-12)
     d = float(np.sum(np.exp(-0.5 * ((x - s) / h) ** 2))) / (n * h * np.sqrt(2.0 * np.pi))
+    return (1.0 - prior_weight) * d + prior_weight / (hi - lo)
+
+
+def parzen_density_many(x: np.ndarray, s: np.ndarray, h: float, lo: float, hi: float,
+                        prior_weight: float = 0.25) -> np.ndarray:
+    """:func:`parzen_density` at every point of ``x`` at once, bit for bit the same.
+
+    The same operations on the same numbers: each row of the kernel matrix is one call's
+    array, and a row sum of a C-ordered array is the same pairwise sum as ``np.sum`` of
+    that row.  One call per dimension instead of one per candidate: with 48 candidates, 56
+    dimensions and both densities, a TPE proposal made 5,376 calls, each with its own
+    Python overhead and its own copy of the good or bad set, and the bad set grows with the
+    history (tests/test_optimizers.py checks the equality)."""
+    s = np.asarray(s, dtype=float)
+    x = np.asarray(x, dtype=float)
+    n = s.size
+    if n < 1 or hi <= lo:
+        return np.full(x.shape, 1.0 / max(hi - lo, 1e-12))
+    d = np.sum(np.exp(-0.5 * ((x[:, None] - s[None, :]) / h) ** 2), axis=1) / (n * h * np.sqrt(2.0 * np.pi))
     return (1.0 - prior_weight) * d + prior_weight / (hi - lo)
 
 
@@ -260,10 +282,9 @@ def tpe_propose(X: np.ndarray, y: np.ndarray, space: SearchSpace, rng: np.random
     for b in blk:
         if len(b) == 1:
             d = int(b[0])
-            for c in range(ncand):
-                ld = parzen_density(C[c, d], X[good, d], hg[d], lo[d], hi[d], prior_weight)
-                gd = parzen_density(C[c, d], X[bad, d], hb[d], lo[d], hi[d], prior_weight)
-                ei[c] += np.log(ld) - np.log(gd)
+            ld = parzen_density_many(C[:, d], X[good, d], hg[d], lo[d], hi[d], prior_weight)
+            gd = parzen_density_many(C[:, d], X[bad, d], hb[d], lo[d], hi[d], prior_weight)
+            ei += np.log(ld) - np.log(gd)
         else:
             ei += block_log_density(C, X, good, hg, b, lo, hi, prior_weight) \
                 - block_log_density(C, X, bad, hb, b, lo, hi, prior_weight)

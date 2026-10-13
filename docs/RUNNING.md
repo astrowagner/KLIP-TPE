@@ -110,6 +110,20 @@ part way through a batch repeats that batch.  A run started before `--batch-mode
 resumes with `sync`, and the k-scan modes always use it.  `run_setup.txt` records both
 settings.
 
+With trials in flight, the time between two finished evaluations is the throughput, not the
+time any of them takes.  The panel and each `run.log` evaluation line give a trial's own
+times: `eval`, from its dispatch until it was processed (scored, files written, checkpoint,
+display), and `reduce`, until the last of its reductions was back.  `results.jsonl` keeps
+`reduce_s` in each record.  The panel's `1 done every ... (N in flight)` is the throughput,
+and both ETAs come from it.
+
+With several trials in flight, the main thread sets the pace once the workers keep up: it
+scores every trial, asks for the next proposal and writes the files, the checkpoint and the
+display.  `KLIP_TPE_PROFILE_MAIN=300 klip-tpe resume ...` writes `main_thread_profile.txt`
+into the run directory every 300 s.  It lists the share of the time each function held the
+main thread over the last 300 s and since the start, and the share it spent waiting.  It
+needs no other package.
+
 Six NEAR nights are ~2000 frames × 150² each, and the workers share them.  Each running job
 holds its own binned cube and KL bases, and each worker keeps its latest injected cube of every
 night it has reduced, about 0.85 GB for six NEAR nights.  On Linux the log reports, after the
@@ -122,6 +136,17 @@ The run checkpoints after every evaluation, every validation trial, every post-a
 and every param_verify reduction; `klip-tpe resume --root ... --nights 1 2 3 4 5 6` (`--run-dir` defaults to `last`, the newest run under
 `<root>/comb/opt`; give a directory to pick another) or the script's `resume` continues exactly where it stopped.  `klip-tpe extend --n-iter ...`
 reopens a finished annulus with a larger budget (IDL `extend_ann`).
+
+The checkpoint also survives a crash of the machine.  Each write is fsynced before its
+rename, and the directory after it, and the save before the newest stays beside it as
+`checkpoint.prev.json`.  `results.jsonl` and `results.txt` reach the disk before the
+checkpoint that counts their lines, and so do the products of a finished annulus or hook
+before the checkpoint that records them.  After a crash, `resume` takes `checkpoint.json`, or
+`checkpoint.prev.json` when the crash left `checkpoint.json` empty or missing.  It cuts any
+half line off the end of `results.jsonl` and `results.txt`, and the run ends where it would
+have ended without the crash.  A resume reads every `checkpoint*.json` in the directory and
+takes the one furthest along, so a backup copy such as `checkpoint.bak.json` is used when it
+is the newest.
 
 ## While it runs
 

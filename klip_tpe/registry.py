@@ -47,8 +47,8 @@ def register(run_dir: str, argv: Optional[List[str]] = None) -> None:
         rec = {"run_dir": os.path.abspath(run_dir), "pid": os.getpid(),
                "argv": list(argv if argv is not None else sys.argv),
                "started": time.time(), "host": os.uname().nodename if hasattr(os, "uname") else ""}
-        with open(registry_path(), "a") as f:
-            f.write(json.dumps(rec) + "\n")
+        from .durable import append_line
+        append_line(registry_path(), json.dumps(rec))    # on a line of its own, whatever a crash left
     except Exception:
         pass
 
@@ -154,7 +154,8 @@ def run_state(run_dir: str, table: Optional[List[tuple]] = None) -> Dict[str, An
         try:
             st["age"] = time.time() - os.path.getmtime(res)
             with open(res, "rb") as f:
-                st["n_eval"] = sum(1 for _ in f)
+                # complete lines only: a crash can leave half of one at the end
+                st["n_eval"] = sum(chunk.count(b"\n") for chunk in iter(lambda: f.read(1 << 20), b""))
                 f.seek(0, os.SEEK_END)
                 back = min(8192, f.tell())
                 f.seek(-back, os.SEEK_END)

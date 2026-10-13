@@ -4,9 +4,10 @@ import numpy as np
 import pytest
 from scipy.integrate import quad
 
+from klip_tpe import optimizers as O
 from klip_tpe.optimizers import (GridSearch, History, RandomSearch, TPE, block_log_density,
-                                 make_optimizer, parzen_bandwidth, parzen_density, resolve_blocks,
-                                 tpe_propose)
+                                 make_optimizer, parzen_bandwidth, parzen_density, parzen_density_many,
+                                 resolve_blocks, tpe_propose)
 from klip_tpe.space import Param, SearchSpace, kgrid
 
 
@@ -121,6 +122,79 @@ def test_tpe_propose_near_optimum_more_than_random(blocks):
     assert near_tpe > 0.7
     assert near_tpe > near_rnd + 0.3
     assert np.all(P >= -1) and np.all(P <= 1)
+
+
+def _propose_one_candidate_at_a_time(X, y, space, rng, gamma=0.25, ncand=48, pbest=0.0, prior_weight=0.25,
+                                     bw_floor=0.08, blocks=None):
+    """tpe_propose as it was until 2026-10-12: each candidate's density computed on its own."""
+    X, y = np.asarray(X, float), np.asarray(y, float)
+    n, ndim = X.shape
+    lo, hi, cat, ncat = space.lo, space.hi, space.is_categorical, space.n_categories
+    if n < 2:
+        return space.random(rng)
+    ord_ = np.argsort(-y, kind="stable")
+    ng = min(max(int(round(gamma * n)), 1), n - 1)
+    good, bad = ord_[:ng], ord_[ng:]
+    hg = np.array([parzen_bandwidth(X[good, d], lo[d], hi[d], bw_floor) for d in range(ndim)])
+    hb = np.array([parzen_bandwidth(X[bad, d], lo[d], hi[d], bw_floor) for d in range(ndim)])
+    pmf_g = {d: O._categorical_pmf(X[good, d], ncat[d], prior_weight) for d in range(ndim) if cat[d]}
+    pmf_b = {d: O._categorical_pmf(X[bad, d], ncat[d], prior_weight) for d in range(ndim) if cat[d]}
+    blk = resolve_blocks(space, blocks)
+    C = np.empty((ncand, ndim))
+    for c in range(ncand):
+        anchor = good[0] if rng.random() < pbest else -1
+        for b in blk:
+            j = anchor if anchor >= 0 else good[int(rng.random() * ng)]
+            for d in b:
+                C[c, d] = min(max(X[j, d] + hg[d] * rng.standard_normal(), lo[d]), hi[d])
+        for d in range(ndim):
+            if cat[d]:
+                C[c, d] = float(rng.choice(ncat[d], p=pmf_g[d]))
+    ei = np.zeros(ncand)
+    for b in blk:
+        if len(b) == 1:
+            d = int(b[0])
+            for c in range(ncand):
+                ld = parzen_density(C[c, d], X[good, d], hg[d], lo[d], hi[d], prior_weight)
+                gd = parzen_density(C[c, d], X[bad, d], hb[d], lo[d], hi[d], prior_weight)
+                ei[c] += np.log(ld) - np.log(gd)
+        else:
+            ei += block_log_density(C, X, good, hg, b, lo, hi, prior_weight) \
+                - block_log_density(C, X, bad, hb, b, lo, hi, prior_weight)
+    for d in range(ndim):
+        if cat[d]:
+            ci = C[:, d].astype(int)
+            ei += np.log(pmf_g[d][ci]) - np.log(pmf_b[d][ci])
+    return space.sanitize(C[int(np.argmax(ei))])
+
+
+def test_tpe_proposals_are_bit_for_bit_what_they_were(partition_space):
+    """The densities of all candidates are computed at once since 2026-10-12, one call per
+    dimension instead of one per candidate (a proposal took 129 ms at 5,000 evaluations of a
+    56-D space, on the thread that sets a pipelined search's pace).  The proposals, and the
+    generator state after them, must not move by one bit."""
+    sp = partition_space.replicate([Param("m", 0, 2, "categorical", choices=["x", "y", "z"])], ["p0", "p1"])
+    for seed in range(24):
+        g = np.random.default_rng(seed)
+        n = int(g.integers(2, 30)) if seed % 3 == 0 else int(g.integers(30, 1500))
+        X = np.array([sp.random(g) for _ in range(n)])
+        y = g.standard_normal(n) * 3
+        if seed % 4 == 0:
+            y[g.random(n) < 0.3] = 1.25                                   # ties in the ranking
+        for kw in ({}, {"gamma": 0.15, "pbest": 0.2, "prior_weight": 0.1}, {"blocks": "partitions"}):
+            r1, r2 = np.random.default_rng(100 + seed), np.random.default_rng(100 + seed)
+            a = _propose_one_candidate_at_a_time(X, y, sp, r1, **kw)
+            b = tpe_propose(X, y, sp, r2, **kw)
+            assert np.array_equal(a, b), (seed, n, kw)
+            assert r1.bit_generator.state == r2.bit_generator.state
+    g = np.random.default_rng(7)
+    for trial in range(200):
+        s = g.uniform(-3, 9, int(g.integers(0, 2000)))
+        x = g.uniform(-4, 10, int(g.integers(1, 80)))
+        h = float(g.uniform(1e-3, 3))
+        lo, hi = (0.0, 6.0) if trial % 7 else (2.0, 2.0)                  # and a degenerate range
+        many = parzen_density_many(x, s, h, lo, hi, 0.25)
+        assert np.array_equal(many, [parzen_density(v, s, h, lo, hi, 0.25) for v in x]), trial
 
 
 def test_tpe_propose_sanitized_in_bounds(simple_space, rng):
