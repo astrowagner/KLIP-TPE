@@ -3440,6 +3440,7 @@ class LiveDisplay(RunCallback):
         self._val_args: Optional[Dict[str, Any]] = None
         self._t0 = time.time()
         self._setup: Dict[str, Any] = {}
+        self._books: List[Any] = []                              # annulus books being drawn elsewhere
 
     def _next_step(self) -> int:
         """Carry on numbering panels where the run left off.
@@ -4164,6 +4165,7 @@ class LiveDisplay(RunCallback):
     def on_eval(self, runner, record, inj, clean, is_best: bool) -> None:
         self._trial_noted = False
         try:
+            self._collect_books(runner)          # an earlier annulus' books, once they are written
             self._on_eval(runner, record, inj, clean, is_best)
         except Exception as exc:
             self._say(runner, f"on_eval failed: {exc!r}\n" + traceback.format_exc(limit=3))
@@ -4457,16 +4459,7 @@ class LiveDisplay(RunCallback):
         ad.winner = result.to_dict()
         ad.validation = result.validation_table
         d = self._ann_dir(result.annulus)
-        self._guard(runner, "corner", render_corner, ad, os.path.join(d, "corner.pdf"))
-        self._guard(runner, "landscapes", render_landscapes, ad, os.path.join(d, "landscapes.pdf"))
-        self._guard(runner, "parhist", render_parhist_book, ad, os.path.join(d, "parhist.pdf"))
-        self._guard(runner, "edf", render_edf, ad, os.path.join(d, "edf.png"))
-        self._guard(runner, "partition map", render_nightmap, ad, os.path.join(d, "partition_map.png"))
-        self._guard(runner, "kbook", render_kbook, ad, os.path.join(d, "kbook.pdf"))
-        self._guard(runner, "importance", render_importance, ad, os.path.join(d, "importance.pdf"))
-        self._guard(runner, "paracoord", render_paracoord, ad, os.path.join(d, "paracoord.pdf"))
-        self._guard(runner, "rank", render_rank, ad, os.path.join(d, "rank.pdf"))
-        self._guard(runner, "slice", render_slice, ad, os.path.join(d, "slice.pdf"))
+        self._books_start(runner, ad, d, result.annulus)
         self._guard(runner, "verify books", render_verify_books, self.run_dir, result.annulus)
         self._guard(runner, "products sheet", render_products_sheet, self.run_dir, result.annulus,
                     os.path.join(d, "products.pdf"))
@@ -4538,8 +4531,45 @@ class LiveDisplay(RunCallback):
                             step_label="annulus done -- " + ("VALIDATED winner" if result.validated else "winner NOT validated"),
                             contrast_note="no validated curve for this annulus" if not curves else None)
 
+    def _books_start(self, runner, ad: AnnulusData, d: str, ia: int) -> None:
+        """The ten annulus books of :mod:`klip_tpe.books`, drawn by a separate process from a
+        snapshot of ``ad`` so that the next annulus does not wait for them, or here when no
+        process can be started (or ``KLIP_TPE_BOOKS=inline`` asks for that)."""
+        from . import books
+        self._collect_books(runner)
+        if books.in_background():
+            try:
+                self._books.append(books.start(ad, d, ia))
+                return
+            except Exception as exc:
+                self._say(runner, f"annulus {ia + 1} books: no separate process ({exc!r}), drawing them here")
+        self._books_report(runner, books.draw(ad, d))
+
+    def _books_report(self, runner, statuses) -> None:
+        for st in statuses:
+            if not st.get("ok"):
+                self._say(runner, f"{st['book']} failed: {st.get('error', '')}")
+
+    def _collect_books(self, runner, wait: bool = False) -> None:
+        """Report the books processes that have ended; with ``wait``, wait for all of them."""
+        keep = []
+        for job in getattr(self, "_books", None) or []:
+            if not wait and not job.done():
+                keep.append(job)
+                continue
+            if not job.done():
+                self._say(runner, f"waiting for the annulus {job.ia + 1} books")
+            res = self._guard(runner, f"annulus {job.ia + 1} books", job.finish)
+            if res is not None:
+                statuses, note = res
+                self._books_report(runner, statuses)
+                if note:
+                    self._say(runner, note)
+        self._books = keep
+
     def on_finish(self, runner) -> None:
         self._wait_renders()
+        self._collect_books(runner, wait=True)
         if not self.movie or not self._paths:
             return
         try:

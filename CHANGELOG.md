@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 2026-10-13 (injection only into the kept frames and on the job's threads, the display's annulus books under their own name)
+## Unreleased — 2026-10-13 (injection only into the kept frames and on the job's threads, the display's annulus books in a process of their own)
 
 From the NEAR2 parallelism note of 2026-10-13.
 
@@ -34,19 +34,32 @@ From the NEAR2 parallelism note of 2026-10-13.
   - The high-pass already ran after the frame selection, as in `reduce_near_2`.  A job that
     high-passes all 2024 frames of n6 kept all of them, because a cut that would leave fewer
     than `k_klip × bin` frames (at least 3) is skipped, the rule of `near2_framekeep.pro`.
-- **The display's annulus books have a stage of their own.**  `heartbeat.json` and the stall
-  note named the candidate search for the minutes between annuli.  On the running stitch of
-  `run_20261008_093817` the search takes 0.15 s in the sandbox (20 peaks), and the final,
-  verified pass 5 s.  The minutes are the display's books, which it draws on the run's main
-  thread after the hooks.  In that run (Mac-Pro-5, 10,000 evaluations in annulus 1)
-  param_verify finished at 15:23:54, `corner.pdf` was written at 15:27:46, `landscapes.pdf`
-  at 15:46:08 and the final panel at 15:49:54, and annulus 2 began calibrating at 15:50:06.
-  Its parameter walks were still drawn line by line, which 7fbe593 replaced.  At 5,000
-  evaluations the ten books take 3.8 min in the sandbox with 7fbe593, `corner.pdf` 119 s and
-  `landscapes.pdf` 65 s of it.  The "expected ~38s" was the stall threshold of the
-  evaluations before (300 s / 8).
-  - The books run under `annulus N display books`.  The post-annulus hooks and the books carry
-    no stall threshold, as the final products do, and the next evaluation sets it again.
+- **The display's annulus books are drawn by a process of their own.**  `heartbeat.json` and
+  the stall note named the candidate search for the minutes between annuli.  On the running
+  stitch of `run_20261008_093817` the search takes 0.15 s in the sandbox (20 peaks), and the
+  final, verified pass 5 s.  The minutes were the display's books, drawn on the run's main
+  thread after the hooks while every worker waited.  In that run (Mac-Pro-5, 10,000
+  evaluations in annulus 1) param_verify finished at 15:23:54, `corner.pdf` was written at
+  15:27:46, `landscapes.pdf` at 15:46:08 and the final panel at 15:49:54, and annulus 2 began
+  calibrating at 15:50:06.  Its parameter walks were still drawn line by line, which 7fbe593
+  replaced.  The "expected ~38s" was the stall threshold of the evaluations before
+  (300 s / 8).
+  - The ten books of an annulus (corner, landscapes, parhist, edf, partition map, kbook,
+    importance, paracoord, rank, slice) are drawn by `python -m klip_tpe.books` from a
+    pickled snapshot of the same annulus data, with the same functions in the same order
+    (`klip_tpe/books.py`).  At 5,000 evaluations the run spent 218 s on them and now spends
+    0.09 s handing them over, and the process wrote all ten in 205 s, byte for byte the same
+    files (with `SOURCE_DATE_EPOCH` set, which fixes the PDFs' creation date).
+  - The process runs at a lower priority than the workers.  The display reports the books
+    in the log once they are written, and the run waits for the last of them at its end.  A
+    Ctrl-C of the run does not stop the process, which finishes the books.  When it ends
+    without finishing, the run draws them from the snapshot.  `KLIP_TPE_BOOKS=inline` draws
+    them on the main thread as before.
+  - The verify books and the products sheet read the run directory as it stands, and the
+    validation panel and the annulus' last frames come from images the run holds in memory.
+    They stay on the main thread, a few seconds under the stage `annulus N display books`.
+    The post-annulus hooks and these carry no stall threshold, as the final products do, and
+    the next evaluation sets it again.
 
 ## Unreleased — 2026-10-12 (checkpoints that survive a machine crash, less work per evaluation on the main thread, each trial's own times on the panel)
 

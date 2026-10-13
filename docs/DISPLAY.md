@@ -122,6 +122,14 @@ run_dir/
   bench_summary.txt                              one row for benchmark tables
 ```
 
+The ten books of an annulus (`corner.pdf` to `slice.pdf`, `edf.png` and
+`partition_map.png`) are drawn by a separate Python process while the next annulus runs.
+It draws them from a snapshot of the annulus' records with the same functions, so the files
+are the same as when the run drew them itself, and it runs at a lower priority than the
+workers.  The books of an annulus appear a few minutes after it ends, and the run waits for
+the last of them at its end.  A Ctrl-C of the run does not stop that process, which finishes
+the books and exits.  `KLIP_TPE_BOOKS=inline` draws them on the run's main thread instead.
+
 Each annulus is reduced over its zone padded by 2 px where it meets another annulus, and
 its stitch tile overlaps the neighbor by 2 px there.  The inner edge of the innermost
 annulus and the outer edge of the outermost are neither padded nor overlapped, so the

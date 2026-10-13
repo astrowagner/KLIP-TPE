@@ -41,6 +41,8 @@ def test_live_display_products(live_run):
     # never a swallowed callback failure
     assert not [l for l in logs if "failed" in l and "display" in l], [l for l in logs if "failed" in l]
     assert not [l for l in logs if l.strip().startswith("callback")]
+    # the annulus books came from their own process, reported once written (klip_tpe.books)
+    assert [l for l in logs if "annulus 1 books: 10 of 10 written" in l], logs
     steps = sorted(f for f in os.listdir(os.path.join(d, "steps")) if f.startswith("step"))
     assert len(steps) == 19                       # 14 evaluations + 2x2 validation trials + the annulus-done frame
     assert all(_size(os.path.join(d, "steps", f)) > 30_000 for f in steps)
