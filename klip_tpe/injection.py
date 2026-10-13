@@ -24,7 +24,7 @@ from scipy import ndimage
 from .metrics import Source
 
 __all__ = ["InjectionModel", "GaussianPSF", "TemplatePSF", "AiryPSF", "FramePSF", "LibraryPSF", "inject_sources",
-           "shift_bilinear", "add_stamp", "takes_azimuth"]
+           "inject_frames", "shift_bilinear", "add_stamp", "takes_azimuth"]
 
 
 def takes_azimuth(model) -> bool:
@@ -51,20 +51,27 @@ def shift_bilinear(img: np.ndarray, dx: float, dy: float) -> np.ndarray:
 
 
 def add_stamp(frame: np.ndarray, stamp: np.ndarray, stamp_center: Tuple[float, float],
-              x: float, y: float) -> None:
+              x: float, y: float, buf: Optional[np.ndarray] = None) -> None:
     """Add ``stamp`` to ``frame`` in place so that ``stamp_center`` (x, y in stamp
     pixels) lands at frame position ``(x, y)``; integer part by placement, fractional
-    part by bilinear shift (``near2_psfstamp``).  Clipped at the frame edges."""
+    part by bilinear shift (``near2_psfstamp``).  Clipped at the frame edges.
+
+    ``buf``: a float64 array of the stamp's shape that receives the shifted stamp, so a
+    caller adding many stamps does not allocate one each time (the numbers are the same)."""
     sh, sw = stamp.shape
     fx = x - stamp_center[0]
     fy = y - stamp_center[1]
     ix, iy = int(np.floor(fx)), int(np.floor(fy))
-    s = shift_bilinear(stamp, fx - ix, fy - iy)
     ny, nx = frame.shape
     x0, y0 = max(ix, 0), max(iy, 0)
     x1, y1 = min(ix + sw, nx), min(iy + sh, ny)
     if x1 <= x0 or y1 <= y0:
         return
+    if buf is None:
+        s = shift_bilinear(stamp, fx - ix, fy - iy)
+    else:
+        s = ndimage.shift(np.asarray(stamp, float), (fy - iy, fx - ix), output=buf, order=1,
+                          mode="constant", cval=0.0)
     frame[y0:y1, x0:x1] += s[y0 - iy:y1 - iy, x0 - ix:x1 - ix]
 
 
@@ -407,7 +414,8 @@ def _check_float32_headroom(cube: np.ndarray, sources: Sequence[Source], model: 
     # would cost real time for a number that only has to be right to an order of magnitude.
     # The brightest pixels are the star's and are in every frame, so striding is safe.
     s = max(1, int(cube.size // 2_000_000))
-    peak = float(np.nanmax(np.abs(cube.reshape(-1)[::s])))
+    # the samples as the float32 cube holds them, whatever the dtype passed in
+    peak = float(np.nanmax(np.abs(np.asarray(cube.reshape(-1)[::s], np.float32))))
     if not np.isfinite(peak) or peak <= 0:
         return
     quantum = peak * float(np.finfo(np.float32).eps)      # ULP of the brightest pixels
@@ -439,7 +447,7 @@ def _check_float32_headroom(cube: np.ndarray, sources: Sequence[Source], model: 
 def inject_sources(cube: np.ndarray, angles: np.ndarray, sources: Sequence[Source], model: InjectionModel,
                    pxscale: float, truenorth: float = 0.0, center: Optional[Tuple[float, float]] = None,
                    fallback: Optional[InjectionModel] = None, angle_convention: str = "pa",
-                   copy: bool = True) -> np.ndarray:
+                   copy: bool = True, frames: Optional[Sequence[int]] = None, threads: int = 1) -> np.ndarray:
     """Return ``cube`` with synthetic companions added to every frame.
 
     For each source: amplitude ``contrast * model.flux_unit * model.throughput(rho)``;
@@ -454,13 +462,37 @@ def inject_sources(cube: np.ndarray, angles: np.ndarray, sources: Sequence[Sourc
     mask is fixed to the detector while the field rotates past it: a companion at one sky
     position angle is attenuated differently in every frame of a roll sequence.  For a
     round occulter the throughput is constant and is computed once.
+
+    ``frames``: inject only these frames (indices into the cube); the others come back as
+    they went in.  ``threads``: the frames go to that many threads (:func:`inject_frames`).
     """
     out = np.array(cube, dtype=np.float32, copy=copy)
-    n, ny, nx = out.shape
     _check_float32_headroom(out, sources, model, fallback)
-    if center is None:
-        center = ((nx - 1) / 2.0, (ny - 1) / 2.0)
-    angles = np.asarray(angles, float)
+    inject_frames(out, out, angles, sources, model, pxscale, frames, truenorth=truenorth, center=center,
+                  fallback=fallback, angle_convention=angle_convention, threads=threads)
+    return out
+
+
+@dataclass
+class _Prepared:
+    """What one source needs in every frame, worked out once: the stamp, the model it
+    came from (the fallback where the model has no template there), and the scaled stamp
+    shared by every frame when neither the throughput nor the PSF changes frame to frame."""
+
+    src: Source
+    model: InjectionModel           # the model the stamp came from
+    stamp: np.ndarray               # unit stamp, float64
+    center: Tuple[float, float]
+    r_px: float
+    per_frame: bool
+    az_aware: bool
+    thru: Optional[float]
+    base: Optional[np.ndarray]      # stamp * contrast * flux_unit * throughput, or None
+
+
+def _prepare(sources: Sequence[Source], model: InjectionModel, fallback: Optional[InjectionModel],
+             pxscale: float) -> list:
+    out = []
     for s in sources:
         st, sc, ok = model.stamp(s.rho)
         m = model
@@ -476,32 +508,104 @@ def inject_sources(cube: np.ndarray, angles: np.ndarray, sources: Sequence[Sourc
             st, sc, ok = fallback.stamp(s.rho)
             m = fallback
         st = np.asarray(st, float)
-        r_px = s.rho / pxscale
         per_frame = bool(getattr(model, "per_frame", False)) and ok
         # A position-dependent coronagraph attenuates a source by a different factor in
         # every frame: the mask is fixed to the detector and the field rotates past it, so
         # a companion at one sky PA crosses the quadrant boundaries as the telescope rolls.
-        # Hoisting the throughput out of this loop is only correct for a round occulter.
+        # Hoisting the throughput out of the frame loop is only correct for a round occulter.
         az_aware = takes_azimuth(model)
         thru = None if az_aware else float(model.throughput(s.rho))
         base = None if (az_aware or per_frame) else st * (s.contrast * m.flux_unit * thru)
-        for j in range(n):
-            if angle_convention == "pa":
-                az = s.theta - truenorth - 270.0 - angles[j]
-            else:
-                az = s.theta - angles[j]
-            azr = np.deg2rad(az)
-            xs, ys = center[0] + r_px * np.cos(azr), center[1] + r_px * np.sin(azr)
-            t_j = float(model.throughput(s.rho, az)) if az_aware else thru
-            if per_frame:
-                stj, sc, fu_j = model.frame_stamp(j, s.rho)
-                stamp = np.asarray(stj, float) * (s.contrast * fu_j * t_j)
-            elif az_aware:
-                stamp = st * (s.contrast * m.flux_unit * t_j)
-            else:
-                stamp = base
-            if m.refpa_deg is not None:
-                from .klip import rotate_ccw
-                stamp = rotate_ccw(stamp, az - m.refpa_deg, cval=0.0)
-            add_stamp(out[j], stamp, sc, xs, ys)
+        out.append(_Prepared(s, m, st, sc, s.rho / pxscale, per_frame, az_aware, thru, base))
     return out
+
+
+def inject_frames(out: np.ndarray, cube: np.ndarray, angles: np.ndarray, sources: Sequence[Source],
+                  model: InjectionModel, pxscale: float, frames: Optional[Sequence[int]] = None, *,
+                  truenorth: float = 0.0, center: Optional[Tuple[float, float]] = None,
+                  fallback: Optional[InjectionModel] = None, angle_convention: str = "pa",
+                  threads: int = 1) -> None:
+    """``out[j] = cube[j]`` with the sources added, for every frame ``j`` of ``frames`` (all
+    by default), the numbers :func:`inject_sources` gives.  ``out`` is a float32 cube of
+    the same shape and may be ``cube`` itself.  Frames not listed are not touched.
+
+    Each frame's stamps are added in the order of ``sources``, as before.  The frames go
+    to ``threads`` threads in blocks, and each block writes only its own frames.  Within a
+    block, a source whose stamp is the same in every frame is rotated to all the block's
+    frames by one :func:`klip_tpe.klip.rotate_ccw_many` call, which runs without the GIL.
+    The shift and the add stay frame by frame."""
+    from .klip import frame_blocks, run_blocks
+    prepared = _prepare(sources, model, fallback, pxscale)
+    n, ny, nx = out.shape
+    fr = np.arange(n) if frames is None else np.asarray(frames, dtype=np.intp).reshape(-1)
+    if not prepared and out is cube:
+        return
+    if center is None:
+        center = ((nx - 1) / 2.0, (ny - 1) / 2.0)
+    angles = np.asarray(angles, float)
+    copy_in = out is not cube
+
+    def block(lo, hi):
+        J = fr[lo:hi].tolist()
+        if copy_in:
+            for j in J:
+                out[j] = cube[j]
+        for p in prepared:
+            if p.base is not None:
+                _add_shared(out, J, p, angles, truenorth, center, angle_convention)
+            else:
+                _add_each(out, J, p, model, angles, truenorth, center, angle_convention)
+    # a block's temporaries are a few stamp-sized arrays per frame; keep them near 1 MB
+    px = max((int(p.stamp.size) for p in prepared), default=0)
+    run_blocks(block, frame_blocks(fr.size, threads, 4 * px), threads)
+
+
+def _azimuth(s: Source, angle: float, truenorth: float, angle_convention: str):
+    if angle_convention == "pa":
+        return s.theta - truenorth - 270.0 - angle
+    return s.theta - angle
+
+
+def _add_shared(out, J, p: _Prepared, angles, truenorth, center, angle_convention) -> None:
+    """Add a source whose scaled stamp is the same in every frame to the frames ``J``."""
+    s, m = p.src, p.model
+    k = len(J)
+    xs, ys = np.empty(k), np.empty(k)
+    rot = []
+    for i, j in enumerate(J):
+        az = _azimuth(s, angles[j], truenorth, angle_convention)
+        azr = np.deg2rad(az)
+        xs[i], ys[i] = center[0] + p.r_px * np.cos(azr), center[1] + p.r_px * np.sin(azr)
+        if m.refpa_deg is not None:
+            rot.append(az - m.refpa_deg)
+    if m.refpa_deg is not None:
+        from .klip import rotate_ccw_many
+        stamps = rotate_ccw_many(p.base, rot, cval=0.0)
+    else:
+        stamps = None
+    buf = np.empty(p.base.shape)
+    for i, j in enumerate(J):
+        add_stamp(out[j], p.base if stamps is None else stamps[i], p.center, xs[i], ys[i], buf)
+
+
+def _add_each(out, J, p: _Prepared, model, angles, truenorth, center, angle_convention) -> None:
+    """Add a source whose stamp or throughput changes frame to frame to the frames ``J``."""
+    s, m = p.src, p.model
+    sc = p.center
+    buf = None
+    for j in J:
+        az = _azimuth(s, angles[j], truenorth, angle_convention)
+        azr = np.deg2rad(az)
+        xs, ys = center[0] + p.r_px * np.cos(azr), center[1] + p.r_px * np.sin(azr)
+        t_j = float(model.throughput(s.rho, az)) if p.az_aware else p.thru
+        if p.per_frame:
+            stj, sc, fu_j = model.frame_stamp(j, s.rho)
+            stamp = np.asarray(stj, float) * (s.contrast * fu_j * t_j)
+        else:
+            stamp = p.stamp * (s.contrast * m.flux_unit * t_j)
+        if m.refpa_deg is not None:
+            from .klip import rotate_ccw
+            stamp = rotate_ccw(stamp, az - m.refpa_deg, cval=0.0)
+        if buf is None or buf.shape != stamp.shape:
+            buf = np.empty(stamp.shape)
+        add_stamp(out[j], stamp, sc, xs, ys, buf)

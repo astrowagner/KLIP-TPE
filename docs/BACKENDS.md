@@ -2,8 +2,8 @@
 
 klip-tpe ships its own annular KLIP (`klip_tpe.klip`, the port of `reduce_near_2`), but
 the optimizer does not care who does the subtraction. Three external engines are wired
-in; each is a `KLIPReducer` subclass that keeps the pre-processing chain (injection,
-frame selection, high-pass, binning, RDI reference handling) and replaces only the
+in; each is a `KLIPReducer` subclass that keeps the pre-processing chain (frame
+selection, injection, high-pass, binning, RDI reference handling) and replaces only the
 subtract-derotate-combine step, so results and products are directly comparable across
 engines on the same data.
 

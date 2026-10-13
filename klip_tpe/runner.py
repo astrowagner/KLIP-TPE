@@ -2867,6 +2867,10 @@ class Runner:
         # recorded in the checkpoint when it completes so a resumed run picks up at the
         # first unfinished hook instead of skipping or repeating them)
         self._run_hooks(ia, winner)
+        # The display's books and panels for the annulus are drawn here, on this thread.  They
+        # get a stage of their own, since under the last hook's name minutes of them read as a
+        # candidate search in heartbeat.json and in the stall note.
+        self.hb.stage(f"annulus {ia + 1} display books", annulus=ia)
         self._emit("on_annulus_done", res, winner)
         return res
 
@@ -2885,6 +2889,9 @@ class Runner:
                "verify": ("verify", self._verify_hook, (ia, winner)),
                "param_verify": ("param_verify", self._param_verify_hook, (ia, winner)),
                "candidates": ("candidate search", self._candidates_hook, (ia,))}
+        # An evaluation's stall threshold says nothing about these.  Each takes as long as it
+        # takes, as the final products do, and the next evaluation sets the threshold again.
+        self.hb.stall_after(None)
         for name in self.hooks_pending(ia):
             what, fn, args = fns[name]
             self.hb.stage(f"annulus {ia + 1} {what}", annulus=ia)

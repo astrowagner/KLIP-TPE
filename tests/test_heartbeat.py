@@ -244,3 +244,32 @@ def test_a_dead_run_reads_as_stopped_even_with_a_stale_heartbeat(tmp_path, monke
     st = registry.run_state(str(tmp_path))
     assert st["state"] == "stopped"
     assert st["stage"].startswith("annulus 1 eval 14")
+
+
+def test_the_annulus_books_are_not_filed_under_the_last_hook(tmp_path):
+    """From the NEAR2 note of 2026-10-13: the candidate search between annuli took 5-10+
+    minutes against its own 38 s estimate.  The search takes seconds on a NEAR-sized
+    stitch.  The minutes were the display's books, drawn after the hooks while
+    heartbeat.json still named the candidate search, and the 38 s was an evaluation's
+    stall threshold (300 s / 8) carried into the hooks."""
+    from conftest import build_synthetic_run
+    from klip_tpe import CalibrationConfig, Runner, ValidationConfig
+    red, space, obj, samp, cfg = build_synthetic_run(
+        ann_edges=[8, 30], n_iter=6, n_init=3, candidates=True, param_verify=False, stitch_every=0,
+        calibration=CalibrationConfig(recal_budget=0), validation=ValidationConfig(n_top=1, n_valid=1))
+    seen = {"eval": []}
+
+    class CB:
+        def on_eval(self, runner, rec, inj, clean, *a):
+            seen["eval"].append(runner.hb._stall_after)
+
+        def on_verify(self, runner, ia, kind, result):
+            if kind == "candidates":            # the annulus' search, not the final one
+                seen.setdefault("hook", (runner.hb.snapshot()["stage"], runner.hb._stall_after))
+
+        def on_annulus_done(self, runner, result, winner):
+            seen["books"] = (runner.hb.snapshot()["stage"], runner.hb._stall_after)
+    Runner(red, space, obj, samp, cfg, str(tmp_path), log=lambda s: None, callbacks=[CB()]).run()
+    assert any(s is not None for s in seen["eval"]), "the evaluations set a threshold"
+    assert seen["hook"] == ("annulus 1 candidate search", None)
+    assert seen["books"] == ("annulus 1 display books", None)

@@ -1,5 +1,53 @@
 # Changelog
 
+## Unreleased — 2026-10-13 (injection only into the kept frames and on the job's threads, the display's annulus books under their own name)
+
+From the NEAR2 parallelism note of 2026-10-13.
+
+- **A job injects only the frames its selection keeps, on its own threads.**  On patrick
+  `inject_sources` was the largest fixed cost of a job, 0.42-0.49 s per n6 job at any bin,
+  on one thread and into all 2024 frames of the night.
+  - The frame selection reads the frame tags, not the pixels, so `KLIPReducer.reduce` now
+    selects first and injects the kept frames alone.  Each night keeps the frames it has
+    injected for its latest sources, so a reduction of the same sources with another
+    selection injects only the frames it adds.  The KLIP-FM model cube works the same way.
+  - `inject_sources` takes `frames` and `threads`, and the new `inject_frames` writes the
+    injected frames into a cube the caller holds.  The frames go to the job's threads in
+    blocks.  Within a block one `rotate_ccw_many` call rotates a source's stamp to every
+    frame's angle, without the GIL.  The shift and the add stay frame by frame.
+  - Every injected frame is the same as before, bit for bit.  Each frame takes its stamps in
+    the order of the sources, with the sines, cosines, sample positions and interpolation
+    calls of the old loop.  `tests/test_injection_frames.py` compares the injection with
+    the old loop for a stamp shared by all frames (rotated or not), the fallback template, a
+    PSF per frame and a throughput per frame, on one to three threads.  Whole reductions of
+    NEAR2 n4 and n6 gave the same images, KLIP-FM, nosub and cADI images as 7fbe593, with
+    cuts that act and cuts below `k_klip × bin`, a reused cache, k-scan, `hp_order="binned"`,
+    destriping and the searched reference library.
+  - On the sandbox (2 cores, n6, 3 sources, median of 5 draws, three runs), the injection
+    took 1.0-1.2 s per job before.  It now takes 0.87-0.91 s on one thread and 0.66-0.73 s
+    on two with every frame kept, 0.61-0.71 s and 0.52 s with 1349 frames kept, and 0.12-0.14 s
+    and 0.08-0.09 s with 165.  A whole n6 reduction with 1934 frames kept went from 2.3-2.6 s
+    to 2.0-2.1 s on one thread and 1.4-1.6 s on two.  Three fifths of what is left are the two
+    scipy interpolations, whose cost per pixel does not change with the batch.
+  - The cost estimate that orders the jobs counts the injection per kept frame, at the
+    measured cost relative to the high-pass.
+  - The high-pass already ran after the frame selection, as in `reduce_near_2`.  A job that
+    high-passes all 2024 frames of n6 kept all of them, because a cut that would leave fewer
+    than `k_klip × bin` frames (at least 3) is skipped, the rule of `near2_framekeep.pro`.
+- **The display's annulus books have a stage of their own.**  `heartbeat.json` and the stall
+  note named the candidate search for the minutes between annuli.  On the running stitch of
+  `run_20261008_093817` the search takes 0.15 s in the sandbox (20 peaks), and the final,
+  verified pass 5 s.  The minutes are the display's books, which it draws on the run's main
+  thread after the hooks.  In that run (Mac-Pro-5, 10,000 evaluations in annulus 1)
+  param_verify finished at 15:23:54, `corner.pdf` was written at 15:27:46, `landscapes.pdf`
+  at 15:46:08 and the final panel at 15:49:54, and annulus 2 began calibrating at 15:50:06.
+  Its parameter walks were still drawn line by line, which 7fbe593 replaced.  At 5,000
+  evaluations the ten books take 3.8 min in the sandbox with 7fbe593, `corner.pdf` 119 s and
+  `landscapes.pdf` 65 s of it.  The "expected ~38s" was the stall threshold of the
+  evaluations before (300 s / 8).
+  - The books run under `annulus N display books`.  The post-annulus hooks and the books carry
+    no stall threshold, as the final products do, and the next evaluation sets it again.
+
 ## Unreleased — 2026-10-12 (checkpoints that survive a machine crash, less work per evaluation on the main thread, each trial's own times on the panel)
 
 From three NEAR2 notes of 2026-10-12: the checkpoint-durability note, the 552d9cc section of

@@ -24,7 +24,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .injection import InjectionModel, inject_sources
+from .injection import InjectionModel, _check_float32_headroom, inject_frames
 from .klip import (KLIPParams, arcdist_deg, bin_by_groups, bin_frames, bin_groups, derotate, destripe,
                    frame_selection_mask, highpass_stack, klip_annular, nw_ang_comb)
 from .metrics import Source
@@ -126,6 +126,21 @@ class Dataset:
         return int(self.cube.shape[0])
 
 
+class _FrameCache:
+    """One set of sources injected into a cube frame by frame, as reductions ask for frames.
+
+    ``done`` marks the frames injected so far.  The lock covers filling frames and copying
+    out a selection, so two reductions of the same sources on threads never read a frame
+    another is still writing."""
+
+    __slots__ = ("cube", "done", "lock")
+
+    def __init__(self, cube: np.ndarray):
+        self.cube = cube
+        self.done = np.zeros(cube.shape[0], bool)
+        self.lock = threading.Lock()
+
+
 def _flag(v) -> bool:
     """A yes/no request parameter: True for True, 1, "1", "yes", "true"."""
     if isinstance(v, str):
@@ -144,9 +159,10 @@ class KLIPReducer(Reducer):
         use_rdi (bool), rdi_mode ('rdi' | 'ardi'), do_destripe (bool), destripe_clip (float),
         fm_selfsub (bool, KLIP-FM self-subtraction terms; default True)
 
-    The chain: inject -> frame selection -> high-pass -> [destripe 90, 0] ->
-    angle-aware binning -> annular KLIP [RDI/ARDI basis, KLIP-FM] -> high-pass
-    (NaN-aware) -> derotate -> combine [-> mask_fn].
+    The chain: frame selection -> inject (the kept frames) -> high-pass -> [destripe 90, 0]
+    -> angle-aware binning -> annular KLIP [RDI/ARDI basis, KLIP-FM] -> high-pass
+    (NaN-aware) -> derotate -> combine [-> mask_fn].  The selection reads only the frame
+    tags, so injecting the kept frames alone changes no number.
 
     ``mask_fn(image) -> image`` is the optional legacy post-mask hook
     (``block_burn`` / ``block_airy``), applied to the final science image only.
@@ -195,8 +211,9 @@ class KLIPReducer(Reducer):
                          "use_rdi": False, "rdi_mode": "ardi", "do_destripe": False, "destripe_clip": 0.0,
                          "fm_selfsub": True}
         self.defaults.update(defaults or {})
-        self._inj_cache: Dict[Tuple, np.ndarray] = {}
-        self._fm_cache: Dict[Tuple, np.ndarray] = {}
+        self._inj_cache: Dict[Tuple, _FrameCache] = {}
+        self._fm_cache: Dict[Tuple, _FrameCache] = {}
+        self._inj_lock = threading.Lock()
         self._cost_cache: Dict[Tuple, float] = {}
         #: optional searched reference library (:mod:`klip_tpe.reflib`).  Set through
         #: :meth:`set_reference_library`; when it is None every RDI/ARDI reduction uses
@@ -231,9 +248,10 @@ class KLIPReducer(Reducer):
                       fm: bool = False) -> Optional[float]:
         """Rough single-thread seconds of one :meth:`reduce`, for scheduling only.
 
-        From the frames kept, the frames after binning and the KLIP zone: the high-pass of
-        every kept frame, the derotation and combination of every binned frame, and the
-        per-target KL bases (binned frames x references squared x zone pixels).  The
+        From the frames kept, the frames after binning and the KLIP zone: the injection and
+        the high-pass of every kept frame, the derotation and combination of every binned
+        frame, and the per-target KL bases (binned frames x references squared x zone
+        pixels).  The
         coefficients come from 2024-frame, 150 x 150 timings on one 2.8 GHz core, and only
         the ratios between jobs are used."""
         try:
@@ -274,7 +292,7 @@ class KLIPReducer(Reducer):
             if fm:
                 cost += raw + post + klip                            # the model cube follows the data
             if n_inject:
-                cost += 3e-5 * n_inject * ds.nframes
+                cost += 1.2e-4 * n_inject * n_kept                    # each source into each kept frame
             if len(self._cost_cache) > 4096:
                 self._cost_cache.clear()
             self._cost_cache[key] = float(cost)
@@ -282,32 +300,68 @@ class KLIPReducer(Reducer):
         except Exception:
             return None
 
-    def _inject(self, sources: Sequence[Source]) -> np.ndarray:
-        key = tuple(s.as_tuple() for s in sources)
-        if key in self._inj_cache:
-            return self._inj_cache[key]
-        if self.model is None:
-            raise ValueError("KLIPReducer needs an injection_model to inject sources")
-        cube = inject_sources(self.data.cube, self.data.angles, sources, self.model, self.pxscale,
-                              truenorth=self.truenorth, fallback=self.fallback,
-                              angle_convention=self.angle_convention)
-        self._inj_cache = {key: cube}      # keep only the latest injected cube
-        return cube
+    def _inject(self, sources: Sequence[Source], keep: Optional[np.ndarray] = None,
+                threads: int = 1) -> np.ndarray:
+        """The cube with ``sources`` injected, every frame; with ``keep``, the kept frames
+        only (``cube[keep]``, in order).
 
-    def model_cube(self, sources: Sequence[Source]) -> np.ndarray:
-        """KLIP-FM planet-model cube: the sources injected into a ZERO cube with the
-        same injection code / conventions as the data (reduce_near_2 L1441-1494)."""
+        Only the frames asked for are injected.  The frame selection depends on the tags,
+        not on the injection, so a frame it drops never needs its companions.  The latest
+        set of sources stays cached with the frames injected so far, so a reduction with
+        the same sources and another selection injects only the frames it adds.  Each frame
+        gets the numbers :func:`klip_tpe.injection.inject_sources` gives it."""
         key = tuple(s.as_tuple() for s in sources)
-        if key in self._fm_cache:
-            return self._fm_cache[key]
-        if self.model is None:
-            raise ValueError("KLIPReducer needs an injection_model to build the FM model cube")
-        zeros = np.zeros(self.data.cube.shape, np.float32)
-        cube = inject_sources(zeros, self.data.angles, sources, self.model, self.pxscale,
+        with self._inj_lock:
+            ent = self._inj_cache.get(key)
+            if ent is None:
+                if self.model is None:
+                    raise ValueError("KLIPReducer needs an injection_model to inject sources")
+                # frames are written as they are asked for: a frame never asked for costs no
+                # memory, and no frame is read before it is written
+                ent = _FrameCache(np.empty(self.data.cube.shape, np.float32))
+                self._inj_cache = {key: ent}       # keep only the latest set of sources
+                _check_float32_headroom(self.data.cube, sources, self.model, self.fallback)
+        return self._fill(ent, self.data.cube, sources, keep, threads)
+
+    def model_cube(self, sources: Sequence[Source], keep: Optional[np.ndarray] = None,
+                   threads: int = 1) -> np.ndarray:
+        """KLIP-FM planet-model cube: the sources injected into a ZERO cube with the
+        same injection code / conventions as the data (reduce_near_2 L1441-1494).
+        ``keep``: the kept frames only, as :meth:`_inject`."""
+        key = tuple(s.as_tuple() for s in sources)
+        with self._inj_lock:
+            ent = self._fm_cache.get(key)
+            if ent is None:
+                if self.model is None:
+                    raise ValueError("KLIPReducer needs an injection_model to build the FM model cube")
+                ent = _FrameCache(np.zeros(self.data.cube.shape, np.float32))
+                self._fm_cache = {key: ent}
+        return self._fill(ent, ent.cube, sources, keep, threads)
+
+    def _fill(self, ent: _FrameCache, base: np.ndarray, sources: Sequence[Source],
+              keep: Optional[np.ndarray], threads: int) -> np.ndarray:
+        """Inject the frames of ``keep`` (all by default) that ``ent`` does not hold yet,
+        from ``base``, and return the frames asked for."""
+        want = np.ones(ent.done.size, bool) if keep is None else np.asarray(keep, bool)
+        with ent.lock:
+            todo = np.flatnonzero(want & ~ent.done)
+            if todo.size:
+                inject_frames(ent.cube, base, self.data.angles, sources, self.model, self.pxscale, todo,
                               truenorth=self.truenorth, fallback=self.fallback,
-                              angle_convention=self.angle_convention, copy=False)
-        self._fm_cache = {key: cube}
-        return cube
+                              angle_convention=self.angle_convention, threads=threads)
+                ent.done[todo] = True
+            return ent.cube if want.all() else ent.cube[want]
+
+    def __getstate__(self):
+        # the injection caches are scratch, and a lock does not pickle
+        d = self.__dict__.copy()
+        d.update(_inj_cache={}, _fm_cache={})
+        d.pop("_inj_lock", None)
+        return d
+
+    def __setstate__(self, d):
+        self.__dict__.update(d)
+        self._inj_lock = threading.Lock()
 
     def set_reference_library(self, *, partition, groups=None, metric: str = "cc",
                              shift_px: int = 1, n_min_ref: int = 2,
@@ -494,7 +548,6 @@ class KLIPReducer(Reducer):
         outrad = min(float(p["outrad"]) + pad_out, self.outrad_cap)
         inrad = min(inrad, outrad - 1.0)
         ds = self.data
-        cube = self._inject(req.injections) if req.injections else ds.cube
         angles = ds.angles
         meta: Dict[str, Any] = {}
         # the job's threads: the per-target KLIP loop, and the per-frame steps around it
@@ -503,10 +556,12 @@ class KLIPReducer(Reducer):
         if do_fm and req.k_scan:
             meta["fm_note"] = "KLIP-FM skipped: not supported with k_scan"
             do_fm = False
-        mcube = self.model_cube(req.fm_sources) if do_fm else None
-
         keep = frame_selection_mask(ds.nframes, ds.tags, p["corr_thresh"], p["noise_max"],
                                     p["coronoise_max"], bin_, k)
+        # The selection reads the tags, not the pixels, so it comes first.  Only the kept
+        # frames are injected, and the injected cubes come back as cube[keep].
+        cube = self._inject(req.injections, keep, threads=nth) if req.injections else ds.cube
+        mcube = self.model_cube(req.fm_sources, keep, threads=nth) if do_fm else None
         dth = self.dth_max_deg(outrad)
         # ``hp_order="binned"`` (under test, off by default): bin first, then high-pass the
         # binned frames.  Both are linear, so the images agree to rounding, and the high-pass
@@ -515,11 +570,14 @@ class KLIPReducer(Reducer):
         # frame before binning, and a destriped cube keeps that order (not linear).
         hp_binned = str(p.get("hp_order", "raw")).lower() == "binned" and filt > 1 and not p["do_destripe"]
 
-        def prep(c):
-            """frame selection, high-pass, destripe and binning of a science cube"""
+        def prep(c, selected=False):
+            """frame selection, high-pass, destripe and binning of a science cube
+            (``selected``: ``c`` holds only the kept frames already)"""
             a_ = angles
             if not keep.all():
-                c, a_ = c[keep], a_[keep]
+                a_ = a_[keep]
+                if not selected:
+                    c = c[keep]
             if hp_binned:
                 return bin_frames(c, a_, bin_, dth, return_groups=True, threads=nth, dtype=np.float64,
                                   then=lambda bc: highpass_stack(bc, filt, nan_aware=False, threads=nth))
@@ -531,19 +589,16 @@ class KLIPReducer(Reducer):
                 c = np.stack([destripe(destripe(f, 90.0, clip), 0.0, clip) for f in c])
             return bin_frames(c, a_, bin_, dth, return_groups=True, threads=nth)
 
-        if mcube is not None:
-            if not keep.all():
-                mcube = mcube[keep]
-            if filt > 1 and not hp_binned:
-                mcube = highpass_stack(mcube, filt, nan_aware=False, threads=nth)
-        bcube, bang, grp, bkeep = prep(cube)
+        if mcube is not None and filt > 1 and not hp_binned:
+            mcube = highpass_stack(mcube, filt, nan_aware=False, threads=nth)
+        bcube, bang, grp, bkeep = prep(cube, selected=bool(req.injections))
         if bcube.shape[0] == 0:
             # bin_frames drops bins whose nansum is zero.  np.nansum of an ALL-NaN frame is
             # 0.0, so a cube that is mostly NaN -- a subarray padded into a larger grid, say
             # -- is wiped out entirely by the high-pass, which at nan_aware=False spreads NaN
             # over the whole frame.  Every downstream shape then goes to zero and the failure
             # surfaces somewhere far away and unrecognisable.
-            nan_frac = float(np.mean(~np.isfinite(np.asarray(cube, float))))
+            nan_frac = float(np.mean(~np.isfinite(np.asarray(ds.cube, float))))
             raise ValueError(
                 f"every frame was dropped as empty after filtering and binning "
                 f"(filter={filt}, bin={bin_}); {100 * nan_frac:.0f}% of the input pixels are "

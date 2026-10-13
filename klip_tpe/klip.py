@@ -17,9 +17,9 @@ import numpy as np
 from scipy import ndimage
 
 __all__ = ["frame_selection_mask", "bin_frames", "bin_groups", "bin_by_groups", "bin_angles",
-           "highpass", "highpass_stack", "destripe", "rotate_ccw", "derotate", "nw_ang_comb", "nw_ang_comb_ref",
-           "klip_basis", "zone_indices", "klip_annular", "klip_fm_zone", "arcdist_deg",
-           "reference_mask", "KLIPParams"]
+           "highpass", "highpass_stack", "destripe", "rotate_ccw", "rotate_ccw_many", "derotate",
+           "nw_ang_comb", "nw_ang_comb_ref", "klip_basis", "zone_indices", "klip_annular", "klip_fm_zone",
+           "arcdist_deg", "reference_mask", "KLIPParams"]
 
 
 # ----------------------------------------------------------------------------
@@ -305,12 +305,9 @@ def rotate_ccw(img: np.ndarray, angle_deg: float, cval: float = np.nan, order: i
         return img.copy()
     mode = nan_mode or ROT_NAN_MODE
     ny, nx = img.shape
-    cx, cy = (nx - 1) / 2.0, (ny - 1) / 2.0
     a = np.deg2rad(angle_deg)
     ca, sa = np.cos(a), np.sin(a)
-    dx, dy = _centred_grid(ny, nx)
-    xs = cx + ca * dx + sa * dy
-    ys = cy - sa * dx + ca * dy
+    xs, ys = _rotation_coords(ny, nx, ca, sa)
     fin = np.isfinite(img)
     inside = (xs >= 0) & (xs <= nx - 1) & (ys >= 0) & (ys <= ny - 1)
     if order == 1 and fin.all():
@@ -328,6 +325,52 @@ def rotate_ccw(img: np.ndarray, angle_deg: float, cval: float = np.nan, order: i
             out[(w <= 1e-6) & inside] = np.nan
     out[~inside] = cval
     return out
+
+
+def rotate_ccw_many(img: np.ndarray, angles_deg: Sequence[float], cval: float = np.nan) -> np.ndarray:
+    """:func:`rotate_ccw` of one image by each of ``angles_deg``, as an ``(n, ny, nx)`` array
+    whose plane ``j`` holds the numbers ``rotate_ccw(img, angles_deg[j], cval=cval)`` gives.
+
+    The sines and cosines are taken angle by angle as :func:`rotate_ccw` takes them, the
+    sample positions come from the same :func:`_rotation_coords`, and one interpolation
+    call samples them all.  It computes every output pixel from its own position alone,
+    so the planes do not depend on each other, and it runs without the GIL.  An image
+    with a non-finite pixel is rotated angle by angle by :func:`rotate_ccw` itself."""
+    img = np.asarray(img, float)
+    n = len(angles_deg)
+    ny, nx = img.shape
+    if n == 0:
+        return np.empty((0, ny, nx))
+    if not np.isfinite(img).all():
+        return np.stack([rotate_ccw(img, angles_deg[j], cval=cval) for j in range(n)])
+    ca, sa = np.ones(n), np.zeros(n)
+    zero = np.zeros(n, bool)
+    for j in range(n):
+        ang = angles_deg[j]
+        if ang == 0.0:
+            zero[j] = True                     # rotate_ccw returns a copy, no interpolation
+            continue
+        a = np.deg2rad(ang)
+        ca[j], sa[j] = np.cos(a), np.sin(a)
+    xs, ys = _rotation_coords(ny, nx, ca[:, None, None], sa[:, None, None])
+    inside = (xs >= 0) & (xs <= nx - 1) & (ys >= 0) & (ys <= ny - 1)
+    out = ndimage.map_coordinates(img, [ys, xs], order=1, mode="constant", cval=0.0)
+    out[~inside] = cval
+    if zero.any():
+        out[zero] = img
+    return out
+
+
+def _rotation_coords(ny: int, nx: int, ca, sa) -> Tuple[np.ndarray, np.ndarray]:
+    """Input positions ``(xs, ys)`` that a CCW rotation with cosine ``ca`` and sine ``sa``
+    samples for each output pixel, about ``((nx-1)/2, (ny-1)/2)``.  ``ca``/``sa`` are
+    scalars for one rotation or ``(n, 1, 1)`` arrays for ``n`` of them, with the same
+    arithmetic element by element either way."""
+    cx, cy = (nx - 1) / 2.0, (ny - 1) / 2.0
+    dx, dy = _centred_grid(ny, nx)
+    xs = cx + ca * dx + sa * dy
+    ys = cy - sa * dx + ca * dy
+    return xs, ys
 
 
 _GRIDS: Dict[Tuple[int, int], Tuple[np.ndarray, np.ndarray]] = {}
