@@ -49,7 +49,8 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic}]
                         [--k-scan-max K_SCAN_MAX]
                         [--stitch-every STITCH_EVERY] [--verify] [--no-verify]
                         [--verify-n-boot VERIFY_N_BOOT] [--param-verify]
-                        [--no-param-verify] [--n-remeasure N] [--n-pv N_PV]
+                        [--no-param-verify] [--n-remeasure N]
+                        [--n-sources N [N ...]] [--n-pv N_PV]
                         [--pv-divmin PV_DIVMIN] [--candidates]
                         [--write-setup-files] [--no-setup-files]
                         [--legacy-stitch] [--batch BATCH]
@@ -151,6 +152,12 @@ options:
                         scatter is ~0.9 S/N on typical data, so N=3 divides it
                         by sqrt(3) and roughly halves the optimism of the
                         reported best; see docs/BUDGET.md
+  --n-sources N [N ...]
+                        injected sources per annulus, the last value repeating
+                        (default: klip-tpe's rule by the annulus' outer edge,
+                        and 0 asks for the rule in that annulus). The cap that
+                        keeps each source's noise ring clean still applies,
+                        and the log says when it binds
   --n-pv N_PV
   --pv-divmin PV_DIVMIN
   --candidates          blind candidate search on the running/final stitch
@@ -297,7 +304,8 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic}]
                      [--k-scan-max K_SCAN_MAX] [--stitch-every STITCH_EVERY]
                      [--verify] [--no-verify] [--verify-n-boot VERIFY_N_BOOT]
                      [--param-verify] [--no-param-verify] [--n-remeasure N]
-                     [--n-pv N_PV] [--pv-divmin PV_DIVMIN] [--candidates]
+                     [--n-sources N [N ...]] [--n-pv N_PV]
+                     [--pv-divmin PV_DIVMIN] [--candidates]
                      [--write-setup-files] [--no-setup-files]
                      [--legacy-stitch] [--batch BATCH]
                      [--batch-mode {pipeline,sync}]
@@ -397,6 +405,12 @@ options:
                         scatter is ~0.9 S/N on typical data, so N=3 divides it
                         by sqrt(3) and roughly halves the optimism of the
                         reported best; see docs/BUDGET.md
+  --n-sources N [N ...]
+                        injected sources per annulus, the last value repeating
+                        (default: klip-tpe's rule by the annulus' outer edge,
+                        and 0 asks for the rule in that annulus). The cap that
+                        keeps each source's noise ring clean still applies,
+                        and the log says when it binds
   --n-pv N_PV
   --pv-divmin PV_DIVMIN
   --candidates          blind candidate search on the running/final stitch

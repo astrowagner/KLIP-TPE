@@ -241,6 +241,10 @@ def _protocol_args(p):
                    help="score each trial as the MEAN of N independent injection draws (default 1). "
                         "The objective's per-draw scatter is ~0.9 S/N on typical data, so N=3 divides "
                         "it by sqrt(3) and roughly halves the optimism of the reported best; see docs/BUDGET.md")
+    p.add_argument("--n-sources", type=int, nargs="+", default=None, metavar="N",
+                   help="injected sources per annulus, the last value repeating (default: klip-tpe's rule "
+                        "by the annulus' outer edge, and 0 asks for the rule in that annulus). The cap that "
+                        "keeps each source's noise ring clean still applies, and the log says when it binds")
     p.add_argument("--n-pv", type=int, default=20)
     p.add_argument("--pv-divmin", type=float, default=0.05)
     p.add_argument("--candidates", action="store_true", help="blind candidate search on the running/final stitch")
@@ -286,7 +290,18 @@ def _protocol_args(p):
                            "changes nothing, instead of warning")
 
 
+def _n_sources(a):
+    """``--n-sources`` as ``RunConfig.n_sources``: one count, or one per annulus."""
+    ns = getattr(a, "n_sources", None)
+    if ns is None:
+        return None
+    if any(int(v) < 0 for v in ns):
+        raise SystemExit(f"--n-sources takes counts of 0 or more (0 = the rule), not {' '.join(map(str, ns))}")
+    return int(ns[0]) if len(ns) == 1 else [int(v) for v in ns]
+
+
 def _protocol_config(a) -> dict:
+    ns = _n_sources(a)
     return dict(opt_width=a.opt_width, width_range=tuple(a.width_range), r_cap=a.r_cap, k_mode=a.k_mode,
                 k_scan_max=a.k_scan_max, stitch_every=a.stitch_every, verify=a.verify, verify_n_boot=a.verify_n_boot,
                 param_verify=a.param_verify, n_pv=a.n_pv, pv_divmin=a.pv_divmin, candidates=a.candidates,
@@ -297,7 +312,8 @@ def _protocol_config(a) -> dict:
                 liveness_check=getattr(a, "liveness_check", "warn"),
                 batch=max(int(getattr(a, "batch", 1) or 1), 1),
                 **({"batch_mode": a.batch_mode} if getattr(a, "batch_mode", None) else {}),
-                **({"edge_padding": a.edge_padding} if getattr(a, "edge_padding", None) else {}))
+                **({"edge_padding": a.edge_padding} if getattr(a, "edge_padding", None) else {}),
+                **({"n_sources": ns} if ns is not None else {}))
 
 
 def build_near_space(red, a):

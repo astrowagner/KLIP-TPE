@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased — 2026-10-13 (injection only into the kept frames and on the job's threads, the display's annulus books in a process of their own)
+## Unreleased — 2026-10-13 (injection only into the kept frames and on the job's threads, the display's annulus books in a process of their own, `--n-sources`)
 
-From the NEAR2 parallelism note of 2026-10-13.
+From two NEAR2 notes of 2026-10-13: the parallelism note and the note on the source count.
 
 - **A job injects only the frames its selection keeps, on its own threads.**  On patrick
   `inject_sources` was the largest fixed cost of a job, 0.42-0.49 s per n6 job at any bin,
@@ -60,6 +60,13 @@ From the NEAR2 parallelism note of 2026-10-13.
     They stay on the main thread, a few seconds under the stage `annulus N display books`.
     The post-annulus hooks and these carry no stall threshold, as the final products do, and
     the next evaluation sets it again.
+- **`--n-sources` on the command line.**  `klip-tpe near` and `klip-tpe generic` take
+  `--n-sources N [N ...]`, the injected sources per annulus, the last value repeating, and a
+  0 asks for the rule in that annulus.  It sets `RunConfig.n_sources`, which the command line
+  never set before, and `run_setup.json` and `run_setup.txt` record it with the other fields.
+  Each annulus' first log line gives the count used and where it came from, as in
+  `2 sources (n_sources 2)` or `6 sources (the rule)`.  The cap that keeps each source's noise
+  ring clean still applies, and its own log line says when it binds.
 
 ## Unreleased — 2026-10-12 (checkpoints that survive a machine crash, less work per evaluation on the main thread, each trial's own times on the panel)
 

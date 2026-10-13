@@ -867,7 +867,8 @@ class Runner:
         except Exception:
             return []
 
-    def _nsrc(self, ia: int) -> int:
+    def _nsrc_asked(self, ia: int) -> Optional[int]:
+        """The count ``RunConfig.n_sources`` asks for in annulus ``ia``, or None for the rule."""
         ns = self.cfg.n_sources
         if isinstance(ns, (list, tuple, np.ndarray)):
             # per annulus, the last entry repeating (like n_iter / n_init)
@@ -875,7 +876,10 @@ class Runner:
         # 0 or None hands the annulus back to the rule -- in a list, as documented, and as a
         # single value too.  A 0 used to be taken literally: the annulus asked for no sources,
         # the ring-survival loop below had nothing to try, and none were injected.
-        ns = int(ns) if ns else None
+        return int(ns) if ns else None
+
+    def _nsrc(self, ia: int) -> int:
+        ns = self._nsrc_asked(ia)
         if ia in self._nsrc_cache:
             return self._nsrc_cache[ia]
         a_in, a_out = self._zone(ia, None)
@@ -2738,8 +2742,10 @@ class Runner:
                          f"(contrast {self.contrast:.3e})")
         elif resume_index is None:
             label = f"{ia+1}" if self.cfg.opt_width else f"{ia+1}/{self.cfg.nann}"
-            self.log(f"=== annulus {label}: [{a_in:.1f}, {a_out:.1f}] px, "
-                     f"{self._nsrc(ia)} sources, band {self._band(ia)[0]:.3f}-{self._band(ia)[1]:.3f}\"")
+            n, asked = self._nsrc(ia), self._nsrc_asked(ia)
+            how = "the rule" if asked is None else f"n_sources {asked}"
+            self.log(f"=== annulus {label}: [{a_in:.1f}, {a_out:.1f}] px, {n} source{'s' * (n != 1)} ({how}), "
+                     f"band {self._band(ia)[0]:.3f}-{self._band(ia)[1]:.3f}\"")
             if ia > 0 and not cc.warm_start_previous:
                 self.contrast = float(self.cfg.contrast0)
             contrast, kdef, cinfo = self.calibrate(ia)
