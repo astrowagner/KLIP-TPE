@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased — 2026-10-13 (injection only into the kept frames and on the job's threads, the display's annulus books in a process of their own, `--n-sources`)
+## Unreleased — 2026-10-13 (injection only into the kept frames and on the job's threads, the display's annulus books in a process of their own, `--n-sources`, `--min-r-fwhm`)
 
-From two NEAR2 notes of 2026-10-13: the parallelism note and the note on the source count.
+From three NEAR2 notes of 2026-10-13: the parallelism note, the note on the source count and
+the note on the injection floor.
 
 - **A job injects only the frames its selection keeps, on its own threads.**  On patrick
   `inject_sources` was the largest fixed cost of a job, 0.42-0.49 s per n6 job at any bin,
@@ -67,6 +68,17 @@ From two NEAR2 notes of 2026-10-13: the parallelism note and the note on the sou
   Each annulus' first log line gives the count used and where it came from, as in
   `2 sources (n_sources 2)` or `6 sources (the rule)`.  The cap that keeps each source's noise
   ring clean still applies, and its own log line says when it binds.
+- **The injection floor on the command line.**  `--min-r-fwhm X` (`near`, `generic` and
+  `--instrument nomic`) keeps every injection outside X FWHM of the star, 1.5 by default as
+  before.  It sets `RunConfig.min_r_fwhm`, which puts the floor on the run's one sampler, so
+  search, calibration, validation, param_verify and the products inject with it, and a resume
+  puts it back on the sampler the resumed run builds.  On NEAR 1.0 FWHM is 1.0 λ/D to half a
+  percent (0.284″).  With the NEAR2 annuli from 0.10″, annulus 1's single source moves from
+  0.427″, where the old floor clamped it, to its mid-radius of 0.312″.
+  - When the count used still leaves a source's Mawet ring fewer than `min_ring` clean
+    apertures, the log says so once per annulus, since that source's S/N then comes from the
+    radial band.  On NEAR annulus 1 that is so at 0.312″ (0 clean apertures) and already at
+    0.427″ (4).  The candidate search keeps its own inner limit.
 
 ## Unreleased — 2026-10-12 (checkpoints that survive a machine crash, less work per evaluation on the main thread, each trial's own times on the panel)
 

@@ -50,7 +50,7 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic}]
                         [--stitch-every STITCH_EVERY] [--verify] [--no-verify]
                         [--verify-n-boot VERIFY_N_BOOT] [--param-verify]
                         [--no-param-verify] [--n-remeasure N]
-                        [--n-sources N [N ...]] [--n-pv N_PV]
+                        [--n-sources N [N ...]] [--min-r-fwhm X] [--n-pv N_PV]
                         [--pv-divmin PV_DIVMIN] [--candidates]
                         [--write-setup-files] [--no-setup-files]
                         [--legacy-stitch] [--batch BATCH]
@@ -158,6 +158,9 @@ options:
                         and 0 asks for the rule in that annulus). The cap that
                         keeps each source's noise ring clean still applies,
                         and the log says when it binds
+  --min-r-fwhm X        no injection inside X FWHM of the star, in every stage
+                        (default 1.5). On NEAR 1.0 FWHM is 1.0 lambda/D to
+                        half a percent
   --n-pv N_PV
   --pv-divmin PV_DIVMIN
   --candidates          blind candidate search on the running/final stitch
@@ -304,7 +307,7 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic}]
                      [--k-scan-max K_SCAN_MAX] [--stitch-every STITCH_EVERY]
                      [--verify] [--no-verify] [--verify-n-boot VERIFY_N_BOOT]
                      [--param-verify] [--no-param-verify] [--n-remeasure N]
-                     [--n-sources N [N ...]] [--n-pv N_PV]
+                     [--n-sources N [N ...]] [--min-r-fwhm X] [--n-pv N_PV]
                      [--pv-divmin PV_DIVMIN] [--candidates]
                      [--write-setup-files] [--no-setup-files]
                      [--legacy-stitch] [--batch BATCH]
@@ -411,6 +414,9 @@ options:
                         and 0 asks for the rule in that annulus). The cap that
                         keeps each source's noise ring clean still applies,
                         and the log says when it binds
+  --min-r-fwhm X        no injection inside X FWHM of the star, in every stage
+                        (default 1.5). On NEAR 1.0 FWHM is 1.0 lambda/D to
+                        half a percent
   --n-pv N_PV
   --pv-divmin PV_DIVMIN
   --candidates          blind candidate search on the running/final stitch

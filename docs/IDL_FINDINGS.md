@@ -196,7 +196,7 @@ the inner edge to 1.5 FWHM and lays the centred ladder; for **two sources** the 
 `sqrt((r_in²+r_out²)/2)` so both land there 180° apart (`RunConfig.pair_area_midpoint=True`;
 CLI `--ladder-pair` restores the pre-2026-09-05 ladder).  One sampler object serves search,
 calibration, validation, param_verify (its fixed set now comes from `_band` too) and the
-products.
+products.  `--min-r-fwhm` (`RunConfig.min_r_fwhm`) moves its 1.5 FWHM floor for all of them.
 
 Check against IDL: annulus 1 ([0, 20] px) injects at `rho = 0.645"` (14.1 px) in both codes
 (IDL `run_20260906_173000` calibration setup: 0.645" at PA 308.86/128.86; Python: 0.645" at

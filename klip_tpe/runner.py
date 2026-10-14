@@ -218,6 +218,11 @@ class RunConfig:
     seed: Optional[int] = None
     contrast0: float = 3e-5
     n_sources: Any = None                 # None / 0 -> per-annulus rule; an int everywhere; a list per annulus (0 / None entries -> the rule)
+    #: No injection inside this many FWHM of the star, in every stage (search, calibration,
+    #: validation, param_verify, products): it sets ``min_r_fwhm`` on the run's one sampler,
+    #: here and on a resume.  None leaves the sampler's own floor (``PositionSampler``: 1.5).
+    #: On NEAR 1.0 FWHM is 1.0 lambda/D to half a percent, and the AGPM reaches 0.9 lambda/D.
+    min_r_fwhm: Optional[float] = None
     #: Fresh-position measurements per SEARCH trial, averaged into one score (1 = the IDL's
     #: single draw).  Not to be confused with ``CalibrationConfig.n_remeasure``, which is the
     #: same idea applied to the calibration trials and the k-scan only.
@@ -681,6 +686,7 @@ class Runner:
         #: the same recovery as the command line).  "never" starts a fresh search over it.
         self.resume_mode = str(resume or "auto").lower()
         self.sampler, self.cfg, self.run_dir = sampler, config, run_dir
+        self._apply_sampler_config()
         self.throughput_fn = throughput_fn
         self.log = log
         self.callbacks: List[RunCallback] = list(callbacks)
@@ -889,14 +895,32 @@ class Runner:
             if self._ring_survives(ia, cand):
                 n = cand
                 break
+        mr = self._min_ring()
         if n < asked and self._nsrc_warned.get(ia) != n:
             self._nsrc_warned[ia] = n
-            mr = int(getattr(getattr(self.objective, "metric", None), "min_ring", 6) or 6)
             self.log(f"  annulus {ia+1}: {asked} sources requested, {n} used -- more would leave "
                      f"some separation's Mawet ring fewer than {mr} clean apertures, and it would "
                      f"fall back to the radial band there")
+        # The count used can still starve a ring: one source close to the star, whose ring
+        # holds only a handful of apertures, is never capped.
+        got = self._ring_clean(ia, n)
+        if got is not None and got[0] < mr:
+            who = "one source" if n == 1 else f"with {n} sources, the one"
+            self.log(f"  annulus {ia+1}: {who} at {got[1]:.3f}\" keeps {got[0]} clean aperture"
+                     f"{'s' * (got[0] != 1)} in its Mawet ring, fewer than {mr}, so its S/N comes from "
+                     f"the radial band instead")
         self._nsrc_cache[ia] = n
         return n
+
+    def _apply_sampler_config(self) -> None:
+        """``RunConfig.min_r_fwhm`` onto the run's sampler (the base of a replay), so the run
+        injects with the floor it was started with, whatever sampler the caller built."""
+        v = getattr(self.cfg, "min_r_fwhm", None)
+        if v is None:
+            return
+        smp = getattr(self.sampler, "base", None) or self.sampler
+        if hasattr(smp, "min_r_fwhm"):
+            smp.min_r_fwhm = float(v)
 
     def _ring_survives(self, ia: int, n: int) -> bool:
         """Would ``n`` sources leave every one of their rings ``min_ring`` clean apertures?
@@ -913,17 +937,27 @@ class Runner:
         ``opt_width``, and the ``pair_area_midpoint`` pair), and they are covered here too
         because ``_band_for`` collapses the band for them.
         """
-        m = getattr(self.objective, "metric", None)
-        mr = int(getattr(m, "min_ring", 6) or 6)
         if n <= 1:
             return True
+        got = self._ring_clean(ia, n)
+        return got is None or got[0] >= self._min_ring()    # a guard that cannot measure must not veto
+
+    def _min_ring(self) -> int:
+        return int(getattr(getattr(self.objective, "metric", None), "min_ring", 6) or 6)
+
+    def _ring_clean(self, ia: int, n: int) -> Optional[Tuple[int, float]]:
+        """The fewest clean noise apertures any of ``n`` sources keeps in its Mawet ring, over
+        two probe draws of the run's own sampler, and that source's separation (arcsec).
+        None when it cannot be measured."""
+        m = getattr(self.objective, "metric", None)
+        mr = self._min_ring()
         try:
             lo, hi = self._band_for(ia, n, None)
             shape = self._probe_shape()
             if shape is None:
-                return True
+                return None
             probe = np.zeros(shape, float)
-            worst = mr
+            worst = None
             # the geometry's own sampler: a replay of recorded draws must not spend them here
             smp = getattr(self.sampler, "base", None) or self.sampler
             for seed in (0x5E3D, 0xC0FFEE):
@@ -935,10 +969,13 @@ class Runner:
                                         pixel_mask=getattr(m, "pixel_mask", None),
                                         angle_convention=getattr(self.reducer, "angle_convention", "pa"),
                                         min_ring=mr, return_details=True)
-                worst = min([worst] + [int(d.get("nclean", 0)) for d in det])
-            return worst >= mr
+                for s, d in zip(src, det):
+                    c = int(d.get("nclean", 0))
+                    if worst is None or c < worst[0]:
+                        worst = (c, float(s.rho))
+            return worst
         except Exception:
-            return True          # a guard that cannot measure must not veto the run
+            return None
 
     def _probe_shape(self) -> Optional[Tuple[int, int]]:
         """Frame shape for the packing probe, from whichever reducer holds data."""
@@ -3953,6 +3990,7 @@ class Runner:
         caller that wants different settings wants a new run directory.
         """
         self.cfg = RunConfig.from_dict(st["config"])
+        self._apply_sampler_config()
         self.space = SearchSpace.from_dict(
             st["space"], project=project if project is not None else getattr(self.space, "project", None))
         self.rng.bit_generator.state = st["rng_state"]

@@ -245,6 +245,9 @@ def _protocol_args(p):
                    help="injected sources per annulus, the last value repeating (default: klip-tpe's rule "
                         "by the annulus' outer edge, and 0 asks for the rule in that annulus). The cap that "
                         "keeps each source's noise ring clean still applies, and the log says when it binds")
+    p.add_argument("--min-r-fwhm", type=float, default=1.5, metavar="X",
+                   help="no injection inside X FWHM of the star, in every stage (default 1.5). On NEAR "
+                        "1.0 FWHM is 1.0 lambda/D to half a percent")
     p.add_argument("--n-pv", type=int, default=20)
     p.add_argument("--pv-divmin", type=float, default=0.05)
     p.add_argument("--candidates", action="store_true", help="blind candidate search on the running/final stitch")
@@ -300,8 +303,19 @@ def _n_sources(a):
     return int(ns[0]) if len(ns) == 1 else [int(v) for v in ns]
 
 
+def _min_r_fwhm(a):
+    """``--min-r-fwhm`` as ``RunConfig.min_r_fwhm``."""
+    v = getattr(a, "min_r_fwhm", None)
+    if v is None:
+        return None
+    if not v >= 0:
+        raise SystemExit(f"--min-r-fwhm takes 0 or more FWHM, not {v}")
+    return float(v)
+
+
 def _protocol_config(a) -> dict:
     ns = _n_sources(a)
+    rmin = _min_r_fwhm(a)
     return dict(opt_width=a.opt_width, width_range=tuple(a.width_range), r_cap=a.r_cap, k_mode=a.k_mode,
                 k_scan_max=a.k_scan_max, stitch_every=a.stitch_every, verify=a.verify, verify_n_boot=a.verify_n_boot,
                 param_verify=a.param_verify, n_pv=a.n_pv, pv_divmin=a.pv_divmin, candidates=a.candidates,
@@ -313,7 +327,8 @@ def _protocol_config(a) -> dict:
                 batch=max(int(getattr(a, "batch", 1) or 1), 1),
                 **({"batch_mode": a.batch_mode} if getattr(a, "batch_mode", None) else {}),
                 **({"edge_padding": a.edge_padding} if getattr(a, "edge_padding", None) else {}),
-                **({"n_sources": ns} if ns is not None else {}))
+                **({"n_sources": ns} if ns is not None else {}),
+                **({"min_r_fwhm": rmin} if rmin is not None else {}))
 
 
 def build_near_space(red, a):
