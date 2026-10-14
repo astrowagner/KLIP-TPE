@@ -43,6 +43,54 @@ class ReductionRequest:
     fm_sources: Optional[Sequence[Source]] = None   # KLIP-FM test sources (model cube, never added to the data)
     extras: bool = False                            # also produce the nosub (clean pass) / cadi (injected pass) reference image
     threads: int = 1                                # this partition job's threads: the per-target KLIP loop and the per-frame steps (set by PartitionedReducer)
+    #: ``"reduce"`` (the default) or ``"prepare"``: the latter returns the prepared frames
+    #: (selected, injected, high-passed, binned) as :class:`SiblingFrames`, for the SDI pool
+    #: of the other wavelength groups, and reduces nothing
+    stage: str = "reduce"
+    #: the other groups' prepared frames for the SDI pool: ``{pid: SiblingFrames}``, or the
+    #: shared-memory descriptor :class:`klip_tpe.parallel.SharedArrays` of them
+    siblings: Any = None
+
+
+@dataclass
+class SiblingFrames:
+    """One wavelength group's frames as another group's reduction needs them for its SDI
+    pool: prepared exactly as the group would prepare its own (the same selection,
+    injections, high-pass and binning), not yet rescaled.  ``mcube`` is the KLIP-FM model
+    cube through the same chain, when the request asked for KLIP-FM."""
+    pid: Any
+    lam_m: float
+    bcube: np.ndarray                 # (n_binned, ny, nx)
+    bang: np.ndarray                  # the binned angles
+    mcube: Optional[np.ndarray] = None
+
+
+@dataclass
+class PreparedFrames:
+    """The first half of :meth:`KLIPReducer.reduce`: everything up to the binned frames,
+    before any PSF subtraction."""
+    p: Dict[str, Any]
+    k: int
+    bin_: int
+    filt: int
+    inrad: float
+    outrad: float
+    dth: float
+    keep: np.ndarray
+    bcube: np.ndarray
+    bang: np.ndarray
+    grp: np.ndarray
+    bkeep: np.ndarray
+    mcube: Optional[np.ndarray]
+    hp_nan: bool
+    hp_binned: bool
+    nth: int
+    meta: Dict[str, Any]
+
+    def siblings_payload(self, pid: Any, lam_m: float) -> SiblingFrames:
+        return SiblingFrames(pid, float(lam_m), np.ascontiguousarray(self.bcube, np.float32),
+                             np.asarray(self.bang, float),
+                             None if self.mcube is None else np.ascontiguousarray(self.mcube, np.float32))
 
 
 @dataclass
@@ -269,9 +317,21 @@ class KLIPReducer(Reducer):
             n_ang = int(max(round(p["n_ang"]), 1))
             inrad = max(float(p["inrad"]), 0.0)
             outrad = min(float(p["outrad"]), self.outrad_cap)
+            # a searched library's counts: more rows in every target's basis, and the SDI
+            # pool's rescaling of every sibling frame
+            spec = self._reflib_spec or {}
+            extra = 0
+            n_sdi = 0
+            if spec:
+                for name in ["sdi"] + list((spec.get("groups") or {spec.get("ref_group", "psfref"): None}).keys()):
+                    v = p.get(f"nkeep_{name}")
+                    if v is not None:
+                        extra += int(max(round(float(v)), 0))
+                        if name == "sdi":
+                            n_sdi = int(max(round(float(v)), 0))
             key = (k, bin_, filt > 1, n_ang, round(inrad, 2), round(outrad, 2), p["corr_thresh"], p["noise_max"],
                    p["coronoise_max"], round(float(p["angsep"]), 3), round(float(p["anglemax"]), 2),
-                   bool(p["fast"]), bool(k_scan), int(n_inject), bool(fm))
+                   bool(p["fast"]), bool(k_scan), int(n_inject), bool(fm), int(extra), int(n_sdi))
             hit = self._cost_cache.get(key)
             if hit is not None:
                 return hit
@@ -286,12 +346,15 @@ class KLIPReducer(Reducer):
             span = float(ang.max() - ang.min()) if n_kept > 1 else 0.0
             sep = float(p["angsep"]) * abs(arcdist_deg(inrad, outrad, self.lam_over_d_px))
             amax = float(p["anglemax"])
-            if bool(p["fast"]) or (sep <= 0 and amax >= span):
+            if (bool(p["fast"]) or (sep <= 0 and amax >= span)) and extra == 0:
                 klip = 2.2e-10 * m * m * zone                        # one basis per sector
             else:
                 frac = 1.0 if span <= 0 else min(1.0, max(2.0 * (amax - sep), 0.0) / span)
-                mref = max(min(float(m), m * frac), 4.0)
+                mref = max(min(float(m), m * frac), 4.0) + extra
                 klip = 2.2e-10 * m * mref * mref * zone + 2e-4 * m * n_ang
+            if n_sdi > 0 and spec.get("sdi"):
+                lenders = max(len(spec["sdi"].get("lenders") or []) - 1, 1)
+                klip += 1.3e-7 * lenders * m * npix * (2 if fm else 1)   # the rescaling of every sibling frame
             raw = (1.5e-8 if filt > 1 else 2e-9) * n_kept * npix     # high-pass, copies, binning
             post = 3.6e-7 * m * npix                                 # post high-pass, derotate, combine
             cost = raw + post * (k if k_scan else 1) + klip
@@ -375,7 +438,8 @@ class KLIPReducer(Reducer):
                              ref_group: str = "psfref",
                              similarity: Optional[np.ndarray] = None,
                              rotation: bool = False,
-                             searched: Optional[Sequence[str]] = None) -> None:
+                             searched: Optional[Sequence[str]] = None,
+                             sdi: Optional[Dict[str, Any]] = None) -> None:
         """Make the reference library a searched object rather than a fixed basis.
 
         ``partition`` is one label per *unbinned* science frame -- the roll, night or
@@ -395,6 +459,17 @@ class KLIPReducer(Reducer):
         pool).  A pool left out is not a dimension at all: every one of its eligible frames
         is in the basis, as it is without a library.  ``searched=("psfref",)`` with
         ``rotation`` is ADI plus a searched number of reference-star frames, the ALES form.
+
+        ``sdi`` adds the pool of the other wavelength groups' frames, rescaled about the star
+        to this group's wavelength (:mod:`klip_tpe.rescale`), ranked by correlation with the
+        target and counted by ``nkeep_sdi``: ``{"n_frames": total frames the other groups
+        hold (for the count's range), "cap": most-correlated rows the count may reach,
+        "lenders": their ids}``.  The frames themselves arrive with each request
+        (``ReductionRequest.siblings``, prepared by the groups' own :meth:`prepare`, which
+        :class:`PartitionedReducer` arranges), so this only declares the pool.  A target's
+        eligible SDI rows are the ones whose planet has moved, by rotation and scaling
+        together, the arc ``angsep`` asks for (the displacement rule,
+        :func:`klip_tpe.rescale.displacement_px`), within ``anglemax`` of rotation.
 
         The similarity matrix depends on the binned cube, the high-pass width and the
         annulus, all of which the search can move, so it is built lazily and cached per
@@ -419,7 +494,12 @@ class KLIPReducer(Reducer):
                 f"so nkeep_* would be searched and change nothing.  Use the built-in engine "
                 f"(backend 'klip') for a searched library, or search this backend's own "
                 f"selection instead (pyKLIP: its ADI / RDI / ADI+RDI mode).")
-        pools = ["altroll"] + list((groups or {ref_group: None}).keys())
+        pools = ["altroll"] + (["sdi"] if sdi else []) + list((groups or {ref_group: None}).keys())
+        if sdi:
+            sdi = {"n_frames": int(sdi.get("n_frames", 0)), "cap": int(sdi.get("cap", 100)),
+                   "lenders": list(sdi.get("lenders", []))}
+            if sdi["n_frames"] < 1 or sdi["cap"] < 1:
+                raise ValueError(f"an SDI pool needs frames and a cap above 0, got {sdi}")
         if searched is not None:
             searched = tuple(str(s) for s in searched)
             bad = [s for s in searched if s not in pools]
@@ -429,6 +509,7 @@ class KLIPReducer(Reducer):
                              "metric": metric, "shift_px": int(shift_px),
                              "n_min_ref": int(n_min_ref), "min_keep": dict(min_keep or {}),
                              "ref_group": ref_group, "rotation": bool(rotation), "searched": searched,
+                             "sdi": sdi or None,
                              "similarity": None if similarity is None else np.asarray(similarity, float)}
         self._reflib_cache.clear()
 
@@ -454,18 +535,26 @@ class KLIPReducer(Reducer):
         groups = [ReferenceGroup("altroll", np.arange(n_sci), partition=spec["partition"],
                                  min_keep=spec["min_keep"].get("altroll", 0),
                                  rotation=bool(spec.get("rotation", False)))]
+        n_sdi = 0
+        if spec.get("sdi"):
+            n_sdi = int(spec["sdi"]["n_frames"])
+            groups.append(ReferenceGroup("sdi", n_sci + np.arange(n_sdi), min_keep=spec["min_keep"].get("sdi", 0),
+                                         max_keep=min(int(spec["sdi"]["cap"]), n_sdi), scales=np.ones(n_sdi)))
         for name, rows in (spec["groups"] or {spec["ref_group"]: np.arange(n_ref)}).items():
             rows = np.asarray(rows, int)
             if rows.size:
-                groups.append(ReferenceGroup(name, n_sci + rows,
+                groups.append(ReferenceGroup(name, n_sci + n_sdi + rows,
                                              min_keep=spec["min_keep"].get(name, 0)))
-        return ReferenceLibrary(groups, np.zeros((n_sci + n_ref, n_sci)),
+        ruled = bool(spec.get("rotation")) or n_sdi > 0
+        return ReferenceLibrary(groups, np.zeros((n_sci + n_sdi + n_ref, n_sci)),
                                 target_partition=spec["partition"], metric=spec["metric"],
                                 n_min_ref=spec["n_min_ref"],
-                                angles=np.asarray(self.data.angles, float) if spec.get("rotation") else None)
+                                angles=np.concatenate([np.asarray(self.data.angles, float), np.zeros(n_sdi)])
+                                if ruled else None,
+                                mid_px=1.0 if n_sdi else None)
 
     def _reflib(self, bcube, ref, bkeep_partition, filt, inrad, outrad, key_extra=(), sim_cube=None,
-                bang=None):
+                bang=None, sdi=None):
         """The library for this evaluation: ``(selection, basis)``.  ``bang``: the binned
         angles, which a ``rotation`` science pool selects by (they follow from the key).
 
@@ -474,7 +563,17 @@ class KLIPReducer(Reducer):
         and reused; ``key_extra`` carries the binning and the frame-selection mask, and
         ``sim_cube`` is the same binned cube WITHOUT injections, so that the ranking does not
         depend on what was injected or on which evaluation came first.  The BASIS rows are
-        always this evaluation's own cube, ``[bcube | ref]``.
+        always this evaluation's own cube, ``[bcube | SDI rows | ref]``.
+
+        ``sdi`` (from :meth:`_sdi_rows`) is this evaluation's SDI pool: its rows go between
+        the science frames and the reference star's, and its block of the similarity is
+        computed here and now, against this evaluation's own target frames at zero lag,
+        never cached.  The rows are rescaled frames of the same registered sequence, so the
+        +/- 1 px search the other pools use has nothing to find there, and they carry this
+        evaluation's injections: a cached ranking would make the selection depend on which
+        evaluation came first, the very thing the cache rule below exists to prevent, and a
+        second, clean prep of every sibling would double the rescaling.  The injections'
+        footprint in the ranking is a few pixels of the thousands in the annulus.
 
         Until 2026-09-27 the cache held the basis rows too, keyed without the injections:
         every later reduction with the same key took its science (other-roll) references from
@@ -493,35 +592,59 @@ class KLIPReducer(Reducer):
         key = (n_sci, int(filt), round(float(inrad), 3), round(float(outrad), 3),
                spec["metric"], spec["shift_px"]) + tuple(key_extra)
         lib = self._reflib_cache.get(key)
-        if lib is not None:
+        if lib is None:
+            rot = bool(spec.get("rotation", False))
+            groups = [ReferenceGroup("altroll", np.arange(n_sci), partition=bkeep_partition,
+                                     min_keep=spec["min_keep"].get("altroll", 0), rotation=rot)]
+            for name, rows in (spec["groups"] or {spec["ref_group"]: np.arange(n_ref)}).items():
+                rows = np.asarray(rows, int)
+                if rows.size:
+                    groups.append(ReferenceGroup(name, n_sci + rows,
+                                                 min_keep=spec["min_keep"].get(name, 0)))
+            if rot and (bang is None or np.asarray(bang).size != n_sci):
+                raise ValueError("a rotation library needs one binned angle per science frame")
+            if spec.get("similarity") is not None:
+                sim = spec["similarity"]
+                if sim.shape != (library.shape[0], n_sci):
+                    raise ValueError(f"supplied similarity is {sim.shape}, expected "
+                                     f"{(library.shape[0], n_sci)} (library x target)")
+            else:
+                sc = bcube if sim_cube is None else sim_cube
+                if sc.shape != bcube.shape:
+                    raise ValueError(f"similarity cube {sc.shape} does not match the binned cube {bcube.shape}")
+                sim = similarity_matrix(sc, sc if ref is None else np.concatenate([sc, ref], axis=0),
+                                        inrad=inrad, outrad=outrad, filt=0.0,
+                                        metric=spec["metric"], shift_px=spec["shift_px"])
+            lib = ReferenceLibrary(groups, sim, target_partition=bkeep_partition,
+                                   metric=spec["metric"], n_min_ref=spec["n_min_ref"],
+                                   angles=np.asarray(bang, float) if rot else None)
+            self._reflib_cache[key] = lib
+        if sdi is None:
             return lib, library
-        rot = bool(spec.get("rotation", False))
-        groups = [ReferenceGroup("altroll", np.arange(n_sci), partition=bkeep_partition,
-                                 min_keep=spec["min_keep"].get("altroll", 0), rotation=rot)]
-        for name, rows in (spec["groups"] or {spec["ref_group"]: np.arange(n_ref)}).items():
-            rows = np.asarray(rows, int)
-            if rows.size:
-                groups.append(ReferenceGroup(name, n_sci + rows,
-                                             min_keep=spec["min_keep"].get(name, 0)))
-        if rot and (bang is None or np.asarray(bang).size != n_sci):
-            raise ValueError("a rotation library needs one binned angle per science frame")
-        if spec.get("similarity") is not None:
-            sim = spec["similarity"]
-            if sim.shape != (library.shape[0], n_sci):
-                raise ValueError(f"supplied similarity is {sim.shape}, expected "
-                                 f"{(library.shape[0], n_sci)} (library x target)")
-        else:
-            sc = bcube if sim_cube is None else sim_cube
-            if sc.shape != bcube.shape:
-                raise ValueError(f"similarity cube {sc.shape} does not match the binned cube {bcube.shape}")
-            sim = similarity_matrix(sc, sc if ref is None else np.concatenate([sc, ref], axis=0),
-                                    inrad=inrad, outrad=outrad, filt=0.0,
-                                    metric=spec["metric"], shift_px=spec["shift_px"])
-        lib = ReferenceLibrary(groups, sim, target_partition=bkeep_partition,
-                               metric=spec["metric"], n_min_ref=spec["n_min_ref"],
-                               angles=np.asarray(bang, float) if rot else None)
-        self._reflib_cache[key] = lib
-        return lib, library
+        # this evaluation's SDI rows between the science frames and the reference star's
+        n_sdi = int(sdi["rows"].shape[0])
+        cap = int(spec["sdi"]["cap"]) if spec.get("sdi") else n_sdi
+        groups = []
+        for g in lib.groups:
+            if g.name == "altroll":
+                groups.append(ReferenceGroup(g.name, g.rows, partition=g.partition, min_keep=g.min_keep,
+                                             max_keep=g.max_keep, rotation=g.rotation))
+            else:
+                groups.append(ReferenceGroup(g.name, g.rows + n_sdi, partition=g.partition, min_keep=g.min_keep,
+                                             max_keep=g.max_keep))
+        groups.insert(1, ReferenceGroup("sdi", n_sci + np.arange(n_sdi), min_keep=spec["min_keep"].get("sdi", 0),
+                                        max_keep=min(cap, n_sdi), scales=sdi["scales"]))
+        sim_sdi = similarity_matrix(bcube, sdi["rows"], inrad=inrad, outrad=outrad, filt=0.0,
+                                    metric=spec["metric"], shift_px=0)
+        sim = np.concatenate([lib.similarity[:n_sci], sim_sdi, lib.similarity[n_sci:]], axis=0)
+        ang = np.asarray(bang, float) if lib.angles is None else np.asarray(lib.angles, float)[:n_sci]
+        full = ReferenceLibrary(groups, sim, target_partition=bkeep_partition, metric=spec["metric"],
+                                n_min_ref=spec["n_min_ref"],
+                                angles=np.concatenate([ang, np.asarray(sdi["angles"], float)]),
+                                mid_px=max(float(inrad) + abs(float(outrad) - float(inrad)) / 2.0, 1.0))
+        library = np.concatenate([bcube, np.asarray(sdi["rows"], bcube.dtype)] + ([ref] if ref is not None else []),
+                                 axis=0)
+        return full, library
 
     def _binned_partition(self, keep, grp, bkeep):
         """Partition label per surviving BINNED frame.
@@ -571,7 +694,12 @@ class KLIPReducer(Reducer):
         return ref
 
     # -- main entry ----------------------------------------------------------
-    def reduce(self, req: ReductionRequest) -> ReductionResult:
+    def prepare(self, req: ReductionRequest) -> PreparedFrames:
+        """The first half of :meth:`reduce`: the frame selection, the injections into the
+        kept frames, the KLIP-FM model cube, the high-pass, the destriping and the
+        angle-aware binning.  What another wavelength group's reduction needs from this one
+        for its SDI pool is exactly this, so the SDI mode runs it once per group and hands
+        the result round (``ReductionRequest.stage = "prepare"``)."""
         p = dict(self.defaults)
         p.update({k: v for k, v in req.params.items() if v is not None})
         k = int(max(round(p["k_klip"]), 1))
@@ -586,7 +714,6 @@ class KLIPReducer(Reducer):
         outrad = min(float(p["outrad"]) + pad_out, self.outrad_cap)
         inrad = min(inrad, outrad - 1.0)
         ds = self.data
-        angles = ds.angles
         meta: Dict[str, Any] = {}
         # the job's threads: the per-target KLIP loop, and the per-frame steps around it
         nth = int(max(getattr(req, "threads", 1) or 1, 1))
@@ -608,29 +735,10 @@ class KLIPReducer(Reducer):
         # frame before binning, and a destriped cube keeps that order (not linear).
         hp_binned = str(p.get("hp_order", "raw")).lower() == "binned" and filt > 1 and not p["do_destripe"]
         hp_nan = _flag(p.get("hp_nan_aware", False))
-
-        def prep(c, selected=False):
-            """frame selection, high-pass, destripe and binning of a science cube
-            (``selected``: ``c`` holds only the kept frames already)"""
-            a_ = angles
-            if not keep.all():
-                a_ = a_[keep]
-                if not selected:
-                    c = c[keep]
-            if hp_binned:
-                return bin_frames(c, a_, bin_, dth, return_groups=True, threads=nth, dtype=np.float64,
-                                  then=lambda bc: highpass_stack(bc, filt, nan_aware=hp_nan, threads=nth))
-            if filt > 1:
-                c = highpass_stack(c, filt, nan_aware=hp_nan, threads=nth)
-            if p["do_destripe"]:
-                # reduce_near_2 L1672-1677: 90 deg (columns) then 0 deg (rows); science only
-                clip = float(p["destripe_clip"])
-                c = np.stack([destripe(destripe(f, 90.0, clip), 0.0, clip) for f in c])
-            return bin_frames(c, a_, bin_, dth, return_groups=True, threads=nth)
-
         if mcube is not None and filt > 1 and not hp_binned:
             mcube = highpass_stack(mcube, filt, nan_aware=hp_nan, threads=nth)
-        bcube, bang, grp, bkeep = prep(cube, selected=bool(req.injections))
+        bcube, bang, grp, bkeep = self._prep_cube(cube, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth,
+                                                  selected=bool(req.injections))
         if bcube.shape[0] == 0:
             # bin_frames drops bins whose nansum is zero.  np.nansum of an ALL-NaN frame is
             # 0.0, so a cube that is mostly NaN -- a subarray padded into a larger grid, say
@@ -651,16 +759,107 @@ class KLIPReducer(Reducer):
             else:
                 mb = bin_by_groups(mcube, grp, threads=nth) if bin_ > 1 else np.asarray(mcube, np.float32)
             mcube = mb[bkeep]
+        return PreparedFrames(p, k, bin_, filt, inrad, outrad, dth, keep, bcube, bang, grp, bkeep, mcube,
+                              hp_nan, hp_binned, nth, meta)
 
+    def _prep_cube(self, c, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth, selected=False):
+        """frame selection, high-pass, destripe and binning of a science cube
+        (``selected``: ``c`` holds only the kept frames already)"""
+        a_ = self.data.angles
+        if not keep.all():
+            a_ = a_[keep]
+            if not selected:
+                c = c[keep]
+        if hp_binned:
+            return bin_frames(c, a_, bin_, dth, return_groups=True, threads=nth, dtype=np.float64,
+                              then=lambda bc: highpass_stack(bc, filt, nan_aware=hp_nan, threads=nth))
+        if filt > 1:
+            c = highpass_stack(c, filt, nan_aware=hp_nan, threads=nth)
+        if p["do_destripe"]:
+            # reduce_near_2 L1672-1677: 90 deg (columns) then 0 deg (rows); science only
+            clip = float(p["destripe_clip"])
+            c = np.stack([destripe(destripe(f, 90.0, clip), 0.0, clip) for f in c])
+        return bin_frames(c, a_, bin_, dth, return_groups=True, threads=nth)
+
+    def reduce(self, req: ReductionRequest) -> ReductionResult:
+        if str(getattr(req, "stage", "reduce")) == "prepare":
+            pr = self.prepare(req)
+            return pr.siblings_payload(getattr(self, "partition_id", None), self.lam_m)
+        return self._reduce_prepared(self.prepare(req), req)
+
+    def _sdi_rows(self, siblings, prep: PreparedFrames):
+        """The SDI pool's rows for this group: every sibling's prepared frames magnified
+        about the star by ``lambda_this / lambda_sibling`` (:mod:`klip_tpe.rescale`), with
+        their angles and scales, and the model cubes the same way when KLIP-FM is on, so a
+        planet sits at ``r * s`` in the FM rows as in the data rows.  Returns ``None``
+        without siblings."""
+        from .parallel import SharedArrays
+        from .rescale import rescale_frames
+        if siblings is None:
+            return None
+        closer = None
+        if isinstance(siblings, SharedArrays):
+            arrays, closer = siblings.attach()
+            siblings = {pid: SiblingFrames(pid, float(ex["lam_m"]), arrays[f"{pid}/bcube"], np.asarray(ex["bang"], float),
+                                           arrays.get(f"{pid}/mcube"))
+                        for pid, ex in siblings.extra.items()}
+        try:
+            rows, angs, scales, fms, lenders, counts = [], [], [], [], [], []
+            for pid, sib in siblings.items():
+                if getattr(sib, "pid", pid) == getattr(self, "partition_id", object()) or sib.bcube.shape[0] == 0:
+                    continue
+                s = float(self.lam_m) / float(sib.lam_m)
+                rows.append(rescale_frames(sib.bcube, s, threads=prep.nth))
+                angs.append(np.asarray(sib.bang, float))
+                scales.append(np.full(int(sib.bcube.shape[0]), s))
+                if prep.mcube is not None:
+                    if sib.mcube is None:
+                        raise ValueError(f"KLIP-FM with an SDI pool needs the siblings' model cubes ({pid} has none)")
+                    fms.append(rescale_frames(sib.mcube, s, threads=prep.nth))
+                lenders.append(pid)
+                counts.append(int(sib.bcube.shape[0]))
+        finally:
+            if closer is not None:
+                closer()
+        if not rows:
+            return None
+        return {"rows": np.concatenate(rows, axis=0), "angles": np.concatenate(angs),
+                "scales": np.concatenate(scales), "fm_rows": np.concatenate(fms, axis=0) if fms else None,
+                "lenders": lenders, "counts": counts}
+
+    def _reduce_prepared(self, prep: PreparedFrames, req: ReductionRequest) -> ReductionResult:
+        p, k, bin_, filt = prep.p, prep.k, prep.bin_, prep.filt
+        inrad, outrad, dth, keep = prep.inrad, prep.outrad, prep.dth, prep.keep
+        bcube, bang, grp, bkeep, mcube = prep.bcube, prep.bang, prep.grp, prep.bkeep, prep.mcube
+        meta, nth = prep.meta, prep.nth
+        ds = self.data
+        spec = self._reflib_spec
+        # the SDI pool: the other groups' frames, rescaled, when the count asks for any
+        sdi = None
+        if spec is not None and spec.get("sdi") and int(round(float(p.get("nkeep_sdi", 0) or 0))) > 0:
+            if req.siblings is None:
+                # a bare KLIPReducer.reduce: nobody prepared the other groups' frames
+                meta["sdi_note"] = "nkeep_sdi > 0 but no sibling frames came with the request: no SDI rows"
+            else:
+                sdi = self._sdi_rows(req.siblings, prep)
         ref_basis = fm_ref = None
         ref_lib = ref_keep = None
         rdi_mode = str(p["rdi_mode"]).lower()
-        if p["use_rdi"]:
-            ref = self._reference_cube(filt, meta, threads=nth)
-            if self._reflib_spec is not None:
-                # Searched library: the basis cube is [science | references] in that order,
-                # because the group row indices the library hands back address it that way,
-                # and every target picks its own rows out of it.  ARDI and RDI stop being
+        adi_point = self._library_at_adi_point(p, int(bcube.shape[0]))
+        if adi_point is not None:
+            # the ADI point of a searched library -- every count the space searches at 0 and the
+            # rotating science pool whole -- IS the ADI reduction, and klip_annular would run it
+            # as such (library_as_adi) after the reference cube's high-pass and the similarity
+            # matrix had been paid for.  Neither is needed to reduce nothing but the sequence.
+            meta.update(rdi_mode="searched", ref_keep=dict(adi_point),
+                        n_ref_frames=0 if ds.ref_cube is None else int(np.asarray(ds.ref_cube).shape[0]),
+                        ref_metric=spec["metric"])
+        elif p["use_rdi"] or sdi is not None:
+            ref = self._reference_cube(filt, meta, threads=nth) if p["use_rdi"] else None
+            if spec is not None:
+                # Searched library: the basis cube is [science | SDI rows | references] in that
+                # order, because the group row indices the library hands back address it that
+                # way, and every target picks its own rows out of it.  ARDI and RDI stop being
                 # separate modes here -- an all-zero altroll count IS pure RDI, and the
                 # optimizer can elect it rather than being told.
                 bpart = self._binned_partition(keep, grp, bkeep)
@@ -670,17 +869,20 @@ class KLIPReducer(Reducer):
                     # the ranking is computed once per key, on the frames WITHOUT injections
                     # -- rebuilt here only if the key is new
                     k0 = (int(bcube.shape[0]), int(filt), round(float(inrad), 3), round(float(outrad), 3),
-                          self._reflib_spec["metric"], self._reflib_spec["shift_px"]) + kx
+                          spec["metric"], spec["shift_px"]) + kx
                     if k0 not in self._reflib_cache:
-                        sim_cube = prep(ds.cube)[0]
+                        sim_cube = self._prep_cube(ds.cube, p, keep, bin_, filt, dth, prep.hp_nan, prep.hp_binned, nth)[0]
                 ref_lib, ref_basis = self._reflib(bcube, ref, bpart, filt, inrad, outrad, key_extra=kx,
-                                                  sim_cube=sim_cube, bang=bang)
+                                                  sim_cube=sim_cube, bang=bang, sdi=sdi)
                 ref_keep = ref_lib.keep_from_config(p)
                 if mcube is not None:
                     fm_ref = np.concatenate(
-                        [mcube] + ([np.zeros_like(ref)] if ref is not None else []), axis=0)
+                        [mcube] + ([sdi["fm_rows"]] if sdi is not None else [])
+                        + ([np.zeros_like(ref)] if ref is not None else []), axis=0)
                 meta.update(rdi_mode="searched", n_ref_frames=0 if ref is None else int(ref.shape[0]),
                             ref_keep=dict(ref_keep), ref_metric=ref_lib.metric)
+                if sdi is not None:
+                    meta.update(n_sdi_rows=int(sdi["rows"].shape[0]), sdi_lenders=[str(x) for x in sdi["lenders"]])
             elif ref is not None:
                 if rdi_mode == "rdi":
                     ref_basis = ref
@@ -714,10 +916,38 @@ class KLIPReducer(Reducer):
         if self.mask_fn is not None:
             img = np.stack([self.mask_fn(im) for im in img]) if req.k_scan else self.mask_fn(img)
         meta.update(info)
+        if adi_point is not None:
+            meta["library_as_adi"] = True
         meta.update(n_kept=int(keep.sum()), n_binned=int(bcube.shape[0]), inrad=inrad, outrad=outrad,
                     params=p, tag=req.tag)
         return ReductionResult(np.asarray(img, np.float32), self.partition_weight(), meta,
                                fm_image=fm_img, nosub=nosub, cadi=cadi)
+
+    def _library_at_adi_point(self, p: Dict[str, Any], n_binned: int) -> Optional[Dict[str, int]]:
+        """The counts of a searched library when they leave nothing but the rotating sequence
+        itself (every pool the space searches at 0, the one-label science pool whole), else
+        None.  A pool the space does not search is at its maximum, so it counts as present."""
+        spec = self._reflib_spec
+        if spec is None or not spec.get("rotation") or not self.supports_reference_library:
+            return None
+        if int(np.unique(np.asarray(spec["partition"])).size) > 1:
+            return None
+        searched = spec.get("searched")
+        stub = self._reflib_stub()
+        keep: Dict[str, int] = {}
+        for g in stub.groups:
+            is_searched = searched is None or g.name in searched
+            v = p.get(g.param_name)
+            if g.name == "altroll":
+                n = int(round(float(v))) if (is_searched and v is not None) else max(n_binned - 1, 0)
+                if n < max(n_binned - 1, 0):
+                    return None
+                keep[g.name] = n                      # the count as the record has it (the config's own when searched)
+                continue
+            if not is_searched or v is None or int(round(float(v))) != 0:
+                return None
+            keep[g.name] = 0
+        return keep
 
     # ------------------------------------------------------------------ backend hook
     def _subtract(self, bcube: np.ndarray, bang: np.ndarray, kp: KLIPParams, p: Dict[str, Any], filt: int,
@@ -873,6 +1103,12 @@ class PartitionedReducer(Reducer):
             from .parallel import pin_blas
             pin_blas()                      # one BLAS thread per worker thread (no oversubscription)
         self.representative = representative if representative is not None else next(iter(self.reducers))
+        for pid, r in self.reducers.items():
+            if getattr(r, "partition_id", None) is None:
+                r.partition_id = pid
+        #: which partitions lend their frames to the others' SDI pools (``"all"``, or
+        #: ``"selected"``: only the partitions the configuration includes); an IFS adapter sets it
+        self.sdi_lenders: str = "all"
         first = self.reducers[self.representative]
         self.pxscale, self.fwhm = first.pxscale, first.fwhm
         self.lam_over_d_px = first.lam_over_d_px
@@ -1021,6 +1257,48 @@ class PartitionedReducer(Reducer):
             self._pool.shutdown(wait=False)
             self._pool = None
 
+    def sdi_lender_ids(self, selected: Sequence[Any]) -> Optional[List[Any]]:
+        """The partitions whose frames feed the others' SDI pools, or None when no partition
+        has an SDI pool (:meth:`KLIPReducer.set_reference_library` with ``sdi``)."""
+        if not any((getattr(r, "_reflib_spec", None) or {}).get("sdi") for r in self.reducers.values()):
+            return None
+        return list(self.reducers) if str(self.sdi_lenders) == "all" else list(selected)
+
+    def _prepare_siblings(self, config: Config, sel, injections, k_scan, tag, fm_sources, per, kind):
+        """The SDI mode's first round: every lending partition's frames prepared as it would
+        prepare its own for this configuration (``ReductionRequest.stage = "prepare"``), in
+        parallel, then handed to the partition jobs -- in one shared-memory block with worker
+        processes (:class:`klip_tpe.parallel.SharedArrays`), as they are otherwise.  Nothing
+        is done when the configuration's ``nkeep_sdi`` is 0: that point is the reduction
+        without an SDI pool, and costs exactly that.  Returns ``(siblings, shared)``."""
+        lenders = self.sdi_lender_ids(sel)
+        if lenders is None or int(round(float(config.params.get("nkeep_sdi", 0) or 0))) <= 0:
+            return None, None
+        jobs = [(self.reducers[pid], ReductionRequest(config.params_for(pid), injections, k_scan,
+                                                      f"{tag}_{pid}_prep", fm_sources=fm_sources,
+                                                      threads=per, stage="prepare"))
+                for pid in lenders]
+        payload = {pid: sf for pid, sf in zip(lenders, self._map(jobs))}
+        if kind != "processes":
+            return payload, None
+        from .parallel import SharedArrays
+        arrays, extra = {}, {}
+        for pid, sf in payload.items():
+            arrays[f"{pid}/bcube"] = sf.bcube
+            if sf.mcube is not None:
+                arrays[f"{pid}/mcube"] = sf.mcube
+            extra[pid] = {"lam_m": float(sf.lam_m), "bang": np.asarray(sf.bang, float)}
+        if getattr(self, "_no_shared_memory", False):
+            return payload, None
+        try:
+            shared = SharedArrays.create(arrays, extra)
+        except Exception as exc:          # no shared memory here: the arrays travel with the jobs
+            self._no_shared_memory = True
+            self._log(f"  (shared memory unavailable for the SDI frames, {exc!r}; passing them with the jobs, "
+                      f"which is slower)")
+            return payload, None
+        return shared, shared
+
     def reduce_config(self, config: Config, injections: Optional[Sequence[Source]] = None,
                       k_scan: bool = False, tag: str = "", selected: Optional[Sequence[Any]] = None,
                       fm_sources: Optional[Sequence[Source]] = None, extras: bool = False
@@ -1031,9 +1309,10 @@ class PartitionedReducer(Reducer):
         sel = list(config.selected if selected is None else selected)
         kind = self.start_workers() if self.max_workers > 1 else "serial"
         per = self.job_threads(len(sel))          # threads inside each partition job
+        siblings, shared = self._prepare_siblings(config, sel, injections, k_scan, tag, fm_sources, per, kind)
         jobs = [(self.reducers[pid], ReductionRequest(config.params_for(pid), injections, k_scan,
                                                       f"{tag}_{pid}", fm_sources=fm_sources, extras=extras,
-                                                      threads=per))
+                                                      threads=per, siblings=siblings))
                 for pid in sel]
         keys = None
         plan = self._plan(jobs, per) if kind == "processes" else None
@@ -1046,7 +1325,11 @@ class PartitionedReducer(Reducer):
             # one submitted later goes ahead of an earlier one only when it is longer by
             # more than the time between them, so a trial's jobs are not held back for long
             keys = [now - w for w in walls]
-        results = self._map(jobs, keys)
+        try:
+            results = self._map(jobs, keys)
+        finally:
+            if shared is not None:
+                shared.release()
         stack = np.stack([r.image for r in results])
         w = np.array([self.partition_weight(pid) for pid in sel], float)
         img = combine_stack(stack, w)
@@ -1110,6 +1393,8 @@ class PartitionedReducer(Reducer):
                  partition_label=getattr(self, "partition_label", "night"),
                  provenance=getattr(self, "provenance", None),
                  partitions={str(k): r.describe() for k, r in self.reducers.items()})
+        if self.sdi_lender_ids(list(self.reducers)) is not None:
+            d["sdi_lenders"] = str(self.sdi_lenders)
         return d
 
 

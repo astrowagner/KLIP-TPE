@@ -17,7 +17,9 @@ import contextlib
 import os
 import threading
 import time
-from typing import Optional, Union
+from typing import Any, Dict, Optional, Tuple, Union
+
+import numpy as np
 
 WorkerSpec = Union[int, str, None]
 
@@ -458,5 +460,101 @@ class ProcessPool:
     def __del__(self):
         try:
             self.close()
+        except Exception:
+            pass
+
+
+
+# ----------------------------------------------------------------------------
+# arrays made once per reduction and read by every worker: shared memory, not pickles
+# ----------------------------------------------------------------------------
+class SharedArrays:
+    """Named numpy arrays in one shared-memory block, for the worker processes to read in
+    place.
+
+    The SDI mode prepares every wavelength group's frames once per reduction and hands all of
+    them to each group's job.  Through the job queue that is tens of MB pickled per job, hundreds
+    per reduction, serialised by the parent; here the parent writes them once into a
+    :class:`multiprocessing.shared_memory.SharedMemory` block and the jobs carry only this
+    descriptor (the block's name and each array's offset, shape and dtype, plus ``extra``, small
+    picklable things that go with them).  A worker :meth:`attach` es, gets views, and closes its
+    handle when its copies are made; the parent :meth:`release` s the block when the reduction is
+    done.  Picklable without the handle.  With threads instead of processes nothing of this is
+    needed: the arrays are passed as they are."""
+
+    def __init__(self, name: str, size: int, index: Dict[str, Tuple[int, Tuple[int, ...], str]],
+                 extra: Optional[Dict[str, Any]] = None):
+        self.name, self.size, self.index = str(name), int(size), dict(index)
+        self.extra = dict(extra or {})
+        self._shm = None
+
+    @classmethod
+    def create(cls, arrays: Dict[str, np.ndarray], extra: Optional[Dict[str, Any]] = None) -> "SharedArrays":
+        """Write ``arrays`` into a new block (the parent's side).  Raises when shared memory
+        is not available, so a caller can fall back to passing the arrays themselves."""
+        from multiprocessing import shared_memory
+        index: Dict[str, Tuple[int, Tuple[int, ...], str]] = {}
+        off = 0
+        for k, a in arrays.items():
+            a = np.ascontiguousarray(a)
+            index[k] = (off, tuple(int(v) for v in a.shape), a.dtype.str)
+            off += int(a.nbytes)
+            off += (-off) % 64                       # 64-byte alignment for the next array
+        shm = shared_memory.SharedMemory(create=True, size=max(off, 1))
+        for k, a in arrays.items():
+            o, shape, dt = index[k]
+            a = np.ascontiguousarray(a)
+            view = np.ndarray(shape, dtype=np.dtype(dt), buffer=shm.buf, offset=o)
+            view[...] = a
+        out = cls(shm.name, max(off, 1), index, extra)
+        out._shm = shm
+        return out
+
+    def attach(self):
+        """``(arrays, closer)``: the arrays as views into the block, and a callable that
+        drops this process's handle once the views are no longer needed (a view read after
+        it is undefined)."""
+        from multiprocessing import shared_memory
+        # Attaching registers the block with the resource tracker as if this process owned
+        # it, and the tracker (a worker's own, or the parent's when the worker inherited its
+        # pipe, as on macOS) would then unlink it at exit or complain that it could not.  The
+        # parent owns the block, so the registration is skipped here: the register call is
+        # stood down for the duration of the attach (one job at a time in a worker).
+        from multiprocessing import resource_tracker
+        orig = resource_tracker.register
+        resource_tracker.register = lambda *a, **k: None
+        try:
+            shm = shared_memory.SharedMemory(name=self.name, create=False)
+        finally:
+            resource_tracker.register = orig
+        arrays = {k: np.ndarray(shape, dtype=np.dtype(dt), buffer=shm.buf, offset=o)
+                  for k, (o, shape, dt) in self.index.items()}
+
+        def closer():
+            try:
+                shm.close()
+            except Exception:
+                pass
+        return arrays, closer
+
+    def release(self) -> None:
+        """The parent's side: close and unlink the block."""
+        shm, self._shm = self._shm, None
+        if shm is None:
+            return
+        for f in (shm.close, shm.unlink):
+            try:
+                f()
+            except Exception:
+                pass
+
+    def __getstate__(self):
+        d = dict(self.__dict__)
+        d["_shm"] = None
+        return d
+
+    def __del__(self):
+        try:
+            self.release()
         except Exception:
             pass
