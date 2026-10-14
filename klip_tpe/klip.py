@@ -18,6 +18,7 @@ from scipy import ndimage
 
 __all__ = ["frame_selection_mask", "bin_frames", "bin_groups", "bin_by_groups", "bin_angles",
            "highpass", "highpass_stack", "destripe", "rotate_ccw", "rotate_ccw_many", "derotate",
+           "group_mean", "group_bounds",
            "nw_ang_comb", "nw_ang_comb_ref", "klip_basis", "zone_indices", "klip_annular", "klip_fm_zone",
            "arcdist_deg", "reference_mask", "KLIPParams"]
 
@@ -133,6 +134,29 @@ def bin_groups(angles: np.ndarray, bin_: int, dth_max_deg: float) -> np.ndarray:
     return _bin_groups(angles, b, dth_max_deg)
 
 
+def group_mean(frames: np.ndarray, dtype=np.float32) -> np.ndarray:
+    """The mean of one bin group's frames ``(m, ny, nx)``, as :func:`bin_by_groups` takes
+    it: summed in the frames' own precision for ``dtype=np.float32``, in double for
+    ``np.float64``.  A group of one frame is that frame.  Pass a C-contiguous array (a copy
+    or a leading-axis slice of one), so the sum runs frame after frame as it always has."""
+    if frames.shape[0] > 1:
+        return frames.mean(axis=0, dtype=None if np.dtype(dtype) == np.float32 else dtype)
+    return frames[0]
+
+
+def group_bounds(grp: np.ndarray) -> np.ndarray:
+    """First frame of every group, and the frame count at the end: ``[s_0, s_1, ..., n]``.
+    The angle-aware binning numbers its groups along the frames, so group ``g`` is the
+    frames ``s_g:s_(g+1)``."""
+    grp = np.asarray(grp)
+    if grp.size == 0:
+        return np.zeros(1, int)
+    if np.any(np.diff(grp) < 0):
+        raise ValueError("bin groups must run along the frames")
+    starts = np.flatnonzero(np.r_[True, grp[1:] != grp[:-1]])
+    return np.r_[starts, grp.size].astype(int)
+
+
 def bin_by_groups(cube: np.ndarray, grp: np.ndarray, threads: int = 1, dtype=np.float32) -> np.ndarray:
     """Mean-combine the frames of each group (``bin_type='mean'``; the model cube is
     always mean-binned, reduce_near_2 L1792-1806).  ``threads``: groups go to that many
@@ -140,12 +164,11 @@ def bin_by_groups(cube: np.ndarray, grp: np.ndarray, threads: int = 1, dtype=np.
     in double precision, for frames that still carry their background."""
     ng = int(grp.max()) + 1 if grp.size else 0
     bc = np.empty((ng,) + cube.shape[1:], dtype)
-    acc = None if np.dtype(dtype) == np.float32 else dtype
 
     def block(lo, hi):
         for g in range(lo, hi):
             w = np.flatnonzero(grp == g)
-            bc[g] = cube[w].mean(axis=0, dtype=acc) if w.size > 1 else cube[w[0]]
+            bc[g] = group_mean(cube[w], dtype)
     run_blocks(block, frame_blocks(ng, threads), threads)
     return bc
 

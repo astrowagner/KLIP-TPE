@@ -1,5 +1,50 @@
 # Changelog
 
+## Unreleased — 2026-10-14c (the frames before KLIP one bin group at a time: a night read once per reduction, no injected cube held)
+
+From the NEAR2 session's note of 2026-10-14 on the per-frame passes of a draw (its items 1 and
+2).  Before KLIP a draw wrote and read whole cubes about seven times (the injected copy of the
+night, the compact copy of its kept frames, the high-pass, the binning), a clean reduction about
+five times.
+
+- **`KLIPReducer.prepare` goes one bin group at a time** (`_prep_fused`).  A batch of whole
+  groups, at most five frames of 150² past its first group, is copied out of the night, given
+  its sources, high-passed, destriped when asked and averaged into its binned frames while it is
+  in the processor's cache.  The groups are spread over the job's threads.  A job reads its kept
+  frames from memory once and writes only the binned cube.  Each step is the whole-cube step's
+  own function on the same frames in the same order, so every number is the same to the bit.
+  `prep_fused=False` keeps the whole-cube path, the reference the tests hold the fused one to.
+- **No injected cube.**  The sources go straight into the batch
+  (`klip_tpe.injection.place_source`, the arithmetic of `inject_frames` in the same order), and
+  the KLIP-FM model cube is made the same way from zero frames.  A set of sources reduced a
+  second time on a night (param-verify's fixed set, a fixed-source search) keeps its stamps from
+  then on, about 70 MB a night for three sources on NEAR, where the frame cache held the whole
+  injected night.  After a run of draws on one NEAR night a worker's resident peak is 546 MB,
+  where it was 884 MB.
+- **The float32 headroom check** sampled the cube for its peak on every new set of sources, so
+  on every draw.  Its stride touches most of the cube's cache lines, which made it most of
+  another read of the night.  The reducer now takes the peak once (`KLIPReducer.cube_peak`,
+  `klip_tpe.injection.cube_peak`).
+- New helpers: `klip_tpe.klip.group_mean` (the binning's mean, which `bin_by_groups` now calls)
+  and `group_bounds`, and in `klip_tpe.injection` `stamp_crop` and `add_crop` (where `add_stamp`
+  puts a stamp and what it adds there) and `prepare_sources`.
+- On NEAR2 night 6 on one thread, with memory kept warm, a draw's preparation takes 1.15 s where
+  the whole-cube path takes 1.25 s at bin 29, and 1.16 s for 1.26 s at bin 20.  That machine's
+  260 MiB cache holds most of a night, so the passes cost little there.  Where many workers
+  share the memory bus each pass goes to main memory.  Each cube-sized temporary of the
+  whole-cube path is also a fresh mapping, which the kernel zeroes on first touch, and the new
+  path makes none.
+- `tests/test_prep_fused.py` holds the fused frames to the whole-cube ones to the bit: 22
+  configurations on 1 and 3 threads, every injection model, NaN frames, empty bins, a float64
+  cube, whole reductions, the searched library's ranking, the kept stamps, how often the
+  headroom check runs, two threads at once and pickling.  On NEAR2 nights 6 and 4, a synthetic
+  searched library and an ALES cube with NaN registration edges, every image of 52 reductions
+  (113 arrays with the FM, nosub and cADI images and the frame counts) is the same to the bit
+  as before, on 1 and 2 threads.  So are the prepared frames themselves (the binned cube, its
+  angles, groups and kept bins, the model cube) of 180 preparations on the two nights, ten
+  settings each clean, injected and with KLIP-FM, for a new set of sources, the same set again
+  and the set from its kept stamps.
+
 ## Unreleased — 2026-10-14b (ADI, SDI and RDI in one KLIP step for IFS data, reference means within observing blocks)
 
 From the ALES reduction's answer of 2026-10-14 (its sections 1 and 2).  An IFS cube loaded as

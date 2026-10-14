@@ -273,10 +273,14 @@ def test_the_same_sources_from_two_threads_at_once():
 
 
 def test_a_reducer_still_pickles():
+    """The whole-cube reference path's frame caches (the fused path's stamps:
+    tests/test_prep_fused.py) are dropped by a pickle and rebuilt after."""
     red = _reducer()
     src = [Source(0.5, 30.0, 5e-3)]
-    a = red.reduce(ReductionRequest(_params(), src, fm_sources=src)).image
+    p = _params(prep_fused=False)
+    a = red.reduce(ReductionRequest(p, src, fm_sources=src)).image
     assert red._inj_cache and red._fm_cache
     back = pickle.loads(pickle.dumps(red))
     assert back._inj_cache == {} and back._fm_cache == {} and red._inj_cache
-    assert _bits(back.reduce(ReductionRequest(_params(), src, fm_sources=src)).image, a)
+    assert _bits(back.reduce(ReductionRequest(p, src, fm_sources=src)).image, a)
+    assert _bits(back.reduce(ReductionRequest(_params(), src, fm_sources=src)).image, a), "the fused path agrees"

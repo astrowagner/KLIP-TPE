@@ -50,6 +50,37 @@ def shift_bilinear(img: np.ndarray, dx: float, dy: float) -> np.ndarray:
     return ndimage.shift(np.asarray(img, float), (dy, dx), order=1, mode="constant", cval=0.0)
 
 
+def stamp_crop(shape: Tuple[int, int], stamp: np.ndarray, stamp_center: Tuple[float, float],
+               x: float, y: float, buf: Optional[np.ndarray] = None):
+    """Where :func:`add_stamp` puts ``stamp`` in a frame of ``shape`` and what it adds there:
+    ``(y0, y1, x0, x1, values)``, the frame's rows ``y0:y1`` and columns ``x0:x1`` and the
+    shifted stamp's float64 values over them, or None when the stamp falls outside the
+    frame.  ``values`` is a view into ``buf`` when one is given (copy it to keep it past the
+    next call)."""
+    sh, sw = stamp.shape
+    fx = x - stamp_center[0]
+    fy = y - stamp_center[1]
+    ix, iy = int(np.floor(fx)), int(np.floor(fy))
+    ny, nx = int(shape[0]), int(shape[1])
+    x0, y0 = max(ix, 0), max(iy, 0)
+    x1, y1 = min(ix + sw, nx), min(iy + sh, ny)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    if buf is None:
+        s = shift_bilinear(stamp, fx - ix, fy - iy)
+    else:
+        s = ndimage.shift(np.asarray(stamp, float), (fy - iy, fx - ix), output=buf, order=1,
+                          mode="constant", cval=0.0)
+    return y0, y1, x0, x1, s[y0 - iy:y1 - iy, x0 - ix:x1 - ix]
+
+
+def add_crop(frame: np.ndarray, crop) -> None:
+    """Add a :func:`stamp_crop` to ``frame`` in place (a float32 frame takes the float64
+    values the way ``+=`` takes them: summed in double, rounded once)."""
+    y0, y1, x0, x1, v = crop
+    frame[y0:y1, x0:x1] += v
+
+
 def add_stamp(frame: np.ndarray, stamp: np.ndarray, stamp_center: Tuple[float, float],
               x: float, y: float, buf: Optional[np.ndarray] = None) -> None:
     """Add ``stamp`` to ``frame`` in place so that ``stamp_center`` (x, y in stamp
@@ -58,21 +89,9 @@ def add_stamp(frame: np.ndarray, stamp: np.ndarray, stamp_center: Tuple[float, f
 
     ``buf``: a float64 array of the stamp's shape that receives the shifted stamp, so a
     caller adding many stamps does not allocate one each time (the numbers are the same)."""
-    sh, sw = stamp.shape
-    fx = x - stamp_center[0]
-    fy = y - stamp_center[1]
-    ix, iy = int(np.floor(fx)), int(np.floor(fy))
-    ny, nx = frame.shape
-    x0, y0 = max(ix, 0), max(iy, 0)
-    x1, y1 = min(ix + sw, nx), min(iy + sh, ny)
-    if x1 <= x0 or y1 <= y0:
-        return
-    if buf is None:
-        s = shift_bilinear(stamp, fx - ix, fy - iy)
-    else:
-        s = ndimage.shift(np.asarray(stamp, float), (fy - iy, fx - ix), output=buf, order=1,
-                          mode="constant", cval=0.0)
-    frame[y0:y1, x0:x1] += s[y0 - iy:y1 - iy, x0 - ix:x1 - ix]
+    c = stamp_crop(frame.shape, stamp, stamp_center, x, y, buf)
+    if c is not None:
+        add_crop(frame, c)
 
 
 class InjectionModel:
@@ -395,8 +414,17 @@ class LibraryPSF(InjectionModel):
         return kernel_from_profile(st, fwhm)
 
 
+def cube_peak(cube: np.ndarray) -> float:
+    """The brightest pixel of ``cube`` as the float32 cube holds it, from a strided
+    subsample of about two million pixels (what :func:`_check_float32_headroom` reads)."""
+    if not cube.size:
+        return float("nan")
+    s = max(1, int(cube.size // 2_000_000))
+    return float(np.nanmax(np.abs(np.asarray(cube.reshape(-1)[::s], np.float32))))
+
+
 def _check_float32_headroom(cube: np.ndarray, sources: Sequence[Source], model: InjectionModel,
-                            fallback: Optional[InjectionModel] = None) -> None:
+                            fallback: Optional[InjectionModel] = None, peak: Optional[float] = None) -> None:
     """Warn when an injection is too faint to survive being added to a float32 cube.
 
     The cube is held in float32, so adding a stamp whose pixels sit below the float32
@@ -412,10 +440,12 @@ def _check_float32_headroom(cube: np.ndarray, sources: Sequence[Source], model: 
         return
     # A subsample: this runs on every injection, and a full pass over a production cube
     # would cost real time for a number that only has to be right to an order of magnitude.
-    # The brightest pixels are the star's and are in every frame, so striding is safe.
-    s = max(1, int(cube.size // 2_000_000))
-    # the samples as the float32 cube holds them, whatever the dtype passed in
-    peak = float(np.nanmax(np.abs(np.asarray(cube.reshape(-1)[::s], np.float32))))
+    # The brightest pixels are the star's and are in every frame, so striding is safe.  The
+    # stride still touches most of the cube's cache lines (every 22nd pixel of a NEAR night
+    # is a line in 1.4), so a caller that injects often passes the ``peak`` it computed once
+    # (:func:`cube_peak`, which the reducer keeps).
+    if peak is None:
+        peak = cube_peak(cube)
     if not np.isfinite(peak) or peak <= 0:
         return
     quantum = peak * float(np.finfo(np.float32).eps)      # ULP of the brightest pixels
@@ -566,8 +596,10 @@ def _azimuth(s: Source, angle: float, truenorth: float, angle_convention: str):
     return s.theta - angle
 
 
-def _add_shared(out, J, p: _Prepared, angles, truenorth, center, angle_convention) -> None:
-    """Add a source whose scaled stamp is the same in every frame to the frames ``J``."""
+def _place_shared(J, p: _Prepared, angles, truenorth, center, angle_convention, shape, sink) -> None:
+    """Place a source whose scaled stamp is the same in every frame on the frames ``J``:
+    ``sink(i, crop)`` receives the :func:`stamp_crop` of frame ``J[i]`` (a view into a
+    buffer the next frame reuses)."""
     s, m = p.src, p.model
     k = len(J)
     xs, ys = np.empty(k), np.empty(k)
@@ -584,16 +616,19 @@ def _add_shared(out, J, p: _Prepared, angles, truenorth, center, angle_conventio
     else:
         stamps = None
     buf = np.empty(p.base.shape)
-    for i, j in enumerate(J):
-        add_stamp(out[j], p.base if stamps is None else stamps[i], p.center, xs[i], ys[i], buf)
+    for i in range(k):
+        c = stamp_crop(shape, p.base if stamps is None else stamps[i], p.center, xs[i], ys[i], buf)
+        if c is not None:
+            sink(i, c)
 
 
-def _add_each(out, J, p: _Prepared, model, angles, truenorth, center, angle_convention) -> None:
-    """Add a source whose stamp or throughput changes frame to frame to the frames ``J``."""
+def _place_each(J, p: _Prepared, model, angles, truenorth, center, angle_convention, shape, sink) -> None:
+    """Place a source whose stamp or throughput changes frame to frame on the frames ``J``
+    (``sink`` as for :func:`_place_shared`)."""
     s, m = p.src, p.model
     sc = p.center
     buf = None
-    for j in J:
+    for i, j in enumerate(J):
         az = _azimuth(s, angles[j], truenorth, angle_convention)
         azr = np.deg2rad(az)
         xs, ys = center[0] + p.r_px * np.cos(azr), center[1] + p.r_px * np.sin(azr)
@@ -608,4 +643,35 @@ def _add_each(out, J, p: _Prepared, model, angles, truenorth, center, angle_conv
             stamp = rotate_ccw(stamp, az - m.refpa_deg, cval=0.0)
         if buf is None or buf.shape != stamp.shape:
             buf = np.empty(stamp.shape)
-        add_stamp(out[j], stamp, sc, xs, ys, buf)
+        c = stamp_crop(shape, stamp, sc, xs, ys, buf)
+        if c is not None:
+            sink(i, c)
+
+
+def place_source(J, p: _Prepared, model, angles, truenorth, center, angle_convention, shape, sink) -> None:
+    """One prepared source (:func:`prepare_sources`) on the frames ``J`` of a cube of frame
+    ``shape``: ``sink(i, crop)`` receives what frame ``J[i]`` gets (:func:`stamp_crop`), with
+    the numbers :func:`inject_frames` adds.  ``model`` is the injection model (the
+    throughput's), ``center`` the star's ``(x, y)``."""
+    if p.base is not None:
+        _place_shared(J, p, angles, truenorth, center, angle_convention, shape, sink)
+    else:
+        _place_each(J, p, model, angles, truenorth, center, angle_convention, shape, sink)
+
+
+def prepare_sources(sources: Sequence[Source], model: InjectionModel, fallback: Optional[InjectionModel],
+                    pxscale: float) -> list:
+    """What each source needs in every frame, worked out once (for :func:`place_source`)."""
+    return _prepare(sources, model, fallback, pxscale)
+
+
+def _add_shared(out, J, p: _Prepared, angles, truenorth, center, angle_convention) -> None:
+    """Add a source whose scaled stamp is the same in every frame to the frames ``J``."""
+    _place_shared(J, p, angles, truenorth, center, angle_convention, out.shape[1:],
+                  lambda i, c: add_crop(out[J[i]], c))
+
+
+def _add_each(out, J, p: _Prepared, model, angles, truenorth, center, angle_convention) -> None:
+    """Add a source whose stamp or throughput changes frame to frame to the frames ``J``."""
+    _place_each(J, p, model, angles, truenorth, center, angle_convention, out.shape[1:],
+                lambda i, c: add_crop(out[J[i]], c))
