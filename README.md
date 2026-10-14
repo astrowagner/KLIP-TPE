@@ -119,7 +119,7 @@ from any phase; `extend` adds evaluations to a finished one.
 |---|---|
 | a registered cube + angles (+ PSF, + reference cube), FITS or arrays — VIP, your pipeline | `klip_tpe.instruments.generic` / `klip-tpe generic` |
 | LBTI/NOMIC through **pyNOMIC** | `klip_tpe.instruments.nomic` / `klip-tpe near --instrument nomic` — **[docs/PYNOMIC.md](docs/PYNOMIC.md)** |
-| LBTI/**ALES** integral-field cubes, wavelength groups as partitions with on/off flags | `klip_tpe.instruments.ales` / `klip-tpe near --instrument ales` — **[docs/ALES.md](docs/ALES.md)** |
+| LBTI/**ALES** integral-field cubes, wavelength groups as partitions with on/off flags, a reference star as a searched library | `klip_tpe.instruments.ales` / `klip-tpe near --instrument ales` — **[docs/ALES.md](docs/ALES.md)** |
 | VLT/VISIR **NEAR** campaign tree | `klip_tpe.instruments.near` / `klip-tpe near` — `docs/RUNNING.md` |
 | **JWST** via spaceKLIP (database or `calints`) | `klip_tpe.backends.spaceklip` — tutorial 3, `docs/BACKENDS.md` |
 | any **pyKLIP** `Data` object (GPI, CHARIS, JWST, GenericData) | `klip_tpe.backends.pyklip.dataset_from_pyklip` |
@@ -195,7 +195,7 @@ lists all of them.
 * `docs/TUTORIALS.md` — the notebooks and what to read when.
 * `docs/BUDGET.md` — **how many evaluations a run needs**, measured: warm-up, search, validation.
 * `docs/PYNOMIC.md` — LBTI/NOMIC via pyNOMIC: loading, image groups as partitions, checks.
-* `docs/ALES.md` — LBTI/ALES integral-field cubes: wavelength groups as partitions, the group flags, the WISPIT 2 run.
+* `docs/ALES.md` — LBTI/ALES integral-field cubes: wavelength groups as partitions, the group flags, a reference star as a searched library (`nkeep_psfref` from plain ADI to the whole pool), the WISPIT 2 run.
 * `docs/RUNNING.md` — the NEAR production protocol from a terminal or Jupyter.
 * `docs/DISPLAY.md` — the live panel, cell by cell, and every product file.
 * `docs/BACKENDS.md` — pyKLIP / VIP / spaceKLIP: parameter mapping, conventions, ingestion.

@@ -19,7 +19,9 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--angle-sign ANGLE_SIGN] [--crop-half CROP_HALF]
                         [--center CENTER CENTER] [--wv-index WV_INDEX]
                         [--no-tags] [--forbidden-pa PA HALFWIDTH]
-                        [--ales-target NAME] [--ales-ref NAME]
+                        [--ales-target NAME] [--ales-ref NAME] [--ales-reflib]
+                        [--ales-ref-bin N]
+                        [--ales-reflib-science {all,searched}]
                         [--ales-groups N] [--ales-channels C0 C1]
                         [--ales-only gNN [gNN ...]] [--ales-max-excluded N]
                         [--ales-prefer-um UM] [--ales-representative gNN]
@@ -40,8 +42,8 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--weighting {equal,sqrt_texp}] [--fast]
                         [--no-library] [--no-clean-subtract] [--ladder-pair]
                         [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
-                        [--bin-min N] [--known RHO PA] [--metric {mawet,fmmf}]
-                        [--run-dir RUN_DIR]
+                        [--bin-min N] [--bin-max N] [--known RHO PA]
+                        [--metric {mawet,fmmf}] [--run-dir RUN_DIR]
                         [--ann-edges ANN_EDGES [ANN_EDGES ...]]
                         [--n-iter N_ITER [N_ITER ...]]
                         [--n-init N_INIT [N_INIT ...]]
@@ -115,6 +117,10 @@ options:
                         at N frames per bin. Cost, not correctness: on a long
                         sequence bin 1 costs tens of times more than bin 5
                         (default 1 = no floor)
+  --bin-max N           generic / ales: top of the searched temporal-bin
+                        range, frames per bin (default: ales 30, generic
+                        nframes / 8). A winner sitting on it
+                        (distance_to_bounds bin = 0) wants it higher
   --known RHO PA
   --metric {mawet,fmmf}
                         detection metric: 'mawet' (default) filters with the
@@ -269,6 +275,18 @@ LBTI/ALES (--instrument ales):
   --ales-ref NAME       reference star whose products sit beside the target's
                         (HIP91748): its group means become each group's RDI
                         library (default: none, RDI off)
+  --ales-reflib         search the reference star as a library: nkeep_psfref,
+                        the reference means most correlated with each target
+                        frame, searched from 0 (plain ADI, to the bit) to the
+                        whole pool, on top of the ADI references (needs
+                        --ales-ref)
+  --ales-ref-bin N      the reference star's frames in consecutive means of N
+                        before anything else (default 5: 248 HIP 91748 frames
+                        make 49 means; 1 = every frame)
+  --ales-reflib-science {all,searched}
+                        the science pool of the searched library: every frame
+                        the ADI rule admits (default) or a searched count too,
+                        nkeep_altroll, whose 0 is pure RDI
   --ales-groups N       wavelength groups over the usable channels, equally
                         spaced in ln(lambda) (default 20; 15 = one R = 40
                         resolution element each)
@@ -338,12 +356,13 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--angle-sign ANGLE_SIGN] [--crop-half CROP_HALF]
                      [--center CENTER CENTER] [--wv-index WV_INDEX]
                      [--no-tags] [--forbidden-pa PA HALFWIDTH]
-                     [--ales-target NAME] [--ales-ref NAME] [--ales-groups N]
-                     [--ales-channels C0 C1] [--ales-only gNN [gNN ...]]
-                     [--ales-max-excluded N] [--ales-prefer-um UM]
-                     [--ales-representative gNN] [--ales-angle-offset DEG]
-                     [--ales-tag-r-in PX] [--ales-cache DIR]
-                     [--ales-selection {binary,two_slot}]
+                     [--ales-target NAME] [--ales-ref NAME] [--ales-reflib]
+                     [--ales-ref-bin N] [--ales-reflib-science {all,searched}]
+                     [--ales-groups N] [--ales-channels C0 C1]
+                     [--ales-only gNN [gNN ...]] [--ales-max-excluded N]
+                     [--ales-prefer-um UM] [--ales-representative gNN]
+                     [--ales-angle-offset DEG] [--ales-tag-r-in PX]
+                     [--ales-cache DIR] [--ales-selection {binary,two_slot}]
                      [--nights NIGHTS [NIGHTS ...]]
                      [--backend {klip,pyklip,vip}] [--obj OBJ [OBJ ...]]
                      [--frames FRAMES] [--binned] [--pre-bin PRE_BIN]
@@ -357,8 +376,8 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--weighting {equal,sqrt_texp}] [--fast] [--no-library]
                      [--no-clean-subtract] [--ladder-pair]
                      [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
-                     [--bin-min N] [--known RHO PA] [--metric {mawet,fmmf}]
-                     [--run-dir RUN_DIR]
+                     [--bin-min N] [--bin-max N] [--known RHO PA]
+                     [--metric {mawet,fmmf}] [--run-dir RUN_DIR]
                      [--ann-edges ANN_EDGES [ANN_EDGES ...]]
                      [--n-iter N_ITER [N_ITER ...]]
                      [--n-init N_INIT [N_INIT ...]] [--mode {tpe,random,grid}]
@@ -429,6 +448,10 @@ options:
                         at N frames per bin. Cost, not correctness: on a long
                         sequence bin 1 costs tens of times more than bin 5
                         (default 1 = no floor)
+  --bin-max N           generic / ales: top of the searched temporal-bin
+                        range, frames per bin (default: ales 30, generic
+                        nframes / 8). A winner sitting on it
+                        (distance_to_bounds bin = 0) wants it higher
   --known RHO PA
   --metric {mawet,fmmf}
                         detection metric: 'mawet' (default) filters with the
@@ -583,6 +606,18 @@ LBTI/ALES (--instrument ales):
   --ales-ref NAME       reference star whose products sit beside the target's
                         (HIP91748): its group means become each group's RDI
                         library (default: none, RDI off)
+  --ales-reflib         search the reference star as a library: nkeep_psfref,
+                        the reference means most correlated with each target
+                        frame, searched from 0 (plain ADI, to the bit) to the
+                        whole pool, on top of the ADI references (needs
+                        --ales-ref)
+  --ales-ref-bin N      the reference star's frames in consecutive means of N
+                        before anything else (default 5: 248 HIP 91748 frames
+                        make 49 means; 1 = every frame)
+  --ales-reflib-science {all,searched}
+                        the science pool of the searched library: every frame
+                        the ADI rule admits (default) or a searched count too,
+                        nkeep_altroll, whose 0 is pure RDI
   --ales-groups N       wavelength groups over the usable channels, equally
                         spaced in ln(lambda) (default 20; 15 = one R = 40
                         resolution element each)
@@ -652,7 +687,9 @@ usage: klip-tpe resume [-h] [--instrument {near,nomic,generic,ales}]
                        [--angle-sign ANGLE_SIGN] [--crop-half CROP_HALF]
                        [--center CENTER CENTER] [--wv-index WV_INDEX]
                        [--no-tags] [--forbidden-pa PA HALFWIDTH]
-                       [--ales-target NAME] [--ales-ref NAME]
+                       [--ales-target NAME] [--ales-ref NAME] [--ales-reflib]
+                       [--ales-ref-bin N]
+                       [--ales-reflib-science {all,searched}]
                        [--ales-groups N] [--ales-channels C0 C1]
                        [--ales-only gNN [gNN ...]] [--ales-max-excluded N]
                        [--ales-prefer-um UM] [--ales-representative gNN]
@@ -671,10 +708,11 @@ usage: klip-tpe resume [-h] [--instrument {near,nomic,generic,ales}]
                        [--weighting {equal,sqrt_texp}] [--fast] [--no-library]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
-                       [--bin-min N] [--known RHO PA] [--metric {mawet,fmmf}]
-                       [--run-dir RUN_DIR] [--display] [--no-display]
-                       [--display-every DISPLAY_EVERY] [--pdf-every PDF_EVERY]
-                       [--movie-every MOVIE_EVERY] [--show [SHOW]] [--aliens]
+                       [--bin-min N] [--bin-max N] [--known RHO PA]
+                       [--metric {mawet,fmmf}] [--run-dir RUN_DIR] [--display]
+                       [--no-display] [--display-every DISPLAY_EVERY]
+                       [--pdf-every PDF_EVERY] [--movie-every MOVIE_EVERY]
+                       [--show [SHOW]] [--aliens]
                        [--window-scale WINDOW_SCALE]
 
 options:
@@ -721,6 +759,10 @@ options:
                         at N frames per bin. Cost, not correctness: on a long
                         sequence bin 1 costs tens of times more than bin 5
                         (default 1 = no floor)
+  --bin-max N           generic / ales: top of the searched temporal-bin
+                        range, frames per bin (default: ales 30, generic
+                        nframes / 8). A winner sitting on it
+                        (distance_to_bounds bin = 0) wants it higher
   --known RHO PA
   --metric {mawet,fmmf}
                         detection metric: 'mawet' (default) filters with the
@@ -778,6 +820,18 @@ LBTI/ALES (--instrument ales):
   --ales-ref NAME       reference star whose products sit beside the target's
                         (HIP91748): its group means become each group's RDI
                         library (default: none, RDI off)
+  --ales-reflib         search the reference star as a library: nkeep_psfref,
+                        the reference means most correlated with each target
+                        frame, searched from 0 (plain ADI, to the bit) to the
+                        whole pool, on top of the ADI references (needs
+                        --ales-ref)
+  --ales-ref-bin N      the reference star's frames in consecutive means of N
+                        before anything else (default 5: 248 HIP 91748 frames
+                        make 49 means; 1 = every frame)
+  --ales-reflib-science {all,searched}
+                        the science pool of the searched library: every frame
+                        the ADI rule admits (default) or a searched count too,
+                        nkeep_altroll, whose 0 is pure RDI
   --ales-groups N       wavelength groups over the usable channels, equally
                         spaced in ln(lambda) (default 20; 15 = one R = 40
                         resolution element each)
@@ -847,7 +901,9 @@ usage: klip-tpe extend [-h] [--instrument {near,nomic,generic,ales}]
                        [--angle-sign ANGLE_SIGN] [--crop-half CROP_HALF]
                        [--center CENTER CENTER] [--wv-index WV_INDEX]
                        [--no-tags] [--forbidden-pa PA HALFWIDTH]
-                       [--ales-target NAME] [--ales-ref NAME]
+                       [--ales-target NAME] [--ales-ref NAME] [--ales-reflib]
+                       [--ales-ref-bin N]
+                       [--ales-reflib-science {all,searched}]
                        [--ales-groups N] [--ales-channels C0 C1]
                        [--ales-only gNN [gNN ...]] [--ales-max-excluded N]
                        [--ales-prefer-um UM] [--ales-representative gNN]
@@ -866,8 +922,9 @@ usage: klip-tpe extend [-h] [--instrument {near,nomic,generic,ales}]
                        [--weighting {equal,sqrt_texp}] [--fast] [--no-library]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
-                       [--bin-min N] [--known RHO PA] [--metric {mawet,fmmf}]
-                       --run-dir RUN_DIR --n-iter N_ITER [N_ITER ...]
+                       [--bin-min N] [--bin-max N] [--known RHO PA]
+                       [--metric {mawet,fmmf}] --run-dir RUN_DIR --n-iter
+                       N_ITER [N_ITER ...]
 
 options:
   -h, --help            show this help message and exit
@@ -913,6 +970,10 @@ options:
                         at N frames per bin. Cost, not correctness: on a long
                         sequence bin 1 costs tens of times more than bin 5
                         (default 1 = no floor)
+  --bin-max N           generic / ales: top of the searched temporal-bin
+                        range, frames per bin (default: ales 30, generic
+                        nframes / 8). A winner sitting on it
+                        (distance_to_bounds bin = 0) wants it higher
   --known RHO PA
   --metric {mawet,fmmf}
                         detection metric: 'mawet' (default) filters with the
@@ -963,6 +1024,18 @@ LBTI/ALES (--instrument ales):
   --ales-ref NAME       reference star whose products sit beside the target's
                         (HIP91748): its group means become each group's RDI
                         library (default: none, RDI off)
+  --ales-reflib         search the reference star as a library: nkeep_psfref,
+                        the reference means most correlated with each target
+                        frame, searched from 0 (plain ADI, to the bit) to the
+                        whole pool, on top of the ADI references (needs
+                        --ales-ref)
+  --ales-ref-bin N      the reference star's frames in consecutive means of N
+                        before anything else (default 5: 248 HIP 91748 frames
+                        make 49 means; 1 = every frame)
+  --ales-reflib-science {all,searched}
+                        the science pool of the searched library: every frame
+                        the ADI rule admits (default) or a searched count too,
+                        nkeep_altroll, whose 0 is pure RDI
   --ales-groups N       wavelength groups over the usable channels, equally
                         spaced in ln(lambda) (default 20; 15 = one R = 40
                         resolution element each)
@@ -1062,7 +1135,9 @@ usage: klip-tpe replay [-h] [--instrument {near,nomic,generic,ales}]
                        [--angle-sign ANGLE_SIGN] [--crop-half CROP_HALF]
                        [--center CENTER CENTER] [--wv-index WV_INDEX]
                        [--no-tags] [--forbidden-pa PA HALFWIDTH]
-                       [--ales-target NAME] [--ales-ref NAME]
+                       [--ales-target NAME] [--ales-ref NAME] [--ales-reflib]
+                       [--ales-ref-bin N]
+                       [--ales-reflib-science {all,searched}]
                        [--ales-groups N] [--ales-channels C0 C1]
                        [--ales-only gNN [gNN ...]] [--ales-max-excluded N]
                        [--ales-prefer-um UM] [--ales-representative gNN]
@@ -1081,9 +1156,10 @@ usage: klip-tpe replay [-h] [--instrument {near,nomic,generic,ales}]
                        [--weighting {equal,sqrt_texp}] [--fast] [--no-library]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
-                       [--bin-min N] [--known RHO PA] [--metric {mawet,fmmf}]
-                       --idl-log IDL_LOG [--run-dir RUN_DIR] [--n N]
-                       [--repeat REPEAT] [--contrast CONTRAST]
+                       [--bin-min N] [--bin-max N] [--known RHO PA]
+                       [--metric {mawet,fmmf}] --idl-log IDL_LOG
+                       [--run-dir RUN_DIR] [--n N] [--repeat REPEAT]
+                       [--contrast CONTRAST]
                        [--ann-edges ANN_EDGES [ANN_EDGES ...]] [--k-max K_MAX]
                        [--anglemax-hi ANGLEMAX_HI] [--seed SEED]
 
@@ -1131,6 +1207,10 @@ options:
                         at N frames per bin. Cost, not correctness: on a long
                         sequence bin 1 costs tens of times more than bin 5
                         (default 1 = no floor)
+  --bin-max N           generic / ales: top of the searched temporal-bin
+                        range, frames per bin (default: ales 30, generic
+                        nframes / 8). A winner sitting on it
+                        (distance_to_bounds bin = 0) wants it higher
   --known RHO PA
   --metric {mawet,fmmf}
                         detection metric: 'mawet' (default) filters with the
@@ -1187,6 +1267,18 @@ LBTI/ALES (--instrument ales):
   --ales-ref NAME       reference star whose products sit beside the target's
                         (HIP91748): its group means become each group's RDI
                         library (default: none, RDI off)
+  --ales-reflib         search the reference star as a library: nkeep_psfref,
+                        the reference means most correlated with each target
+                        frame, searched from 0 (plain ADI, to the bit) to the
+                        whole pool, on top of the ADI references (needs
+                        --ales-ref)
+  --ales-ref-bin N      the reference star's frames in consecutive means of N
+                        before anything else (default 5: 248 HIP 91748 frames
+                        make 49 means; 1 = every frame)
+  --ales-reflib-science {all,searched}
+                        the science pool of the searched library: every frame
+                        the ADI rule admits (default) or a searched count too,
+                        nkeep_altroll, whose 0 is pure RDI
   --ales-groups N       wavelength groups over the usable channels, equally
                         spaced in ln(lambda) (default 20; 15 = one R = 40
                         resolution element each)
@@ -1256,7 +1348,9 @@ usage: klip-tpe compare [-h] [--instrument {near,nomic,generic,ales}]
                         [--angle-sign ANGLE_SIGN] [--crop-half CROP_HALF]
                         [--center CENTER CENTER] [--wv-index WV_INDEX]
                         [--no-tags] [--forbidden-pa PA HALFWIDTH]
-                        [--ales-target NAME] [--ales-ref NAME]
+                        [--ales-target NAME] [--ales-ref NAME] [--ales-reflib]
+                        [--ales-ref-bin N]
+                        [--ales-reflib-science {all,searched}]
                         [--ales-groups N] [--ales-channels C0 C1]
                         [--ales-only gNN [gNN ...]] [--ales-max-excluded N]
                         [--ales-prefer-um UM] [--ales-representative gNN]
@@ -1277,8 +1371,9 @@ usage: klip-tpe compare [-h] [--instrument {near,nomic,generic,ales}]
                         [--weighting {equal,sqrt_texp}] [--fast]
                         [--no-library] [--no-clean-subtract] [--ladder-pair]
                         [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
-                        [--bin-min N] [--known RHO PA] [--metric {mawet,fmmf}]
-                        --idl-run IDL_RUN --out OUT [--annulus ANNULUS]
+                        [--bin-min N] [--bin-max N] [--known RHO PA]
+                        [--metric {mawet,fmmf}] --idl-run IDL_RUN --out OUT
+                        [--annulus ANNULUS]
                         [--ann-edges ANN_EDGES [ANN_EDGES ...]]
                         [--contrast CONTRAST] [--contrast-from-idl]
                         [--max-new MAX_NEW] [--stride STRIDE]
@@ -1332,6 +1427,10 @@ options:
                         at N frames per bin. Cost, not correctness: on a long
                         sequence bin 1 costs tens of times more than bin 5
                         (default 1 = no floor)
+  --bin-max N           generic / ales: top of the searched temporal-bin
+                        range, frames per bin (default: ales 30, generic
+                        nframes / 8). A winner sitting on it
+                        (distance_to_bounds bin = 0) wants it higher
   --known RHO PA
   --metric {mawet,fmmf}
                         detection metric: 'mawet' (default) filters with the
@@ -1399,6 +1498,18 @@ LBTI/ALES (--instrument ales):
   --ales-ref NAME       reference star whose products sit beside the target's
                         (HIP91748): its group means become each group's RDI
                         library (default: none, RDI off)
+  --ales-reflib         search the reference star as a library: nkeep_psfref,
+                        the reference means most correlated with each target
+                        frame, searched from 0 (plain ADI, to the bit) to the
+                        whole pool, on top of the ADI references (needs
+                        --ales-ref)
+  --ales-ref-bin N      the reference star's frames in consecutive means of N
+                        before anything else (default 5: 248 HIP 91748 frames
+                        make 49 means; 1 = every frame)
+  --ales-reflib-science {all,searched}
+                        the science pool of the searched library: every frame
+                        the ADI rule admits (default) or a searched count too,
+                        nkeep_altroll, whose 0 is pure RDI
   --ales-groups N       wavelength groups over the usable channels, equally
                         spaced in ln(lambda) (default 20; 15 = one R = 40
                         resolution element each)

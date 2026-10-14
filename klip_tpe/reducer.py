@@ -373,7 +373,9 @@ class KLIPReducer(Reducer):
                              shift_px: int = 1, n_min_ref: int = 2,
                              min_keep: Optional[Dict[str, int]] = None,
                              ref_group: str = "psfref",
-                             similarity: Optional[np.ndarray] = None) -> None:
+                             similarity: Optional[np.ndarray] = None,
+                             rotation: bool = False,
+                             searched: Optional[Sequence[str]] = None) -> None:
         """Make the reference library a searched object rather than a fixed basis.
 
         ``partition`` is one label per *unbinned* science frame -- the roll, night or
@@ -381,6 +383,18 @@ class KLIPReducer(Reducer):
         this is what stops a roll subtracting its own companion.  ``groups`` optionally
         splits ``data.ref_cube`` into several named external pools (name -> row indices);
         the default makes it one pool called ``psfref``.
+
+        ``rotation`` makes the science pool one the ADI rule selects from, per target and
+        per annulus (``angsep``, ``anglemax`` over the binned angles, the label on top when
+        there is more than one): the form for one continuously rotating sequence, which has
+        no label to exclude by.  With every eligible science frame kept and
+        ``nkeep_<ref_group> = 0`` the reduction is plain ADI to the bit, so "no reference
+        frames" is a point of the search space.
+
+        ``searched`` names the pools whose counts become search dimensions (default: every
+        pool).  A pool left out is not a dimension at all: every one of its eligible frames
+        is in the basis, as it is without a library.  ``searched=("psfref",)`` with
+        ``rotation`` is ADI plus a searched number of reference-star frames, the ALES form.
 
         The similarity matrix depends on the binned cube, the high-pass width and the
         annulus, all of which the search can move, so it is built lazily and cached per
@@ -405,18 +419,28 @@ class KLIPReducer(Reducer):
                 f"so nkeep_* would be searched and change nothing.  Use the built-in engine "
                 f"(backend 'klip') for a searched library, or search this backend's own "
                 f"selection instead (pyKLIP: its ADI / RDI / ADI+RDI mode).")
+        pools = ["altroll"] + list((groups or {ref_group: None}).keys())
+        if searched is not None:
+            searched = tuple(str(s) for s in searched)
+            bad = [s for s in searched if s not in pools]
+            if bad:
+                raise ValueError(f"searched pools {bad} are not among {pools}")
         self._reflib_spec = {"partition": np.asarray(list(partition)), "groups": groups,
                              "metric": metric, "shift_px": int(shift_px),
                              "n_min_ref": int(n_min_ref), "min_keep": dict(min_keep or {}),
-                             "ref_group": ref_group,
+                             "ref_group": ref_group, "rotation": bool(rotation), "searched": searched,
                              "similarity": None if similarity is None else np.asarray(similarity, float)}
         self._reflib_cache.clear()
 
     def reference_params(self):
-        """The searched counts this reducer's library contributes to the space."""
+        """The searched counts this reducer's library contributes to the space (the
+        ``searched`` pools of :meth:`set_reference_library`; a pool left out keeps every
+        eligible frame and is no dimension)."""
         if self._reflib_spec is None or not self.supports_reference_library:
             return []
-        return self._reflib_stub().params()
+        searched = self._reflib_spec.get("searched")
+        return [p for p in self._reflib_stub().params()
+                if searched is None or p.name[len("nkeep_"):] in searched]
 
     def _reflib_stub(self):
         """A library over the UNBINNED geometry, for building the search space before any
@@ -428,7 +452,8 @@ class KLIPReducer(Reducer):
         ref = self.data.ref_cube
         n_ref = 0 if ref is None else int(np.asarray(ref).shape[0])
         groups = [ReferenceGroup("altroll", np.arange(n_sci), partition=spec["partition"],
-                                 min_keep=spec["min_keep"].get("altroll", 0))]
+                                 min_keep=spec["min_keep"].get("altroll", 0),
+                                 rotation=bool(spec.get("rotation", False)))]
         for name, rows in (spec["groups"] or {spec["ref_group"]: np.arange(n_ref)}).items():
             rows = np.asarray(rows, int)
             if rows.size:
@@ -436,10 +461,13 @@ class KLIPReducer(Reducer):
                                              min_keep=spec["min_keep"].get(name, 0)))
         return ReferenceLibrary(groups, np.zeros((n_sci + n_ref, n_sci)),
                                 target_partition=spec["partition"], metric=spec["metric"],
-                                n_min_ref=spec["n_min_ref"])
+                                n_min_ref=spec["n_min_ref"],
+                                angles=np.asarray(self.data.angles, float) if spec.get("rotation") else None)
 
-    def _reflib(self, bcube, ref, bkeep_partition, filt, inrad, outrad, key_extra=(), sim_cube=None):
-        """The library for this evaluation: ``(selection, basis)``.
+    def _reflib(self, bcube, ref, bkeep_partition, filt, inrad, outrad, key_extra=(), sim_cube=None,
+                bang=None):
+        """The library for this evaluation: ``(selection, basis)``.  ``bang``: the binned
+        angles, which a ``rotation`` science pool selects by (they follow from the key).
 
         The SELECTION -- the groups and the similarity matrix that ranks each target's
         references -- is built once per distinct (binning, frame selection, filter, annulus)
@@ -467,13 +495,16 @@ class KLIPReducer(Reducer):
         lib = self._reflib_cache.get(key)
         if lib is not None:
             return lib, library
+        rot = bool(spec.get("rotation", False))
         groups = [ReferenceGroup("altroll", np.arange(n_sci), partition=bkeep_partition,
-                                 min_keep=spec["min_keep"].get("altroll", 0))]
+                                 min_keep=spec["min_keep"].get("altroll", 0), rotation=rot)]
         for name, rows in (spec["groups"] or {spec["ref_group"]: np.arange(n_ref)}).items():
             rows = np.asarray(rows, int)
             if rows.size:
                 groups.append(ReferenceGroup(name, n_sci + rows,
                                              min_keep=spec["min_keep"].get(name, 0)))
+        if rot and (bang is None or np.asarray(bang).size != n_sci):
+            raise ValueError("a rotation library needs one binned angle per science frame")
         if spec.get("similarity") is not None:
             sim = spec["similarity"]
             if sim.shape != (library.shape[0], n_sci):
@@ -487,7 +518,8 @@ class KLIPReducer(Reducer):
                                     inrad=inrad, outrad=outrad, filt=0.0,
                                     metric=spec["metric"], shift_px=spec["shift_px"])
         lib = ReferenceLibrary(groups, sim, target_partition=bkeep_partition,
-                               metric=spec["metric"], n_min_ref=spec["n_min_ref"])
+                               metric=spec["metric"], n_min_ref=spec["n_min_ref"],
+                               angles=np.asarray(bang, float) if rot else None)
         self._reflib_cache[key] = lib
         return lib, library
 
@@ -642,7 +674,7 @@ class KLIPReducer(Reducer):
                     if k0 not in self._reflib_cache:
                         sim_cube = prep(ds.cube)[0]
                 ref_lib, ref_basis = self._reflib(bcube, ref, bpart, filt, inrad, outrad, key_extra=kx,
-                                                  sim_cube=sim_cube)
+                                                  sim_cube=sim_cube, bang=bang)
                 ref_keep = ref_lib.keep_from_config(p)
                 if mcube is not None:
                     fm_ref = np.concatenate(
@@ -736,6 +768,18 @@ class KLIPReducer(Reducer):
                  # which frames these are, when the loader said (load_calints does): the run's
                  # record of its input, beside the record of what it did with it
                  frames=(getattr(self.data, "meta", None) or {}).get("provenance"))
+        spec = getattr(self, "_reflib_spec", None)
+        if spec is not None:
+            n_ref = 0 if self.data.ref_cube is None else int(np.asarray(self.data.ref_cube).shape[0])
+            searched = spec.get("searched")
+            d["reference_library"] = {
+                "metric": spec["metric"], "shift_px": spec["shift_px"], "n_min_ref": spec["n_min_ref"],
+                "ref_group": spec["ref_group"], "n_ref_frames": n_ref, "rotation": bool(spec.get("rotation", False)),
+                "n_labels": int(np.unique(np.asarray(spec["partition"])).size),
+                "pools": [g.param_name + (f" {g.min_keep}-{g.max_keep} searched"
+                                          if searched is None or g.name in searched
+                                          else " all eligible frames (not searched)")
+                          for g in self._reflib_stub().groups]}
         return d
 
 

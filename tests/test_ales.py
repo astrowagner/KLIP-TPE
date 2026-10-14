@@ -15,7 +15,11 @@ From the ALES reduction's handoff of 2026-10-13 (WISPIT 2, 535 frames x 99 chann
   decode to all on;
 * the metric does not de-spike a critically sampled source's peak;
 * ``--instrument ales`` reaches the loader through the command line, and a tiny run on a
-  synthetic IFS cube goes end to end with the flags recorded.
+  synthetic IFS cube goes end to end with the flags recorded;
+* a reference star as a searched library (the ALES reduction's note of 2026-10-14): its
+  frames in fixed means, cached unbinned; ``nkeep_psfref`` the one count in the space, from
+  0 to the pool, seeded at 0; at 0 every group is plain ADI to the bit, above 0 the
+  reference means are in; the guard chain, the command line and the setup file's record.
 """
 from __future__ import annotations
 
@@ -282,7 +286,133 @@ def test_the_command_line_reaches_the_loader(tmp_path, monkeypatch):
     assert steps[:2] == ["group_count_guard", "min_bin_guard"] and guard.describe()["steps"][0]["max_excluded"] == 2
     space = cli.build_near_space(red, a)
     assert space.selection == "binary" and len(space.selection_dims) == 4
+    assert (space.params[0].name, space.params[0].hi) == ("bin", 30.0), "the ALES bin range tops at 30 by default"
+    a.bin_max = 60
+    assert cli.build_near_space(red, a).params[0].hi == 60.0
+    assert "bin_max" in cli._explicit_dests(["near", "--instrument", "ales", "--root", d, "--bin-max", "60"])
     assert cli._default_run_dir(a).startswith("runs" + os.sep)
+
+
+def _same(a, b):
+    np.testing.assert_array_equal(np.nan_to_num(a, nan=-7.0), np.nan_to_num(b, nan=-7.0))
+
+
+def test_the_reference_star_as_a_searched_library(tmp_path):
+    d, waves, pa, cube, tpl = _ifs(tmp_path, planet=(10.0, 240.0, 3e-3))
+    cache = str(tmp_path / "cache")
+    # the reference frames in threes: 10 frames make 3 means, one frame unused; the cache
+    # keeps the group means unbinned, so another ref_bin reads them back
+    ds, lam, fw, table = ales.load_ales(d, "SYN", ref="REF", c0=1, c1=10, ngrp=4, ref_bin=3, cache=cache, log=QUIET)
+    assert ds["g01"].ref_cube.shape == (3, N, N)
+    pv = ds["g01"].meta["provenance"]
+    assert (pv["ref_frames"], pv["ref_bin"], pv["n_ref"]) == (10, 3, 3) and pv["ref_source"].endswith("REF_cube_cen_clean.fits")
+    raw = np.load(os.path.join(cache, "REF_c1-10_n4_g01.npy"))
+    assert raw.shape == (10, N, N)
+    np.testing.assert_allclose(ds["g01"].ref_cube[1], np.nanmean(raw[3:6].astype(np.float64), axis=0), rtol=1e-6, atol=1e-3)
+    ds1, *_ = ales.load_ales(d, "SYN", ref="REF", c0=1, c1=10, ngrp=4, ref_bin=1, cache=cache, log=QUIET)
+    assert ds1["g01"].ref_cube.shape == (10, N, N) and ds1["g01"].meta["provenance"]["ref_bin"] == 1
+    with pytest.raises(ValueError, match="no mean"):
+        ales.reference_means(raw, 11)
+    # without a reference star there is no library to search
+    ds0, *_ = ales.load_ales(d, "SYN", c0=1, c1=10, ngrp=4, log=QUIET)
+    with pytest.raises(ValueError, match="reference star"):
+        ales.make_reducer(ds0, lam, fw, max_workers=1, reflib=True, log=QUIET)
+    with pytest.raises(ValueError, match="reflib_science"):
+        ales.make_reducer(ds, lam, fw, max_workers=1, reflib=True, reflib_science="some", log=QUIET)
+    plain = ales.make_reducer(ds0, lam, fw, max_workers=1, table=table, log=QUIET)
+    lib = ales.make_reducer(ds, lam, fw, max_workers=1, table=table, reflib=True, log=QUIET)
+    rec = lib.provenance["reference_library"]
+    assert rec["n_ref"] == 3 and rec["ref_bin"] == 3 and rec["ref_frames"] == 10 and rec["rotation"] is True
+    assert rec["nkeep_psfref"].startswith("searched 0-3") and rec["science_pool"].startswith("every frame")
+    assert all(r.describe()["reference_library"]["rotation"] for r in lib.reducers.values())
+    assert lib.reducers["g00"].describe()["reference_library"]["pools"] == [
+        "nkeep_altroll all eligible frames (not searched)", "nkeep_psfref 0-3 searched"]
+    # the space: the shared block, the flags, then the one count, seeded at the ADI point
+    defaults = {"bin": 2, "k_klip": 3, "filter": 9, "angsep": 0.5, "anglemax": 30}
+    s0 = ales.make_space(plain, defaults=defaults)
+    s1 = ales.make_space(lib, defaults=defaults)
+    assert s1.names == s0.names + ["nkeep_psfref"] and "nkeep_altroll" not in s1.names
+    nk = s1.params[-1]
+    assert (nk.lo, nk.hi, nk.default) == (0.0, 3.0, 0.0)
+    assert ales.make_space(lib, defaults=dict(defaults, nkeep_psfref=2)).params[-1].default == 2.0
+    # the science pool whole: no library guard, the census guard governs; searched: the library guard last
+    steps = [s["name"] for s in ales.make_guard(lib, n_min_ref=2, ref_frac=0.5).describe()["steps"]]
+    assert "reference_library_guard" not in steps and steps[-1] == "reference_count_guard"
+    both = ales.make_reducer(ds, lam, fw, max_workers=1, reflib=True, reflib_science="searched", log=QUIET)
+    assert ales.make_space(both, defaults=defaults).names[-2:] == ["nkeep_altroll", "nkeep_psfref"]
+    assert [s["name"] for s in ales.make_guard(both, n_min_ref=2, ref_frac=0.5).describe()["steps"]][-1] == "reference_library_guard"
+    assert both.provenance["reference_library"]["science_pool"].startswith("searched")
+    # nkeep_psfref = 0 is plain ADI to the bit in every group, the planet included; above 0 it is not
+    zone = (7.0, 13.0)
+    c0 = _zone(s0.decode(s0.default_vector()), zone)
+    c1 = _zone(s1.decode(s1.default_vector()), zone)
+    assert c1.params["nkeep_psfref"] == 0
+    e0, e1 = plain.reduce_config(c0), lib.reduce_config(c1)
+    _same(e1.image, e0.image)
+    for g, m in e1.meta.items():
+        assert m["library_as_adi"] is True and m["rdi_mode"] == "searched"
+        assert m["ref_keep"] == {"altroll": m["n_binned"] - 1, "psfref": 0}
+        _same(e1.stack[list(e1.meta).index(g)], e0.stack[list(e0.meta).index(g)])
+    c3 = _zone(s1.decode(s1.default_vector({"nkeep_psfref": 3})), zone)
+    e3 = lib.reduce_config(c3)
+    assert not np.array_equal(np.nan_to_num(e3.image), np.nan_to_num(e0.image))
+    assert all(m["library_as_adi"] is False and m["ref_keep"]["psfref"] == 3 for m in e3.meta.values())
+    assert all(int(m["nref_used"].min()) >= 3 for m in e3.meta.values())
+    # the frames the ADI rule admits are the same frames with or without the library
+    for g, m in e3.meta.items():
+        np.testing.assert_array_equal(m["nref"], e0.meta[g]["nref"] + 3)
+    # the planet survives both
+    cx, cy = star_center(e0.image.shape)
+    x0, y0 = source_xy(10.0 * 0.0345, 240.0, 0.0345, cx, cy)
+    for im in (e0.image, e3.image):
+        yy, xx = np.mgrid[0:N, 0:N]
+        ann = (np.hypot(xx - cx, yy - cy) >= 7) & (np.hypot(xx - cx, yy - cy) <= 13) & np.isfinite(im)
+        iy, ix = np.unravel_index(np.argmax(np.where(ann, im, -np.inf)), im.shape)
+        assert abs(ix - x0[0]) <= 1 and abs(iy - y0[0]) <= 1
+    # the command line: --ales-reflib needs --ales-ref, then the options reach the loader and the reducer
+    a = _args("--ales-target", "SYN", "--ales-groups", "4", "--ales-channels", "1", "10", "--workers", "1",
+              "--ales-reflib", "--ales-ref-bin", "3")
+    a.root = [d]
+    with pytest.raises(SystemExit, match="--ales-ref"):
+        cli._near_objects(a, log=QUIET)
+    a = _args("--ales-target", "SYN", "--ales-ref", "REF", "--ales-groups", "4", "--ales-channels", "1", "10",
+              "--workers", "1", "--ales-reflib", "--ales-ref-bin", "3", "--ales-cache", cache)
+    assert a.ales_reflib and a.ales_ref_bin == 3 and a.ales_reflib_science == "all"
+    a.root = [d]
+    red, obj, samp, guard, thr = cli._near_objects(a, log=QUIET)
+    assert red.provenance["reference_library"]["n_ref"] == 3
+    space = cli.build_near_space(red, a)
+    assert space.names[-1] == "nkeep_psfref" and space.params[-1].hi == 3.0
+    assert "reference_library_guard" not in [s["name"] for s in guard.describe()["steps"]]
+    assert {"ales_reflib", "ales_ref_bin", "ales_reflib_science"} <= cli._explicit_dests(
+        ["near", "--instrument", "ales", "--root", d, "--ales-reflib", "--ales-ref-bin", "3",
+         "--ales-reflib-science", "all"])
+
+
+@pytest.mark.slow
+def test_a_tiny_search_with_the_reference_library(tmp_path):
+    d, waves, pa, cube, tpl = _ifs(tmp_path)
+    ds, lam, fw, table = ales.load_ales(d, "SYN", ref="REF", c0=1, c1=10, ngrp=4, ref_bin=2, log=QUIET)
+    red = ales.make_reducer(ds, lam, fw, max_workers=1, table=table, reflib=True, log=QUIET)
+    space = ales.make_space(red, defaults={"bin": 2, "k_klip": 3, "filter": 9}, k_klip_max=6)
+    space.project = ales.make_guard(red, max_excluded=1, n_min_ref=3, ref_frac=0.5, k_max=6)
+    obj, samp = ales.default_config(red)
+    cfg = RunConfig(ann_edges=[7, 13], n_iter=6, n_init=3, seed=3, fm_curve=False, param_verify=False,
+                    validation=ValidationConfig(n_top=1, n_valid=1), calibration=CalibrationConfig(forced=[3e-3]))
+    r = Runner(red, space, obj, samp, cfg, str(tmp_path / "run"), log=QUIET)
+    res = r.run()
+    assert len(res) == 1 and res[0].validated
+    setup = json.load(open(tmp_path / "run" / "run_setup.json"))
+    rec = setup["reducer"]["provenance"]["reference_library"]
+    assert rec["n_ref"] == 5 and rec["ref_bin"] == 2 and rec["ref_frames"] == 10
+    assert setup["reducer"]["partitions"]["g01"]["reference_library"]["rotation"] is True
+    assert setup["reducer"]["partitions"]["g01"]["frames"]["n_ref"] == 5
+    names = [p["name"] for p in setup["space"]["params"]]
+    assert names[-1] == "nkeep_psfref" and "nkeep_altroll" not in names
+    recs = [json.loads(l) for l in open(tmp_path / "run" / "results.jsonl")]
+    i = names.index("nkeep_psfref")
+    assert recs[0]["x"][i] == 0.0, "the seed is the ADI point"
+    assert len({rec["x"][i] for rec in recs}) > 1, "the count was searched"
 
 
 @pytest.mark.slow

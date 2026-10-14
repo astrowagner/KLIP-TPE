@@ -165,16 +165,22 @@ def _ales_objects(a, log=print):
     a.workers = resolve_workers(a.workers)
     c0, c1 = (int(a.ales_channels[0]), int(a.ales_channels[1])) if a.ales_channels else (ales.ALES.c0, ales.ALES.c1)
     px = a.pxscale if a.pxscale is not None else ales.ALES.pxscale
+    reflib = bool(getattr(a, "ales_reflib", False))
+    if reflib and not a.ales_ref:
+        raise SystemExit("--ales-reflib needs the reference star: --ales-ref NAME (HIP91748)")
     datasets, lam_m, fwhm_px, table = ales.load_ales(
         root, a.ales_target, ref=a.ales_ref, c0=c0, c1=c1, ngrp=a.ales_groups, only=a.ales_only,
         pxscale=px, diam_m=a.diam, angle_offset=a.ales_angle_offset, angle_sign=a.angle_sign,
-        tags=None if a.no_tags else "auto", tag_r_in=a.ales_tag_r_in, cache=a.ales_cache, log=log)
+        tags=None if a.no_tags else "auto", tag_r_in=a.ales_tag_r_in, cache=a.ales_cache,
+        ref_bin=int(getattr(a, "ales_ref_bin", 5) or 1), log=log)
     if a.fwhm_px:
         fwhm_px = {k: float(a.fwhm_px) for k in fwhm_px}
     red = ales.make_reducer(datasets, lam_m, fwhm_px, pxscale=px, diam_m=a.diam,
                             ee_radius_px=a.r_ee if a.r_ee else 3.0, representative=a.ales_representative,
                             weighting=a.weighting, max_workers=a.workers, pool=a.pool, fast=a.fast,
-                            n_min_ref=a.n_min_ref, backend=getattr(a, "backend", "klip"), table=table, log=log)
+                            n_min_ref=a.n_min_ref, backend=getattr(a, "backend", "klip"), table=table,
+                            reflib=reflib, reflib_science=getattr(a, "ales_reflib_science", "all") or "all",
+                            log=log)
     _set_threads_per_job(red, a)
     objective, sampler = ales.default_config(red, clean_subtract=not a.no_clean_subtract,
                                              known=[tuple(k) for k in (a.known or [])],
@@ -227,6 +233,16 @@ def _add_near_args(p):
     ga.add_argument("--ales-ref", default=None, metavar="NAME",
                     help="reference star whose products sit beside the target's (HIP91748): its group means "
                          "become each group's RDI library (default: none, RDI off)")
+    ga.add_argument("--ales-reflib", action="store_true",
+                    help="search the reference star as a library: nkeep_psfref, the reference means most "
+                         "correlated with each target frame, searched from 0 (plain ADI, to the bit) to the "
+                         "whole pool, on top of the ADI references (needs --ales-ref)")
+    ga.add_argument("--ales-ref-bin", type=int, default=5, metavar="N",
+                    help="the reference star's frames in consecutive means of N before anything else "
+                         "(default 5: 248 HIP 91748 frames make 49 means; 1 = every frame)")
+    ga.add_argument("--ales-reflib-science", default="all", choices=["all", "searched"],
+                    help="the science pool of the searched library: every frame the ADI rule admits "
+                         "(default) or a searched count too, nkeep_altroll, whose 0 is pure RDI")
     ga.add_argument("--ales-groups", type=int, default=20, metavar="N",
                     help="wavelength groups over the usable channels, equally spaced in ln(lambda) (default 20; "
                          "15 = one R = 40 resolution element each)")
@@ -291,6 +307,9 @@ def _add_near_args(p):
                    help="generic / ales: floor of the temporal bin, as a projection (MinBinGuard): a draw below "
                         "it is evaluated at N frames per bin. Cost, not correctness: on a long sequence bin 1 "
                         "costs tens of times more than bin 5 (default 1 = no floor)")
+    p.add_argument("--bin-max", type=int, default=None, metavar="N",
+                   help="generic / ales: top of the searched temporal-bin range, frames per bin (default: ales 30, "
+                        "generic nframes / 8). A winner sitting on it (distance_to_bounds bin = 0) wants it higher")
     p.add_argument("--known", type=float, nargs=2, action="append", metavar=("RHO", "PA"))
     p.add_argument("--metric", default="mawet", choices=["mawet", "fmmf"],
                    help="detection metric: 'mawet' (default) filters with the injection PSF; "
@@ -416,17 +435,19 @@ def build_near_space(red, a):
     if getattr(a, "instrument", "near") == "generic":
         from .instruments import generic
         has_tags = all(r.frame_tags() for r in red.reducers.values())
+        bmax = getattr(a, "bin_max", None)
         return generic.make_space(red, per_night=not a.global_block, k_klip_max=a.k_max,
                                   opt_framesel=has_tags and not a.no_framesel, search_angles=not a.fast,
                                   selection=None if a.no_selection else "two_slot", max_drop=getattr(a, "max_drop", 2),
                                   width_range=tuple(a.width_range) if a.opt_width else None,
-                                  search_k=a.k_mode not in ("scan", "scan_rescore"))
+                                  search_k=a.k_mode not in ("scan", "scan_rescore"),
+                                  **({"bin_range": (1, int(bmax))} if bmax else {}))
     if getattr(a, "instrument", "near") == "ales":
         from .instruments import ales
         has_tags = all(r.frame_tags() for r in red.reducers.values())
         # one block shared by every group (per_night=False), whatever --global-block says
         return ales.make_space(red, k_klip_max=a.k_max, opt_framesel=has_tags and not a.no_framesel,
-                               search_angles=not a.fast,
+                               search_angles=not a.fast, bin_range=(1, int(getattr(a, "bin_max", None) or 30)),
                                selection=None if a.no_selection else a.ales_selection,
                                max_drop=a.ales_max_excluded if a.ales_selection == "two_slot" and a.ales_max_excluded > 0
                                else getattr(a, "max_drop", 2),
@@ -644,7 +665,8 @@ def _fill_from_registry(a, argv=None) -> None:
               "truenorth", "fwhm_px", "metric", "backend", "forbidden_pa", "r_ee", "angle_sign",
               "no_tags", "ales_target", "ales_ref", "ales_groups", "ales_channels", "ales_only",
               "ales_max_excluded", "ales_prefer_um", "ales_representative", "ales_angle_offset",
-              "ales_tag_r_in", "ales_cache", "ales_selection", "bin_min"):
+              "ales_tag_r_in", "ales_cache", "ales_selection", "ales_reflib", "ales_ref_bin",
+              "ales_reflib_science", "bin_min", "bin_max"):
         if k in given:                     # the user said so on this command line
             continue
         v = getattr(prev, k, None)

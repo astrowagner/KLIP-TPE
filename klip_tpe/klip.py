@@ -676,6 +676,12 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
         raise ValueError("fm_cube must be frame-aligned with cube")
     rdi = ref_cube is not None
     use_lib = rdi and p.ref_lib is not None
+    lib_as_adi = False
+    if use_lib and p.ref_lib.is_plain_adi(dict(p.ref_keep or {})):
+        # the counts leave nothing but the rotating sequence itself: that is the ADI
+        # reduction, taken as the ADI code takes it, so no reference frames means exactly
+        # no reference frames
+        use_lib, rdi, lib_as_adi = False, False, True
     if rdi:
         if ref_cube.shape[1:] != (ny, nx):
             raise ValueError("ref_cube must have the science frame size")
@@ -709,6 +715,7 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
                 f"itself and leave only round-off)")
     info = {"fast": fast, "auto_fast": auto_fast, "arcdist": arc, "n_frames": n, "n_dropped": 0,
             "rdi": rdi, "n_basis_frames": int(ref_cube.shape[0]) if rdi else n, "fm": do_fm,
+            "library_as_adi": lib_as_adi,
             "k_requested": int(k_req), "k_effective": int(k), "k_capped": bool(k_capped),
             "fm_selfsub": bool(fm_selfsub) if do_fm else None}
 
@@ -792,7 +799,10 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
         if p.ref_lib.n_target != n:
             raise ValueError(f"reference library was built for {p.ref_lib.n_target} target "
                              f"frames, this cube has {n}")
-        nref = np.array([p.ref_lib.select(t, keep).size for t in range(n)])
+        # the census before any fallback, as reference_mask's is: a rotation group counts
+        # the rows the ADI rule admits, so the starved-target rule reads the same number
+        # with and without a library
+        nref = np.array([p.ref_lib.select(t, keep, angsep_deg, p.anglemax, census=True).size for t in range(n)])
         info["ref_keep"] = {g.name: int(keep.get(g.name, g.max_keep)) for g in p.ref_lib.groups}
         info["ref_metric"] = p.ref_lib.metric
     else:
@@ -816,7 +826,7 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
             dropped[t] = True
             return                        # frame stays NaN
         if use_lib:
-            refs = p.ref_lib.mask(t, keep, n_basis)
+            refs = p.ref_lib.mask(t, keep, n_basis, angsep_deg, p.anglemax)
             if refs.sum() < 2:
                 # every eligible frame, rather than a basis of one: the counts came from
                 # the optimizer and a starved draw should score badly, not crash

@@ -366,7 +366,11 @@ def make_guard(reducer: PartitionedReducer, n_min_ref: int = 10, ref_frac: float
     for r in reducer.reducers.values():
         spec = getattr(r, "_reflib_spec", None)
         if spec is not None and getattr(r, "supports_reference_library", True):
-            lib = ReferenceLibraryGuard(n_min_ref=int(spec.get("n_min_ref", 2)), k_max=k_max)
+            # the guard reads the basis size off the searched counts, which is the basis
+            # size only when every pool is searched: a pool that keeps every eligible frame
+            # (``searched`` of set_reference_library) is counted by the angular census instead
+            if spec.get("searched") is None:
+                lib = ReferenceLibraryGuard(n_min_ref=int(spec.get("n_min_ref", 2)), k_max=k_max)
             break
         nat = getattr(r, "_native_lib", None)
         if nat is not None:

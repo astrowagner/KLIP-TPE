@@ -1,5 +1,50 @@
 # Changelog
 
+## Unreleased — 2026-10-14 (a searched reference library for one rotating sequence: the ADI rule as its eligibility, a reference star's count from plain ADI to the whole pool)
+
+From the ALES reduction's note of 2026-10-14.  A searched library (`klip_tpe.reflib`) chose a
+target's science references by partition label alone: the roll, night or channel a frame
+belongs to.  One continuously rotating sequence has no label to exclude by, and under the
+library `reference_mask`'s rule (`angsep`, `anglemax`) was not applied, so switched on as it was
+the library would have admitted references with no rotation and left `angsep` and `anglemax`
+dead.
+
+- **`ReferenceGroup(rotation=True)`** (`reflib.py`): a science pool the ADI rule selects from, per
+  target and per annulus.  `ReferenceLibrary` carries the frames' angles; `eligible` admits the
+  rows with `angsep_deg <= |dPA| <= anglemax`, never the target, the label rule on top only when
+  there is more than one label, and falls back to every other row below 4 as `klip_annular` does;
+  `select` and `mask` take the two angles, and a `census` argument asks for the count before the
+  fallback (what the starved-target rule reads).  `is_plain_adi(keep)` says whether a count
+  vector is the ADI point: every eligible science frame kept, no reference frame.
+- **`klip_annular`** passes `angsep` and `anglemax` into the library path, and at the ADI point
+  runs the ADI code itself (`info['library_as_adi']`), its shortcuts and k cap included, so "no
+  reference frames" is plain ADI to the bit and not a per-target imitation of it.
+- **`KLIPReducer.set_reference_library(rotation=..., searched=...)`**: `rotation` builds the
+  science pool that way and hands the binned angles to the library; `searched` names the pools
+  whose counts are search dimensions (default: all).  A pool left out is not a dimension at all,
+  every one of its eligible frames is in the basis, as without a library.  `describe()` records
+  the library (metric, floor, pools and which are searched).  `generic.make_guard` adds
+  `ReferenceLibraryGuard` only when every pool is searched, since the guard reads the basis size
+  off the searched counts.  `tests/test_reflib_rotation.py`: the rule decides the rows, a
+  one-label pool without the rule stays empty (the NIRCam precondition), the full library is
+  plain ADI to the bit through `klip_annular` and the reducer at several `angsep` / `anglemax`
+  and with KLIP-FM, a truncated pool is not.
+- **ALES: `--ales-ref NAME --ales-reflib`** searches the reference star as a library: each
+  target frame's basis is the ADI-eligible science frames plus the `nkeep_psfref` reference means
+  most correlated with it in the annulus, `nkeep_psfref` one more dimension of the shared block
+  from 0 (plain ADI, the seed) to the whole pool.  `--ales-ref-bin N` (5) takes the reference
+  frames in consecutive means first, so the count means one thing whatever the science `bin` is;
+  the cache keeps them unbinned.  `--ales-reflib-science {all,searched}` keeps the science pool
+  whole (default) or searches `nkeep_altroll` as well, with the library guard then last.
+  `run_setup.json` records the pool (`reducer.provenance.reference_library`, and per group).
+  `resume` restores the three options.  `docs/ALES.md` section 3, `tests/test_ales.py`.
+- **`--bin-max N`** (generic and ALES): the top of the searched temporal-bin range, for a winner
+  that sits on it.
+- Checked on the WISPIT 2 cube over the whole field: `nkeep_psfref = 0` through the adapter is
+  plain ADI to the bit (the clean image, every group, an injected image and its score), and the
+  count changes the images from 1 up; at bin 5 on two cores the whole pool costs a 20-group
+  evaluation about a third more than ADI.  The run itself is reported with the data.
+
 ## Unreleased — 2026-10-14 (LBTI/ALES integral-field cubes: wavelength groups as partitions with on/off flags)
 
 From the ALES reduction's handoff of 2026-10-13 (WISPIT 2, the package's first IFS data set).

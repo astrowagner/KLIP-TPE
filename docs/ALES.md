@@ -59,7 +59,42 @@ An excluded group is out of the target set and the combination.  In `results.jso
 record's flags are its `x` at the `sel_gNN` positions of `space.names` and, decoded,
 `meta.selected` and `config.selected` (the groups included).
 
-## 3. Conventions
+## 3. A reference star as a searched library
+
+`--ales-ref NAME` attaches a reference star's group means (`NAME_cube_cen_clean.fits` beside
+the target's products) to every group.  On its own that is the fixed ARDI basis of any
+adapter: every reference frame in every target's basis.  `--ales-reflib` makes it a searched
+library instead (`KLIPReducer.set_reference_library`, the `rotation` form, one per group):
+
+* A target frame's basis is the science frames the ADI rule admits for it (`angsep` in the
+  group's lambda/D, `anglemax`, per annulus, as without a library) plus the `nkeep_psfref`
+  reference means most correlated with it in the annulus (`cc`, the NIRCam library's
+  ranking).  `nkeep_psfref` is one more dimension of the shared block, from 0 to the whole
+  pool, and 0 is plain ADI to the bit: that point runs the ADI code itself, shortcuts and
+  the k cap included (`klip_annular`'s `library_as_adi`).  The seed sits at 0, so the
+  search's first evaluation is the ADI baseline and every library draw is read against it.
+* The reference frames are taken in consecutive means of `--ales-ref-bin N` (5: 248
+  HIP 91748 frames make 49 means, the 3 left over unused) before anything else, so the count
+  means one thing whatever the science `bin` is.  The cache keeps the reference group means
+  unbinned, so `N` may change between runs.  `run_setup.json` records the pool under
+  `reducer.provenance.reference_library` (source, frames, `ref_bin`, means, the metric, the
+  science pool) and per group under `partitions.gNN.reference_library` and `.frames`.
+* The science pool is not a dimension by default (`--ales-reflib-science all`): the ADI rule
+  decides it, as in a plain ADI run.  `searched` adds `nkeep_altroll`, the NIRCam form, the
+  science frames ranked by correlation and the count searched, whose 0 is pure RDI.  In that
+  form `ReferenceLibraryGuard` comes last in the guard chain (the searched counts are then the
+  basis size, so their sum is floored and `k_klip` capped by it).  With the science pool
+  whole, the census guard governs as before and `nkeep_psfref` runs free from 0.
+* The similarity matrix is built once per group per distinct (binning, frame selection,
+  filter, annulus) and cached, on the frames without injections.  The basis rows are the
+  evaluation's own frames.  At bin 5 on 2 cores the whole pool costs a 20-group evaluation
+  about a third more than plain ADI, nothing at `nkeep_psfref = 0`.
+* `nkeep_psfref` appears as `nkref` in the live window and the books, like the NIRCam count.
+
+`klip-tpe resume` restores `--ales-reflib`, `--ales-ref-bin` and `--ales-reflib-science` from
+the run's record with the other ALES options.
+
+## 4. Conventions
 
 * The products are north up, east left once every frame is rotated counter-clockwise by
   `LBT_PARA + 180` deg.  The adapter adds the 180 to the angle array once
@@ -82,7 +117,7 @@ record's flags are its `x` at the `sel_gNN` positions of `space.names` and, deco
   every group, and the 3-spaxel flux unit then differs by up to 1.5 % through the whole-pixel
   aperture.
 
-## 4. Running it
+## 5. Running it
 
 ```
 klip-tpe near --instrument ales --root /Volumes/RAID36TB/LMIRCam/WISPIT2_ALES/reduction/products \
@@ -104,9 +139,13 @@ klip-tpe near --instrument ales --root /Volumes/RAID36TB/LMIRCam/WISPIT2_ALES/re
 * `--ales-groups`, `--ales-channels C0 C1`, `--ales-only gNN ...`, `--ales-max-excluded`,
   `--ales-prefer-um`, `--ales-representative`, `--ales-selection {binary,two_slot}`,
   `--ales-ref NAME`, `--ales-tag-r-in`: `docs/CLI.md`.
+* `--ales-ref NAME --ales-reflib` searches the reference star as a library (section 3), with
+  `--ales-ref-bin N` (5) and `--ales-reflib-science {all,searched}` (all).
 * `--bin-min N` floors the temporal bin.  A 535-frame group at bin 1 costs 30 times a bin-5
   one (97 s against 3 s for 20 groups on two cores); on a machine with many cores it is
-  affordable, on two it is not.
+  affordable, on two it is not.  `--bin-max N` is the top of the searched bin range (30 by
+  default here): a winner sitting on it (`distance_to_bounds` bin 0 in `final_results.json`)
+  wants it higher.
 * The search space's seed is the ALES reduction's baseline (`ales.BASELINE`): bin 5,
   filter 13, k 5, angsep 0.77 lambda/D, anglemax 45, no frame cuts.  `--n-sources`,
   `--n-remeasure`, `--min-r-fwhm` and the rest are as for any run.
@@ -120,6 +159,8 @@ from klip_tpe import CalibrationConfig, RunConfig, Runner
 from klip_tpe.instruments import ales
 datasets, lam_m, fwhm_px, table = ales.load_ales(PRODUCTS, "WISPIT2", cache=CACHE)
 red = ales.make_reducer(datasets, lam_m, fwhm_px, max_workers=16, table=table)
+# with a reference star as a searched library: load_ales(..., ref="HIP91748", ref_bin=5, cache=CACHE)
+# and make_reducer(..., reflib=True); make_space then adds nkeep_psfref
 space = ales.make_space(red)
 space.project = ales.make_guard(red, max_excluded=10)
 objective, sampler = ales.default_config(red, known=[ales.WISPIT2B], forbidden_pa=[(ales.WISPIT2B[1], 25.0)])

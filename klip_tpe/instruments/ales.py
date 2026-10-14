@@ -25,6 +25,14 @@ The first data set was WISPIT 2 (UT 2026-06-05, DX aperture, 535 frames x 99 cha
 
 or on the command line, ``klip-tpe near --instrument ales --root PRODUCTS ...``.
 
+A reference star (``load_ales(..., ref="HIP91748")``) is a fixed ARDI library by default.
+With ``make_reducer(..., reflib=True)`` (``--ales-reflib``) it is a searched one: each target
+frame's basis is the science frames the ADI rule admits for it plus the ``nkeep_psfref``
+reference means most correlated with it in the annulus, with ``nkeep_psfref`` a dimension of
+the search from 0, plain ADI to the bit, to the whole pool.  The reference frames are taken
+in consecutive means of ``ref_bin`` (``--ales-ref-bin``, 5 by default: 248 HIP 91748 frames
+make 49 means) so the count means one thing whatever the science ``bin`` is.
+
 Conventions (ALES reduction README, section 4):
 
 * the products are north up, east left once every frame is rotated counter-clockwise by
@@ -46,13 +54,13 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from ..feasibility import FrameSelectionGuard, MinBinGuard, ReferenceCountGuard, compose
+from ..feasibility import FrameSelectionGuard, MinBinGuard, ReferenceCountGuard, ReferenceLibraryGuard, compose
 from ..reducer import Dataset, PartitionedReducer
 from ..space import SearchSpace
 from . import generic
 
-__all__ = ["ALES", "WISPIT2B", "BASELINE", "group_table", "group_mean", "load_groups", "load_ales",
-           "make_reducer", "make_space", "make_guard", "default_config", "GroupCountGuard",
+__all__ = ["ALES", "WISPIT2B", "BASELINE", "group_table", "group_mean", "reference_means", "load_groups",
+           "load_ales", "make_reducer", "make_space", "make_guard", "default_config", "GroupCountGuard",
            "product_paths", "representative_group"]
 
 
@@ -147,6 +155,28 @@ def _fwhm_px(lam_m: float, pxscale: float, diam_m: float, fwhm_lod: float) -> fl
     return float(fwhm_lod * (lam_m / diam_m) * 206265.0 / pxscale)
 
 
+def reference_means(cube: np.ndarray, n: int, dtype=np.float32) -> np.ndarray:
+    """``nanmean`` of consecutive blocks of ``n`` frames of a ``(frame, y, x)`` cube, the
+    frames left over at the end dropped (248 frames in fives: 49 means, 3 frames unused).
+
+    The reference star's frames are not derotated, so there is no angle to close a block
+    early on, and a fixed block gives the searched count ``nkeep_psfref`` one meaning for
+    the whole search: the ``bin`` of the science frames may move, the reference means do
+    not.  ``n <= 1`` returns the cube itself."""
+    n = int(n)
+    if n <= 1:
+        return np.asarray(cube, dtype)
+    nb = int(cube.shape[0]) // n
+    if nb < 1:
+        raise ValueError(f"{cube.shape[0]} reference frames make no mean of {n}")
+    out = np.empty((nb,) + tuple(cube.shape[1:]), dtype)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)          # all-NaN pixels
+        for b in range(nb):
+            out[b] = np.nanmean(np.asarray(cube[b * n:(b + 1) * n], np.float64), axis=0)
+    return out
+
+
 def _group_cube(cube, cached: Optional[Dict[str, Any]], name: str, channels: Sequence[int]) -> np.ndarray:
     """A group's ``(frame, y, x)`` cube: from ``cached`` (an array or a ``.npy`` path per
     group) when it holds the group, else the mean of the cube's channels."""
@@ -168,7 +198,8 @@ def load_groups(cube: Optional[np.ndarray], angles: Sequence[float], waves_um: S
                 nan_policy: str = "keep", ref_cube: Optional[np.ndarray] = None,
                 psf_center: Optional[Tuple[float, float]] = None,
                 cached: Optional[Dict[str, Any]] = None, ref_cached: Optional[Dict[str, Any]] = None,
-                source: Optional[str] = None, log: Callable[[str], None] = print
+                source: Optional[str] = None, ref_bin: int = 1, ref_source: Optional[str] = None,
+                log: Callable[[str], None] = print
                 ) -> Tuple[Dict[str, Dataset], Dict[str, float], Dict[str, float], List[Dict[str, Any]]]:
     """Wavelength groups of an IFS cube as :class:`~klip_tpe.reducer.Dataset` partitions.
 
@@ -178,14 +209,17 @@ def load_groups(cube: Optional[np.ndarray], angles: Sequence[float], waves_um: S
     applied once; ``psf``: ``(nwave, ny', nx')`` template on its own grid, meaned over each
     group's channels and centred at ``psf_center`` (the 5 x 5 centroid of its peak when
     None); ``ref_cube``: a reference star's ``(nwave, nref, ny, nx)`` cube, meaned the same
-    way and attached per group (RDI/ARDI are then on by default in :func:`make_reducer`).
-    ``groups`` overrides the table :func:`group_table` would build; ``only`` keeps the named
-    groups; ``cached`` / ``ref_cached`` give ready group cubes (arrays or ``.npy`` paths) by
-    group name.
+    way and attached per group (RDI/ARDI are then on by default in :func:`make_reducer`),
+    its frames taken in consecutive means of ``ref_bin`` first (:func:`reference_means`;
+    1 = the frames as they are).  ``groups`` overrides the table :func:`group_table` would
+    build; ``only`` keeps the named groups; ``cached`` / ``ref_cached`` give ready group
+    cubes (arrays or ``.npy`` paths) by group name, the reference ones unbinned.
 
     Returns ``(datasets, lam_m, fwhm_px, table)``: the partitions, their mean wavelengths
     (m) and FWHM (px, ``fwhm_lod`` lambda/D), and the group table with ``fwhm_px`` and
-    ``n_nan`` (NaN pixels left in the group's cube) added to each group.
+    ``n_nan`` (NaN pixels left in the group's cube) added to each group.  Each dataset's
+    ``meta['provenance']`` records the group, and with a reference star ``ref_source``,
+    ``ref_frames`` (its frames), ``ref_bin`` and ``n_ref`` (the means attached).
     """
     w = np.asarray(waves_um, float).ravel()
     if cube is not None:
@@ -220,13 +254,16 @@ def load_groups(cube: Optional[np.ndarray], angles: Sequence[float], waves_um: S
                 tpl = np.nanmean(t[ch], axis=0) if t.ndim == 3 else t
             tpl = np.where(np.isfinite(tpl), tpl, 0.0)          # 50 all-NaN pixels in WISPIT 2's template
         rg = None
-        if ref_cube is not None or (ref_cached and name in ref_cached):
-            rg = _group_cube(ref_cube, ref_cached, name, ch)
         meta = {"provenance": {"instrument": "ALES", "group": name, "channels": list(ch),
                                "lam_um": [float(w[c]) for c in ch], "lam_mean_um": g["lam_mean"],
                                "lam_edges_um": [g["lam_lo"], g["lam_hi"]], "nframes": int(cg.shape[0]),
                                "source": source, "angle_offset_deg": float(angle_offset),
                                "angle_sign": float(angle_sign)}}
+        if ref_cube is not None or (ref_cached and name in ref_cached):
+            raw = _group_cube(ref_cube, ref_cached, name, ch)
+            rg = reference_means(raw, ref_bin)
+            meta["provenance"].update(ref_source=ref_source, ref_frames=int(raw.shape[0]),
+                                      ref_bin=int(max(ref_bin, 1)), n_ref=int(rg.shape[0]))
         if psf_center is not None:
             meta["psf_center"] = (float(psf_center[0]), float(psf_center[1]))
         ds = generic.load_cube(cg, a, psf=tpl, name=name, angle_sign=angle_sign, angle_offset=angle_offset,
@@ -238,9 +275,14 @@ def load_groups(cube: Optional[np.ndarray], angles: Sequence[float], waves_um: S
         fwhm_px[name] = _fwhm_px(lam_m[name], pxscale, diam_m, fwhm_lod)
         g["n_nan"] = int(np.count_nonzero(~np.isfinite(ds.cube)))
         g["fwhm_px"] = fwhm_px[name]
+        rtxt = ""
+        if rg is not None:
+            pv = meta["provenance"]
+            rtxt = (f", {pv['ref_frames']} reference frames" if pv["ref_bin"] <= 1 else
+                    f", {pv['ref_frames']} reference frames in means of {pv['ref_bin']}: {pv['n_ref']}")
         log(f"  {name}: channels {ch[0]}-{ch[-1]} ({len(ch)}), {g['lam_lo']:.4f}-{g['lam_hi']:.4f} um, "
             f"mean {g['lam_mean']:.3f} um, fwhm {fwhm_px[name]:.2f} px, {ds.cube.shape[0]} frames, "
-            f"{g['n_nan']} NaN px" + (f", {rg.shape[0]} reference frames" if rg is not None else ""))
+            f"{g['n_nan']} NaN px" + rtxt)
     return datasets, lam_m, fwhm_px, table
 
 
@@ -255,16 +297,18 @@ def load_ales(products_dir: str, target: str = "WISPIT2", ref: Optional[str] = N
               pxscale: float = ALES.pxscale, diam_m: float = ALES.diam_m, fwhm_lod: float = ALES.fwhm_lod,
               angle_offset: float = ALES.angle_offset, angle_sign: float = 1.0, tags: Any = "auto",
               tag_r_in: float = ALES.tag_r_in, nan_policy: str = "keep", cache: Optional[str] = None,
-              log: Callable[[str], None] = print
+              ref_bin: int = 1, log: Callable[[str], None] = print
               ) -> Tuple[Dict[str, Dataset], Dict[str, float], Dict[str, float], List[Dict[str, Any]]]:
     """:func:`load_groups` on the reduction's product files (:func:`product_paths`).
 
     ``ref`` names a reference star whose products sit beside the target's (``"HIP91748"``)
-    and attaches its group means as each group's RDI library.  ``cache`` is a directory:
-    the group cubes are written there as ``.npy`` the first time and read back after,
-    which matters when the products live on a slow volume (the full cube is 814 MB and a
-    group mean reads all of it).  The template's star is at the header's ``STARX``/``STARY``
-    when it has them, else at the centroid of its peak.
+    and attaches its group means as each group's RDI library, in consecutive means of
+    ``ref_bin`` frames (:func:`reference_means`; 1 = every frame).  ``cache`` is a
+    directory: the group cubes are written there as ``.npy`` the first time and read back
+    after, which matters when the products live on a slow volume (the full cube is 814 MB
+    and a group mean reads all of it); the reference star's group means are cached
+    unbinned, so ``ref_bin`` may change between runs.  The template's star is at the
+    header's ``STARX``/``STARY`` when it has them, else at the centroid of its peak.
     """
     paths = product_paths(products_dir, target)
     w = np.asarray(_fits(paths["waves"], memmap=False)[0], float).ravel()
@@ -286,9 +330,21 @@ def load_ales(products_dir: str, target: str = "WISPIT2", ref: Optional[str] = N
 
     cached, rcached = from_cache(key), from_cache(rkey)
     cube = None if all(n in cached for n in names) else _fits(paths["cube"])[0]
-    rcube = None
-    if ref is not None and not all(n in rcached for n in names):
-        rcube = _fits(product_paths(products_dir, ref)["cube"])[0]
+    rcube = rpath = None
+    if ref is not None:
+        rpath = product_paths(products_dir, ref)["cube"]
+        if not all(n in rcached for n in names):
+            rcube = _fits(rpath)[0]
+            if cache:
+                # the cache holds the reference group means as they are; the means of
+                # ref_bin are taken from it on every load, so ref_bin is free to change
+                os.makedirs(cache, exist_ok=True)
+                for g in table:
+                    if g["name"] in names and g["name"] not in rcached:
+                        f = os.path.join(cache, f"{rkey}_{g['name']}.npy")
+                        np.save(f, group_mean(rcube, g["channels"]))
+                        rcached[g["name"]] = f
+                rcube = None
     log(f"ALES {target}: {w.size} channels, {a.size} frames; {len(table)} groups over channels {c0}-{c1} "
         f"({w[c0]:.4f}-{w[c1]:.4f} um)" + (f"; reference star {ref}" if ref else "")
         + (f"; {len(cached)} group cubes from the cache" if cached else ""))
@@ -296,17 +352,13 @@ def load_ales(products_dir: str, target: str = "WISPIT2", ref: Optional[str] = N
         cube, a, w, psf, c0=c0, c1=c1, ngrp=ngrp, groups=table, only=only, pxscale=pxscale, diam_m=diam_m,
         fwhm_lod=fwhm_lod, angle_offset=angle_offset, angle_sign=angle_sign, tags=tags, tag_r_in=tag_r_in,
         nan_policy=nan_policy, ref_cube=rcube, psf_center=center, cached=cached, ref_cached=rcached,
-        source=paths["cube"], log=log)
+        source=paths["cube"], ref_bin=ref_bin, ref_source=rpath, log=log)
     if cache:
         os.makedirs(cache, exist_ok=True)
         for g in table:
             f = os.path.join(cache, f"{key}_{g['name']}.npy")
             if not os.path.exists(f):
                 np.save(f, datasets[g["name"]].cube)
-            if ref is not None and datasets[g["name"]].ref_cube is not None:
-                rf = os.path.join(cache, f"{rkey}_{g['name']}.npy")
-                if not os.path.exists(rf):
-                    np.save(rf, datasets[g["name"]].ref_cube)
     return datasets, lam_m, fwhm_px, table
 
 
@@ -323,7 +375,8 @@ def make_reducer(datasets: Dict[str, Dataset], lam_m: Dict[str, float], fwhm_px:
                  pool: str = "auto", fast: bool = False, n_min_ref: int = 10, outrad_cap: Optional[float] = None,
                  use_rdi: Optional[bool] = None, rdi_mode: str = "ardi", backend: str = "klip",
                  table: Optional[Sequence[Dict[str, Any]]] = None, defaults: Optional[Dict[str, Any]] = None,
-                 log: Callable[[str], None] = print) -> PartitionedReducer:
+                 reflib: bool = False, reflib_science: str = "all", reflib_metric: str = "cc",
+                 reflib_n_min_ref: int = 2, log: Callable[[str], None] = print) -> PartitionedReducer:
     """:func:`generic.make_reducer` over the groups, with the group at the mean wavelength
     standing for the combination (:func:`representative_group`): the metric's FWHM and
     matched filter and the sampler's floor come from it, not from the bluest group.  The
@@ -338,7 +391,18 @@ def make_reducer(datasets: Dict[str, Dataset], lam_m: Dict[str, float], fwhm_px:
     boxcar carries a NaN along the whole frame: at bin 5 it emptied 40 of WISPIT 2's 108
     bins, and b's matched-filter S/N on the reduction's own parameters fell from 6.2 to 5.3
     (to 3.5 with the de-spiking below as well).  The ALES reduction's own high-pass is
-    NaN-aware too."""
+    NaN-aware too.
+
+    ``reflib`` makes the reference star a searched library
+    (:meth:`~klip_tpe.reducer.KLIPReducer.set_reference_library`, one per group, the
+    ``rotation`` form): every target frame's basis is the science frames the ADI rule
+    admits for it (``angsep``, ``anglemax``, per annulus, as without a library) plus the
+    ``nkeep_psfref`` reference means most correlated with it in the annulus
+    (``reflib_metric``), ``nkeep_psfref`` searched from 0, which is plain ADI to the bit,
+    to the whole pool.  ``reflib_science='searched'`` searches the science count too
+    (``nkeep_altroll``, the NIRCam form, whose zero is pure RDI); ``'all'`` keeps every
+    admitted science frame.  ``reflib_n_min_ref`` is the library's own floor on a target's
+    references.  Without ``reflib`` a reference star is the fixed ARDI library it was."""
     rep = representative or representative_group(lam_m)
     d = {"hp_nan_aware": True}
     d.update(defaults or {})
@@ -358,6 +422,31 @@ def make_reducer(datasets: Dict[str, Dataset], lam_m: Dict[str, float], fwhm_px:
                       [{"name": n, "lam_mean": lam_m[n] * 1e6, "fwhm_px": fwhm_px[n]} for n in datasets]}
     log(f"  representative group {rep}: {lam_m[rep] * 1e6:.3f} um, fwhm {red.fwhm:.2f} px, "
         f"lambda/D {red.lam_over_d_px:.2f} px (the metric's and the sampler's)")
+    if reflib:
+        if reflib_science not in ("all", "searched"):
+            raise ValueError(f"reflib_science is 'all' or 'searched', not {reflib_science!r}")
+        without = [pid for pid, ds in datasets.items() if ds.ref_cube is None]
+        if without:
+            raise ValueError(f"a searched reference library needs a reference star in every group; "
+                             f"{without[:4]} have none (load_ales(ref=...))")
+        searched = None if reflib_science == "searched" else ("psfref",)
+        for pid, rr in red.reducers.items():
+            rr.set_reference_library(partition=np.zeros(int(rr.data.nframes), int), ref_group="psfref",
+                                     n_min_ref=reflib_n_min_ref, metric=reflib_metric, rotation=True,
+                                     searched=searched)
+        pv = (next(iter(datasets.values())).meta or {}).get("provenance", {})
+        n_ref = {pid: int(ds.ref_cube.shape[0]) for pid, ds in datasets.items()}
+        red.provenance["reference_library"] = {
+            "pool": "psfref", "source": pv.get("ref_source"), "ref_frames": pv.get("ref_frames"),
+            "ref_bin": pv.get("ref_bin"), "n_ref": n_ref[rep] if len(set(n_ref.values())) == 1 else n_ref,
+            "metric": reflib_metric, "n_min_ref": int(reflib_n_min_ref), "rotation": True,
+            "nkeep_psfref": f"searched 0-{n_ref[rep]} (0 = plain ADI)",
+            "science_pool": ("every frame the ADI rule admits (angsep, anglemax per annulus), not searched"
+                             if searched else "searched, nkeep_altroll (0 = pure RDI)")}
+        log(f"  searched reference library: {n_ref[rep]} reference means per group"
+            + (f" ({pv['ref_frames']} frames in means of {pv['ref_bin']})" if pv.get("ref_bin", 1) > 1 else "")
+            + f", nkeep_psfref 0-{n_ref[rep]} by {reflib_metric}; science frames: "
+            + ("the ADI rule, all of them" if searched else "the ADI rule, nkeep_altroll searched"))
     return red
 
 
@@ -370,13 +459,22 @@ def make_space(reducer: PartitionedReducer, defaults: Optional[Dict[str, Any]] =
     ``k_klip`` once each (``per_night=False``: the wavelength dependence that matters is
     carried by each group's own lambda), and ``selection='binary'`` adds one 0/1 flag per
     group, ``sel_gNN``.  ``'two_slot'`` with ``max_drop`` slots is the other bounded form.
+    A reducer with a searched reference library (``reflib`` of :func:`make_reducer`) adds
+    its counts once, ``nkeep_psfref`` (and ``nkeep_altroll`` when the science count is
+    searched), shared by every group like the rest of the block.  ``nkeep_psfref`` seeds at
+    0 unless ``defaults`` says otherwise: the search's first evaluation is then the plain
+    ADI baseline itself, and its score the one every library draw is read against.
     The defaults are the ALES reduction's baseline (:data:`BASELINE`); the NEAR production
     seed (bin 29, corr_thresh 0.907) is wrong for these data."""
     d = dict(BASELINE)
     d.update(defaults or {})
     kw.setdefault("per_night", False)
-    return generic.make_space(reducer, bin_range=bin_range, selection=selection, max_drop=max_drop,
-                              defaults=d, **kw)
+    space = generic.make_space(reducer, bin_range=bin_range, selection=selection, max_drop=max_drop,
+                               defaults=d, **kw)
+    for p in space.params:
+        if p.name == "nkeep_psfref":
+            p.default = float(np.clip(float(d.get("nkeep_psfref", 0)), p.lo, p.hi))
+    return space
 
 
 class GroupCountGuard:
@@ -437,7 +535,14 @@ def make_guard(reducer: PartitionedReducer, max_excluded: Optional[int] = 10,
                frame_selection: Optional[bool] = None, bin_min: int = 1):
     """The group-count bound, then the generic guards (bin floor, frame-selection snapping,
     reference count), the last with the representative group's lambda/D and FWHM.  The
-    group bound goes first so the reference census sees the groups that are included."""
+    group bound goes first so the reference census sees the groups that are included.
+
+    With a searched reference library whose every pool is searched (``reflib_science=
+    'searched'`` of :func:`make_reducer`) the library guard comes last, as in
+    :func:`generic.make_guard`: the searched counts are then the basis size, so their sum
+    is floored and ``k_klip`` capped by it.  With the science pool kept whole (``'all'``)
+    the basis is the angular census plus ``nkeep_psfref``, the census guard already
+    governs it, and ``nkeep_psfref`` runs free from 0, the ADI point, to the pool."""
     lam = {pid: float(r.lam_m) for pid, r in reducer.reducers.items()}
     gc = GroupCountGuard(max_excluded, prefer=prefer, lam_m=lam, prefer_m=prefer_m) if max_excluded is not None else None
     ref = ReferenceCountGuard(angles_fn=reducer.frame_angles, tags_fn=reducer.frame_tags,
@@ -448,7 +553,14 @@ def make_guard(reducer: PartitionedReducer, max_excluded: Optional[int] = 10,
         frame_selection = all(r.frame_tags() for r in reducer.reducers.values())
     fs = FrameSelectionGuard(tags_fn=reducer.frame_tags,
                              nframes_fn=lambda pid: reducer.reducers[pid].data.nframes) if frame_selection else None
-    return compose(*[p for p in (gc, mb, fs, ref) if p is not None])
+    lib = None
+    for r in reducer.reducers.values():
+        spec = getattr(r, "_reflib_spec", None)
+        if spec is not None and getattr(r, "supports_reference_library", True):
+            if spec.get("searched") is None:
+                lib = ReferenceLibraryGuard(n_min_ref=int(spec.get("n_min_ref", 2)), k_max=k_max)
+            break
+    return compose(*[p for p in (gc, mb, fs, ref, lib) if p is not None])
 
 
 def default_config(reducer: PartitionedReducer, clean_subtract: bool = True, known=(),
