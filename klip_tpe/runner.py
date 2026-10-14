@@ -446,6 +446,20 @@ def _secs(v: Optional[float]) -> str:
     return f"{v:.1f}s" if v < 100 else f"{v:.0f}s"
 
 
+def _error_why(exc: BaseException) -> str:
+    """A failed evaluation's ``meta['why']``: the error, shortened for a record."""
+    s = f"error: {exc!r}"
+    return s if len(s) <= 300 else s[:297] + "..."
+
+
+def _whys(counts: "collections.Counter", top: int = 3) -> str:
+    """The commonest reasons of a count of failed draws, for a log line."""
+    items = counts.most_common()
+    out = ", ".join(f"{n} {w}" for w, n in items[:top])
+    rest = sum(n for _, n in items[top:])
+    return out + (f", {rest} other" if rest else "")
+
+
 def _atomic_write(path: str, text: Union[str, bytes], keep: Optional[str] = None) -> None:
     """Replace ``path`` atomically and durably (:func:`klip_tpe.durable.write`).  After a
     crash of the machine it holds the old contents or all of the new, never nothing.
@@ -686,9 +700,9 @@ class Runner:
         #: the same recovery as the command line).  "never" starts a fresh search over it.
         self.resume_mode = str(resume or "auto").lower()
         self.sampler, self.cfg, self.run_dir = sampler, config, run_dir
-        self._apply_sampler_config()
         self.throughput_fn = throughput_fn
         self.log = log
+        self._apply_sampler_config()
         self.callbacks: List[RunCallback] = list(callbacks)
         self._last_images: Dict[str, Any] = {}
         os.makedirs(run_dir, exist_ok=True)
@@ -706,6 +720,7 @@ class Runner:
         self._best_images: Dict[str, Any] = {}
         self._nsrc_warned: Dict[int, int] = {}     # annulus -> count already reported
         self._nsrc_cache: Dict[int, int] = {}      # annulus -> resolved count (the probe is not free)
+        self._draw_tally: Dict[int, Dict[str, Any]] = {}   # annulus -> search draws, failed draws, reasons
         self._calib_images: Optional[Dict[str, Any]] = None
         self._k_default = int(self.cfg.defaults.get("k_klip", 10) or 10)
         self._resumed = False
@@ -748,7 +763,8 @@ class Runner:
 
     def _on_draw(self, ia: int, j: int, n: int, rec: "EvalRecord", inj, clean) -> None:
         """One remeasurement finished: log it and offer it to the display."""
-        s = "failed" if rec.score is None else f"{rec.score:.3f}"
+        s = (f"failed ({rec.meta.get('why') or 'no reason given'})" if rec.score is None
+             else f"{rec.score:.3f}")
         self.log(f"[ann {ia+1}]   draw {j+1}/{n} score={s}  ({rec.wall_s:.0f}s)")
         self._emit("on_draw", j, n, rec, inj, clean)
 
@@ -902,25 +918,53 @@ class Runner:
                      f"some separation's Mawet ring fewer than {mr} clean apertures, and it would "
                      f"fall back to the radial band there")
         # The count used can still starve a ring: one source close to the star, whose ring
-        # holds only a handful of apertures, is never capped.
-        got = self._ring_clean(ia, n)
+        # holds only a handful of apertures, is never capped.  Asked at the sources themselves
+        # and over more azimuths than the cap asks: where a source falls on the pixel grid
+        # moves its count by one.
+        got = self._ring_clean(ia, n, ndraw=12, at_sources=True)
         if got is not None and got[0] < mr:
+            few, rho, most = got
             who = "one source" if n == 1 else f"with {n} sources, the one"
-            self.log(f"  annulus {ia+1}: {who} at {got[1]:.3f}\" keeps {got[0]} clean aperture"
-                     f"{'s' * (got[0] != 1)} in its Mawet ring, fewer than {mr}, so its S/N comes from "
-                     f"the radial band instead")
+            keeps = f"{few}" if most == few else f"{few} to {most}"
+            self.log(f"  annulus {ia+1}: {who} at {rho:.3f}\" keeps {keeps} clean aperture"
+                     f"{'s' * (most != 1)} in its Mawet ring, fewer than {mr}"
+                     + (", so its S/N comes from the radial band instead" if most < mr else
+                        f" at some azimuths, and there its S/N comes from the radial band instead"))
         self._nsrc_cache[ia] = n
         return n
 
     def _apply_sampler_config(self) -> None:
         """``RunConfig.min_r_fwhm`` onto the run's sampler (the base of a replay), so the run
-        injects with the floor it was started with, whatever sampler the caller built."""
+        injects with the floor it was started with, whatever sampler the caller built.  Then
+        the metric's inner guard is fitted to that floor (:meth:`_fit_inner_guard`)."""
         v = getattr(self.cfg, "min_r_fwhm", None)
-        if v is None:
-            return
         smp = getattr(self.sampler, "base", None) or self.sampler
-        if hasattr(smp, "min_r_fwhm"):
+        if v is not None and hasattr(smp, "min_r_fwhm"):
             smp.min_r_fwhm = float(v)
+        self._fit_inner_guard(smp)
+
+    def _fit_inner_guard(self, smp) -> None:
+        """Lower the metric's inner guard (``inner_fwhm``, no S/N inside it) to the injection
+        floor when the floor is closer in, so every source the sampler places is scored.
+
+        A guard outside the floor fails every draw between the two, in every stage.  The
+        guard is never raised: inside the floor nothing is injected, and other measurements
+        (a candidate's S/N, the known companions') keep the metric's own guard."""
+        m = getattr(self.objective, "metric", None)
+        g = getattr(m, "inner_fwhm", None)
+        try:
+            # the floor in the metric's own FWHM, which need not be the sampler's
+            floor = float(smp.min_r_fwhm) * float(smp.fwhm_as) / (float(m.pxscale) * float(m.fwhm))
+            g = float(g)
+        except (AttributeError, TypeError, ValueError, ZeroDivisionError):
+            return
+        if not np.isfinite(floor) or floor >= g * (1.0 - 1e-9):
+            return
+        m.inner_fwhm = max(floor, 0.0)
+        self.log(f"  injection floor {float(smp.min_r_fwhm):g} FWHM: the metric scores sources from "
+                 f"{m.inner_fwhm:.3f} FWHM (its inner guard was {g:g})"
+                 + (f".  Inside {5 / (2 * np.pi):.3f} FWHM a ring holds fewer than 5 apertures and "
+                    f"a source there still gets no S/N" if m.inner_fwhm < 5 / (2 * np.pi) else ""))
 
     def _ring_survives(self, ia: int, n: int) -> bool:
         """Would ``n`` sources leave every one of their rings ``min_ring`` clean apertures?
@@ -945,10 +989,24 @@ class Runner:
     def _min_ring(self) -> int:
         return int(getattr(getattr(self.objective, "metric", None), "min_ring", 6) or 6)
 
-    def _ring_clean(self, ia: int, n: int) -> Optional[Tuple[int, float]]:
+    def _inner_fwhm(self) -> float:
+        """The metric's inner guard (FWHM), for the places that call ``mawet_peak_snr`` directly."""
+        g = getattr(getattr(self.objective, "metric", None), "inner_fwhm", None)
+        return 1.0 if g is None else float(g)
+
+    def _ring_clean(self, ia: int, n: int, ndraw: int = 2,
+                    at_sources: bool = False) -> Optional[Tuple[int, float, int]]:
         """The fewest clean noise apertures any of ``n`` sources keeps in its Mawet ring, over
-        two probe draws of the run's own sampler, and that source's separation (arcsec).
-        None when it cannot be measured."""
+        ``ndraw`` probe draws of the run's own sampler, that source's separation (arcsec), and
+        the most any draw's worst source keeps.  None when it cannot be measured.  The first
+        two draws are the ones the source-count cap asks (:meth:`_ring_survives`).
+
+        The cap probes a blank frame, on which the metric takes the first pixel of its search
+        window as each source's peak, one up and one to the left of it, and lays the ring
+        through that.  ``at_sources`` puts a spike on each source instead, so the metric finds
+        it where it was put, as it finds an injected source.  Close to the star the two
+        differ: on NEAR at 0.312" the blank probe keeps 0 apertures where the source keeps 3
+        or 4."""
         m = getattr(self.objective, "metric", None)
         mr = self._min_ring()
         try:
@@ -956,24 +1014,40 @@ class Runner:
             shape = self._probe_shape()
             if shape is None:
                 return None
+            conv = getattr(self.reducer, "angle_convention", "pa")
+            cx, cy = star_center(shape)
             probe = np.zeros(shape, float)
-            worst = None
+            worst, most = None, None
             # the geometry's own sampler: a replay of recorded draws must not spend them here
             smp = getattr(self.sampler, "base", None) or self.sampler
-            for seed in (0x5E3D, 0xC0FFEE):
+            seeds = [0x5E3D, 0xC0FFEE] + list(range(1, int(ndraw) - 1))
+            for seed in seeds[:max(int(ndraw), 1)]:
                 src = smp.sample(n, lo, hi, np.random.default_rng([int(self.cfg.seed or 0),
                                                                    int(ia), int(n), seed]))
+                kw = {}
+                if at_sources:
+                    probe = np.zeros(shape, float)
+                    xs, ys = source_xy([s.rho for s in src], [s.theta for s in src], self.pxscale, cx, cy, conv)
+                    for x, y in zip(xs, ys):
+                        ix, iy = int(round(x)), int(round(y))
+                        if 0 <= iy < shape[0] and 0 <= ix < shape[1]:
+                            probe[iy, ix] = 1.0
+                    kw["declip_nsig"] = None          # the spikes must stay
                 _, det = mawet_peak_snr(probe, [s.rho for s in src], [s.theta for s in src],
                                         self.pxscale, self.fwhm, known=self._known(),
                                         excl_fwhm=float(getattr(m, "excl_fwhm", 1.5) or 1.5),
                                         pixel_mask=getattr(m, "pixel_mask", None),
-                                        angle_convention=getattr(self.reducer, "angle_convention", "pa"),
-                                        min_ring=mr, return_details=True)
+                                        inner_fwhm=self._inner_fwhm(),
+                                        angle_convention=conv, min_ring=mr, return_details=True, **kw)
+                fewest = None
                 for s, d in zip(src, det):
                     c = int(d.get("nclean", 0))
                     if worst is None or c < worst[0]:
                         worst = (c, float(s.rho))
-            return worst
+                    fewest = c if fewest is None else min(fewest, c)
+                if fewest is not None:
+                    most = fewest if most is None else max(most, fewest)
+            return None if worst is None else (worst[0], worst[1], most)
         except Exception:
             return None
 
@@ -1428,6 +1502,7 @@ class Runner:
         given_clean, clean = clean, None
         kinfo: Dict[str, Any] = {}
         sr = None
+        why = None
         try:
             if self._kscan_active():
                 given_clean = None
@@ -1464,8 +1539,10 @@ class Runner:
             inj = EvalImages(np.full((2, 2), np.nan))
             sr = None
             failed = True
+            why = _error_why(exc)
             t_reduced = time.time()
-        rec = self._eval_record(cfg, phase, contrast, sources, inj, sr, failed, k_used, kinfo, t0, t_reduced)
+        rec = self._eval_record(cfg, phase, contrast, sources, inj, sr, failed, k_used, kinfo, t0, t_reduced,
+                                why=why)
         return rec, inj, clean
 
     def _score_images(self, inj: EvalImages, clean: Optional[EvalImages], sources: Sequence[Source],
@@ -1480,9 +1557,11 @@ class Runner:
     def _eval_record(self, cfg: Config, phase: str, contrast: float, sources: Sequence[Source],
                      inj: EvalImages, sr, failed: bool, k_used: Any = None,
                      kinfo: Optional[Dict[str, Any]] = None, t0: Optional[float] = None,
-                     t_reduced: Optional[float] = None) -> EvalRecord:
+                     t_reduced: Optional[float] = None, why: Optional[str] = None) -> EvalRecord:
         """The :class:`EvalRecord` of one scored (or failed) evaluation.  ``t0``: when its
-        reductions were dispatched, ``t_reduced``: when the last of them was back."""
+        reductions were dispatched, ``t_reduced``: when the last of them was back.  A record
+        without a score says why in ``meta['why']``: ``why`` for a failed one (the error),
+        the objective's reason for a NaN score."""
         kinfo = kinfo or {}
         t0 = time.time() if t0 is None else t0
         if k_used is None:
@@ -1493,6 +1572,10 @@ class Runner:
                 "zone": list(self._zone(self.ia, cfg)),
                 "angle_convention": str(getattr(self.reducer, "angle_convention", "pa")),
                 "t_dispatch": float(t0)}
+        if failed:
+            meta["why"] = why or "error"
+        elif sr is not None and not np.isfinite(sr.score):
+            meta["why"] = getattr(sr, "why", None) or "score not finite"
         if kinfo:
             meta["kbest"] = kinfo.get("kbest")
             if "kpn" in kinfo:
@@ -1632,9 +1715,10 @@ class Runner:
             if clean_exc is not None:
                 # draw 1 fails with its clean image (the injected failure is reported first,
                 # as it was), and the later draws reduce their own
-                self.log(f"  evaluation failed: {(res if isinstance(res, BaseException) else clean_exc)!r}")
+                err = res if isinstance(res, BaseException) else clean_exc
+                self.log(f"  evaluation failed: {err!r}")
                 rec = self._eval_record(cfg, phase, contrast, srcs, EvalImages(np.full((2, 2), np.nan)),
-                                        None, True, t0=t0)
+                                        None, True, t0=t0, why=_error_why(err))
                 _done(0, (rec, EvalImages(np.full((2, 2), np.nan)), None))
                 for _ in range(1, n):                 # the other draws' images, made without a clean one
                     next(stream)
@@ -1644,6 +1728,7 @@ class Runner:
                     back.append(time.time())          # their reductions, and their scoring with them
                 break
             clean = shared
+            why = None
             try:
                 if isinstance(res, BaseException):
                     clean = None                      # as evaluate() returned it for a failed reduction
@@ -1653,8 +1738,8 @@ class Runner:
                 failed = False
             except Exception as exc:                  # noqa: BLE001
                 self.log(f"  evaluation failed: {exc!r}")
-                inj, sr, failed = EvalImages(np.full((2, 2), np.nan)), None, True
-            _done(j, (self._eval_record(cfg, phase, contrast, srcs, inj, sr, failed, t0=t0), inj, clean))
+                inj, sr, failed, why = EvalImages(np.full((2, 2), np.nan)), None, True, _error_why(exc)
+            _done(j, (self._eval_record(cfg, phase, contrast, srcs, inj, sr, failed, t0=t0, why=why), inj, clean))
         rec, inj, clean = last
         t_red = max(back) if back else None
         if not combine and n == 1:
@@ -1704,6 +1789,14 @@ class Runner:
                                    else float(r.raw_score) for r in recs]
         meta["draw_n"] = len(recs)
         meta["draw_failed"] = int(len(recs) - len(good))
+        # the last draw's reason is not the trial's: the trial fails only when every draw does
+        meta.pop("why", None)
+        if meta["draw_failed"]:
+            whys = [None if (s is not None and np.isfinite(s)) else (r.meta.get("why") or "score not finite")
+                    for s, r in zip(scores, recs)]
+            meta["draw_why"] = whys
+            if not good:
+                meta["why"] = collections.Counter(w for w in whys if w).most_common(1)[0][0]
         meta["draw_sd"] = float(np.std(good, ddof=1)) if len(good) > 1 else None
         meta["draw_spread"] = float(max(good) - min(good)) if len(good) > 1 else None
         if reduce is None:
@@ -1856,6 +1949,7 @@ class Runner:
         trial = 0
         while trial < budget:
             vals = []
+            whys: List[Optional[str]] = []       # per draw: why it has no score (None: it has one)
             src = []
             errors: List[BaseException] = []
             # the remeasurements' positions first, in order (every draw happens whatever
@@ -1882,6 +1976,7 @@ class Runner:
                         r = self.objective.score_search(inj.image, src, None if clean is None else clean.image,
                                                         **self._fm_for(inj, clean))
                         vals.append(r.score)
+                        whys.append(None if np.isfinite(r.score) else (getattr(r, "why", None) or "score not finite"))
                         # keep the last measurement for the display (on_calibration images)
                         self._calib_images = {
                             "inj": inj, "clean": clean, "sources": list(src), "contrast": contrast, "config": cfgk,
@@ -1891,6 +1986,7 @@ class Runner:
                     except Exception as exc:
                         self.log(f"  calibration reduction failed: {exc!r}")
                         vals.append(np.nan)
+                        whys.append(_error_why(exc))
                         errors.append(exc)
             if trial == 0 and errors and len(errors) == len(vals):
                 # Not a calibration problem: the DEFAULT reduction of this annulus does not run
@@ -1906,7 +2002,12 @@ class Runner:
             info["trials"].append({"contrast": contrast, "k": kdef,
                                    "snr": None if not np.isfinite(msnr) else float(msnr),
                                    "values": [None if not np.isfinite(v) else float(v) for v in vals]})
-            self.log(f"  calibration trial {trial+1}: contrast={contrast:.3e}  k={kdef}  median S/N={msnr:.2f}")
+            nfail = sum(w is not None for w in whys)
+            if nfail:
+                info["trials"][-1]["why"] = whys
+            self.log(f"  calibration trial {trial+1}: contrast={contrast:.3e}  k={kdef}  median S/N={msnr:.2f}"
+                     + (f"  ({nfail} of {len(whys)} draws failed: "
+                        f"{_whys(collections.Counter(w for w in whys if w))})" if nfail else ""))
             self._emit("on_calibration_trial", ia, trial + 1, contrast, msnr, self._calib_images)
             if self.cfg.write_setup_files:
                 self._write_setup_file(os.path.join(self._ann_dir(ia), f"calib{trial+1:04d}_setup.txt"), "calib",
@@ -2205,11 +2306,49 @@ class Runner:
         elapsed = time.time() - self.wall0 + self.wall_prev
         _sd = rec.meta.get("draw_sd")
         _dn = rec.meta.get("draw_n")
+        _df = int(rec.meta.get("draw_failed") or 0)
         self.log(f"[ann {ia+1}] eval {i+1}/{n_iter} {phase:<7s} score={rec.score if rec.score is None else round(rec.score,3)}"
-                 + (f" (mean of {_dn}" + (f", sd {_sd:.2f})" if _sd is not None else ")") if _dn else "")
+                 + (f" (mean of {_dn}" + (f", sd {_sd:.2f}" if _sd is not None else "")
+                    + (f", {_df} failed" if _df else "") + ")" if _dn else "")
+                 + (f" [{rec.meta['why']}]" if rec.score is None and rec.meta.get("why") else "")
                  + f" raw={rec.raw_score if rec.raw_score is None else round(rec.raw_score,3)}"
                  f" best={bs:.3f}@{bi+1}  contrast={self.contrast:.2e}"
                  f"  reduce {_secs(rec.reduce_s)} / eval {_secs(eval_s)}  ({elapsed/3600:.2f} h)")
+        self._tally_draws(ia, rec)
+
+    #: the share of failed draws, after at least ``FAILED_DRAWS_AFTER`` of them, at which the
+    #: log warns once per annulus (the end of the search gives the count either way)
+    FAILED_DRAWS_WARN = 0.1
+    FAILED_DRAWS_AFTER = 20
+
+    def _tally_draws(self, ia: int, rec: EvalRecord) -> None:
+        """Count a search trial's draws and failed draws, with their reasons, and warn once
+        when failures are common.  Each failed draw also says why on its own line, but a
+        rate is what shows a systematic cause: at 1.1 FWHM the inner guard failed half the
+        draws for 400 evaluations before the run was stopped (NEAR2 note, 2026-10-13)."""
+        t = self._draw_tally.setdefault(ia, {"n": 0, "failed": 0, "why": collections.Counter(),
+                                             "warned": False, "since_resume": False})
+        if rec.meta.get("draw_n"):
+            n, whys = int(rec.meta["draw_n"]), [w for w in (rec.meta.get("draw_why") or []) if w]
+        else:
+            n, whys = 1, ([rec.meta.get("why") or "score not finite"] if rec.score is None else [])
+        t["n"] += n
+        t["failed"] += len(whys)
+        t["why"].update(whys)
+        if (not t["warned"] and t["n"] >= self.FAILED_DRAWS_AFTER
+                and t["failed"] >= self.FAILED_DRAWS_WARN * t["n"]):
+            t["warned"] = True
+            self.log(f"  ** annulus {ia+1}: {t['failed']} of the first {t['n']} draws failed "
+                     f"({_whys(t['why'])}).  A failed draw does not count toward its trial's mean.  "
+                     f"Each one's reason is on its log line and in results.jsonl (meta 'why', 'draw_why')")
+
+    def _draw_note(self, ia: int) -> None:
+        """The end of a search: how many of its draws failed, and why."""
+        t = self._draw_tally.get(ia)
+        if not t or not t["failed"]:
+            return
+        since = " since the resume" if t["since_resume"] else ""
+        self.log(f"  note: {t['failed']} of {t['n']} draws{since} failed ({_whys(t['why'])})")
 
     def _recal_check(self, ia: int, i: int) -> Optional[Tuple[str, float, Optional[float], Optional[float]]]:
         """The re-calibration revisit after the trial at index ``i``, decided but not acted
@@ -2411,6 +2550,7 @@ class Runner:
                 x0, "seed", tag=f"a{ia+1}_seed",
                 on_draw=lambda j, nd, r, i_, c_: self._on_draw(ia, j, nd, r, i_, c_))
             self._append(rec)
+            self._tally_draws(ia, rec)
             self._set_best_images(rec, inj, clean)
             self.checkpoint()          # not routine: a new segment (annulus start, re-calibration)
             self._save_eval_images(rec, inj, clean)
@@ -2455,6 +2595,7 @@ class Runner:
                     winner = dict(cand, x=np.asarray(row["x"], float), config=cfg)
                 continue
             trials, trial_imgs, trial_src, trial_ps, samples_r, samples_s = [], [], [], [], [], []
+            vwhy: Dict[int, str] = {}           # trial -> why it has no score (this session's trials)
             clean = None
             rng_before = self.rng.bit_generator.state   # before this candidate's draws: see _load_validation_partial
             part = self._load_validation_trials(ia, ci, cands)
@@ -2493,6 +2634,8 @@ class Runner:
                         inj = res
                         r = self.objective.score_raw(inj.image, src, None if clean is None else clean.image,
                                                      **self._fm_for(inj, clean))
+                        if not np.isfinite(r.score):
+                            vwhy[t] = getattr(r, "why", None) or "score not finite"
                         trials.append(r.score)
                         trial_imgs.append(inj)
                         trial_src.append(src)
@@ -2504,6 +2647,7 @@ class Runner:
                                    r, list(trials))
                     except Exception as exc:
                         self.log(f"  validation trial failed: {exc!r}")
+                        vwhy[t] = _error_why(exc)
                         trials.append(np.nan)
                         trial_imgs.append(None)
                         trial_src.append(src)
@@ -2521,9 +2665,15 @@ class Runner:
                    "trials": [None if not np.isfinite(v) else float(v) for v in vs],
                    "trial_sources": [[list(s.as_tuple()) for s in src] for src in trial_src],
                    "x": [float(v) for v in x], "config": cfg.to_dict(), "committed_trial": commit}
+            nbad = int(np.count_nonzero(~np.isfinite(vs)))
+            if nbad:
+                # trials resumed from an interrupted validation carry no reason
+                row["trial_why"] = [None if np.isfinite(v) else vwhy.get(t, "not recorded") for t, v in enumerate(vs)]
             table.append(row)
             self.log(f"  validation cand {ci+1}/{len(cands)} (eval {e+1}, search {self.history.y[e]:.3f}) "
-                     f"-> validated {vscore:.3f}")
+                     f"-> validated {vscore:.3f}"
+                     + (f"  ({nbad} of {vs.size} trials failed: "
+                        f"{_whys(collections.Counter(w for w in row['trial_why'] if w))})" if nbad else ""))
             if self.cfg.write_setup_files:
                 self._write_setup_file(os.path.join(self._ann_dir(ia), f"valid_cand{ci+1:02d}_setup.txt"), "valid",
                                        ia, e + 1, cfg, trial_src[commit] if commit >= 0 else [], self.contrast,
@@ -2785,6 +2935,7 @@ class Runner:
                      f"band {self._band(ia)[0]:.3f}-{self._band(ia)[1]:.3f}\"")
             if ia > 0 and not cc.warm_start_previous:
                 self.contrast = float(self.cfg.contrast0)
+            self._draw_tally.pop(ia, None)
             contrast, kdef, cinfo = self.calibrate(ia)
             self.contrast = contrast
             self._k_default = kdef
@@ -2797,6 +2948,8 @@ class Runner:
             self._reset_history(ia)
             self._search_annulus(ia, len(self.history))
         else:
+            self._draw_tally[ia] = {"n": 0, "failed": 0, "why": collections.Counter(), "warned": False,
+                                    "since_resume": True}
             self._restore_best_images(ia)
             self._search_annulus(ia, resume_index)
         return self._finish_annulus(ia)
@@ -2857,6 +3010,7 @@ class Runner:
                 f"and start again (a resume would just find the same {ntot} failures and stop here).")
         elif ntot and nok < ntot:
             self.log(f"  note: {ntot - nok}/{ntot} evaluations failed")
+        self._draw_note(ia)
         self.log(f"  search done: best {bs:.3f} at eval {bi+1}")
         self._memory_note()
         table, vwin, winner = ([], -1, {})
@@ -3393,7 +3547,7 @@ class Runner:
                            pv_divmin=float(self.cfg.pv_divmin), n_init=self.cfg.per_annulus(self.cfg.n_init, ia),
                            nsrc=self._nsrc(ia), rng=rng, known=list(getattr(self.sampler, "known", ()) or ()),
                            angle_convention=self.reducer.angle_convention,
-                           flatten=self.flatten_products, log=self.log,
+                           flatten=self.flatten_products, log=self.log, inner_fwhm=self._inner_fwhm(),
                            # several configurations in flight, each its clean + injected pair
                            run_calls=lambda cs: self._run_ordered(
                                cs, max(1, self._reduction_window(len(cfg_w.selected)) // 2)))

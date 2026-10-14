@@ -15,15 +15,17 @@ only by option flags of :class:`MawetPeakSNR`.
 """
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy import ndimage
 
 __all__ = ["radprof", "declip", "gaussian_kernel", "source_xy", "mawet_peak_snr",
            "injection_difference_snr", "aperture_mawet_snr", "clip0", "MawetPeakSNR",
-           "InjectionDifferenceSNR", "Objective", "Source", "nanmedian_even", "pa_wedge_mask"]
+           "InjectionDifferenceSNR", "Objective", "Source", "nanmedian_even", "pa_wedge_mask",
+           "why_failed", "WHY_GUARD", "WHY_RING", "WHY_NOISE"]
 
 
 def pa_wedge_mask(shape: Tuple[int, int], bands: Sequence[Tuple[float, float]],
@@ -228,21 +230,32 @@ def _aperture_sum(img: np.ndarray, x: float, y: float, r: float) -> float:
 # ----------------------------------------------------------------------------
 # per-source detection S/N  (near2_snrpk)
 # ----------------------------------------------------------------------------
+#: Why :func:`mawet_peak_snr` leaves a source's S/N NaN (``details[s]['why']``).  The
+#: objective puts them in a failed draw's record and log line.
+WHY_GUARD = "inside the inner guard"
+WHY_RING = "fewer than 5 apertures on its ring"
+WHY_NOISE = "no noise samples on its ring or band"
+
+
 def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                    kernel=None, search_px: float = 1.5,
                    excl_fwhm: float = 1.5, known: Sequence[Tuple[float, float]] = (),
                    declip_nsig: Optional[float] = 6.0, band_fwhm: float = 0.6,
                    min_ring: int = 6, penalty: str = "geometric",
-                   pixel_mask: Optional[np.ndarray] = None,
+                   pixel_mask: Optional[np.ndarray] = None, inner_fwhm: float = 1.0,
                    angle_convention: str = "pa", return_details: bool = False):
     """Matched-filter Mawet et al. (2014) detection S/N of each source.
 
     * optional single-pixel de-spiking, then convolution with ``kernel`` (default
       FWHM Gaussian);
+    * no S/N for a source placed inside ``inner_fwhm`` FWHM of the star, or so close that
+      its ring holds fewer than 5 apertures.  Both are asked of the position the source
+      was given, ``rho``, so a clean and an injected image are judged by the same
+      geometry;
     * the source is *located* as the matched-filter peak within ``search_px`` of
       the nominal position (absorbs sub-pixel recovery offsets);
-    * noise from ``nap = floor(2 pi r / fwhm)`` apertures on the same ring, skipping
-      apertures within ``excl_fwhm*fwhm`` of any injected or ``known`` source;
+    * noise from ``nap = floor(2 pi r / fwhm)`` apertures on the ring through that peak,
+      skipping apertures within ``excl_fwhm*fwhm`` of any injected or ``known`` source;
     * a radial band ``|r' - r| <= band_fwhm*fwhm`` gives a sigma FLOOR (and replaces
       the ring when it holds fewer than ``min_ring`` clean samples);
     * small-sample penalty ``sqrt(1 + 1/n)`` with ``n = max(nap, 3)`` (``penalty=
@@ -255,8 +268,16 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
     :mod:`klip_tpe.fmmf`.  Each distinct kernel costs one convolution of the frame.
 
     Returns per-source S/N, **which may be negative** (peak below the ring mean) or
-    NaN (inside 1 FWHM, starved ring).  ``pixel_mask`` (True = exclude) removes
-    e.g. disk pixels from the noise samples.
+    NaN (inside the inner guard, no noise samples), and with ``return_details`` each
+    source's geometry and, for a NaN, ``'why'`` (:data:`WHY_GUARD`, :data:`WHY_RING`,
+    :data:`WHY_NOISE`).  ``pixel_mask`` (True = exclude) removes e.g. disk pixels from
+    the noise samples.
+
+    The IDL ``near2_snrpk`` asked the guard of the located peak instead.  On a clean
+    image that peak is whichever noise pixel is highest within ``search_px``, and for a
+    source at 1.1 FWHM it lay inside 1 FWHM about half the time, so the clean term, and
+    with it the draw, failed while the injected image scored (NEAR2 note, 2026-10-13).
+    Where both guards pass, the S/N is the same.
     """
     img = np.asarray(img, float)
     ny, nx = img.shape
@@ -308,7 +329,15 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
         r = float(np.hypot(px - cx, py - cy))
         nap = int(np.floor(2 * np.pi * r / fwhm))
         det = {"x": px, "y": py, "r": r, "nap": nap, "peak": float(A[py, px]) if np.isfinite(pkv) else np.nan}
-        if r < fwhm or nap < 5:
+        r_req = float(rho[s]) / pxscale                # where the source was put (px)
+        # (a source placed exactly on the guard passes: rho = floor * fwhm_as comes back
+        # through pxscale a rounding error either side of it)
+        if not r_req >= float(inner_fwhm) * fwhm * (1.0 - 1e-9):
+            det["why"] = WHY_GUARD
+            details.append(det)
+            continue
+        if int(np.floor(2 * np.pi * r_req / fwhm)) < 5:
+            det["why"] = WHY_RING
             details.append(det)
             continue
         th0 = np.arctan2(py - cy, px - cx)
@@ -364,6 +393,8 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                 sd = max(sd, sd_band)
             n_pen = max(nap, 3) if penalty == "geometric" else max(nclean, 1)
             snr[s] = (A[py, px] - bg) / (sd * np.sqrt(1.0 + 1.0 / n_pen))
+        else:
+            det["why"] = WHY_NOISE
         det.update(sigma=sd, bg=bg, nclean=nclean, sd_band=sd_band)
         details.append(det)
     if return_details:
@@ -492,7 +523,11 @@ class MawetPeakSNR(Metric):
     MIRI 4QPM dead zones, a glow-stick residual.  On a ring the mask already eats, the
     mean is taken over the surviving pixels and then removed from all of them, which
     biases the very sources the metric is trying to measure.  Pass ``flatten=True`` to
-    restore the IDL behaviour."""
+    restore the IDL behaviour.
+
+    ``inner_fwhm``: no S/N for a source placed inside this many FWHM of the star.  The
+    :class:`~klip_tpe.runner.Runner` lowers it to the injection floor when the floor is
+    closer in (``RunConfig.min_r_fwhm``), so a run that injects there is scored there."""
 
     pxscale: float
     fwhm: float
@@ -509,6 +544,7 @@ class MawetPeakSNR(Metric):
     flatten: bool = False
     angle_convention: str = "pa"
     name: str = "mawet_peak"
+    inner_fwhm: float = 1.0
 
     def kernel(self, rho) -> np.ndarray:
         if self.kernel_fn is not None:
@@ -517,13 +553,19 @@ class MawetPeakSNR(Metric):
                 return k
         return gaussian_kernel(self.mf_fwhm or self.fwhm)
 
-    def per_source(self, img_inj, img_clean, rho, theta) -> np.ndarray:
+    def per_source(self, img_inj, img_clean, rho, theta, why: Optional[list] = None) -> np.ndarray:
+        """Per-source S/N.  ``why``: a list, filled with each source's reason for a NaN
+        (None for a finite S/N)."""
         img = radprof(img_inj) if self.flatten else np.asarray(img_inj, float)
-        return mawet_peak_snr(img, rho, theta, self.pxscale, self.fwhm, kernel=self.kernel(rho),
-                              search_px=self.search_px, excl_fwhm=self.excl_fwhm, known=self.known,
-                              declip_nsig=self.declip_nsig, band_fwhm=self.band_fwhm,
-                              min_ring=self.min_ring, penalty=self.penalty,
-                              pixel_mask=self.pixel_mask, angle_convention=self.angle_convention)
+        snr, det = mawet_peak_snr(img, rho, theta, self.pxscale, self.fwhm, kernel=self.kernel(rho),
+                                  search_px=self.search_px, excl_fwhm=self.excl_fwhm, known=self.known,
+                                  declip_nsig=self.declip_nsig, band_fwhm=self.band_fwhm,
+                                  min_ring=self.min_ring, penalty=self.penalty,
+                                  pixel_mask=self.pixel_mask, inner_fwhm=self.inner_fwhm,
+                                  angle_convention=self.angle_convention, return_details=True)
+        if why is not None:
+            why[:] = [d.get("why") for d in det]
+        return snr
 
     def describe(self) -> Dict:
         return {"name": self.name, "fwhm": self.fwhm, "pxscale": self.pxscale,
@@ -531,6 +573,7 @@ class MawetPeakSNR(Metric):
                 "search_px": self.search_px, "excl_fwhm": self.excl_fwhm,
                 "known": [list(k) for k in self.known], "declip_nsig": self.declip_nsig,
                 "band_fwhm": self.band_fwhm, "min_ring": self.min_ring, "penalty": self.penalty,
+                "inner_fwhm": self.inner_fwhm,
                 # a masked noise estimate is not comparable with an unmasked one, so the
                 # run's own setup record has to say whether one was in force
                 "pixel_mask_px": None if self.pixel_mask is None else int(np.count_nonzero(self.pixel_mask)),
@@ -571,10 +614,60 @@ class ScoreResult:
     per_source: np.ndarray               # corrected per-source values
     raw_per_source: np.ndarray           # uncorrected injected-image values
     clean_per_source: Optional[np.ndarray] = None
+    #: why ``score`` is NaN (None when it is not), e.g. ``"clean S/N NaN (inside the inner
+    #: guard)"``: which image failed at each source, and the metric's reason when it gives one
+    why: Optional[str] = None
 
     @property
     def raw_score(self) -> float:
         return nanmedian_even(self.raw_per_source)
+
+
+_TAKES_WHY: Dict[Any, bool] = {}
+
+
+def _takes_why(metric) -> bool:
+    """Does ``metric.per_source`` take ``why=`` (see :meth:`MawetPeakSNR.per_source`)?"""
+    ps = getattr(metric, "per_source", None)
+    key = getattr(ps, "__func__", ps)
+    try:
+        return _TAKES_WHY[key]
+    except (KeyError, TypeError):
+        pass
+    try:
+        ok = "why" in inspect.signature(ps).parameters
+    except (TypeError, ValueError):
+        ok = False
+    try:
+        _TAKES_WHY[key] = ok
+    except TypeError:
+        pass
+    return ok
+
+
+def why_failed(raw, why_raw=None, clean=None, why_clean=None) -> str:
+    """Why an aggregate of per-source values is NaN: at each source, the image whose S/N
+    was NaN (the injected one first) and the metric's reason when it gave one, counted
+    over the sources."""
+    raw = np.atleast_1d(np.asarray(raw, float))
+    if raw.size == 0:
+        return "no sources"
+    items: List[str] = []
+    for s in range(raw.size):
+        if not np.isfinite(raw[s]):
+            r = why_raw[s] if why_raw else None
+            items.append("injected S/N NaN" + (f" ({r})" if r else ""))
+        elif clean is not None and not np.isfinite(np.asarray(clean, float)[s]):
+            r = why_clean[s] if why_clean else None
+            items.append("clean S/N NaN" + (f" ({r})" if r else ""))
+        else:
+            items.append("S/N not finite")
+    counts: Dict[str, int] = {}
+    for it in items:
+        counts[it] = counts.get(it, 0) + 1
+    if raw.size == 1:
+        return items[0]
+    return ", ".join(f"{k} at {v} of {raw.size} sources" for k, v in counts.items())
 
 
 class Objective:
@@ -621,28 +714,40 @@ class Objective:
         :class:`Metric` keeps its 4-argument signature."""
         return {"fm": fm} if self.metric.needs_fm else {}
 
+    def _values(self, img, img_clean, rho, th, kw) -> Tuple[np.ndarray, Optional[List[Optional[str]]]]:
+        """The metric's per-source values, and each NaN one's reason when the metric can
+        give one (``why=``, asked only of a metric that takes it)."""
+        if not _takes_why(self.metric):
+            return self.metric.per_source(img, img_clean, rho, th, **kw), None
+        why: List[Optional[str]] = []
+        v = self.metric.per_source(img, img_clean, rho, th, why=why, **kw)
+        return v, (why if len(why) == len(rho) else None)
+
     def score_raw(self, img_inj, sources: Sequence[Source], img_clean=None, fm=None) -> ScoreResult:
         rho = [s.rho for s in sources]
         th = [s.theta for s in sources]
-        raw = self.metric.per_source(img_inj, img_clean, rho, th, **self._fmkw(fm))
-        return ScoreResult(self._agg(raw), raw, raw, None)
+        raw, wr = self._values(img_inj, img_clean, rho, th, self._fmkw(fm))
+        agg = self._agg(raw)
+        return ScoreResult(agg, raw, raw, None, why=None if np.isfinite(agg) else why_failed(raw, wr))
 
     def score_search(self, img_inj, sources: Sequence[Source], img_clean=None, fm=None) -> ScoreResult:
         rho = [s.rho for s in sources]
         th = [s.theta for s in sources]
         kw = self._fmkw(fm)
-        raw = self.metric.per_source(img_inj, img_clean, rho, th, **kw)
+        raw, wr = self._values(img_inj, img_clean, rho, th, kw)
         if not self.effective_clean_subtract:
             # plain metric, or a difference metric that already used the clean image:
             # the search score IS the raw score (no separate clean term)
-            return ScoreResult(self._agg(raw), raw, raw, None)
+            agg = self._agg(raw)
+            return ScoreResult(agg, raw, raw, None, why=None if np.isfinite(agg) else why_failed(raw, wr))
         if img_clean is None:
             raise ValueError("clean_subtract objective needs the clean image")
         # the FM template is a property of the configuration, not of the injection, so the
         # clean term is filtered with exactly the same kernels
-        cl = self.metric.per_source(img_clean, None, rho, th, **kw)
+        cl, wc = self._values(img_clean, None, rho, th, kw)
         corr = raw - clip0(cl)
-        return ScoreResult(self._agg(corr), corr, raw, cl)
+        agg = self._agg(corr)
+        return ScoreResult(agg, corr, raw, cl, why=None if np.isfinite(agg) else why_failed(raw, wr, cl, wc))
 
     def describe(self) -> Dict:
         return {"metric": self.metric.describe(), "clean_subtract": self.clean_subtract,

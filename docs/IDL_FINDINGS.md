@@ -89,6 +89,17 @@ separation) and the Gaussian fallback give 6.30 vs 6.42.  Residual ~5–15 % dif
 are attributable to the `aper`-vs-pixel ring sampling and de-spike details; the sign,
 location logic, small-sample penalty and clean-subtraction clamp behave identically.
 
+The inner guard (since 2026-10-13).  `near2_snrpk` gives no S/N when the located peak lies inside
+1 FWHM or its ring would hold fewer than 5 apertures (`r ge fwhm and nap ge 5`, of the peak).  At
+IDL's 1.5 FWHM injection floor the peak never moves that far in.  With `--min-r-fwhm 1.0` the port
+put a source at 1.10 FWHM, and the clean image's peak, the highest noise pixel within 1.5 px,
+lay inside 1 FWHM in about half the draws, which then failed (1,110 of 2,219 in
+`run_20261013_170907`).  The port now asks both conditions of the radius the source was given
+and still lays the ring through the located peak, so wherever the IDL guard passes the S/N is
+the same (2,729 of 2,729 random sources, to the bit).  The threshold is
+`MawetPeakSNR.inner_fwhm`, 1.0, which the Runner lowers to the injection floor when the floor
+is closer in.
+
 ## 3. Reduction agreement (per night, same config, same injections)
 
 With the worker-default thresholds:
@@ -196,7 +207,8 @@ the inner edge to 1.5 FWHM and lays the centred ladder; for **two sources** the 
 `sqrt((r_in²+r_out²)/2)` so both land there 180° apart (`RunConfig.pair_area_midpoint=True`;
 CLI `--ladder-pair` restores the pre-2026-09-05 ladder).  One sampler object serves search,
 calibration, validation, param_verify (its fixed set now comes from `_band` too) and the
-products.  `--min-r-fwhm` (`RunConfig.min_r_fwhm`) moves its 1.5 FWHM floor for all of them.
+products.  `--min-r-fwhm` (`RunConfig.min_r_fwhm`) moves its 1.5 FWHM floor for all of them, and
+the metric's inner guard follows a floor inside 1 FWHM down (§2).
 
 Check against IDL: annulus 1 ([0, 20] px) injects at `rho = 0.645"` (14.1 px) in both codes
 (IDL `run_20260906_173000` calibration setup: 0.645" at PA 308.86/128.86; Python: 0.645" at

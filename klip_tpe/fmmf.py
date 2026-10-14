@@ -151,6 +151,9 @@ class FMMFSNR(Metric):
     name: str = "fmmf"
     needs_fm: bool = True
     stats: Dict[str, int] = field(default_factory=lambda: {"fm": 0, "fallback": 0})
+    #: no S/N for a source placed inside this many FWHM of the star (as
+    #: :class:`~klip_tpe.metrics.MawetPeakSNR`, which the Runner fits to the injection floor)
+    inner_fwhm: float = 1.0
 
     def _fallback(self, rho_one: float) -> np.ndarray:
         if self.kernel_fn is not None:
@@ -175,14 +178,18 @@ class FMMFSNR(Metric):
                 out.append(k)
         return out
 
-    def per_source(self, img_inj, img_clean, rho, theta, fm=None) -> np.ndarray:
+    def per_source(self, img_inj, img_clean, rho, theta, fm=None, why: Optional[list] = None) -> np.ndarray:
         img = radprof(img_inj) if self.flatten else np.asarray(img_inj, float)
         ks = self.kernels(fm, rho, theta, shape=np.shape(img))
-        return mawet_peak_snr(img, rho, theta, self.pxscale, self.fwhm, kernel=ks,
-                              search_px=self.search_px, excl_fwhm=self.excl_fwhm, known=self.known,
-                              declip_nsig=self.declip_nsig, band_fwhm=self.band_fwhm,
-                              min_ring=self.min_ring, penalty=self.penalty,
-                              pixel_mask=self.pixel_mask, angle_convention=self.angle_convention)
+        snr, det = mawet_peak_snr(img, rho, theta, self.pxscale, self.fwhm, kernel=ks,
+                                  search_px=self.search_px, excl_fwhm=self.excl_fwhm, known=self.known,
+                                  declip_nsig=self.declip_nsig, band_fwhm=self.band_fwhm,
+                                  min_ring=self.min_ring, penalty=self.penalty,
+                                  pixel_mask=self.pixel_mask, inner_fwhm=self.inner_fwhm,
+                                  angle_convention=self.angle_convention, return_details=True)
+        if why is not None:
+            why[:] = [d.get("why") for d in det]
+        return snr
 
     def describe(self) -> Dict:
         n = max(self.stats["fm"] + self.stats["fallback"], 1)
@@ -193,7 +200,7 @@ class FMMFSNR(Metric):
                 "excl_fwhm": self.excl_fwhm, "known": [list(k) for k in self.known],
                 "declip_nsig": self.declip_nsig, "band_fwhm": self.band_fwhm,
                 "min_ring": self.min_ring, "penalty": self.penalty, "flatten": self.flatten,
-                "fm_from_difference": self.fm_from_difference,
+                "inner_fwhm": self.inner_fwhm, "fm_from_difference": self.fm_from_difference,
                 "fm_fraction": round(self.stats["fm"] / n, 4),
                 "n_filtered": self.stats["fm"] + self.stats["fallback"]}
 

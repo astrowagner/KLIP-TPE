@@ -171,7 +171,8 @@ def param_verify_cubes(cclean: np.ndarray, cinj: np.ndarray, wts: Sequence[float
                        sources: Sequence[Source], ccal: float, pxscale: float, fwhm: float,
                        rlo: float, rhi: float, out_dir: Optional[str] = None, tag: str = "01",
                        snr_thr: float = 3.0, angle_convention: str = "pa",
-                       flatten: bool = False, write_fits: bool = True) -> Dict[str, Any]:
+                       flatten: bool = False, write_fits: bool = True,
+                       inner_fwhm: float = 1.0) -> Dict[str, Any]:
     """``near2m_paramverify`` (param_verify 135-249) on ``(N, ny, nx)`` clean and
     injected cubes of the ensemble.
 
@@ -188,7 +189,8 @@ def param_verify_cubes(cclean: np.ndarray, cinj: np.ndarray, wts: Sequence[float
        ``combsnr = snr_map(radprof(comb))``.
     5. Contrast curve (221-229): ``ps = mawet_peak_snr(radprof(combj), sources)``;
        ``reval = rlo + (rhi-rlo)(i+0.5)/12``; ``K_s = ps_s sigma(r_s) / ccal``;
-       ``Kc = median(K > 0)``; ``c5 = 5 sigma(r) / Kc``.
+       ``Kc = median(K > 0)``; ``c5 = 5 sigma(r) / Kc``.  ``inner_fwhm`` is the metric's
+       inner guard (:func:`~klip_tpe.metrics.mawet_peak_snr`), the run's own.
 
     Writes ``paramverify_{stim,detfrac,recovery,combine,combsnr}_NN.fits`` and
     ``paramverify_calib_NN.txt`` into ``out_dir`` when given.  Returns a dict
@@ -249,7 +251,8 @@ def param_verify_cubes(cclean: np.ndarray, cinj: np.ndarray, wts: Sequence[float
     combj = _wsum(cinj)
     combsnr = snr_map(_flat(comb), fwhm)
 
-    ps = mawet_peak_snr(_flat(combj), rho, th, pxscale, fwhm, angle_convention=angle_convention)
+    ps = mawet_peak_snr(_flat(combj), rho, th, pxscale, fwhm, inner_fwhm=inner_fwhm,
+                        angle_convention=angle_convention)
     reval = rlo + (rhi - rlo) * (np.arange(12) + 0.5) / 12.0
     rp_comb = _flat(comb)
     sig_r = radial_rms(rp_comb, reval)
@@ -309,8 +312,8 @@ def param_verify(history: History, space: SearchSpace, reduce_fn: Callable[..., 
                  n_init: Optional[int] = None, nsrc: int = 4, fixed_sources: Optional[Sequence[Source]] = None,
                  rng: Optional[np.random.Generator] = None, known: Sequence[Tuple[float, float]] = (),
                  snr_thr: float = 3.0, angle_convention: str = "pa", flatten: bool = False,
-                 log: Callable[[str], None] = print, run_calls: Optional[Callable] = None
-                 ) -> Optional[Dict[str, Any]]:
+                 log: Callable[[str], None] = print, run_calls: Optional[Callable] = None,
+                 inner_fwhm: float = 1.0) -> Optional[Dict[str, Any]]:
     """Run the param_verify stage for one annulus (opt 7781-7935 + ``near2m_paramverify``).
 
     Parameters
@@ -336,6 +339,9 @@ def param_verify(history: History, space: SearchSpace, reduce_fn: Callable[..., 
         configurations' re-reductions (no-argument callables) and yields their results in
         order, an exception standing for a failed one (:meth:`Runner._run_ordered`, which
         keeps several in flight).  Default: one after another.
+    inner_fwhm
+        the metric's inner guard for the contrast curve's S/N (the Runner passes its own,
+        which follows the injection floor).
 
     Weights are ``max(score, 0)`` of each kept config (opt 7850).  Returns the
     dict of :func:`param_verify_cubes` extended with ``eval_indices`` and ``X``,
@@ -379,7 +385,8 @@ def param_verify(history: History, space: SearchSpace, reduce_fn: Callable[..., 
         log("param_verify: fewer than 2 configs reduced -- skipped")
         return None
     out = param_verify_cubes(np.stack(cclean), np.stack(cinj), wts, fixed_sources, ccal, pxscale, fwhm,
-                             rlo, rhi, out_dir, tag, snr_thr, angle_convention, flatten=flatten)
+                             rlo, rhi, out_dir, tag, snr_thr, angle_convention, flatten=flatten,
+                             inner_fwhm=inner_fwhm)
     out["eval_indices"] = kept
     out["X"] = history.X[kept].copy()
     log(f"param_verify annulus {tag}: {len(kept)} configs; combine K~{out['Kc']:.3E}")

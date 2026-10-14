@@ -155,6 +155,11 @@ is the newest.
 * `results.txt` mirrors IDL's `optimize_tpe_results.txt`; `annulusNN/evalNNNN_setup.txt` per evaluation.
 * `klip_stitched_running*.fits` every 10 evaluations.
 * `klip-tpe compare --idl-run <IDL run dir> --out cmp ...` replays a running IDL run through Python (for cross-validation against the IDL original).
+* A draw without a score says why on its line, as in `draw 3/5 score=failed (clean S/N NaN (inside the inner guard))`,
+  and `results.jsonl` keeps the reason (`meta['why']`, a trial's draws in `meta['draw_why']`), as do
+  `calibration.json` (`why`) and `validation.json` (`trial_why`).  A failed draw does not count toward its
+  trial's mean.  The log warns once per annulus when a tenth or more of at least 20 draws have failed, and
+  the end of each search gives the count with the commonest reasons.
 
 ## Afterwards
 

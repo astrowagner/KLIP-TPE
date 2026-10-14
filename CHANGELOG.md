@@ -1,9 +1,9 @@
 # Changelog
 
-## Unreleased — 2026-10-13 (injection only into the kept frames and on the job's threads, the display's annulus books in a process of their own, `--n-sources`, `--min-r-fwhm`)
+## Unreleased — 2026-10-13 (injection only into the kept frames and on the job's threads, the display's annulus books in a process of their own, `--n-sources`, `--min-r-fwhm`, the metric's inner guard at the source's own radius, failed draws that say why)
 
-From three NEAR2 notes of 2026-10-13: the parallelism note, the note on the source count and
-the note on the injection floor.
+From four NEAR2 notes of 2026-10-13: the parallelism note, the note on the source count, the
+note on the injection floor and the note on the metric's inner guard.
 
 - **A job injects only the frames its selection keeps, on its own threads.**  On patrick
   `inject_sources` was the largest fixed cost of a job, 0.42-0.49 s per n6 job at any bin,
@@ -77,8 +77,42 @@ the note on the injection floor.
   0.427″, where the old floor clamped it, to its mid-radius of 0.312″.
   - When the count used still leaves a source's Mawet ring fewer than `min_ring` clean
     apertures, the log says so once per annulus, since that source's S/N then comes from the
-    radial band.  On NEAR annulus 1 that is so at 0.312″ (0 clean apertures) and already at
-    0.427″ (4).  The candidate search keeps its own inner limit.
+    radial band.  It counts the apertures at the source over 12 azimuths, because where the
+    source falls on the pixel grid moves the count by one.  On NEAR annulus 1 a source keeps
+    3 to 4 at 0.312″, and 5 to 6 at 0.427″.  The candidate search keeps its own inner limit.
+- **The metric's inner guard asks where a source was put.**  `run_20261013_170907`
+  (`--min-r-fwhm 1.0 --n-sources 1 2 --n-remeasure 5`) was stopped after 443 evaluations with
+  1,110 of its 2,219 draws failed.  Annulus 1's one source sat at 0.312″, 1.10 FWHM.
+  `mawet_peak_snr` locates a source as the filtered image's peak within 1.5 px and gave no S/N
+  to a peak inside 1 FWHM, as `near2_snrpk` does.  On the injected image that peak is the
+  planet.  On the clean image it is the highest noise pixel nearby, which lay inside 1 FWHM
+  about half the time, so the clean term was NaN and the draw failed.  It depended on position
+  angle through the pixel grid, it left `partition_snr` empty for 7-14 % of the pairs of
+  evaluation and night, and it made calibration trial 3 a NaN, so the annulus ran
+  uncalibrated.  IDL's 1.5 FWHM floor never let a peak move that far in.
+  - The guard, and the rule that a ring needs at least 5 apertures, are now asked of the
+    radius the source was given.  The ring is still laid through the located peak.  Wherever
+    the old guard passed, the S/N is the same.  Of 2,729 random sources both versions scored,
+    all scored the same to the bit, and only sources put inside 1 FWHM lost a score.  On NEAR2
+    n6 the same short run of annulus 1 failed 14 of its 30 draws before and none now, and a
+    calibration trial that came back NaN before is gone.
+  - The threshold is `MawetPeakSNR.inner_fwhm`, 1.0 as before, also on `FMMFSNR`.  The Runner
+    lowers it to the injection floor when the floor is closer in, so a run with
+    `--min-r-fwhm 0.9` is scored from 0.9 FWHM, and says so.  It never raises it.
+    param_verify's contrast curve scores with the same guard, `run_setup.json` records it
+    under the objective, and a resume puts it back.  Below 0.80 FWHM a ring holds fewer than 5
+    apertures and a source there still has no S/N.
+- **A draw without a score says why.**  `score=failed` said nothing else for 400 evaluations.
+  - Its log line gives the reason, as in `draw 3/5 score=failed (clean S/N NaN (inside the
+    inner guard))`.  The reason names the image that had no S/N and the metric's own reason
+    (`inside the inner guard`, `fewer than 5 apertures on its ring`, `no noise samples on its
+    ring or band`), or the error of a reduction that raised.  `results.jsonl` keeps it as
+    `meta['why']`, and a trial's draws as `meta['draw_why']`.  `calibration.json` and
+    `validation.json` keep theirs as `why` and `trial_why`.
+  - A trial's line counts its failed draws, as in `(mean of 5, sd 0.38, 2 failed)`, and the
+    calibration and validation lines count theirs with the commonest reasons.  The log warns
+    once per annulus when a tenth or more of at least 20 draws have failed, and the end of each
+    search gives the count.
 
 ## Unreleased — 2026-10-12 (checkpoints that survive a machine crash, less work per evaluation on the main thread, each trial's own times on the panel)
 
