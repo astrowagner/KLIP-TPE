@@ -157,7 +157,13 @@ class KLIPReducer(Reducer):
         corr_thresh, noise_max, coronoise_max, fast, spat_mean, temp_mean, n_min_ref,
         comb_type ('nwadi' | 'mean' | 'median'),
         use_rdi (bool), rdi_mode ('rdi' | 'ardi'), do_destripe (bool), destripe_clip (float),
-        fm_selfsub (bool, KLIP-FM self-subtraction terms; default True)
+        fm_selfsub (bool, KLIP-FM self-subtraction terms; default True),
+        hp_nan_aware (bool, default False: the high-pass of the science frames is IDL's
+            ``smooth`` without ``/nan``, and a frame with a NaN pixel anywhere comes out
+            NaN all over, since the boxcar's running sum carries the NaN along its line.
+            True is ``smooth(/nan)``: each NaN pixel stays NaN and the rest of the frame is
+            filtered.  For frames with NaN at their registration edges, say ALES's, where
+            False dropped every bin with such a frame -- 40 of 108 at bin 5 on WISPIT 2.)
 
     The chain: frame selection -> inject (the kept frames) -> high-pass -> [destripe 90, 0]
     -> angle-aware binning -> annular KLIP [RDI/ARDI basis, KLIP-FM] -> high-pass
@@ -209,7 +215,7 @@ class KLIPReducer(Reducer):
                          "fast": False, "spat_mean": False, "temp_mean": False,
                          "n_min_ref": 10, "comb_type": "nwadi",
                          "use_rdi": False, "rdi_mode": "ardi", "do_destripe": False, "destripe_clip": 0.0,
-                         "fm_selfsub": True}
+                         "fm_selfsub": True, "hp_nan_aware": False}
         self.defaults.update(defaults or {})
         self._inj_cache: Dict[Tuple, _FrameCache] = {}
         self._fm_cache: Dict[Tuple, _FrameCache] = {}
@@ -569,6 +575,7 @@ class KLIPReducer(Reducer):
         # high-pass, the frames still carry their background.  The IDL high-passes every
         # frame before binning, and a destriped cube keeps that order (not linear).
         hp_binned = str(p.get("hp_order", "raw")).lower() == "binned" and filt > 1 and not p["do_destripe"]
+        hp_nan = _flag(p.get("hp_nan_aware", False))
 
         def prep(c, selected=False):
             """frame selection, high-pass, destripe and binning of a science cube
@@ -580,9 +587,9 @@ class KLIPReducer(Reducer):
                     c = c[keep]
             if hp_binned:
                 return bin_frames(c, a_, bin_, dth, return_groups=True, threads=nth, dtype=np.float64,
-                                  then=lambda bc: highpass_stack(bc, filt, nan_aware=False, threads=nth))
+                                  then=lambda bc: highpass_stack(bc, filt, nan_aware=hp_nan, threads=nth))
             if filt > 1:
-                c = highpass_stack(c, filt, nan_aware=False, threads=nth)
+                c = highpass_stack(c, filt, nan_aware=hp_nan, threads=nth)
             if p["do_destripe"]:
                 # reduce_near_2 L1672-1677: 90 deg (columns) then 0 deg (rows); science only
                 clip = float(p["destripe_clip"])
@@ -590,7 +597,7 @@ class KLIPReducer(Reducer):
             return bin_frames(c, a_, bin_, dth, return_groups=True, threads=nth)
 
         if mcube is not None and filt > 1 and not hp_binned:
-            mcube = highpass_stack(mcube, filt, nan_aware=False, threads=nth)
+            mcube = highpass_stack(mcube, filt, nan_aware=hp_nan, threads=nth)
         bcube, bang, grp, bkeep = prep(cube, selected=bool(req.injections))
         if bcube.shape[0] == 0:
             # bin_frames drops bins whose nansum is zero.  np.nansum of an ALL-NaN frame is
@@ -608,7 +615,7 @@ class KLIPReducer(Reducer):
         if mcube is not None:
             if hp_binned:
                 mb = bin_by_groups(mcube, grp, threads=nth, dtype=np.float64) if bin_ > 1 else mcube
-                mb = highpass_stack(mb, filt, nan_aware=False, threads=nth)
+                mb = highpass_stack(mb, filt, nan_aware=hp_nan, threads=nth)
             else:
                 mb = bin_by_groups(mcube, grp, threads=nth) if bin_ > 1 else np.asarray(mcube, np.float32)
             mcube = mb[bkeep]
@@ -786,6 +793,12 @@ class PartitionedReducer(Reducer):
         ``min(max_workers, 2 x partitions)`` it had before, so the runner can keep as many
         reductions in flight as the budget can serve (a trial's clean and all its draws,
         several validation trials).  Per-job scaling is flat past about 4 threads.
+    representative
+        the partition whose pixel scale, FWHM, lambda/D and matched-filter kernel stand for
+        the combined image (the metric and the sampler read them from here).  Default: the
+        first partition, which is right when the partitions share a wavelength.  Wavelength
+        groups of an IFS cube do not, and the first group is the bluest: an ALES adapter
+        names the group at the mean wavelength instead.
     """
 
     name = "partitioned"
@@ -796,9 +809,11 @@ class PartitionedReducer(Reducer):
     _recent_costs = None
 
     def __init__(self, reducers: Dict[Any, Reducer], weighting: str = "equal", max_workers=1,
-                 pool: str = "auto", log=None, threads_per_job: int = 4):
+                 pool: str = "auto", log=None, threads_per_job: int = 4, representative: Any = None):
         if not reducers:
             raise ValueError("need at least one partition")
+        if representative is not None and representative not in reducers:
+            raise KeyError(f"representative partition {representative!r} is not one of {list(reducers)}")
         from .parallel import resolve_workers
         self.reducers = dict(reducers)
         self.weighting = weighting
@@ -813,10 +828,14 @@ class PartitionedReducer(Reducer):
         if self.max_workers > 1:
             from .parallel import pin_blas
             pin_blas()                      # one BLAS thread per worker thread (no oversubscription)
-        first = next(iter(self.reducers.values()))
+        self.representative = representative if representative is not None else next(iter(self.reducers))
+        first = self.reducers[self.representative]
         self.pxscale, self.fwhm = first.pxscale, first.fwhm
         self.lam_over_d_px = first.lam_over_d_px
         self.angle_convention = first.angle_convention
+        #: a record of what the partitions are (an IFS adapter's wavelength groups, say),
+        #: written to the run's setup file by :meth:`describe`
+        self.provenance: Optional[Dict[str, Any]] = None
         self.supports_kscan = all(r.supports_kscan for r in self.reducers.values())
         self.supports_fm = all(getattr(r, "supports_fm", False) for r in self.reducers.values())
         #: what the partitions ARE -- only the wording of the display's partition panels
@@ -837,7 +856,7 @@ class PartitionedReducer(Reducer):
         return 1.0 if self.weighting == "equal" else self.reducers[pid].partition_weight()
 
     def matched_filter_kernel(self, rho_as: float):
-        return next(iter(self.reducers.values())).matched_filter_kernel(rho_as)
+        return self.reducers[getattr(self, "representative", next(iter(self.reducers)))].matched_filter_kernel(rho_as)
 
     _pool_logged = False
 
@@ -1043,6 +1062,9 @@ class PartitionedReducer(Reducer):
     def describe(self) -> Dict[str, Any]:
         d = super().describe()
         d.update(weighting=self.weighting, max_workers=self.max_workers, threads_per_job=self.threads_per_job,
+                 representative=str(getattr(self, "representative", next(iter(self.reducers)))),
+                 partition_label=getattr(self, "partition_label", "night"),
+                 provenance=getattr(self, "provenance", None),
                  partitions={str(k): r.describe() for k, r in self.reducers.items()})
         return d
 

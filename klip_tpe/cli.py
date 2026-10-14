@@ -24,8 +24,10 @@ def _near_objects(a, log=print):
         return _nomic_objects(a, log)
     if getattr(a, "instrument", "near") == "generic":
         return _generic_objects(a, log)
+    if getattr(a, "instrument", "near") == "ales":
+        return _ales_objects(a, log)
     if not a.root:
-        raise SystemExit("--root is required for --instrument near / nomic")
+        raise SystemExit("--root is required for --instrument near / nomic / ales")
     from .instruments import near
     frames = slice(0, a.max_frames) if getattr(a, "max_frames", None) else None
     root = a.root[0] if isinstance(a.root, (list, tuple)) else a.root
@@ -99,7 +101,8 @@ def _generic_objects(a, log=print):
     objective, sampler = generic.default_config(red, clean_subtract=not a.no_clean_subtract,
                                                 known=[tuple(k) for k in (a.known or [])],
                                                 metric=getattr(a, "metric", "mawet"))
-    guard = generic.make_guard(red, n_min_ref=a.n_min_ref, ref_frac=a.ref_frac) if not a.fast else None
+    guard = generic.make_guard(red, n_min_ref=a.n_min_ref, ref_frac=a.ref_frac,
+                               bin_min=getattr(a, "bin_min", 1) or 1) if not a.fast else None
     return red, objective, sampler, guard, None
 
 
@@ -151,13 +154,50 @@ def _nomic_objects(a, log=print):
     return red, objective, sampler, guard, None
 
 
+def _ales_objects(a, log=print):
+    """Reducer / objective / sampler / guard for an ALES integral-field cube: the reduction's
+    products under ``--root``, wavelength groups as partitions (``klip_tpe.instruments.ales``)."""
+    from .instruments import ales
+    from .parallel import resolve_workers
+    if not a.root:
+        raise SystemExit("--instrument ales needs --root, the reduction's products directory")
+    root = a.root[0] if isinstance(a.root, (list, tuple)) else a.root
+    a.workers = resolve_workers(a.workers)
+    c0, c1 = (int(a.ales_channels[0]), int(a.ales_channels[1])) if a.ales_channels else (ales.ALES.c0, ales.ALES.c1)
+    px = a.pxscale if a.pxscale is not None else ales.ALES.pxscale
+    datasets, lam_m, fwhm_px, table = ales.load_ales(
+        root, a.ales_target, ref=a.ales_ref, c0=c0, c1=c1, ngrp=a.ales_groups, only=a.ales_only,
+        pxscale=px, diam_m=a.diam, angle_offset=a.ales_angle_offset, angle_sign=a.angle_sign,
+        tags=None if a.no_tags else "auto", tag_r_in=a.ales_tag_r_in, cache=a.ales_cache, log=log)
+    if a.fwhm_px:
+        fwhm_px = {k: float(a.fwhm_px) for k in fwhm_px}
+    red = ales.make_reducer(datasets, lam_m, fwhm_px, pxscale=px, diam_m=a.diam,
+                            ee_radius_px=a.r_ee if a.r_ee else 3.0, representative=a.ales_representative,
+                            weighting=a.weighting, max_workers=a.workers, pool=a.pool, fast=a.fast,
+                            n_min_ref=a.n_min_ref, backend=getattr(a, "backend", "klip"), table=table, log=log)
+    _set_threads_per_job(red, a)
+    objective, sampler = ales.default_config(red, clean_subtract=not a.no_clean_subtract,
+                                             known=[tuple(k) for k in (a.known or [])],
+                                             forbidden_pa=[tuple(b) for b in (getattr(a, "forbidden_pa", None) or [])],
+                                             metric=getattr(a, "metric", "mawet"))
+    guard = None
+    if not a.fast:
+        guard = ales.make_guard(red, max_excluded=None if a.ales_max_excluded < 0 else a.ales_max_excluded,
+                                prefer_m=a.ales_prefer_um * 1e-6, n_min_ref=a.n_min_ref, ref_frac=a.ref_frac,
+                                frame_selection=not getattr(a, "no_framesel", False),   # resume has no --no-framesel
+                                bin_min=getattr(a, "bin_min", 1) or 1)
+    return red, objective, sampler, guard, None
+
+
 def _add_near_args(p):
-    p.add_argument("--instrument", default="near", choices=["near", "nomic", "generic"],
+    p.add_argument("--instrument", default="near", choices=["near", "nomic", "generic", "ales"],
                    help="near: NEAR campaign tree under --root; nomic: pyNOMIC working directory under --root; "
-                        "generic: any registered cube (--cube/--angles/--psf ...)")
+                        "generic: any registered cube (--cube/--angles/--psf ...); "
+                        "ales: an LBTI/ALES reduction's products under --root, wavelength groups as partitions")
     p.add_argument("--root", nargs="+", default=None,
                    help="NEAR: data root. nomic: pyNOMIC working directory (one per --obj, or one for all). "
-                        "generic: optional base directory for the run directory")
+                        "generic: optional base directory for the run directory. "
+                        "ales: the reduction's products directory (read only; the run goes to --run-dir)")
     gg = p.add_argument_group("generic cubes (--instrument generic / klip-tpe generic)")
     gg.add_argument("--cube", nargs="+", default=None, help="registered cube(s), (n, ny, nx) FITS; one per partition")
     gg.add_argument("--angles", nargs="+", default=None, help="derotation angles FITS (one per cube; CCW to North-up)")
@@ -178,6 +218,40 @@ def _add_near_args(p):
     gg.add_argument("--center", type=float, nargs=2, default=None, help="star pixel (x y); default: array centre")
     gg.add_argument("--wv-index", type=int, default=None, help="channel of a 4-d IFS cube")
     gg.add_argument("--no-tags", action="store_true", help="no data-derived frame-quality tags (no frame selection)")
+    gg.add_argument("--forbidden-pa", type=float, nargs=2, action="append", metavar=("PA", "HALFWIDTH"),
+                    help="generic / ales: no injection within HALFWIDTH deg of position angle PA "
+                         "(a known companion's azimuth, a disk); may repeat")
+    ga = p.add_argument_group("LBTI/ALES (--instrument ales)")
+    ga.add_argument("--ales-target", default="WISPIT2", metavar="NAME",
+                    help="prefix of the product files under --root (NAME_cube_cen_clean.fits ...; default WISPIT2)")
+    ga.add_argument("--ales-ref", default=None, metavar="NAME",
+                    help="reference star whose products sit beside the target's (HIP91748): its group means "
+                         "become each group's RDI library (default: none, RDI off)")
+    ga.add_argument("--ales-groups", type=int, default=20, metavar="N",
+                    help="wavelength groups over the usable channels, equally spaced in ln(lambda) (default 20; "
+                         "15 = one R = 40 resolution element each)")
+    ga.add_argument("--ales-channels", type=int, nargs=2, default=None, metavar=("C0", "C1"),
+                    help="first and last usable channel, inclusive (default 6 88 = 2.899-4.175 um)")
+    ga.add_argument("--ales-only", nargs="+", default=None, metavar="gNN",
+                    help="load these groups only (checks and short runs)")
+    ga.add_argument("--ales-max-excluded", type=int, default=10, metavar="N",
+                    help="the group flags may switch off at most N groups; a proposal past that has groups "
+                         "switched back on, nearest --ales-prefer-um first (default 10; -1 = no bound)")
+    ga.add_argument("--ales-prefer-um", type=float, default=3.7, metavar="UM",
+                    help="wavelength the group bound restores groups towards (default 3.7)")
+    ga.add_argument("--ales-representative", default=None, metavar="gNN",
+                    help="the group whose FWHM and matched filter stand for the combined image "
+                         "(default: the group at the mean wavelength)")
+    ga.add_argument("--ales-angle-offset", type=float, default=180.0, metavar="DEG",
+                    help="added to LBT_PARA once: the derotation is CCW by LBT_PARA + this (default 180)")
+    ga.add_argument("--ales-tag-r-in", type=float, default=2.0, metavar="PX",
+                    help="inner radius of the frame-quality tags' annulus (default 2 spaxels: the star's "
+                         "core and halo; 6, the generic default, is background-dominated here)")
+    ga.add_argument("--ales-cache", default=None, metavar="DIR",
+                    help="directory for the group cubes as .npy, written once and read back after "
+                         "(the full cube is 814 MB on a slow volume)")
+    ga.add_argument("--ales-selection", default="binary", choices=["binary", "two_slot"],
+                    help="group flags: one 0/1 dimension per group (default) or --max-drop drop slots")
     p.add_argument("--nights", type=int, nargs="+", default=[1, 2, 3, 4, 5, 6])
     p.add_argument("--backend", default="klip", choices=["klip", "pyklip", "vip"],
                    help="PSF-subtraction engine: built-in annular KLIP (default), pyKLIP or VIP (must be installed)")
@@ -213,6 +287,10 @@ def _add_near_args(p):
                         "both sources at the annulus' area-weighted mid radius (only to reproduce older IDL runs)")
     p.add_argument("--n-min-ref", type=int, default=10)
     p.add_argument("--ref-frac", type=float, default=0.95)
+    p.add_argument("--bin-min", type=int, default=1, metavar="N",
+                   help="generic / ales: floor of the temporal bin, as a projection (MinBinGuard): a draw below "
+                        "it is evaluated at N frames per bin. Cost, not correctness: on a long sequence bin 1 "
+                        "costs tens of times more than bin 5 (default 1 = no floor)")
     p.add_argument("--known", type=float, nargs=2, action="append", metavar=("RHO", "PA"))
     p.add_argument("--metric", default="mawet", choices=["mawet", "fmmf"],
                    help="detection metric: 'mawet' (default) filters with the injection PSF; "
@@ -343,6 +421,17 @@ def build_near_space(red, a):
                                   selection=None if a.no_selection else "two_slot", max_drop=getattr(a, "max_drop", 2),
                                   width_range=tuple(a.width_range) if a.opt_width else None,
                                   search_k=a.k_mode not in ("scan", "scan_rescore"))
+    if getattr(a, "instrument", "near") == "ales":
+        from .instruments import ales
+        has_tags = all(r.frame_tags() for r in red.reducers.values())
+        # one block shared by every group (per_night=False), whatever --global-block says
+        return ales.make_space(red, k_klip_max=a.k_max, opt_framesel=has_tags and not a.no_framesel,
+                               search_angles=not a.fast,
+                               selection=None if a.no_selection else a.ales_selection,
+                               max_drop=a.ales_max_excluded if a.ales_selection == "two_slot" and a.ales_max_excluded > 0
+                               else getattr(a, "max_drop", 2),
+                               width_range=tuple(a.width_range) if a.opt_width else None,
+                               search_k=a.k_mode not in ("scan", "scan_rescore"))
     return near.make_space(red, per_night=not a.global_block, k_klip_max=a.k_max,
                            opt_framesel=not a.no_framesel, search_angles=not a.fast,
                            selection=None if a.no_selection else "two_slot", max_drop=getattr(a, "max_drop", 2),
@@ -355,6 +444,9 @@ def _default_run_dir(a) -> str:
     root = a.root[0] if isinstance(a.root, (list, tuple)) else a.root
     if getattr(a, "instrument", "near") == "generic":
         return os.path.join(root or "runs", time.strftime("run_%Y%m%d_%H%M%S"))
+    if getattr(a, "instrument", "near") == "ales":
+        # --root is the reduction's products directory, which stays as it is
+        return os.path.join("runs", time.strftime("run_%Y%m%d_%H%M%S"))
     return os.path.join(root, "comb", "opt", time.strftime("run_%Y%m%d_%H%M%S"))
 
 
@@ -549,7 +641,10 @@ def _fill_from_registry(a, argv=None) -> None:
               "crop_half", "parang_sign", "pre_bin", "cube", "angles", "psf",
               "pxscale", "lam", "diam", "ref_cube", "names", "star_flux",
               "workers", "pool", "known", "no_library", "fast", "n_min_ref",
-              "truenorth", "fwhm_px", "metric", "backend"):
+              "truenorth", "fwhm_px", "metric", "backend", "forbidden_pa", "r_ee", "angle_sign",
+              "no_tags", "ales_target", "ales_ref", "ales_groups", "ales_channels", "ales_only",
+              "ales_max_excluded", "ales_prefer_um", "ales_representative", "ales_angle_offset",
+              "ales_tag_r_in", "ales_cache", "ales_selection", "bin_min"):
         if k in given:                     # the user said so on this command line
             continue
         v = getattr(prev, k, None)
@@ -702,7 +797,7 @@ def _add_run_args(p):
     """The search / protocol arguments shared by ``near`` and ``generic``."""
     p.add_argument("--run-dir", default=None,
                    help="output directory (default: <root>/comb/opt/run_YYYYMMDD_HHMMSS, the IDL layout; "
-                        "generic: ./runs/run_...)")
+                        "generic and ales: ./runs/run_...)")
     p.add_argument("--ann-edges", type=float, nargs="+", default=[0.0, 20.0])
     p.add_argument("--n-iter", type=int, nargs="+", default=[200])
     p.add_argument("--n-init", type=int, nargs="+", default=[50])

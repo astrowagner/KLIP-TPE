@@ -9,7 +9,7 @@ selects the data adapter (`klip-tpe generic` is `near --instrument generic`).  `
 ## `klip-tpe generic`
 
 ```
-usage: klip-tpe generic [-h] [--instrument {near,nomic,generic}]
+usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--root ROOT [ROOT ...]] [--cube CUBE [CUBE ...]]
                         [--angles ANGLES [ANGLES ...]] [--psf PSF [PSF ...]]
                         [--ref-cube REF_CUBE [REF_CUBE ...]]
@@ -18,7 +18,15 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic}]
                         [--pxscale PXSCALE] [--lam LAM] [--diam DIAM]
                         [--angle-sign ANGLE_SIGN] [--crop-half CROP_HALF]
                         [--center CENTER CENTER] [--wv-index WV_INDEX]
-                        [--no-tags] [--nights NIGHTS [NIGHTS ...]]
+                        [--no-tags] [--forbidden-pa PA HALFWIDTH]
+                        [--ales-target NAME] [--ales-ref NAME]
+                        [--ales-groups N] [--ales-channels C0 C1]
+                        [--ales-only gNN [gNN ...]] [--ales-max-excluded N]
+                        [--ales-prefer-um UM] [--ales-representative gNN]
+                        [--ales-angle-offset DEG] [--ales-tag-r-in PX]
+                        [--ales-cache DIR]
+                        [--ales-selection {binary,two_slot}]
+                        [--nights NIGHTS [NIGHTS ...]]
                         [--backend {klip,pyklip,vip}] [--obj OBJ [OBJ ...]]
                         [--frames FRAMES] [--binned] [--pre-bin PRE_BIN]
                         [--parang-sign PARANG_SIGN] [--truenorth TRUENORTH]
@@ -32,7 +40,7 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic}]
                         [--weighting {equal,sqrt_texp}] [--fast]
                         [--no-library] [--no-clean-subtract] [--ladder-pair]
                         [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
-                        [--known RHO PA] [--metric {mawet,fmmf}]
+                        [--bin-min N] [--known RHO PA] [--metric {mawet,fmmf}]
                         [--run-dir RUN_DIR]
                         [--ann-edges ANN_EDGES [ANN_EDGES ...]]
                         [--n-iter N_ITER [N_ITER ...]]
@@ -65,14 +73,18 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic}]
 
 options:
   -h, --help            show this help message and exit
-  --instrument {near,nomic,generic}
+  --instrument {near,nomic,generic,ales}
                         near: NEAR campaign tree under --root; nomic: pyNOMIC
                         working directory under --root; generic: any
-                        registered cube (--cube/--angles/--psf ...)
+                        registered cube (--cube/--angles/--psf ...); ales: an
+                        LBTI/ALES reduction's products under --root,
+                        wavelength groups as partitions
   --root ROOT [ROOT ...]
                         NEAR: data root. nomic: pyNOMIC working directory (one
                         per --obj, or one for all). generic: optional base
-                        directory for the run directory
+                        directory for the run directory. ales: the reduction's
+                        products directory (read only; the run goes to --run-
+                        dir)
   --nights NIGHTS [NIGHTS ...]
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
@@ -98,6 +110,11 @@ options:
                         runs)
   --n-min-ref N_MIN_REF
   --ref-frac REF_FRAC
+  --bin-min N           generic / ales: floor of the temporal bin, as a
+                        projection (MinBinGuard): a draw below it is evaluated
+                        at N frames per bin. Cost, not correctness: on a long
+                        sequence bin 1 costs tens of times more than bin 5
+                        (default 1 = no floor)
   --known RHO PA
   --metric {mawet,fmmf}
                         detection metric: 'mawet' (default) filters with the
@@ -106,7 +123,7 @@ options:
                         the result (klip_tpe.fmmf)
   --run-dir RUN_DIR     output directory (default:
                         <root>/comb/opt/run_YYYYMMDD_HHMMSS, the IDL layout;
-                        generic: ./runs/run_...)
+                        generic and ales: ./runs/run_...)
   --ann-edges ANN_EDGES [ANN_EDGES ...]
   --n-iter N_ITER [N_ITER ...]
   --n-init N_INIT [N_INIT ...]
@@ -241,6 +258,48 @@ generic cubes (--instrument generic / klip-tpe generic):
   --wv-index WV_INDEX   channel of a 4-d IFS cube
   --no-tags             no data-derived frame-quality tags (no frame
                         selection)
+  --forbidden-pa PA HALFWIDTH
+                        generic / ales: no injection within HALFWIDTH deg of
+                        position angle PA (a known companion's azimuth, a
+                        disk); may repeat
+
+LBTI/ALES (--instrument ales):
+  --ales-target NAME    prefix of the product files under --root
+                        (NAME_cube_cen_clean.fits ...; default WISPIT2)
+  --ales-ref NAME       reference star whose products sit beside the target's
+                        (HIP91748): its group means become each group's RDI
+                        library (default: none, RDI off)
+  --ales-groups N       wavelength groups over the usable channels, equally
+                        spaced in ln(lambda) (default 20; 15 = one R = 40
+                        resolution element each)
+  --ales-channels C0 C1
+                        first and last usable channel, inclusive (default 6 88
+                        = 2.899-4.175 um)
+  --ales-only gNN [gNN ...]
+                        load these groups only (checks and short runs)
+  --ales-max-excluded N
+                        the group flags may switch off at most N groups; a
+                        proposal past that has groups switched back on,
+                        nearest --ales-prefer-um first (default 10; -1 = no
+                        bound)
+  --ales-prefer-um UM   wavelength the group bound restores groups towards
+                        (default 3.7)
+  --ales-representative gNN
+                        the group whose FWHM and matched filter stand for the
+                        combined image (default: the group at the mean
+                        wavelength)
+  --ales-angle-offset DEG
+                        added to LBT_PARA once: the derotation is CCW by
+                        LBT_PARA + this (default 180)
+  --ales-tag-r-in PX    inner radius of the frame-quality tags' annulus
+                        (default 2 spaxels: the star's core and halo; 6, the
+                        generic default, is background-dominated here)
+  --ales-cache DIR      directory for the group cubes as .npy, written once
+                        and read back after (the full cube is 814 MB on a slow
+                        volume)
+  --ales-selection {binary,two_slot}
+                        group flags: one 0/1 dimension per group (default) or
+                        --max-drop drop slots
 
 pyNOMIC (--instrument nomic):
   --obj OBJ [OBJ ...]   pyNOMIC object name(s) (the <obj>_NOMIC_*.npz prefix)
@@ -269,7 +328,7 @@ pyNOMIC (--instrument nomic):
 ## `klip-tpe near`
 
 ```
-usage: klip-tpe near [-h] [--instrument {near,nomic,generic}]
+usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--root ROOT [ROOT ...]] [--cube CUBE [CUBE ...]]
                      [--angles ANGLES [ANGLES ...]] [--psf PSF [PSF ...]]
                      [--ref-cube REF_CUBE [REF_CUBE ...]]
@@ -278,7 +337,14 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic}]
                      [--pxscale PXSCALE] [--lam LAM] [--diam DIAM]
                      [--angle-sign ANGLE_SIGN] [--crop-half CROP_HALF]
                      [--center CENTER CENTER] [--wv-index WV_INDEX]
-                     [--no-tags] [--nights NIGHTS [NIGHTS ...]]
+                     [--no-tags] [--forbidden-pa PA HALFWIDTH]
+                     [--ales-target NAME] [--ales-ref NAME] [--ales-groups N]
+                     [--ales-channels C0 C1] [--ales-only gNN [gNN ...]]
+                     [--ales-max-excluded N] [--ales-prefer-um UM]
+                     [--ales-representative gNN] [--ales-angle-offset DEG]
+                     [--ales-tag-r-in PX] [--ales-cache DIR]
+                     [--ales-selection {binary,two_slot}]
+                     [--nights NIGHTS [NIGHTS ...]]
                      [--backend {klip,pyklip,vip}] [--obj OBJ [OBJ ...]]
                      [--frames FRAMES] [--binned] [--pre-bin PRE_BIN]
                      [--parang-sign PARANG_SIGN] [--truenorth TRUENORTH]
@@ -291,7 +357,7 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic}]
                      [--weighting {equal,sqrt_texp}] [--fast] [--no-library]
                      [--no-clean-subtract] [--ladder-pair]
                      [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
-                     [--known RHO PA] [--metric {mawet,fmmf}]
+                     [--bin-min N] [--known RHO PA] [--metric {mawet,fmmf}]
                      [--run-dir RUN_DIR]
                      [--ann-edges ANN_EDGES [ANN_EDGES ...]]
                      [--n-iter N_ITER [N_ITER ...]]
@@ -321,14 +387,18 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic}]
 
 options:
   -h, --help            show this help message and exit
-  --instrument {near,nomic,generic}
+  --instrument {near,nomic,generic,ales}
                         near: NEAR campaign tree under --root; nomic: pyNOMIC
                         working directory under --root; generic: any
-                        registered cube (--cube/--angles/--psf ...)
+                        registered cube (--cube/--angles/--psf ...); ales: an
+                        LBTI/ALES reduction's products under --root,
+                        wavelength groups as partitions
   --root ROOT [ROOT ...]
                         NEAR: data root. nomic: pyNOMIC working directory (one
                         per --obj, or one for all). generic: optional base
-                        directory for the run directory
+                        directory for the run directory. ales: the reduction's
+                        products directory (read only; the run goes to --run-
+                        dir)
   --nights NIGHTS [NIGHTS ...]
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
@@ -354,6 +424,11 @@ options:
                         runs)
   --n-min-ref N_MIN_REF
   --ref-frac REF_FRAC
+  --bin-min N           generic / ales: floor of the temporal bin, as a
+                        projection (MinBinGuard): a draw below it is evaluated
+                        at N frames per bin. Cost, not correctness: on a long
+                        sequence bin 1 costs tens of times more than bin 5
+                        (default 1 = no floor)
   --known RHO PA
   --metric {mawet,fmmf}
                         detection metric: 'mawet' (default) filters with the
@@ -362,7 +437,7 @@ options:
                         the result (klip_tpe.fmmf)
   --run-dir RUN_DIR     output directory (default:
                         <root>/comb/opt/run_YYYYMMDD_HHMMSS, the IDL layout;
-                        generic: ./runs/run_...)
+                        generic and ales: ./runs/run_...)
   --ann-edges ANN_EDGES [ANN_EDGES ...]
   --n-iter N_ITER [N_ITER ...]
   --n-init N_INIT [N_INIT ...]
@@ -497,6 +572,48 @@ generic cubes (--instrument generic / klip-tpe generic):
   --wv-index WV_INDEX   channel of a 4-d IFS cube
   --no-tags             no data-derived frame-quality tags (no frame
                         selection)
+  --forbidden-pa PA HALFWIDTH
+                        generic / ales: no injection within HALFWIDTH deg of
+                        position angle PA (a known companion's azimuth, a
+                        disk); may repeat
+
+LBTI/ALES (--instrument ales):
+  --ales-target NAME    prefix of the product files under --root
+                        (NAME_cube_cen_clean.fits ...; default WISPIT2)
+  --ales-ref NAME       reference star whose products sit beside the target's
+                        (HIP91748): its group means become each group's RDI
+                        library (default: none, RDI off)
+  --ales-groups N       wavelength groups over the usable channels, equally
+                        spaced in ln(lambda) (default 20; 15 = one R = 40
+                        resolution element each)
+  --ales-channels C0 C1
+                        first and last usable channel, inclusive (default 6 88
+                        = 2.899-4.175 um)
+  --ales-only gNN [gNN ...]
+                        load these groups only (checks and short runs)
+  --ales-max-excluded N
+                        the group flags may switch off at most N groups; a
+                        proposal past that has groups switched back on,
+                        nearest --ales-prefer-um first (default 10; -1 = no
+                        bound)
+  --ales-prefer-um UM   wavelength the group bound restores groups towards
+                        (default 3.7)
+  --ales-representative gNN
+                        the group whose FWHM and matched filter stand for the
+                        combined image (default: the group at the mean
+                        wavelength)
+  --ales-angle-offset DEG
+                        added to LBT_PARA once: the derotation is CCW by
+                        LBT_PARA + this (default 180)
+  --ales-tag-r-in PX    inner radius of the frame-quality tags' annulus
+                        (default 2 spaxels: the star's core and halo; 6, the
+                        generic default, is background-dominated here)
+  --ales-cache DIR      directory for the group cubes as .npy, written once
+                        and read back after (the full cube is 814 MB on a slow
+                        volume)
+  --ales-selection {binary,two_slot}
+                        group flags: one 0/1 dimension per group (default) or
+                        --max-drop drop slots
 
 pyNOMIC (--instrument nomic):
   --obj OBJ [OBJ ...]   pyNOMIC object name(s) (the <obj>_NOMIC_*.npz prefix)
@@ -525,7 +642,7 @@ pyNOMIC (--instrument nomic):
 ## `klip-tpe resume`
 
 ```
-usage: klip-tpe resume [-h] [--instrument {near,nomic,generic}]
+usage: klip-tpe resume [-h] [--instrument {near,nomic,generic,ales}]
                        [--root ROOT [ROOT ...]] [--cube CUBE [CUBE ...]]
                        [--angles ANGLES [ANGLES ...]] [--psf PSF [PSF ...]]
                        [--ref-cube REF_CUBE [REF_CUBE ...]]
@@ -534,7 +651,14 @@ usage: klip-tpe resume [-h] [--instrument {near,nomic,generic}]
                        [--pxscale PXSCALE] [--lam LAM] [--diam DIAM]
                        [--angle-sign ANGLE_SIGN] [--crop-half CROP_HALF]
                        [--center CENTER CENTER] [--wv-index WV_INDEX]
-                       [--no-tags] [--nights NIGHTS [NIGHTS ...]]
+                       [--no-tags] [--forbidden-pa PA HALFWIDTH]
+                       [--ales-target NAME] [--ales-ref NAME]
+                       [--ales-groups N] [--ales-channels C0 C1]
+                       [--ales-only gNN [gNN ...]] [--ales-max-excluded N]
+                       [--ales-prefer-um UM] [--ales-representative gNN]
+                       [--ales-angle-offset DEG] [--ales-tag-r-in PX]
+                       [--ales-cache DIR] [--ales-selection {binary,two_slot}]
+                       [--nights NIGHTS [NIGHTS ...]]
                        [--backend {klip,pyklip,vip}] [--obj OBJ [OBJ ...]]
                        [--frames FRAMES] [--binned] [--pre-bin PRE_BIN]
                        [--parang-sign PARANG_SIGN] [--truenorth TRUENORTH]
@@ -547,7 +671,7 @@ usage: klip-tpe resume [-h] [--instrument {near,nomic,generic}]
                        [--weighting {equal,sqrt_texp}] [--fast] [--no-library]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
-                       [--known RHO PA] [--metric {mawet,fmmf}]
+                       [--bin-min N] [--known RHO PA] [--metric {mawet,fmmf}]
                        [--run-dir RUN_DIR] [--display] [--no-display]
                        [--display-every DISPLAY_EVERY] [--pdf-every PDF_EVERY]
                        [--movie-every MOVIE_EVERY] [--show [SHOW]] [--aliens]
@@ -555,14 +679,18 @@ usage: klip-tpe resume [-h] [--instrument {near,nomic,generic}]
 
 options:
   -h, --help            show this help message and exit
-  --instrument {near,nomic,generic}
+  --instrument {near,nomic,generic,ales}
                         near: NEAR campaign tree under --root; nomic: pyNOMIC
                         working directory under --root; generic: any
-                        registered cube (--cube/--angles/--psf ...)
+                        registered cube (--cube/--angles/--psf ...); ales: an
+                        LBTI/ALES reduction's products under --root,
+                        wavelength groups as partitions
   --root ROOT [ROOT ...]
                         NEAR: data root. nomic: pyNOMIC working directory (one
                         per --obj, or one for all). generic: optional base
-                        directory for the run directory
+                        directory for the run directory. ales: the reduction's
+                        products directory (read only; the run goes to --run-
+                        dir)
   --nights NIGHTS [NIGHTS ...]
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
@@ -588,6 +716,11 @@ options:
                         runs)
   --n-min-ref N_MIN_REF
   --ref-frac REF_FRAC
+  --bin-min N           generic / ales: floor of the temporal bin, as a
+                        projection (MinBinGuard): a draw below it is evaluated
+                        at N frames per bin. Cost, not correctness: on a long
+                        sequence bin 1 costs tens of times more than bin 5
+                        (default 1 = no floor)
   --known RHO PA
   --metric {mawet,fmmf}
                         detection metric: 'mawet' (default) filters with the
@@ -634,6 +767,48 @@ generic cubes (--instrument generic / klip-tpe generic):
   --wv-index WV_INDEX   channel of a 4-d IFS cube
   --no-tags             no data-derived frame-quality tags (no frame
                         selection)
+  --forbidden-pa PA HALFWIDTH
+                        generic / ales: no injection within HALFWIDTH deg of
+                        position angle PA (a known companion's azimuth, a
+                        disk); may repeat
+
+LBTI/ALES (--instrument ales):
+  --ales-target NAME    prefix of the product files under --root
+                        (NAME_cube_cen_clean.fits ...; default WISPIT2)
+  --ales-ref NAME       reference star whose products sit beside the target's
+                        (HIP91748): its group means become each group's RDI
+                        library (default: none, RDI off)
+  --ales-groups N       wavelength groups over the usable channels, equally
+                        spaced in ln(lambda) (default 20; 15 = one R = 40
+                        resolution element each)
+  --ales-channels C0 C1
+                        first and last usable channel, inclusive (default 6 88
+                        = 2.899-4.175 um)
+  --ales-only gNN [gNN ...]
+                        load these groups only (checks and short runs)
+  --ales-max-excluded N
+                        the group flags may switch off at most N groups; a
+                        proposal past that has groups switched back on,
+                        nearest --ales-prefer-um first (default 10; -1 = no
+                        bound)
+  --ales-prefer-um UM   wavelength the group bound restores groups towards
+                        (default 3.7)
+  --ales-representative gNN
+                        the group whose FWHM and matched filter stand for the
+                        combined image (default: the group at the mean
+                        wavelength)
+  --ales-angle-offset DEG
+                        added to LBT_PARA once: the derotation is CCW by
+                        LBT_PARA + this (default 180)
+  --ales-tag-r-in PX    inner radius of the frame-quality tags' annulus
+                        (default 2 spaxels: the star's core and halo; 6, the
+                        generic default, is background-dominated here)
+  --ales-cache DIR      directory for the group cubes as .npy, written once
+                        and read back after (the full cube is 814 MB on a slow
+                        volume)
+  --ales-selection {binary,two_slot}
+                        group flags: one 0/1 dimension per group (default) or
+                        --max-drop drop slots
 
 pyNOMIC (--instrument nomic):
   --obj OBJ [OBJ ...]   pyNOMIC object name(s) (the <obj>_NOMIC_*.npz prefix)
@@ -662,7 +837,7 @@ pyNOMIC (--instrument nomic):
 ## `klip-tpe extend`
 
 ```
-usage: klip-tpe extend [-h] [--instrument {near,nomic,generic}]
+usage: klip-tpe extend [-h] [--instrument {near,nomic,generic,ales}]
                        [--root ROOT [ROOT ...]] [--cube CUBE [CUBE ...]]
                        [--angles ANGLES [ANGLES ...]] [--psf PSF [PSF ...]]
                        [--ref-cube REF_CUBE [REF_CUBE ...]]
@@ -671,7 +846,14 @@ usage: klip-tpe extend [-h] [--instrument {near,nomic,generic}]
                        [--pxscale PXSCALE] [--lam LAM] [--diam DIAM]
                        [--angle-sign ANGLE_SIGN] [--crop-half CROP_HALF]
                        [--center CENTER CENTER] [--wv-index WV_INDEX]
-                       [--no-tags] [--nights NIGHTS [NIGHTS ...]]
+                       [--no-tags] [--forbidden-pa PA HALFWIDTH]
+                       [--ales-target NAME] [--ales-ref NAME]
+                       [--ales-groups N] [--ales-channels C0 C1]
+                       [--ales-only gNN [gNN ...]] [--ales-max-excluded N]
+                       [--ales-prefer-um UM] [--ales-representative gNN]
+                       [--ales-angle-offset DEG] [--ales-tag-r-in PX]
+                       [--ales-cache DIR] [--ales-selection {binary,two_slot}]
+                       [--nights NIGHTS [NIGHTS ...]]
                        [--backend {klip,pyklip,vip}] [--obj OBJ [OBJ ...]]
                        [--frames FRAMES] [--binned] [--pre-bin PRE_BIN]
                        [--parang-sign PARANG_SIGN] [--truenorth TRUENORTH]
@@ -684,19 +866,23 @@ usage: klip-tpe extend [-h] [--instrument {near,nomic,generic}]
                        [--weighting {equal,sqrt_texp}] [--fast] [--no-library]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
-                       [--known RHO PA] [--metric {mawet,fmmf}] --run-dir
-                       RUN_DIR --n-iter N_ITER [N_ITER ...]
+                       [--bin-min N] [--known RHO PA] [--metric {mawet,fmmf}]
+                       --run-dir RUN_DIR --n-iter N_ITER [N_ITER ...]
 
 options:
   -h, --help            show this help message and exit
-  --instrument {near,nomic,generic}
+  --instrument {near,nomic,generic,ales}
                         near: NEAR campaign tree under --root; nomic: pyNOMIC
                         working directory under --root; generic: any
-                        registered cube (--cube/--angles/--psf ...)
+                        registered cube (--cube/--angles/--psf ...); ales: an
+                        LBTI/ALES reduction's products under --root,
+                        wavelength groups as partitions
   --root ROOT [ROOT ...]
                         NEAR: data root. nomic: pyNOMIC working directory (one
                         per --obj, or one for all). generic: optional base
-                        directory for the run directory
+                        directory for the run directory. ales: the reduction's
+                        products directory (read only; the run goes to --run-
+                        dir)
   --nights NIGHTS [NIGHTS ...]
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
@@ -722,6 +908,11 @@ options:
                         runs)
   --n-min-ref N_MIN_REF
   --ref-frac REF_FRAC
+  --bin-min N           generic / ales: floor of the temporal bin, as a
+                        projection (MinBinGuard): a draw below it is evaluated
+                        at N frames per bin. Cost, not correctness: on a long
+                        sequence bin 1 costs tens of times more than bin 5
+                        (default 1 = no floor)
   --known RHO PA
   --metric {mawet,fmmf}
                         detection metric: 'mawet' (default) filters with the
@@ -761,6 +952,48 @@ generic cubes (--instrument generic / klip-tpe generic):
   --wv-index WV_INDEX   channel of a 4-d IFS cube
   --no-tags             no data-derived frame-quality tags (no frame
                         selection)
+  --forbidden-pa PA HALFWIDTH
+                        generic / ales: no injection within HALFWIDTH deg of
+                        position angle PA (a known companion's azimuth, a
+                        disk); may repeat
+
+LBTI/ALES (--instrument ales):
+  --ales-target NAME    prefix of the product files under --root
+                        (NAME_cube_cen_clean.fits ...; default WISPIT2)
+  --ales-ref NAME       reference star whose products sit beside the target's
+                        (HIP91748): its group means become each group's RDI
+                        library (default: none, RDI off)
+  --ales-groups N       wavelength groups over the usable channels, equally
+                        spaced in ln(lambda) (default 20; 15 = one R = 40
+                        resolution element each)
+  --ales-channels C0 C1
+                        first and last usable channel, inclusive (default 6 88
+                        = 2.899-4.175 um)
+  --ales-only gNN [gNN ...]
+                        load these groups only (checks and short runs)
+  --ales-max-excluded N
+                        the group flags may switch off at most N groups; a
+                        proposal past that has groups switched back on,
+                        nearest --ales-prefer-um first (default 10; -1 = no
+                        bound)
+  --ales-prefer-um UM   wavelength the group bound restores groups towards
+                        (default 3.7)
+  --ales-representative gNN
+                        the group whose FWHM and matched filter stand for the
+                        combined image (default: the group at the mean
+                        wavelength)
+  --ales-angle-offset DEG
+                        added to LBT_PARA once: the derotation is CCW by
+                        LBT_PARA + this (default 180)
+  --ales-tag-r-in PX    inner radius of the frame-quality tags' annulus
+                        (default 2 spaxels: the star's core and halo; 6, the
+                        generic default, is background-dominated here)
+  --ales-cache DIR      directory for the group cubes as .npy, written once
+                        and read back after (the full cube is 814 MB on a slow
+                        volume)
+  --ales-selection {binary,two_slot}
+                        group flags: one 0/1 dimension per group (default) or
+                        --max-drop drop slots
 
 pyNOMIC (--instrument nomic):
   --obj OBJ [OBJ ...]   pyNOMIC object name(s) (the <obj>_NOMIC_*.npz prefix)
@@ -819,7 +1052,7 @@ options:
 ## `klip-tpe replay`
 
 ```
-usage: klip-tpe replay [-h] [--instrument {near,nomic,generic}]
+usage: klip-tpe replay [-h] [--instrument {near,nomic,generic,ales}]
                        [--root ROOT [ROOT ...]] [--cube CUBE [CUBE ...]]
                        [--angles ANGLES [ANGLES ...]] [--psf PSF [PSF ...]]
                        [--ref-cube REF_CUBE [REF_CUBE ...]]
@@ -828,7 +1061,14 @@ usage: klip-tpe replay [-h] [--instrument {near,nomic,generic}]
                        [--pxscale PXSCALE] [--lam LAM] [--diam DIAM]
                        [--angle-sign ANGLE_SIGN] [--crop-half CROP_HALF]
                        [--center CENTER CENTER] [--wv-index WV_INDEX]
-                       [--no-tags] [--nights NIGHTS [NIGHTS ...]]
+                       [--no-tags] [--forbidden-pa PA HALFWIDTH]
+                       [--ales-target NAME] [--ales-ref NAME]
+                       [--ales-groups N] [--ales-channels C0 C1]
+                       [--ales-only gNN [gNN ...]] [--ales-max-excluded N]
+                       [--ales-prefer-um UM] [--ales-representative gNN]
+                       [--ales-angle-offset DEG] [--ales-tag-r-in PX]
+                       [--ales-cache DIR] [--ales-selection {binary,two_slot}]
+                       [--nights NIGHTS [NIGHTS ...]]
                        [--backend {klip,pyklip,vip}] [--obj OBJ [OBJ ...]]
                        [--frames FRAMES] [--binned] [--pre-bin PRE_BIN]
                        [--parang-sign PARANG_SIGN] [--truenorth TRUENORTH]
@@ -841,22 +1081,26 @@ usage: klip-tpe replay [-h] [--instrument {near,nomic,generic}]
                        [--weighting {equal,sqrt_texp}] [--fast] [--no-library]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
-                       [--known RHO PA] [--metric {mawet,fmmf}] --idl-log
-                       IDL_LOG [--run-dir RUN_DIR] [--n N] [--repeat REPEAT]
-                       [--contrast CONTRAST]
+                       [--bin-min N] [--known RHO PA] [--metric {mawet,fmmf}]
+                       --idl-log IDL_LOG [--run-dir RUN_DIR] [--n N]
+                       [--repeat REPEAT] [--contrast CONTRAST]
                        [--ann-edges ANN_EDGES [ANN_EDGES ...]] [--k-max K_MAX]
                        [--anglemax-hi ANGLEMAX_HI] [--seed SEED]
 
 options:
   -h, --help            show this help message and exit
-  --instrument {near,nomic,generic}
+  --instrument {near,nomic,generic,ales}
                         near: NEAR campaign tree under --root; nomic: pyNOMIC
                         working directory under --root; generic: any
-                        registered cube (--cube/--angles/--psf ...)
+                        registered cube (--cube/--angles/--psf ...); ales: an
+                        LBTI/ALES reduction's products under --root,
+                        wavelength groups as partitions
   --root ROOT [ROOT ...]
                         NEAR: data root. nomic: pyNOMIC working directory (one
                         per --obj, or one for all). generic: optional base
-                        directory for the run directory
+                        directory for the run directory. ales: the reduction's
+                        products directory (read only; the run goes to --run-
+                        dir)
   --nights NIGHTS [NIGHTS ...]
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
@@ -882,6 +1126,11 @@ options:
                         runs)
   --n-min-ref N_MIN_REF
   --ref-frac REF_FRAC
+  --bin-min N           generic / ales: floor of the temporal bin, as a
+                        projection (MinBinGuard): a draw below it is evaluated
+                        at N frames per bin. Cost, not correctness: on a long
+                        sequence bin 1 costs tens of times more than bin 5
+                        (default 1 = no floor)
   --known RHO PA
   --metric {mawet,fmmf}
                         detection metric: 'mawet' (default) filters with the
@@ -927,6 +1176,48 @@ generic cubes (--instrument generic / klip-tpe generic):
   --wv-index WV_INDEX   channel of a 4-d IFS cube
   --no-tags             no data-derived frame-quality tags (no frame
                         selection)
+  --forbidden-pa PA HALFWIDTH
+                        generic / ales: no injection within HALFWIDTH deg of
+                        position angle PA (a known companion's azimuth, a
+                        disk); may repeat
+
+LBTI/ALES (--instrument ales):
+  --ales-target NAME    prefix of the product files under --root
+                        (NAME_cube_cen_clean.fits ...; default WISPIT2)
+  --ales-ref NAME       reference star whose products sit beside the target's
+                        (HIP91748): its group means become each group's RDI
+                        library (default: none, RDI off)
+  --ales-groups N       wavelength groups over the usable channels, equally
+                        spaced in ln(lambda) (default 20; 15 = one R = 40
+                        resolution element each)
+  --ales-channels C0 C1
+                        first and last usable channel, inclusive (default 6 88
+                        = 2.899-4.175 um)
+  --ales-only gNN [gNN ...]
+                        load these groups only (checks and short runs)
+  --ales-max-excluded N
+                        the group flags may switch off at most N groups; a
+                        proposal past that has groups switched back on,
+                        nearest --ales-prefer-um first (default 10; -1 = no
+                        bound)
+  --ales-prefer-um UM   wavelength the group bound restores groups towards
+                        (default 3.7)
+  --ales-representative gNN
+                        the group whose FWHM and matched filter stand for the
+                        combined image (default: the group at the mean
+                        wavelength)
+  --ales-angle-offset DEG
+                        added to LBT_PARA once: the derotation is CCW by
+                        LBT_PARA + this (default 180)
+  --ales-tag-r-in PX    inner radius of the frame-quality tags' annulus
+                        (default 2 spaxels: the star's core and halo; 6, the
+                        generic default, is background-dominated here)
+  --ales-cache DIR      directory for the group cubes as .npy, written once
+                        and read back after (the full cube is 814 MB on a slow
+                        volume)
+  --ales-selection {binary,two_slot}
+                        group flags: one 0/1 dimension per group (default) or
+                        --max-drop drop slots
 
 pyNOMIC (--instrument nomic):
   --obj OBJ [OBJ ...]   pyNOMIC object name(s) (the <obj>_NOMIC_*.npz prefix)
@@ -955,7 +1246,7 @@ pyNOMIC (--instrument nomic):
 ## `klip-tpe compare`
 
 ```
-usage: klip-tpe compare [-h] [--instrument {near,nomic,generic}]
+usage: klip-tpe compare [-h] [--instrument {near,nomic,generic,ales}]
                         [--root ROOT [ROOT ...]] [--cube CUBE [CUBE ...]]
                         [--angles ANGLES [ANGLES ...]] [--psf PSF [PSF ...]]
                         [--ref-cube REF_CUBE [REF_CUBE ...]]
@@ -964,7 +1255,15 @@ usage: klip-tpe compare [-h] [--instrument {near,nomic,generic}]
                         [--pxscale PXSCALE] [--lam LAM] [--diam DIAM]
                         [--angle-sign ANGLE_SIGN] [--crop-half CROP_HALF]
                         [--center CENTER CENTER] [--wv-index WV_INDEX]
-                        [--no-tags] [--nights NIGHTS [NIGHTS ...]]
+                        [--no-tags] [--forbidden-pa PA HALFWIDTH]
+                        [--ales-target NAME] [--ales-ref NAME]
+                        [--ales-groups N] [--ales-channels C0 C1]
+                        [--ales-only gNN [gNN ...]] [--ales-max-excluded N]
+                        [--ales-prefer-um UM] [--ales-representative gNN]
+                        [--ales-angle-offset DEG] [--ales-tag-r-in PX]
+                        [--ales-cache DIR]
+                        [--ales-selection {binary,two_slot}]
+                        [--nights NIGHTS [NIGHTS ...]]
                         [--backend {klip,pyklip,vip}] [--obj OBJ [OBJ ...]]
                         [--frames FRAMES] [--binned] [--pre-bin PRE_BIN]
                         [--parang-sign PARANG_SIGN] [--truenorth TRUENORTH]
@@ -978,8 +1277,8 @@ usage: klip-tpe compare [-h] [--instrument {near,nomic,generic}]
                         [--weighting {equal,sqrt_texp}] [--fast]
                         [--no-library] [--no-clean-subtract] [--ladder-pair]
                         [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
-                        [--known RHO PA] [--metric {mawet,fmmf}] --idl-run
-                        IDL_RUN --out OUT [--annulus ANNULUS]
+                        [--bin-min N] [--known RHO PA] [--metric {mawet,fmmf}]
+                        --idl-run IDL_RUN --out OUT [--annulus ANNULUS]
                         [--ann-edges ANN_EDGES [ANN_EDGES ...]]
                         [--contrast CONTRAST] [--contrast-from-idl]
                         [--max-new MAX_NEW] [--stride STRIDE]
@@ -991,14 +1290,18 @@ usage: klip-tpe compare [-h] [--instrument {near,nomic,generic}]
 
 options:
   -h, --help            show this help message and exit
-  --instrument {near,nomic,generic}
+  --instrument {near,nomic,generic,ales}
                         near: NEAR campaign tree under --root; nomic: pyNOMIC
                         working directory under --root; generic: any
-                        registered cube (--cube/--angles/--psf ...)
+                        registered cube (--cube/--angles/--psf ...); ales: an
+                        LBTI/ALES reduction's products under --root,
+                        wavelength groups as partitions
   --root ROOT [ROOT ...]
                         NEAR: data root. nomic: pyNOMIC working directory (one
                         per --obj, or one for all). generic: optional base
-                        directory for the run directory
+                        directory for the run directory. ales: the reduction's
+                        products directory (read only; the run goes to --run-
+                        dir)
   --nights NIGHTS [NIGHTS ...]
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
@@ -1024,6 +1327,11 @@ options:
                         runs)
   --n-min-ref N_MIN_REF
   --ref-frac REF_FRAC
+  --bin-min N           generic / ales: floor of the temporal bin, as a
+                        projection (MinBinGuard): a draw below it is evaluated
+                        at N frames per bin. Cost, not correctness: on a long
+                        sequence bin 1 costs tens of times more than bin 5
+                        (default 1 = no floor)
   --known RHO PA
   --metric {mawet,fmmf}
                         detection metric: 'mawet' (default) filters with the
@@ -1080,6 +1388,48 @@ generic cubes (--instrument generic / klip-tpe generic):
   --wv-index WV_INDEX   channel of a 4-d IFS cube
   --no-tags             no data-derived frame-quality tags (no frame
                         selection)
+  --forbidden-pa PA HALFWIDTH
+                        generic / ales: no injection within HALFWIDTH deg of
+                        position angle PA (a known companion's azimuth, a
+                        disk); may repeat
+
+LBTI/ALES (--instrument ales):
+  --ales-target NAME    prefix of the product files under --root
+                        (NAME_cube_cen_clean.fits ...; default WISPIT2)
+  --ales-ref NAME       reference star whose products sit beside the target's
+                        (HIP91748): its group means become each group's RDI
+                        library (default: none, RDI off)
+  --ales-groups N       wavelength groups over the usable channels, equally
+                        spaced in ln(lambda) (default 20; 15 = one R = 40
+                        resolution element each)
+  --ales-channels C0 C1
+                        first and last usable channel, inclusive (default 6 88
+                        = 2.899-4.175 um)
+  --ales-only gNN [gNN ...]
+                        load these groups only (checks and short runs)
+  --ales-max-excluded N
+                        the group flags may switch off at most N groups; a
+                        proposal past that has groups switched back on,
+                        nearest --ales-prefer-um first (default 10; -1 = no
+                        bound)
+  --ales-prefer-um UM   wavelength the group bound restores groups towards
+                        (default 3.7)
+  --ales-representative gNN
+                        the group whose FWHM and matched filter stand for the
+                        combined image (default: the group at the mean
+                        wavelength)
+  --ales-angle-offset DEG
+                        added to LBT_PARA once: the derotation is CCW by
+                        LBT_PARA + this (default 180)
+  --ales-tag-r-in PX    inner radius of the frame-quality tags' annulus
+                        (default 2 spaxels: the star's core and halo; 6, the
+                        generic default, is background-dominated here)
+  --ales-cache DIR      directory for the group cubes as .npy, written once
+                        and read back after (the full cube is 814 MB on a slow
+                        volume)
+  --ales-selection {binary,two_slot}
+                        group flags: one 0/1 dimension per group (default) or
+                        --max-drop drop slots
 
 pyNOMIC (--instrument nomic):
   --obj OBJ [OBJ ...]   pyNOMIC object name(s) (the <obj>_NOMIC_*.npz prefix)

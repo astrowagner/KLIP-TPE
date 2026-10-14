@@ -280,7 +280,10 @@ def make_reducer(datasets: Dict[str, Dataset], pxscale: float, lam_m: float, dia
         fwp = fwhm_px.get(pid) if isinstance(fwhm_px, dict) else fwhm_px
         fw = float(fwp) if fwp else 1.028 * lod
         sf = star_flux.get(pid) if isinstance(star_flux, dict) else star_flux
-        model = injection_model_for(ds, fw, psf=psf, ee_radius_px=ee_radius_px, star_flux=sf)
+        # a loader that knows where the template's star is (a header's STARX/STARY) says so in
+        # meta['psf_center']; otherwise the centroid of the peak finds it
+        model = injection_model_for(ds, fw, psf=psf, ee_radius_px=ee_radius_px, star_flux=sf,
+                                    psf_center=ds.meta.get("psf_center") if psf is None else None)
         cap = float(outrad_cap) if outrad_cap else float(min(ds.cube.shape[1:]) // 2 - 4)
         rdi = bool(ds.ref_cube is not None) if use_rdi is None else bool(use_rdi)
         d = {"fast": fast, "n_min_ref": n_min_ref, "comb_type": "nwadi", "use_rdi": rdi and ds.ref_cube is not None,

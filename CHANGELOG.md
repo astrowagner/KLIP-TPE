@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased — 2026-10-14 (LBTI/ALES integral-field cubes: wavelength groups as partitions with on/off flags)
+
+From the ALES reduction's handoff of 2026-10-13 (WISPIT 2, the package's first IFS data set).
+
+- **`klip_tpe.instruments.ales`, `klip-tpe near --instrument ales`** reads an ALES reduction's
+  products (the `(wavelength, frame, y, x)` cube, `LBT_PARA`, the wavelengths, the per-channel
+  template) and makes one partition per wavelength group: the usable channels 6-88 cut into
+  20 groups of equal width in ln λ (the handoff's rule, §6.2, reproduced to the channel), each
+  group's channels meaned into one cube, with its own wavelength and FWHM (1.03 λ/D), its own
+  template normalised in 3 spaxels, its own quality tags from 2 spaxels out, and the group
+  mean of a reference star's cube as its RDI library when asked.  The angles carry the +180°
+  once.  The group table and each group's channels go into `run_setup.json`.  `docs/ALES.md`.
+  - One parameter block is shared by every group and `selection='binary'` adds a 0/1 flag per
+    group.  `GroupCountGuard` bounds the flags: a proposal with more than `max_excluded` (10)
+    groups off has groups switched back on, nearest 3.7 µm first, at random for a random draw.
+  - `PartitionedReducer` takes a `representative` partition whose FWHM, λ/D and matched filter
+    stand for the combined image (the first partition before, the bluest group here); the
+    adapter names the group at the mean wavelength.  `describe()` records it, the partition
+    label and a `provenance` dict.
+  - `KLIPReducer` default `hp_nan_aware` (False as before): the science frames' high-pass with
+    `smooth(/nan)` semantics.  The registered ALES frames carry NaN along their edges, and IDL's
+    boxcar carries a NaN along the whole frame: at bin 5 that emptied 40 of WISPIT 2's 108
+    bins, and b's matched-filter S/N on the reduction's own parameters fell from 6.2 to 5.3.  The
+    adapter sets it.
+  - The adapter's metric does not de-spike (`declip_nsig=None`): at 2.1-3.0 spaxels per FWHM a
+    source's peak stands 6 robust σ above its 3 x 3 median and was replaced by it (b's S/N 6.2 →
+    3.9, and 3.5 with the IDL boxcar as well).
+  - `--bin-min N` on the command line floors the temporal bin (`MinBinGuard`) for the generic
+    and ALES guards; `--forbidden-pa PA HALFWIDTH` reaches the sampler for both.
+  - On WISPIT 2 the derotation lands b at (38, 26) against the reduction's (38.1, 26.4), and the
+    reduction's parameters on groups g08-g18 give b a matched-filter S/N of 6.2 and an aperture
+    S/N of 8.2 (the reduction's own metric: 8.6).  The run itself, the first search on the
+    annulus that holds b, is reported with the data.  `tests/test_ales.py`.
+  - `generic.make_reducer` centres a template at the loader's `meta['psf_center']` when there is
+    one (the ALES header's `STARX`, `STARY`), and at the centroid of its peak otherwise, as before.
+
 ## Unreleased — 2026-10-13 (injection only into the kept frames and on the job's threads, the display's annulus books in a process of their own, `--n-sources`, `--min-r-fwhm`, the metric's inner guard at the source's own radius, failed draws that say why)
 
 From four NEAR2 notes of 2026-10-13: the parallelism note, the note on the source count, the

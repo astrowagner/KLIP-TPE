@@ -119,6 +119,7 @@ from any phase; `extend` adds evaluations to a finished one.
 |---|---|
 | a registered cube + angles (+ PSF, + reference cube), FITS or arrays — VIP, your pipeline | `klip_tpe.instruments.generic` / `klip-tpe generic` |
 | LBTI/NOMIC through **pyNOMIC** | `klip_tpe.instruments.nomic` / `klip-tpe near --instrument nomic` — **[docs/PYNOMIC.md](docs/PYNOMIC.md)** |
+| LBTI/**ALES** integral-field cubes, wavelength groups as partitions with on/off flags | `klip_tpe.instruments.ales` / `klip-tpe near --instrument ales` — **[docs/ALES.md](docs/ALES.md)** |
 | VLT/VISIR **NEAR** campaign tree | `klip_tpe.instruments.near` / `klip-tpe near` — `docs/RUNNING.md` |
 | **JWST** via spaceKLIP (database or `calints`) | `klip_tpe.backends.spaceklip` — tutorial 3, `docs/BACKENDS.md` |
 | any **pyKLIP** `Data` object (GPI, CHARIS, JWST, GenericData) | `klip_tpe.backends.pyklip.dataset_from_pyklip` |
@@ -157,6 +158,7 @@ importance instead of the night panels.
 klip-tpe generic  --cube ... --angles ... [--psf ...] [--ref-cube ...] --pxscale --lam --diam ...   # any cube
 klip-tpe near     --root <NEAR tree> --nights 1 2 3 [...]                                            # NEAR
 klip-tpe near     --instrument nomic --root <pyNOMIC workdir> --obj <name> [--groups auto] [...]     # pyNOMIC
+klip-tpe near     --instrument ales --root <ALES products> --ales-target <name> [--ales-groups 20] [...] # ALES IFS
 klip-tpe resume   --run-dir <dir>|last  <same data arguments>                                        # continue
 klip-tpe extend   --run-dir <dir> --n-iter <new totals>                                              # more evaluations
 klip-tpe plots    --run-dir <dir>                                                                    # figures
@@ -183,7 +185,7 @@ lists all of them.
 | `runner.py` | calibrate → search → validate, products, checkpoints, `resume` / `extend`, callbacks |
 | `display.py`, `intro.py`, `animate.py`, `plots.py` | live panel, books, launch movie, GIF / MP4, diagnostics |
 | `products.py`, `stitch.py`, `verify.py`, `param_verify.py`, `candidates.py` | contrast curves, stitches, S/N maps, the verification stack |
-| `instruments/` | `generic`, `near`, `nomic` adapters |
+| `instruments/` | `generic`, `near`, `nomic`, `ales` adapters |
 | `backends/` | `pyklip`, `vip`, `spaceklip`, `custom` |
 | `datasets.py` | public example data (auto-download) |
 | `cli.py`, `parallel.py` | the command line; worker / thread bookkeeping |
@@ -193,6 +195,7 @@ lists all of them.
 * `docs/TUTORIALS.md` — the notebooks and what to read when.
 * `docs/BUDGET.md` — **how many evaluations a run needs**, measured: warm-up, search, validation.
 * `docs/PYNOMIC.md` — LBTI/NOMIC via pyNOMIC: loading, image groups as partitions, checks.
+* `docs/ALES.md` — LBTI/ALES integral-field cubes: wavelength groups as partitions, the group flags, the WISPIT 2 run.
 * `docs/RUNNING.md` — the NEAR production protocol from a terminal or Jupyter.
 * `docs/DISPLAY.md` — the live panel, cell by cell, and every product file.
 * `docs/BACKENDS.md` — pyKLIP / VIP / spaceKLIP: parameter mapping, conventions, ingestion.
