@@ -24,9 +24,11 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .injection import InjectionModel, _check_float32_headroom, inject_frames
-from .klip import (KLIPParams, arcdist_deg, bin_by_groups, bin_frames, bin_groups, derotate, destripe,
-                   frame_selection_mask, highpass_stack, klip_annular, nw_ang_comb)
+from .injection import (InjectionModel, _check_float32_headroom, add_crop, cube_peak, inject_frames,
+                        place_source, prepare_sources)
+from .klip import (BLOCK_BYTES, KLIPParams, _highpass_frames, arcdist_deg, bin_by_groups, bin_frames,
+                   bin_groups, derotate, destripe, frame_blocks, frame_selection_mask, group_bounds, group_mean,
+                   highpass_stack, klip_annular, nw_ang_comb, run_blocks)
 from .metrics import Source
 from .space import Config
 
@@ -189,6 +191,38 @@ class _FrameCache:
         self.lock = threading.Lock()
 
 
+class _CropCache:
+    """What one set of sources adds to each frame (:func:`klip_tpe.injection.stamp_crop`,
+    per source), kept once the set comes back.
+
+    A set seen for the first time is placed without keeping anything: the search draws new
+    sources for every reduction, and keeping their stamps would only write them out to
+    memory.  A set that comes back -- param-verify reduces one fixed set under many
+    configurations, a fixed-source search one set per annulus -- keeps each frame's stamps
+    from its second reduction on, so a later selection places only the frames it adds.  One
+    set is kept at a time, the latest that came back."""
+
+    __slots__ = ("seen", "key", "frames", "lock")
+
+    def __init__(self):
+        self.seen = None
+        self.key = None
+        self.frames: Dict[int, list] = {}
+        self.lock = threading.Lock()
+
+    def lookup(self, key) -> Tuple[bool, Optional[Dict[int, list]]]:
+        """``(first_sighting, frames)``: whether ``key`` is new, and the dict its frames'
+        stamps go in, or None when they are not kept."""
+        with self.lock:
+            if key == self.key:
+                return False, self.frames
+            if key == self.seen:
+                self.key, self.frames = key, {}
+                return False, self.frames
+            self.seen = key
+            return True, None
+
+
 def _flag(v) -> bool:
     """A yes/no request parameter: True for True, 1, "1", "yes", "true"."""
     if isinstance(v, str):
@@ -212,11 +246,22 @@ class KLIPReducer(Reducer):
             True is ``smooth(/nan)``: each NaN pixel stays NaN and the rest of the frame is
             filtered.  For frames with NaN at their registration edges, say ALES's, where
             False dropped every bin with such a frame -- 40 of 108 at bin 5 on WISPIT 2.)
+        prep_fused (bool, default True: the frames before KLIP are made one bin group at a
+            time, see below.  False makes them a whole cube per step, the reference the
+            fused path is tested against, to the bit.)
 
     The chain: frame selection -> inject (the kept frames) -> high-pass -> [destripe 90, 0]
     -> angle-aware binning -> annular KLIP [RDI/ARDI basis, KLIP-FM] -> high-pass
     (NaN-aware) -> derotate -> combine [-> mask_fn].  The selection reads only the frame
     tags, so injecting the kept frames alone changes no number.
+
+    Everything before KLIP is done one bin group at a time (:meth:`_prep_fused`): a group's
+    kept frames are copied out of the cube, given their sources, high-passed, destriped and
+    averaged into the one binned frame, while they are still in the processor's cache.  The
+    frames are read from memory once per reduction, where a whole-cube step per stage read
+    and wrote them seven times, and no injected cube is ever held.  Each step is the
+    whole-cube step's own function on the same frames in the same order, so the numbers are
+    the same to the bit.
 
     ``mask_fn(image) -> image`` is the optional legacy post-mask hook
     (``block_burn`` / ``block_airy``), applied to the final science image only.
@@ -263,10 +308,14 @@ class KLIPReducer(Reducer):
                          "fast": False, "spat_mean": False, "temp_mean": False,
                          "n_min_ref": 10, "comb_type": "nwadi",
                          "use_rdi": False, "rdi_mode": "ardi", "do_destripe": False, "destripe_clip": 0.0,
-                         "fm_selfsub": True, "hp_nan_aware": False}
+                         "fm_selfsub": True, "hp_nan_aware": False, "prep_fused": True}
         self.defaults.update(defaults or {})
         self._inj_cache: Dict[Tuple, _FrameCache] = {}
         self._fm_cache: Dict[Tuple, _FrameCache] = {}
+        #: the fused path's stamps, per kind: the injected sources and the KLIP-FM model's
+        self._crops: Dict[str, _CropCache] = {"inj": _CropCache(), "fm": _CropCache()}
+        #: the cube's brightest pixel for the float32 headroom check, computed once
+        self._peak: Optional[float] = None
         self._inj_lock = threading.Lock()
         self._cost_cache: Dict[Tuple, float] = {}
         #: optional searched reference library (:mod:`klip_tpe.reflib`).  Set through
@@ -389,7 +438,8 @@ class KLIPReducer(Reducer):
                 # memory, and no frame is read before it is written
                 ent = _FrameCache(np.empty(self.data.cube.shape, np.float32))
                 self._inj_cache = {key: ent}       # keep only the latest set of sources
-                _check_float32_headroom(self.data.cube, sources, self.model, self.fallback)
+                _check_float32_headroom(self.data.cube, sources, self.model, self.fallback,
+                                        peak=self.cube_peak())
         return self._fill(ent, self.data.cube, sources, keep, threads)
 
     def model_cube(self, sources: Sequence[Source], keep: Optional[np.ndarray] = None,
@@ -426,11 +476,22 @@ class KLIPReducer(Reducer):
         d = self.__dict__.copy()
         d.update(_inj_cache={}, _fm_cache={})
         d.pop("_inj_lock", None)
+        d.pop("_crops", None)
         return d
 
     def __setstate__(self, d):
         self.__dict__.update(d)
         self._inj_lock = threading.Lock()
+        self._crops = {"inj": _CropCache(), "fm": _CropCache()}
+        self.__dict__.setdefault("_peak", None)
+
+    def cube_peak(self) -> float:
+        """The cube's brightest pixel as the float32 headroom check samples it, computed
+        once.  The check runs for every new set of sources, and its strided sample touches
+        most of the cube's cache lines: once per draw it was most of a read of the cube."""
+        if getattr(self, "_peak", None) is None:
+            self._peak = cube_peak(self.data.cube)
+        return self._peak
 
     def set_reference_library(self, *, partition, groups=None, metric: str = "cc",
                              shift_px: int = 1, n_min_ref: int = 2,
@@ -723,10 +784,6 @@ class KLIPReducer(Reducer):
             do_fm = False
         keep = frame_selection_mask(ds.nframes, ds.tags, p["corr_thresh"], p["noise_max"],
                                     p["coronoise_max"], bin_, k)
-        # The selection reads the tags, not the pixels, so it comes first.  Only the kept
-        # frames are injected, and the injected cubes come back as cube[keep].
-        cube = self._inject(req.injections, keep, threads=nth) if req.injections else ds.cube
-        mcube = self.model_cube(req.fm_sources, keep, threads=nth) if do_fm else None
         dth = self.dth_max_deg(outrad)
         # ``hp_order="binned"`` (under test, off by default): bin first, then high-pass the
         # binned frames.  Both are linear, so the images agree to rounding, and the high-pass
@@ -735,10 +792,28 @@ class KLIPReducer(Reducer):
         # frame before binning, and a destriped cube keeps that order (not linear).
         hp_binned = str(p.get("hp_order", "raw")).lower() == "binned" and filt > 1 and not p["do_destripe"]
         hp_nan = _flag(p.get("hp_nan_aware", False))
-        if mcube is not None and filt > 1 and not hp_binned:
-            mcube = highpass_stack(mcube, filt, nan_aware=hp_nan, threads=nth)
-        bcube, bang, grp, bkeep = self._prep_cube(cube, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth,
-                                                  selected=bool(req.injections))
+        if _flag(p.get("prep_fused", True)):
+            # one bin group at a time, the frames read once (_prep_fused)
+            bcube, bang, grp, bkeep, mcube = self._prep_fused(
+                p, keep, bin_, filt, dth, hp_nan, hp_binned, nth, req.injections or None,
+                req.fm_sources if do_fm else None)
+        else:
+            # the reference: a whole cube per step.  The selection reads the tags, not the
+            # pixels, so it comes first.  Only the kept frames are injected, and the injected
+            # cubes come back as cube[keep].
+            cube = self._inject(req.injections, keep, threads=nth) if req.injections else ds.cube
+            mcube = self.model_cube(req.fm_sources, keep, threads=nth) if do_fm else None
+            if mcube is not None and filt > 1 and not hp_binned:
+                mcube = highpass_stack(mcube, filt, nan_aware=hp_nan, threads=nth)
+            bcube, bang, grp, bkeep = self._prep_cube(cube, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth,
+                                                      selected=bool(req.injections))
+            if mcube is not None and bcube.shape[0]:
+                if hp_binned:
+                    mb = bin_by_groups(mcube, grp, threads=nth, dtype=np.float64) if bin_ > 1 else mcube
+                    mb = highpass_stack(mb, filt, nan_aware=hp_nan, threads=nth)
+                else:
+                    mb = bin_by_groups(mcube, grp, threads=nth) if bin_ > 1 else np.asarray(mcube, np.float32)
+                mcube = mb[bkeep]
         if bcube.shape[0] == 0:
             # bin_frames drops bins whose nansum is zero.  np.nansum of an ALL-NaN frame is
             # 0.0, so a cube that is mostly NaN -- a subarray padded into a larger grid, say
@@ -752,15 +827,153 @@ class KLIPReducer(Reducer):
                 f"NaN. A high-pass filter spreads NaN across the whole frame, so a padded or "
                 f"masked cube must be cropped to its finite region before it reaches the "
                 f"reducer.")
-        if mcube is not None:
-            if hp_binned:
-                mb = bin_by_groups(mcube, grp, threads=nth, dtype=np.float64) if bin_ > 1 else mcube
-                mb = highpass_stack(mb, filt, nan_aware=hp_nan, threads=nth)
-            else:
-                mb = bin_by_groups(mcube, grp, threads=nth) if bin_ > 1 else np.asarray(mcube, np.float32)
-            mcube = mb[bkeep]
         return PreparedFrames(p, k, bin_, filt, inrad, outrad, dth, keep, bcube, bang, grp, bkeep, mcube,
                               hp_nan, hp_binned, nth, meta)
+
+    # ------------------------------------------------------------------ the fused path
+    def _prep_fused(self, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth, injections=None, fm_sources=None):
+        """The frames before KLIP, one bin group at a time: ``(bcube, bang, grp, bkeep,
+        mcube)`` as the whole-cube steps make them (:meth:`_prep_cube`, :meth:`_inject`,
+        :meth:`model_cube`, and the model's binning in :meth:`prepare`), to the bit.
+
+        A group's kept frames are copied out of the cube (``float32`` when they take
+        sources, as the injected cube held them), given each source's stamp in the order of
+        the sources (:func:`klip_tpe.injection.place_source`, the arithmetic of
+        :func:`~klip_tpe.injection.inject_frames`), high-passed a block of frames at a time
+        (``_highpass_frames``, which filters every frame on its own), destriped frame by
+        frame when asked, and averaged by :func:`~klip_tpe.klip.group_mean`, the function the
+        whole-cube binning uses.  With ``hp_order="binned"`` the group is averaged in double
+        precision first and the mean high-passed.  The KLIP-FM model cube is made the same
+        way from zero frames.
+
+        So the cube is read once and nothing the size of the cube is written: the stages
+        that used to read and write a whole cube each -- the injected copy, the compact copy
+        of the kept frames, the high-pass, the binning -- run on a group while it is in the
+        processor's cache.  The groups go to the job's threads."""
+        ds = self.data
+        kidx = np.flatnonzero(keep)
+        a_ = np.asarray(ds.angles, float)[kidx]
+        grp = bin_groups(a_, bin_, dth)
+        bounds = group_bounds(grp)
+        ng = bounds.size - 1
+        if bin_ <= 1:
+            bang = a_.copy()
+        else:
+            bang = np.bincount(grp, weights=a_, minlength=ng) / np.bincount(grp, minlength=ng)
+        clip = float(p["destripe_clip"]) if (p["do_destripe"] and not hp_binned) else None
+        place = self._placer(injections, "inj") if injections else None
+        bc = self._fused_bins(ds.cube, kidx, bounds, bin_, filt, hp_nan, hp_binned, nth, place, clip)
+        tot = np.array([np.nansum(f) for f in bc])
+        bkeep = tot != 0
+        mcube = None
+        if fm_sources:
+            mb = self._fused_bins(None, kidx, bounds, bin_, filt, hp_nan, hp_binned, nth,
+                                  self._placer(fm_sources, "fm"), None)
+            mcube = mb[bkeep]
+        return bc[bkeep], bang[bkeep], grp, bkeep, mcube
+
+    def _placer(self, sources: Sequence[Source], kind: str):
+        """``place(frames, J)``: every source's stamp added to ``frames[i]``, frame ``J[i]``
+        of the cube, in the order of the sources, as :func:`inject_frames` adds them.  The
+        stamps of a set that comes back are kept (:class:`_CropCache`)."""
+        if self.model is None:
+            raise ValueError("KLIPReducer needs an injection_model to inject sources" if kind == "inj" else
+                             "KLIPReducer needs an injection_model to build the FM model cube")
+        key = tuple(s.as_tuple() for s in sources)
+        first, cache = self._crops[kind].lookup(key)
+        if first and kind == "inj":
+            _check_float32_headroom(self.data.cube, sources, self.model, self.fallback, peak=self.cube_peak())
+        prepared = prepare_sources(sources, self.model, self.fallback, self.pxscale)
+        ny, nx = self.data.cube.shape[1:]
+        center = ((nx - 1) / 2.0, (ny - 1) / 2.0)
+        angles = np.asarray(self.data.angles, float)
+        model, truenorth, conv = self.model, self.truenorth, self.angle_convention
+
+        def place(frames: np.ndarray, J: np.ndarray) -> None:
+            todo = []
+            for i, j in enumerate(J):
+                got = None if cache is None else cache.get(int(j))
+                if got is None:
+                    todo.append(i)
+                else:
+                    for c in got:
+                        add_crop(frames[i], c)
+            if not todo:
+                return
+            Jt = [int(J[i]) for i in todo]
+            kept = None if cache is None else [[] for _ in todo]
+            for pp in prepared:
+                def sink(k, c):
+                    add_crop(frames[todo[k]], c)
+                    if kept is not None:
+                        kept[k].append((c[0], c[1], c[2], c[3], c[4].copy()))
+                place_source(Jt, pp, model, angles, truenorth, center, conv, (ny, nx), sink)
+            if kept is not None:
+                for k, j in enumerate(Jt):
+                    cache[j] = kept[k]
+        return place
+
+    def _fused_bins(self, base, kidx, bounds, bin_, filt, hp_nan, hp_binned, nth, place, clip) -> np.ndarray:
+        """Every bin group's frame, before the all-zero test: ``base[kidx]`` (zero frames
+        when ``base`` is None) through ``place``, the high-pass, ``clip``'s destriping and
+        the mean, a batch of whole groups at a time (see :meth:`_prep_fused`)."""
+        ny, nx = self.data.cube.shape[1:]
+        npix = int(ny) * int(nx)
+        ng = int(bounds.size) - 1
+        out = np.empty((ng, ny, nx), np.float32)
+        # a batch holds whole groups and, past its first group, no more frames than one block
+        # of highpass_stack (its float64 copy within BLOCK_BYTES): bin 1 goes five frames of
+        # 150 x 150 at a time, a bin of 29 one group at a time
+        cap = max(1, BLOCK_BYTES // (8 * npix))
+
+        def hp(fr):
+            if filt <= 1:
+                return fr
+            if fr.dtype != np.float32:
+                return highpass_stack(fr, filt, nan_aware=hp_nan, threads=1)
+            for lo, hi in frame_blocks(fr.shape[0], 1, npix):    # in place, a block at a time
+                fr[lo:hi] = _highpass_frames(fr[lo:hi], filt, hp_nan)
+            return fr
+
+        def block(g0, g1):
+            g = g0
+            while g < g1:
+                h = g + 1
+                while h < g1 and bounds[h + 1] - bounds[g] <= cap:
+                    h += 1
+                s0, s1 = int(bounds[g]), int(bounds[h])
+                J = kidx[s0:s1]
+                if base is None:
+                    fr = np.zeros((s1 - s0, ny, nx), np.float32)
+                else:
+                    fr = base[J]                     # a copy, in the cube's own precision
+                    if place is not None and fr.dtype != np.float32:
+                        fr = fr.astype(np.float32)   # as the injected cube held the frames
+                if place is not None:
+                    place(fr, J)
+                if not hp_binned:
+                    fr = hp(fr)
+                    if clip is not None:
+                        # reduce_near_2 L1672-1677: 90 deg (columns) then 0 deg (rows); science only
+                        fr = np.stack([destripe(destripe(f, 90.0, clip), 0.0, clip) for f in fr])
+                    for q in range(g, h):
+                        a, b = int(bounds[q]) - s0, int(bounds[q + 1]) - s0
+                        out[q] = fr[a] if bin_ <= 1 else group_mean(fr[a:b], np.float32)
+                else:
+                    for q in range(g, h):
+                        a, b = int(bounds[q]) - s0, int(bounds[q + 1]) - s0
+                        m = np.asarray(fr[a:b], np.float32) if bin_ <= 1 else group_mean(fr[a:b], np.float64)[None]
+                        out[q] = highpass_stack(m, filt, nan_aware=hp_nan, threads=1)[0]
+                g = h
+        run_blocks(block, frame_blocks(ng, nth), nth)
+        return out
+
+    def _clean_bins(self, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth) -> np.ndarray:
+        """The binned frames of the cube without injections (the reference library's
+        ranking cube), by the path :meth:`prepare` takes."""
+        if _flag(p.get("prep_fused", True)):
+            return self._prep_fused(p, keep, bin_, filt, dth, hp_nan, hp_binned, nth)[0]
+        return self._prep_cube(self.data.cube, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth)[0]
 
     def _prep_cube(self, c, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth, selected=False):
         """frame selection, high-pass, destripe and binning of a science cube
@@ -871,7 +1084,7 @@ class KLIPReducer(Reducer):
                     k0 = (int(bcube.shape[0]), int(filt), round(float(inrad), 3), round(float(outrad), 3),
                           spec["metric"], spec["shift_px"]) + kx
                     if k0 not in self._reflib_cache:
-                        sim_cube = self._prep_cube(ds.cube, p, keep, bin_, filt, dth, prep.hp_nan, prep.hp_binned, nth)[0]
+                        sim_cube = self._clean_bins(p, keep, bin_, filt, dth, prep.hp_nan, prep.hp_binned, nth)
                 ref_lib, ref_basis = self._reflib(bcube, ref, bpart, filt, inrad, outrad, key_extra=kx,
                                                   sim_cube=sim_cube, bang=bang, sdi=sdi)
                 ref_keep = ref_lib.keep_from_config(p)

@@ -70,7 +70,10 @@ is spent like IDL's bridges.  After the nights are loaded the reducer forks
 They share the loaded cubes copy-on-write, and only requests and the small result images
 cross between processes.  A partition job runs its injection, its per-target KLIP work, its
 high-pass, binning, derotation and combination on its own threads, and injects only the frames
-its frame selection keeps.  `--threads-per-job` (4 by default)
+its frame selection keeps.  Everything before KLIP goes one bin group at a time: a group's kept
+frames are copied out of the night, given their sources, high-passed and averaged while they
+are in the processor's cache, so a job reads its kept frames from memory once and writes only
+the binned cube.  `--threads-per-job` (4 by default)
 sets the average.  A job expected to take long, a big night at a small bin, gets more threads,
 up to four times as many, and a light one gets one.  A free worker takes the waiting job
 expected to take longest.  The images do not depend on the thread count or the order.  BLAS
@@ -126,8 +129,10 @@ main thread over the last 300 s and since the start, and the share it spent wait
 needs no other package.
 
 Six NEAR nights are ~2000 frames × 150² each, and the workers share them.  Each running job
-holds its own binned cube and KL bases, and each worker keeps the frames it injected for the
-latest sources of every night it has reduced, at most about 0.85 GB for six NEAR nights.  On Linux the log reports, after the
+holds its own binned cube and KL bases.  No worker holds injected frames.  A set of sources
+reduced a second time on a night (param-verify's fixed set, a fixed-source search) keeps its
+stamps there, about 70 MB a night for three sources on NEAR, one set at a time, so a later
+selection places only the frames it adds.  On Linux the log reports, after the
 search and after validation, the workers' peak resident memory and what they hold together,
 which is what a given pool size needs on that machine.
 
