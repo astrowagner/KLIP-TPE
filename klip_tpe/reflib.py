@@ -19,6 +19,11 @@ What is general here
 * Any number of named :class:`ReferenceGroup` s, each with its own searched count.
 * A group may be science data (then it carries a ``partition`` label per frame and the
   same-partition exclusion applies) or an external star (no exclusion, never a target).
+* A science group of one continuously rotating sequence has no label to exclude by: with
+  ``rotation=True`` it is the ADI rule that decides, per target and per annulus (the
+  references must have turned the planet by ``angsep`` and by no more than ``anglemax``,
+  :func:`klip_tpe.klip.reference_mask`), the label on top of it when there is more than
+  one.  With every eligible frame kept and no other pool, that is plain ADI to the bit.
 * Two similarity metrics, both measured where it matters -- inside the optimized annulus,
   after the same high-pass filter the reduction uses.  ``cc`` is a peak normalized
   cross-correlation (higher is better); ``ssr`` is the residual of a per-pair scale +
@@ -121,23 +126,34 @@ class ReferenceGroup:
     partition: Optional[np.ndarray] = None        # per-frame label, same length as rows
     min_keep: int = 0
     max_keep: Optional[int] = None                # default: all of them
+    #: science frames of a rotating sequence: a target's eligible rows are the ones the ADI
+    #: rule admits (``angsep``, ``anglemax`` over the library's angles), never itself
+    rotation: bool = False
 
     def __post_init__(self):
         self.rows = np.asarray(self.rows, int)
+        self.n_labels = 0
         if self.partition is not None:
             self.partition = np.asarray(self.partition)
             if self.partition.shape != self.rows.shape:
                 raise ValueError(f"group {self.name!r}: {self.partition.size} labels for "
                                  f"{self.rows.size} frames")
+            self.n_labels = int(np.unique(self.partition).size) if self.partition.size else 0
         # The reachable size of a partitioned pool is not its row count: a target only ever
         # sees the rows carrying a DIFFERENT label, so for two 25-frame rolls the ceiling is
         # 25, not 50.  Bounding at 50 would leave half the searched range describing
         # configurations identical to "keep everything eligible", which the optimizer would
-        # have to spend evaluations discovering are ties.
+        # have to spend evaluations discovering are ties.  One label and the rotation rule:
+        # every other frame can be eligible, so the ceiling is the count less the target.
         reach = int(self.rows.size)
         if self.partition is not None and self.partition.size:
             vals, counts = np.unique(self.partition, return_counts=True)
-            reach = int(counts.sum() - counts.min()) if vals.size > 1 else 0
+            if vals.size > 1:
+                reach = int(counts.sum() - counts.min())
+            else:
+                reach = int(max(self.rows.size - 1, 0)) if self.rotation else 0
+        elif self.rotation:
+            reach = int(max(self.rows.size - 1, 0))
         if self.max_keep is None:
             self.max_keep = reach
         self.max_keep = int(min(self.max_keep, reach))
@@ -161,6 +177,9 @@ class ReferenceLibrary:
     target_partition: Optional[np.ndarray] = None   # label per TARGET frame
     metric: str = "cc"
     n_min_ref: int = 2
+    #: the (binned) parallactic angle of each library row that is a science frame, indexed
+    #: by row; a group with ``rotation`` is ranked only among the rows the ADI rule admits
+    angles: Optional[np.ndarray] = None
 
     def __post_init__(self):
         self.similarity = np.asarray(self.similarity, float)
@@ -169,6 +188,13 @@ class ReferenceLibrary:
             raise ValueError(f"duplicate reference-group names: {names}")
         if self.target_partition is not None:
             self.target_partition = np.asarray(self.target_partition)
+        if self.angles is not None:
+            self.angles = np.asarray(self.angles, float).ravel()
+        for g in self.groups:
+            if g.rotation and self.angles is None:
+                raise ValueError(f"group {g.name!r} applies the rotation rule but the library has no angles")
+            if g.rotation and g.rows.size and g.rows.max() >= (self.angles.size if self.angles is not None else 0):
+                raise ValueError(f"group {g.name!r}: {self.angles.size} angles for rows up to {g.rows.max()}")
 
     @property
     def better_is_larger(self) -> bool:
@@ -195,26 +221,53 @@ class ReferenceLibrary:
         """Pull ``nkeep_<group>`` out of a decoded config, defaulting to the full pool."""
         return {g.name: int(round(float(cfg.get(g.param_name, g.max_keep)))) for g in self.groups}
 
-    def eligible(self, target: int, group: ReferenceGroup) -> np.ndarray:
-        """Rows of ``group`` this target may use (the same-partition exclusion)."""
-        if group.partition is None or self.target_partition is None:
-            return group.rows
-        return group.rows[group.partition != self.target_partition[target]]
+    def eligible(self, target: int, group: ReferenceGroup, angsep_deg: float = 0.0,
+                 anglemax: float = 360.0, census: bool = False) -> np.ndarray:
+        """Rows of ``group`` this target may use: never its own label (unless the group
+        rotates under one label), and, for a ``rotation`` group, only the rows the ADI rule admits
+        (``angsep_deg <= |dPA| <= anglemax``, itself never).  When that leaves fewer than
+        4 rows the group falls back to every row but the target, as ``klip_annular`` does
+        without a library (``multiklip``'s fallback).  ``census`` asks for the count
+        before that fallback, which is what the starved-target rule reads."""
+        rows = group.rows
+        if group.partition is not None and self.target_partition is not None \
+                and not (group.rotation and group.n_labels < 2):
+            # the label rule (one roll never serves itself); a rotating sequence under one
+            # label is the case the rotation rule exists for, so the label stands down there
+            rows = rows[group.partition != self.target_partition[target]]
+        if not group.rotation:
+            return rows
+        dpa = np.abs(self.angles[rows] - self.angles[target])
+        ok = (dpa >= float(angsep_deg)) & (dpa <= float(anglemax)) & (rows != target)
+        got = rows[ok]
+        if got.size < 4 and not census:
+            got = group.rows[group.rows != target]
+        return got
 
-    def select(self, target: int, keep: Dict[str, int]) -> np.ndarray:
+    def select(self, target: int, keep: Dict[str, int], angsep_deg: float = 0.0,
+               anglemax: float = 360.0, census: bool = False) -> np.ndarray:
         """Library rows for one target frame: the best ``keep[name]`` of each group.
 
         Ranking is per target, which is the whole point -- a frame taken in poor pointing
         is best matched by different references than the frame after it, and averaging
-        that choice over the sequence is what a fixed library does.
+        that choice over the sequence is what a fixed library does.  ``angsep_deg`` and
+        ``anglemax`` reach the groups that apply the rotation rule.
         """
         out: List[np.ndarray] = []
         for g in self.groups:
             n = int(keep.get(g.name, g.max_keep))
             if n <= 0:
                 continue
-            rows = self.eligible(target, g)
+            rows = self.eligible(target, g, angsep_deg, anglemax, census=census)
             if rows.size == 0:
+                continue
+            if n >= rows.size:
+                # every eligible row, ranked or not.  A rotating sequence keeps them all (that is
+                # what makes the full pool plain ADI); another pool drops a row whose similarity
+                # is not finite, as the ranking below always did
+                if not g.rotation:
+                    rows = rows[np.isfinite(self.similarity[rows, target])]
+                out.append(rows)
                 continue
             s = self.similarity[rows, target]
             order = np.argsort(s)[::-1] if self.better_is_larger else np.argsort(s)
@@ -224,9 +277,28 @@ class ReferenceLibrary:
             return np.zeros(0, int)
         return np.unique(np.concatenate(out))
 
-    def mask(self, target: int, keep: Dict[str, int], n_library: int) -> np.ndarray:
+    def is_plain_adi(self, keep: Dict[str, int]) -> bool:
+        """Do these counts make the library plain ADI: one rotation group under one label
+        kept whole, every other pool at zero?  ``klip_annular`` then reduces without the
+        library at all, so that point of the space IS the ADI reduction, shortcuts and all
+        (its shared basis when nothing is excluded, its cap on ``k``), rather than a
+        per-target rendering of it."""
+        rot = [g for g in self.groups if g.rotation]
+        if len(rot) != 1 or rot[0].n_labels > 1:
+            return False
+        for g in self.groups:
+            n = int(keep.get(g.name, g.max_keep))
+            if g.rotation:
+                if n < g.max_keep:
+                    return False
+            elif n > 0:
+                return False
+        return True
+
+    def mask(self, target: int, keep: Dict[str, int], n_library: int, angsep_deg: float = 0.0,
+             anglemax: float = 360.0) -> np.ndarray:
         m = np.zeros(int(n_library), bool)
-        m[self.select(target, keep)] = True
+        m[self.select(target, keep, angsep_deg, anglemax)] = True
         return m
 
     def project(self, cfg: Dict) -> Dict:
@@ -264,20 +336,23 @@ def science_and_reference_library(science: np.ndarray, partition: Sequence,
                                   metric: str = "cc", shift_px: int = 1,
                                   n_min_ref: int = 2,
                                   science_group: str = "altroll",
-                                  min_keep: Optional[Dict[str, int]] = None):
+                                  min_keep: Optional[Dict[str, int]] = None,
+                                  rotation: bool = False, angles: Optional[Sequence[float]] = None):
     """Build the MWC 758 arrangement for any data set.
 
     ``science`` is the target cube with a ``partition`` label per frame (roll, night,
     channel); it becomes one group whose same-label frames are excluded per target.  Each
     entry of ``external`` is a cube of reference-star frames and becomes a group of its
-    own, always eligible.  Returns ``(library_cube, ReferenceLibrary)`` where the library
-    cube is the science frames followed by each external cube in turn, so the group row
-    indices address it directly.
+    own, always eligible.  ``rotation`` with the frames' ``angles`` makes the science group
+    one the ADI rule selects from (a rotating sequence with no label to exclude by).
+    Returns ``(library_cube, ReferenceLibrary)`` where the library cube is the science
+    frames followed by each external cube in turn, so the group row indices address it
+    directly.
     """
     science = np.asarray(science, float)
     cubes = [science]
     groups = [ReferenceGroup(science_group, np.arange(science.shape[0]),
-                             partition=np.asarray(list(partition)))]
+                             partition=np.asarray(list(partition)), rotation=bool(rotation))]
     off = science.shape[0]
     for name, cube in (external or {}).items():
         cube = np.asarray(cube, float)
@@ -294,4 +369,5 @@ def science_and_reference_library(science: np.ndarray, partition: Sequence,
     sim = similarity_matrix(science, library, inrad=inrad, outrad=outrad, filt=filt,
                             metric=metric, shift_px=shift_px)
     return library, ReferenceLibrary(groups, sim, target_partition=np.asarray(list(partition)),
-                                     metric=metric, n_min_ref=n_min_ref)
+                                     metric=metric, n_min_ref=n_min_ref,
+                                     angles=None if angles is None else np.asarray(angles, float))
