@@ -180,7 +180,8 @@ def _ales_objects(a, log=print):
                             weighting=a.weighting, max_workers=a.workers, pool=a.pool, fast=a.fast,
                             n_min_ref=a.n_min_ref, backend=getattr(a, "backend", "klip"), table=table,
                             reflib=reflib, reflib_science=getattr(a, "ales_reflib_science", "all") or "all",
-                            log=log)
+                            sdi=bool(getattr(a, "ales_sdi", False)), sdi_cap=int(getattr(a, "ales_sdi_cap", 100) or 100),
+                            sdi_lenders=getattr(a, "ales_sdi_lenders", "all") or "all", log=log)
     _set_threads_per_job(red, a)
     objective, sampler = ales.default_config(red, clean_subtract=not a.no_clean_subtract,
                                              known=[tuple(k) for k in (a.known or [])],
@@ -243,6 +244,18 @@ def _add_near_args(p):
     ga.add_argument("--ales-reflib-science", default="all", choices=["all", "searched"],
                     help="the science pool of the searched library: every frame the ADI rule admits "
                          "(default) or a searched count too, nkeep_altroll, whose 0 is pure RDI")
+    ga.add_argument("--ales-sdi", action="store_true",
+                    help="ADI, SDI and RDI in one KLIP step: the other groups' frames, rescaled to each group's "
+                         "wavelength, join its library as a pool; nkeep_sdi (the rows most correlated with each target "
+                         "frame among those the displacement rule admits) is searched from 0 (no SDI) to --ales-sdi-cap. "
+                         "A reference star given (--ales-ref) is the library's third pool, searched. nkeep_sdi = "
+                         "nkeep_psfref = 0 is plain ADI, to the bit")
+    ga.add_argument("--ales-sdi-cap", type=int, default=100, metavar="N",
+                    help="most-correlated SDI rows a target frame may take, the top of nkeep_sdi (default 100; the "
+                         "per-target cost grows with the square of the basis)")
+    ga.add_argument("--ales-sdi-lenders", default="all", choices=["all", "selected"],
+                    help="which groups lend SDI rows: every group, excluded ones too (default), or only the groups "
+                         "the configuration includes")
     ga.add_argument("--ales-groups", type=int, default=20, metavar="N",
                     help="wavelength groups over the usable channels, equally spaced in ln(lambda) (default 20; "
                          "15 = one R = 40 resolution element each)")
@@ -666,7 +679,7 @@ def _fill_from_registry(a, argv=None) -> None:
               "no_tags", "ales_target", "ales_ref", "ales_groups", "ales_channels", "ales_only",
               "ales_max_excluded", "ales_prefer_um", "ales_representative", "ales_angle_offset",
               "ales_tag_r_in", "ales_cache", "ales_selection", "ales_reflib", "ales_ref_bin",
-              "ales_reflib_science", "bin_min", "bin_max"):
+              "ales_reflib_science", "ales_sdi", "ales_sdi_cap", "ales_sdi_lenders", "bin_min", "bin_max"):
         if k in given:                     # the user said so on this command line
             continue
         v = getattr(prev, k, None)

@@ -129,10 +129,21 @@ class ReferenceGroup:
     #: science frames of a rotating sequence: a target's eligible rows are the ones the ADI
     #: rule admits (``angsep``, ``anglemax`` over the library's angles), never itself
     rotation: bool = False
+    #: frames of other wavelength groups magnified about the star, one scale factor per row
+    #: (``lambda_target / lambda_row``): the rows the displacement rule admits, the planet
+    #: having moved by rotation and scaling together at least as far as ``angsep`` asks
+    #: (:func:`klip_tpe.rescale.displacement_px`), with ``|dPA| <= anglemax`` as for ADI
+    scales: Optional[np.ndarray] = None
 
     def __post_init__(self):
         self.rows = np.asarray(self.rows, int)
         self.n_labels = 0
+        if self.scales is not None:
+            self.scales = np.asarray(self.scales, float).ravel()
+            if self.scales.shape != self.rows.shape:
+                raise ValueError(f"group {self.name!r}: {self.scales.size} scales for {self.rows.size} frames")
+            if self.rotation:
+                raise ValueError(f"group {self.name!r}: a group has the rotation rule or scales, not both")
         if self.partition is not None:
             self.partition = np.asarray(self.partition)
             if self.partition.shape != self.rows.shape:
@@ -177,9 +188,13 @@ class ReferenceLibrary:
     target_partition: Optional[np.ndarray] = None   # label per TARGET frame
     metric: str = "cc"
     n_min_ref: int = 2
-    #: the (binned) parallactic angle of each library row that is a science frame, indexed
-    #: by row; a group with ``rotation`` is ranked only among the rows the ADI rule admits
+    #: the (binned) parallactic angle of each library row that is a science frame (of the
+    #: target's group or, rescaled, of another), indexed by row; a group with ``rotation``
+    #: or ``scales`` is ranked only among the rows its rule admits
     angles: Optional[np.ndarray] = None
+    #: the annulus' mid radius in pixels, where the displacement rule of a scaled group is
+    #: measured (the radius the ADI arc rule uses too, :func:`klip_tpe.klip.arcdist_deg`)
+    mid_px: Optional[float] = None
 
     def __post_init__(self):
         self.similarity = np.asarray(self.similarity, float)
@@ -191,10 +206,13 @@ class ReferenceLibrary:
         if self.angles is not None:
             self.angles = np.asarray(self.angles, float).ravel()
         for g in self.groups:
-            if g.rotation and self.angles is None:
+            ruled = g.rotation or g.scales is not None
+            if ruled and self.angles is None:
                 raise ValueError(f"group {g.name!r} applies the rotation rule but the library has no angles")
-            if g.rotation and g.rows.size and g.rows.max() >= (self.angles.size if self.angles is not None else 0):
+            if ruled and g.rows.size and g.rows.max() >= (self.angles.size if self.angles is not None else 0):
                 raise ValueError(f"group {g.name!r}: {self.angles.size} angles for rows up to {g.rows.max()}")
+            if g.scales is not None and self.mid_px is None:
+                raise ValueError(f"group {g.name!r} applies the displacement rule but the library has no mid_px")
 
     @property
     def better_is_larger(self) -> bool:
@@ -228,13 +246,27 @@ class ReferenceLibrary:
         (``angsep_deg <= |dPA| <= anglemax``, itself never).  When that leaves fewer than
         4 rows the group falls back to every row but the target, as ``klip_annular`` does
         without a library (``multiklip``'s fallback).  ``census`` asks for the count
-        before that fallback, which is what the starved-target rule reads."""
+        before that fallback, which is what the starved-target rule reads.  A group with
+        ``scales`` (rescaled frames of other wavelength groups) admits the rows whose
+        displacement at the annulus' mid radius, by rotation and scaling together, is at
+        least the arc ``angsep_deg`` stands for, within ``anglemax`` of rotation, and has
+        no fallback: a target the rule leaves no SDI reference simply has none."""
         rows = group.rows
         if group.partition is not None and self.target_partition is not None \
                 and not (group.rotation and group.n_labels < 2):
             # the label rule (one roll never serves itself); a rotating sequence under one
             # label is the case the rotation rule exists for, so the label stands down there
             rows = rows[group.partition != self.target_partition[target]]
+        if group.scales is not None:
+            # other groups' frames, magnified: the planet must have moved by rotation and
+            # scaling together at least the arc the ADI rule asks for at the mid radius
+            # (angsep_deg is that arc as an angle), and the rotation stays within anglemax
+            from .rescale import displacement_px
+            dpa = self.angles[rows] - self.angles[target]
+            sep_px = np.deg2rad(float(angsep_deg)) * float(self.mid_px)
+            disp = displacement_px(self.mid_px, group.scales[np.searchsorted(group.rows, rows)], dpa)
+            ok = (disp >= sep_px - 1e-9) & (np.abs(dpa) <= float(anglemax))
+            return rows[ok]
         if not group.rotation:
             return rows
         dpa = np.abs(self.angles[rows] - self.angles[target])
@@ -286,6 +318,7 @@ class ReferenceLibrary:
         rot = [g for g in self.groups if g.rotation]
         if len(rot) != 1 or rot[0].n_labels > 1:
             return False
+        # every other pool -- a reference star, rescaled frames of other groups -- at zero
         for g in self.groups:
             n = int(keep.get(g.name, g.max_keep))
             if g.rotation:

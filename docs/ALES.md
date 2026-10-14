@@ -73,12 +73,15 @@ library instead (`KLIPReducer.set_reference_library`, the `rotation` form, one p
   pool, and 0 is plain ADI to the bit: that point runs the ADI code itself, shortcuts and
   the k cap included (`klip_annular`'s `library_as_adi`).  The seed sits at 0, so the
   search's first evaluation is the ADI baseline and every library draw is read against it.
-* The reference frames are taken in consecutive means of `--ales-ref-bin N` (5: 248
-  HIP 91748 frames make 49 means, the 3 left over unused) before anything else, so the count
-  means one thing whatever the science `bin` is.  The cache keeps the reference group means
-  unbinned, so `N` may change between runs.  `run_setup.json` records the pool under
-  `reducer.provenance.reference_library` (source, frames, `ref_bin`, means, the metric, the
-  science pool) and per group under `partitions.gNN.reference_library` and `.frames`.
+* The reference frames are taken in consecutive means of `--ales-ref-bin N` (5) before
+  anything else, so the count means one thing whatever the science `bin` is, and never across
+  an observing block: the blocks come from the `block` column of `NAME_frametags.csv` beside
+  the products (248 HIP 91748 frames in blocks of 78, 78 and 92 make 15 + 15 + 18 = 48 means,
+  a block's last frames unused), the whole sequence is one block without the file.  The cache
+  keeps the reference group means unbinned, so `N` may change between runs.  `run_setup.json`
+  records the pool under `reducer.provenance.reference_library` (source, frames, blocks,
+  `ref_bin`, means, the metric, the science pool) and per group under
+  `partitions.gNN.reference_library` and `.frames`.
 * The science pool is not a dimension by default (`--ales-reflib-science all`): the ADI rule
   decides it, as in a plain ADI run.  `searched` adds `nkeep_altroll`, the NIRCam form, the
   science frames ranked by correlation and the count searched, whose 0 is pure RDI.  In that
@@ -94,7 +97,54 @@ library instead (`KLIPReducer.set_reference_library`, the `rotation` form, one p
 `klip-tpe resume` restores `--ales-reflib`, `--ales-ref-bin` and `--ales-reflib-science` from
 the run's record with the other ALES options.
 
-## 4. Conventions
+## 4. ADI, SDI and RDI in one KLIP step
+
+`--ales-sdi` gives every group's library a third kind of pool: the other groups' frames,
+rescaled to its wavelength (the ALES reduction's note of 2026-10-14, section 3).  For a target
+frame of group g at an annulus of mid radius r:
+
+| pool | rows | a row is eligible when | count |
+|---|---|---|---|
+| ADI | group g's other binned frames | the planet moved by `angsep` (lambda_g/D of arc at r) through rotation, within `anglemax` | every eligible frame (not searched) |
+| SDI | the other groups' binned frames of this evaluation, magnified about the star by s = lambda_g / lambda_g' | the planet's displacement by rotation and scaling together, `r sqrt(1 + s^2 - 2 s cos dPA)`, is at least that arc, and `abs(dPA) <= anglemax` | `nkeep_sdi`, 0 to `--ales-sdi-cap` (100) |
+| RDI | the reference star's means (`--ales-ref`) | always | `nkeep_psfref`, 0 to the pool |
+
+* Within a pool the eligible rows are ranked by correlation with the target in the annulus and
+  the count keeps the best.  `nkeep_sdi` and `nkeep_psfref` join the shared block and seed at 0.
+  `nkeep_sdi = nkeep_psfref = 0` is plain ADI to the bit and costs plain ADI: the other groups
+  are prepared only when `nkeep_sdi` asks for rows.  ADI (0, 0), SDI and ASDI (`nkeep_sdi` up,
+  all of the science frames), RDI and ARDI (`nkeep_psfref` up) and all three together are
+  points of one space, and the optimizer elects the mix.
+* One `angsep` serves both rules.  At s = 1 the displacement is the chord `2 r sin(dPA / 2)`,
+  the ADI arc to first order, so the SDI rule is the ADI rule with the scale in it.  A row of
+  the same time (dPA = 0) is eligible when the spectral displacement `r abs(s - 1)` alone is
+  enough, which it is at large radii and between distant groups.
+* The SDI rows are prepared as the group prepares its own frames (the same selection,
+  injections, high-pass and binning with the searched `bin`), then magnified about the star by
+  a NaN-aware cubic B-spline (`klip_tpe.rescale`, the reduction's own `asdi.rescale`): the
+  high-pass before the rescaling, the injections in every group before the rescaling, so a fake
+  moves the way a planet does and sits at `r s` in the rows.  A KLIP-FM model cube goes through
+  the same chain, so the forward model's planet sits at `r s` too.
+* Each group's frames are prepared once per reduction (`ReductionRequest.stage = "prepare"`, a
+  first round of jobs) and handed to the group jobs in one shared-memory block
+  (`klip_tpe.parallel.SharedArrays`) with worker processes, as they are with threads.
+  `--ales-sdi-lenders all` (default) prepares every group, an excluded one too; `selected` only
+  the groups the configuration includes.
+* The SDI rows are ranked at zero lag against this evaluation's target frames, injections
+  included, and the ranking is never cached: a cached one would make the selection depend on
+  which evaluation came first, and a clean preparation of every sibling would double the
+  rescaling.  The science and reference pools keep their cached ranking on the frames without
+  injections.
+* Cost.  A target's KLIP basis grows by up to `nkeep_sdi` rows and the Gram matrix with its
+  square, and every sibling frame is rescaled once per group per reduction (about 0.5 ms per
+  62 x 62 frame).  At bin 5 on WISPIT 2 that rescaling is 20 x 19 x 108 frames per reduction,
+  which on two cores is most of the cost of the mode, and on 32 threads about a second per
+  reduction.  `--bin-min 5` keeps the search off the bins where it would be tens of seconds.
+  `nkeep_sdi` appears as `nksdi` in the live window and the books.
+
+`klip-tpe resume` restores `--ales-sdi`, `--ales-sdi-cap` and `--ales-sdi-lenders` as well.
+
+## 5. Conventions
 
 * The products are north up, east left once every frame is rotated counter-clockwise by
   `LBT_PARA + 180` deg.  The adapter adds the 180 to the angle array once
@@ -117,7 +167,7 @@ the run's record with the other ALES options.
   every group, and the 3-spaxel flux unit then differs by up to 1.5 % through the whole-pixel
   aperture.
 
-## 5. Running it
+## 6. Running it
 
 ```
 klip-tpe near --instrument ales --root /Volumes/RAID36TB/LMIRCam/WISPIT2_ALES/reduction/products \
@@ -140,7 +190,10 @@ klip-tpe near --instrument ales --root /Volumes/RAID36TB/LMIRCam/WISPIT2_ALES/re
   `--ales-prefer-um`, `--ales-representative`, `--ales-selection {binary,two_slot}`,
   `--ales-ref NAME`, `--ales-tag-r-in`: `docs/CLI.md`.
 * `--ales-ref NAME --ales-reflib` searches the reference star as a library (section 3), with
-  `--ales-ref-bin N` (5) and `--ales-reflib-science {all,searched}` (all).
+  `--ales-ref-bin N` (5) and `--ales-reflib-science {all,searched}` (all).  `--ales-sdi`
+  adds the other groups' rescaled frames as a pool (section 4), with `--ales-sdi-cap N` (100)
+  and `--ales-sdi-lenders {all,selected}` (all); with `--ales-ref` the reference star is the
+  third pool.
 * `--bin-min N` floors the temporal bin.  A 535-frame group at bin 1 costs 30 times a bin-5
   one (97 s against 3 s for 20 groups on two cores); on a machine with many cores it is
   affordable, on two it is not.  `--bin-max N` is the top of the searched bin range (30 by
@@ -160,7 +213,8 @@ from klip_tpe.instruments import ales
 datasets, lam_m, fwhm_px, table = ales.load_ales(PRODUCTS, "WISPIT2", cache=CACHE)
 red = ales.make_reducer(datasets, lam_m, fwhm_px, max_workers=16, table=table)
 # with a reference star as a searched library: load_ales(..., ref="HIP91748", ref_bin=5, cache=CACHE)
-# and make_reducer(..., reflib=True); make_space then adds nkeep_psfref
+# and make_reducer(..., reflib=True); make_space then adds nkeep_psfref.  ADI, SDI and RDI in one
+# step: make_reducer(..., sdi=True, sdi_cap=100, sdi_lenders="all"), which adds nkeep_sdi
 space = ales.make_space(red)
 space.project = ales.make_guard(red, max_excluded=10)
 objective, sampler = ales.default_config(red, known=[ales.WISPIT2B], forbidden_pa=[(ales.WISPIT2B[1], 25.0)])

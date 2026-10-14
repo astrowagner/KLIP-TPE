@@ -21,7 +21,8 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--no-tags] [--forbidden-pa PA HALFWIDTH]
                         [--ales-target NAME] [--ales-ref NAME] [--ales-reflib]
                         [--ales-ref-bin N]
-                        [--ales-reflib-science {all,searched}]
+                        [--ales-reflib-science {all,searched}] [--ales-sdi]
+                        [--ales-sdi-cap N] [--ales-sdi-lenders {all,selected}]
                         [--ales-groups N] [--ales-channels C0 C1]
                         [--ales-only gNN [gNN ...]] [--ales-max-excluded N]
                         [--ales-prefer-um UM] [--ales-representative gNN]
@@ -287,6 +288,21 @@ LBTI/ALES (--instrument ales):
                         the science pool of the searched library: every frame
                         the ADI rule admits (default) or a searched count too,
                         nkeep_altroll, whose 0 is pure RDI
+  --ales-sdi            ADI, SDI and RDI in one KLIP step: the other groups'
+                        frames, rescaled to each group's wavelength, join its
+                        library as a pool; nkeep_sdi (the rows most correlated
+                        with each target frame among those the displacement
+                        rule admits) is searched from 0 (no SDI) to --ales-
+                        sdi-cap. A reference star given (--ales-ref) is the
+                        library's third pool, searched. nkeep_sdi =
+                        nkeep_psfref = 0 is plain ADI, to the bit
+  --ales-sdi-cap N      most-correlated SDI rows a target frame may take, the
+                        top of nkeep_sdi (default 100; the per-target cost
+                        grows with the square of the basis)
+  --ales-sdi-lenders {all,selected}
+                        which groups lend SDI rows: every group, excluded ones
+                        too (default), or only the groups the configuration
+                        includes
   --ales-groups N       wavelength groups over the usable channels, equally
                         spaced in ln(lambda) (default 20; 15 = one R = 40
                         resolution element each)
@@ -358,11 +374,13 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--no-tags] [--forbidden-pa PA HALFWIDTH]
                      [--ales-target NAME] [--ales-ref NAME] [--ales-reflib]
                      [--ales-ref-bin N] [--ales-reflib-science {all,searched}]
-                     [--ales-groups N] [--ales-channels C0 C1]
-                     [--ales-only gNN [gNN ...]] [--ales-max-excluded N]
-                     [--ales-prefer-um UM] [--ales-representative gNN]
-                     [--ales-angle-offset DEG] [--ales-tag-r-in PX]
-                     [--ales-cache DIR] [--ales-selection {binary,two_slot}]
+                     [--ales-sdi] [--ales-sdi-cap N]
+                     [--ales-sdi-lenders {all,selected}] [--ales-groups N]
+                     [--ales-channels C0 C1] [--ales-only gNN [gNN ...]]
+                     [--ales-max-excluded N] [--ales-prefer-um UM]
+                     [--ales-representative gNN] [--ales-angle-offset DEG]
+                     [--ales-tag-r-in PX] [--ales-cache DIR]
+                     [--ales-selection {binary,two_slot}]
                      [--nights NIGHTS [NIGHTS ...]]
                      [--backend {klip,pyklip,vip}] [--obj OBJ [OBJ ...]]
                      [--frames FRAMES] [--binned] [--pre-bin PRE_BIN]
@@ -618,6 +636,21 @@ LBTI/ALES (--instrument ales):
                         the science pool of the searched library: every frame
                         the ADI rule admits (default) or a searched count too,
                         nkeep_altroll, whose 0 is pure RDI
+  --ales-sdi            ADI, SDI and RDI in one KLIP step: the other groups'
+                        frames, rescaled to each group's wavelength, join its
+                        library as a pool; nkeep_sdi (the rows most correlated
+                        with each target frame among those the displacement
+                        rule admits) is searched from 0 (no SDI) to --ales-
+                        sdi-cap. A reference star given (--ales-ref) is the
+                        library's third pool, searched. nkeep_sdi =
+                        nkeep_psfref = 0 is plain ADI, to the bit
+  --ales-sdi-cap N      most-correlated SDI rows a target frame may take, the
+                        top of nkeep_sdi (default 100; the per-target cost
+                        grows with the square of the basis)
+  --ales-sdi-lenders {all,selected}
+                        which groups lend SDI rows: every group, excluded ones
+                        too (default), or only the groups the configuration
+                        includes
   --ales-groups N       wavelength groups over the usable channels, equally
                         spaced in ln(lambda) (default 20; 15 = one R = 40
                         resolution element each)
@@ -689,7 +722,8 @@ usage: klip-tpe resume [-h] [--instrument {near,nomic,generic,ales}]
                        [--no-tags] [--forbidden-pa PA HALFWIDTH]
                        [--ales-target NAME] [--ales-ref NAME] [--ales-reflib]
                        [--ales-ref-bin N]
-                       [--ales-reflib-science {all,searched}]
+                       [--ales-reflib-science {all,searched}] [--ales-sdi]
+                       [--ales-sdi-cap N] [--ales-sdi-lenders {all,selected}]
                        [--ales-groups N] [--ales-channels C0 C1]
                        [--ales-only gNN [gNN ...]] [--ales-max-excluded N]
                        [--ales-prefer-um UM] [--ales-representative gNN]
@@ -832,6 +866,21 @@ LBTI/ALES (--instrument ales):
                         the science pool of the searched library: every frame
                         the ADI rule admits (default) or a searched count too,
                         nkeep_altroll, whose 0 is pure RDI
+  --ales-sdi            ADI, SDI and RDI in one KLIP step: the other groups'
+                        frames, rescaled to each group's wavelength, join its
+                        library as a pool; nkeep_sdi (the rows most correlated
+                        with each target frame among those the displacement
+                        rule admits) is searched from 0 (no SDI) to --ales-
+                        sdi-cap. A reference star given (--ales-ref) is the
+                        library's third pool, searched. nkeep_sdi =
+                        nkeep_psfref = 0 is plain ADI, to the bit
+  --ales-sdi-cap N      most-correlated SDI rows a target frame may take, the
+                        top of nkeep_sdi (default 100; the per-target cost
+                        grows with the square of the basis)
+  --ales-sdi-lenders {all,selected}
+                        which groups lend SDI rows: every group, excluded ones
+                        too (default), or only the groups the configuration
+                        includes
   --ales-groups N       wavelength groups over the usable channels, equally
                         spaced in ln(lambda) (default 20; 15 = one R = 40
                         resolution element each)
@@ -903,7 +952,8 @@ usage: klip-tpe extend [-h] [--instrument {near,nomic,generic,ales}]
                        [--no-tags] [--forbidden-pa PA HALFWIDTH]
                        [--ales-target NAME] [--ales-ref NAME] [--ales-reflib]
                        [--ales-ref-bin N]
-                       [--ales-reflib-science {all,searched}]
+                       [--ales-reflib-science {all,searched}] [--ales-sdi]
+                       [--ales-sdi-cap N] [--ales-sdi-lenders {all,selected}]
                        [--ales-groups N] [--ales-channels C0 C1]
                        [--ales-only gNN [gNN ...]] [--ales-max-excluded N]
                        [--ales-prefer-um UM] [--ales-representative gNN]
@@ -1036,6 +1086,21 @@ LBTI/ALES (--instrument ales):
                         the science pool of the searched library: every frame
                         the ADI rule admits (default) or a searched count too,
                         nkeep_altroll, whose 0 is pure RDI
+  --ales-sdi            ADI, SDI and RDI in one KLIP step: the other groups'
+                        frames, rescaled to each group's wavelength, join its
+                        library as a pool; nkeep_sdi (the rows most correlated
+                        with each target frame among those the displacement
+                        rule admits) is searched from 0 (no SDI) to --ales-
+                        sdi-cap. A reference star given (--ales-ref) is the
+                        library's third pool, searched. nkeep_sdi =
+                        nkeep_psfref = 0 is plain ADI, to the bit
+  --ales-sdi-cap N      most-correlated SDI rows a target frame may take, the
+                        top of nkeep_sdi (default 100; the per-target cost
+                        grows with the square of the basis)
+  --ales-sdi-lenders {all,selected}
+                        which groups lend SDI rows: every group, excluded ones
+                        too (default), or only the groups the configuration
+                        includes
   --ales-groups N       wavelength groups over the usable channels, equally
                         spaced in ln(lambda) (default 20; 15 = one R = 40
                         resolution element each)
@@ -1137,7 +1202,8 @@ usage: klip-tpe replay [-h] [--instrument {near,nomic,generic,ales}]
                        [--no-tags] [--forbidden-pa PA HALFWIDTH]
                        [--ales-target NAME] [--ales-ref NAME] [--ales-reflib]
                        [--ales-ref-bin N]
-                       [--ales-reflib-science {all,searched}]
+                       [--ales-reflib-science {all,searched}] [--ales-sdi]
+                       [--ales-sdi-cap N] [--ales-sdi-lenders {all,selected}]
                        [--ales-groups N] [--ales-channels C0 C1]
                        [--ales-only gNN [gNN ...]] [--ales-max-excluded N]
                        [--ales-prefer-um UM] [--ales-representative gNN]
@@ -1279,6 +1345,21 @@ LBTI/ALES (--instrument ales):
                         the science pool of the searched library: every frame
                         the ADI rule admits (default) or a searched count too,
                         nkeep_altroll, whose 0 is pure RDI
+  --ales-sdi            ADI, SDI and RDI in one KLIP step: the other groups'
+                        frames, rescaled to each group's wavelength, join its
+                        library as a pool; nkeep_sdi (the rows most correlated
+                        with each target frame among those the displacement
+                        rule admits) is searched from 0 (no SDI) to --ales-
+                        sdi-cap. A reference star given (--ales-ref) is the
+                        library's third pool, searched. nkeep_sdi =
+                        nkeep_psfref = 0 is plain ADI, to the bit
+  --ales-sdi-cap N      most-correlated SDI rows a target frame may take, the
+                        top of nkeep_sdi (default 100; the per-target cost
+                        grows with the square of the basis)
+  --ales-sdi-lenders {all,selected}
+                        which groups lend SDI rows: every group, excluded ones
+                        too (default), or only the groups the configuration
+                        includes
   --ales-groups N       wavelength groups over the usable channels, equally
                         spaced in ln(lambda) (default 20; 15 = one R = 40
                         resolution element each)
@@ -1350,7 +1431,8 @@ usage: klip-tpe compare [-h] [--instrument {near,nomic,generic,ales}]
                         [--no-tags] [--forbidden-pa PA HALFWIDTH]
                         [--ales-target NAME] [--ales-ref NAME] [--ales-reflib]
                         [--ales-ref-bin N]
-                        [--ales-reflib-science {all,searched}]
+                        [--ales-reflib-science {all,searched}] [--ales-sdi]
+                        [--ales-sdi-cap N] [--ales-sdi-lenders {all,selected}]
                         [--ales-groups N] [--ales-channels C0 C1]
                         [--ales-only gNN [gNN ...]] [--ales-max-excluded N]
                         [--ales-prefer-um UM] [--ales-representative gNN]
@@ -1510,6 +1592,21 @@ LBTI/ALES (--instrument ales):
                         the science pool of the searched library: every frame
                         the ADI rule admits (default) or a searched count too,
                         nkeep_altroll, whose 0 is pure RDI
+  --ales-sdi            ADI, SDI and RDI in one KLIP step: the other groups'
+                        frames, rescaled to each group's wavelength, join its
+                        library as a pool; nkeep_sdi (the rows most correlated
+                        with each target frame among those the displacement
+                        rule admits) is searched from 0 (no SDI) to --ales-
+                        sdi-cap. A reference star given (--ales-ref) is the
+                        library's third pool, searched. nkeep_sdi =
+                        nkeep_psfref = 0 is plain ADI, to the bit
+  --ales-sdi-cap N      most-correlated SDI rows a target frame may take, the
+                        top of nkeep_sdi (default 100; the per-target cost
+                        grows with the square of the basis)
+  --ales-sdi-lenders {all,selected}
+                        which groups lend SDI rows: every group, excluded ones
+                        too (default), or only the groups the configuration
+                        includes
   --ales-groups N       wavelength groups over the usable channels, equally
                         spaced in ln(lambda) (default 20; 15 = one R = 40
                         resolution element each)

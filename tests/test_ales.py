@@ -111,6 +111,11 @@ def _ifs(tmp_path, planet=None, edge_nan=True):
     fits.writeto(d / "SYN_waves.fits", waves.astype(np.float32), overwrite=True)
     fits.writeto(d / "SYN_star_psf_cube.fits", tpl, fits.Header({"STARX": 27, "STARY": 25}), overwrite=True)
     fits.writeto(d / "REF_cube_cen_clean.fits", cube[:, :10] * 0.8, hdr, overwrite=True)
+    # the reference star's frametags: two observing blocks of 4 and 6 frames
+    with open(d / "REF_frametags.csv", "w") as f:
+        f.write("idx,num,block,time_obs\n")
+        for i in range(10):
+            f.write(f"{i},{100 + i},{0 if i < 4 else 1},08:0{i}:00\n")
     return str(d), waves, pa, cube, tpl
 
 
@@ -303,16 +308,32 @@ def test_the_reference_star_as_a_searched_library(tmp_path):
     # the reference frames in threes: 10 frames make 3 means, one frame unused; the cache
     # keeps the group means unbinned, so another ref_bin reads them back
     ds, lam, fw, table = ales.load_ales(d, "SYN", ref="REF", c0=1, c1=10, ngrp=4, ref_bin=3, cache=cache, log=QUIET)
+    # the means never straddle an observing block: blocks of 4 and 6 in threes make 1 + 2
     assert ds["g01"].ref_cube.shape == (3, N, N)
     pv = ds["g01"].meta["provenance"]
-    assert (pv["ref_frames"], pv["ref_bin"], pv["n_ref"]) == (10, 3, 3) and pv["ref_source"].endswith("REF_cube_cen_clean.fits")
+    assert (pv["ref_frames"], pv["ref_blocks"], pv["ref_bin"], pv["n_ref"]) == (10, [4, 6], 3, 3)
+    assert pv["ref_source"].endswith("REF_cube_cen_clean.fits")
     raw = np.load(os.path.join(cache, "REF_c1-10_n4_g01.npy"))
     assert raw.shape == (10, N, N)
-    np.testing.assert_allclose(ds["g01"].ref_cube[1], np.nanmean(raw[3:6].astype(np.float64), axis=0), rtol=1e-6, atol=1e-3)
+    np.testing.assert_allclose(ds["g01"].ref_cube[0], np.nanmean(raw[0:3].astype(np.float64), axis=0), rtol=1e-6, atol=1e-3)
+    np.testing.assert_allclose(ds["g01"].ref_cube[1], np.nanmean(raw[4:7].astype(np.float64), axis=0), rtol=1e-6, atol=1e-3)
+    np.testing.assert_allclose(ds["g01"].ref_cube[2], np.nanmean(raw[7:10].astype(np.float64), axis=0), rtol=1e-6, atol=1e-3)
     ds1, *_ = ales.load_ales(d, "SYN", ref="REF", c0=1, c1=10, ngrp=4, ref_bin=1, cache=cache, log=QUIET)
     assert ds1["g01"].ref_cube.shape == (10, N, N) and ds1["g01"].meta["provenance"]["ref_bin"] == 1
     with pytest.raises(ValueError, match="no mean"):
         ales.reference_means(raw, 11)
+    # HIP 91748's layout: 78 + 78 + 92 frames in fives are 15 + 15 + 18 = 48 means, the last
+    # 3, 3 and 2 frames of the blocks unused, and no mean across the 3 h gap
+    seq = np.arange(248, dtype=np.float32)[:, None, None] * np.ones((1, 2, 2), np.float32)
+    blocks = [0] * 78 + [1] * 78 + [2] * 92
+    m = ales.reference_means(seq, 5, blocks=blocks)
+    assert m.shape == (48, 2, 2)
+    np.testing.assert_allclose(m[:, 0, 0], [np.mean(np.arange(a, a + 5)) for a in list(range(0, 75, 5)) + list(range(78, 153, 5)) + list(range(156, 246, 5))])
+    assert ales.reference_means(seq, 5).shape == (49, 2, 2), "the whole sequence as one block"
+    assert ales.frame_blocks(os.path.join(d, "nowhere.csv")) is None
+    np.testing.assert_array_equal(ales.frame_blocks(os.path.join(d, "REF_frametags.csv")), ["0"] * 4 + ["1"] * 6)
+    with pytest.raises(ValueError, match="block labels"):
+        ales.reference_means(raw, 3, blocks=[0] * 9)
     # without a reference star there is no library to search
     ds0, *_ = ales.load_ales(d, "SYN", c0=1, c1=10, ngrp=4, log=QUIET)
     with pytest.raises(ValueError, match="reference star"):
@@ -387,6 +408,93 @@ def test_the_reference_star_as_a_searched_library(tmp_path):
     assert {"ales_reflib", "ales_ref_bin", "ales_reflib_science"} <= cli._explicit_dests(
         ["near", "--instrument", "ales", "--root", d, "--ales-reflib", "--ales-ref-bin", "3",
          "--ales-reflib-science", "all"])
+
+
+def test_adi_sdi_and_rdi_in_one_step_through_the_adapter(tmp_path):
+    d, waves, pa, cube, tpl = _ifs(tmp_path, planet=(10.0, 240.0, 3e-3))
+    ds, lam, fw, table = ales.load_ales(d, "SYN", ref="REF", c0=1, c1=10, ngrp=4, ref_bin=2, log=QUIET)
+    ds0, *_ = ales.load_ales(d, "SYN", c0=1, c1=10, ngrp=4, log=QUIET)
+    plain = ales.make_reducer(ds0, lam, fw, max_workers=1, table=table, log=QUIET)
+    # SDI alone (no reference star): two pools
+    sdi0 = ales.make_reducer(ds0, lam, fw, max_workers=1, table=table, sdi=True, sdi_cap=7, log=QUIET)
+    assert [p.name for p in sdi0.reducers["g00"].reference_params()] == ["nkeep_sdi"]
+    assert sdi0.reducers["g00"]._reflib_spec["sdi"]["n_frames"] == 3 * NF and sdi0.sdi_lenders == "all"
+    rec = sdi0.provenance["reference_library"]
+    assert rec["pools"] == ["altroll", "sdi"] and rec["sdi"]["cap"] == 7 and rec["adi_point"] == "nkeep_sdi = 0 is plain ADI"
+    # with the reference star: three pools, searched without --ales-reflib being said
+    both = ales.make_reducer(ds, lam, fw, max_workers=1, table=table, sdi=True, sdi_cap=7, sdi_lenders="selected", log=QUIET)
+    assert [p.name for p in both.reducers["g00"].reference_params()] == ["nkeep_sdi", "nkeep_psfref"]
+    rec = both.provenance["reference_library"]
+    assert rec["pools"] == ["altroll", "sdi", "psfref"] and rec["n_ref"] == 5 and rec["sdi"]["lenders"] == "selected"
+    assert rec["adi_point"] == "nkeep_sdi = nkeep_psfref = 0 is plain ADI" and both.sdi_lenders == "selected"
+    with pytest.raises(ValueError, match="sdi_lenders"):
+        ales.make_reducer(ds, lam, fw, max_workers=1, sdi=True, sdi_lenders="some", log=QUIET)
+    defaults = {"bin": 2, "k_klip": 3, "filter": 9, "angsep": 0.5, "anglemax": 30}
+    s0 = ales.make_space(plain, defaults=defaults)
+    s1 = ales.make_space(both, defaults=defaults)
+    assert s1.names == s0.names + ["nkeep_sdi", "nkeep_psfref"]
+    assert [(p.lo, p.hi, p.default) for p in s1.params[-2:]] == [(0.0, 7.0, 0.0), (0.0, 5.0, 0.0)], "both seed at the ADI point"
+    steps = [st["name"] for st in ales.make_guard(both, n_min_ref=2, ref_frac=0.5).describe()["steps"]]
+    assert "reference_library_guard" not in steps
+    # the ADI point to the bit, every pool live
+    zone = (7.0, 13.0)
+    e0 = plain.reduce_config(_zone(s0.decode(s0.default_vector()), zone))
+    e1 = both.reduce_config(_zone(s1.decode(s1.default_vector()), zone))
+    _same(e1.image, e0.image)
+    assert all(m["library_as_adi"] for m in e1.meta.values()) and all("n_sdi_rows" not in m for m in e1.meta.values())
+    es = both.reduce_config(_zone(s1.decode(s1.default_vector({"nkeep_sdi": 5})), zone))
+    er = both.reduce_config(_zone(s1.decode(s1.default_vector({"nkeep_psfref": 3})), zone))
+    eb = both.reduce_config(_zone(s1.decode(s1.default_vector({"nkeep_sdi": 5, "nkeep_psfref": 3})), zone))
+    imgs = [e0.image, es.image, er.image, eb.image]
+    assert all(not np.array_equal(np.nan_to_num(imgs[i]), np.nan_to_num(imgs[j])) for i in range(4) for j in range(i + 1, 4))
+    m = eb.meta["g01"]
+    assert m["ref_keep"] == {"altroll": m["n_binned"] - 1, "sdi": 5, "psfref": 3} and m["n_sdi_rows"] == 3 * m["n_binned"]
+    assert sorted(m["sdi_lenders"]) == ["g00", "g02", "g03"]
+    # the planet survives the three pools together
+    cx, cy = star_center(eb.image.shape)
+    x0, y0 = source_xy(10.0 * 0.0345, 240.0, 0.0345, cx, cy)
+    yy, xx = np.mgrid[0:N, 0:N]
+    ann = (np.hypot(xx - cx, yy - cy) >= 7) & (np.hypot(xx - cx, yy - cy) <= 13) & np.isfinite(eb.image)
+    iy, ix = np.unravel_index(np.argmax(np.where(ann, eb.image, -np.inf)), eb.image.shape)
+    assert abs(ix - x0[0]) <= 1 and abs(iy - y0[0]) <= 1
+    # the command line
+    a = _args("--ales-target", "SYN", "--ales-ref", "REF", "--ales-groups", "4", "--ales-channels", "1", "10",
+              "--workers", "1", "--ales-sdi", "--ales-sdi-cap", "7", "--ales-sdi-lenders", "selected", "--ales-ref-bin", "2")
+    assert a.ales_sdi and a.ales_sdi_cap == 7 and a.ales_sdi_lenders == "selected"
+    a.root = [d]
+    red, obj, samp, guard, thr = cli._near_objects(a, log=QUIET)
+    assert red.sdi_lenders == "selected" and red.provenance["reference_library"]["pools"] == ["altroll", "sdi", "psfref"]
+    space = cli.build_near_space(red, a)
+    assert space.names[-2:] == ["nkeep_sdi", "nkeep_psfref"] and space.params[-2].hi == 7.0
+    assert {"ales_sdi", "ales_sdi_cap", "ales_sdi_lenders"} <= cli._explicit_dests(
+        ["near", "--instrument", "ales", "--root", d, "--ales-sdi", "--ales-sdi-cap", "7", "--ales-sdi-lenders", "all"])
+
+
+@pytest.mark.slow
+def test_a_tiny_search_with_the_three_pools(tmp_path):
+    d, waves, pa, cube, tpl = _ifs(tmp_path)
+    ds, lam, fw, table = ales.load_ales(d, "SYN", ref="REF", c0=1, c1=10, ngrp=4, ref_bin=2, log=QUIET)
+    red = ales.make_reducer(ds, lam, fw, max_workers=2, pool="processes", table=table, sdi=True, sdi_cap=10, log=QUIET)
+    space = ales.make_space(red, defaults={"bin": 2, "k_klip": 3, "filter": 9}, k_klip_max=6)
+    space.project = ales.make_guard(red, max_excluded=1, n_min_ref=3, ref_frac=0.5, k_max=6)
+    obj, samp = ales.default_config(red)
+    cfg = RunConfig(ann_edges=[7, 13], n_iter=6, n_init=3, seed=3, fm_curve=True, param_verify=False,
+                    validation=ValidationConfig(n_top=1, n_valid=1), calibration=CalibrationConfig(forced=[3e-3]))
+    r = Runner(red, space, obj, samp, cfg, str(tmp_path / "run"), log=QUIET)
+    try:
+        res = r.run()
+    finally:
+        red.close()
+    assert len(res) == 1 and res[0].validated
+    setup = json.load(open(tmp_path / "run" / "run_setup.json"))
+    rec = setup["reducer"]["provenance"]["reference_library"]
+    assert rec["pools"] == ["altroll", "sdi", "psfref"] and rec["sdi"]["cap"] == 10 and setup["reducer"]["sdi_lenders"] == "all"
+    names = [p["name"] for p in setup["space"]["params"]]
+    assert names[-2:] == ["nkeep_sdi", "nkeep_psfref"]
+    recs = [json.loads(l) for l in open(tmp_path / "run" / "results.jsonl")]
+    i, j = names.index("nkeep_sdi"), names.index("nkeep_psfref")
+    assert recs[0]["x"][i] == 0.0 and recs[0]["x"][j] == 0.0, "the seed is the ADI point"
+    assert len({rec["x"][i] for rec in recs}) > 1, "the SDI count was searched"
 
 
 @pytest.mark.slow

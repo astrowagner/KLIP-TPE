@@ -1,5 +1,54 @@
 # Changelog
 
+## Unreleased — 2026-10-14b (ADI, SDI and RDI in one KLIP step for IFS data, reference means within observing blocks)
+
+From the ALES reduction's answer of 2026-10-14 (its sections 1 and 2).  An IFS cube loaded as
+wavelength groups gets a third kind of reference pool: the other groups' frames, rescaled to the
+target group's wavelength, with their count searched, so ADI, SDI and RDI are points of one
+space and the optimizer elects the mix.
+
+- **`klip_tpe.rescale`**: `rescale_frames` magnifies frames about the star by `s` with a
+  NaN-aware cubic B-spline (`scipy.ndimage.map_coordinates`, the ALES reduction's own choice),
+  `displacement_px` is how far a planet at the annulus' mid radius moves between a target and a
+  reference rotated by `dPA` and magnified by `s`: `r sqrt(1 + s^2 - 2 s cos dPA)`, the ADI chord
+  at `s = 1`, the spectral shift `r |s - 1|` at `dPA = 0`.
+- **`ReferenceGroup(scales=...)`** (`reflib.py`): a pool of rescaled rows, one scale per row,
+  eligible by the displacement rule at the library's `mid_px` (the arc `angsep` asks for, in
+  pixels, within `anglemax` of rotation), no fallback; `is_plain_adi` counts it among the pools
+  that must be at zero.
+- **`KLIPReducer.prepare`** is the first half of `reduce` (selection, injections, model cube,
+  high-pass, binning), and a request with `stage="prepare"` returns it as `SiblingFrames`.
+  `set_reference_library(sdi={...})` declares the SDI pool (`n_frames`, `cap`, `lenders`);
+  `reduce` with `ReductionRequest.siblings` rescales every sibling's prepared frames to its own
+  wavelength (`_sdi_rows`), puts them between the science frames and the reference star's in the
+  basis `[bcube | sdi | ref]`, ranks them at zero lag against this evaluation's target frames
+  (never cached: a cached ranking would depend on which evaluation came first, a clean prep of
+  every sibling would double the rescaling), and gives KLIP-FM the siblings' model cubes rescaled
+  the same way, so the forward model's planet sits at `r s`.  `cost_estimate` counts the extra
+  rows and the rescaling.
+- **`PartitionedReducer`** runs a first round of `prepare` jobs over the lending partitions when
+  the configuration's `nkeep_sdi` is above 0 (nothing otherwise: that point is plain ADI at plain
+  ADI's cost) and hands the frames to the partition jobs in one shared-memory block
+  (`klip_tpe.parallel.SharedArrays`, a descriptor the jobs carry, attached without a resource
+  tracker registration of their own) with worker processes, as they are with threads.
+  `sdi_lenders` is `"all"` or `"selected"`; `describe()` records it.
+- **ALES: `--ales-sdi`**, `--ales-sdi-cap N` (100), `--ales-sdi-lenders {all,selected}`:
+  `nkeep_sdi` joins the shared block beside `nkeep_psfref`, both seeded at 0; a reference star
+  given is the third pool, searched; `run_setup.json` records the pools, the rule, the rescaling
+  and the ranking; `resume` restores the options.  `docs/ALES.md` section 4.
+- **Reference means within observing blocks**: `reference_means(blocks=...)` never lets a mean
+  straddle a block, the blocks come from the `block` column of `<ref>_frametags.csv` beside the
+  products (`frame_blocks`), the whole sequence is one block without it; `run_setup.json` records
+  the block sizes.  HIP 91748's 78 + 78 + 92 frames in fives are 48 means, as the reduction's own
+  `bin5` column has them, where one straight run made 49 with two means across a gap, one of 3 h.
+- `tests/test_sdi.py` (the rescaling, the displacement rule, the shared arrays from a forked
+  child, `nkeep_sdi = 0` to the bit through the partitioned reducer with processes and threads,
+  the three pools together and the pure-SDI corner, the FM rows at `r s`, the lenders switch,
+  the cost estimate) and `tests/test_ales.py` (the adapter, the command line, a tiny run with the
+  three pools and KLIP-FM on worker processes).  Checked on the WISPIT 2 cube over three annuli:
+  `nkeep_sdi = nkeep_psfref = 0` is plain ADI to the bit, the SDI count changes the images from
+  1 up.  The run itself is reported with the data.
+
 ## Unreleased — 2026-10-14 (a searched reference library for one rotating sequence: the ADI rule as its eligibility, a reference star's count from plain ADI to the whole pool)
 
 From the ALES reduction's note of 2026-10-14.  A searched library (`klip_tpe.reflib`) chose a
