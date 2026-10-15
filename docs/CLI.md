@@ -41,7 +41,8 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--pool {auto,processes,threads}]
                         [--threads-per-job THREADS_PER_JOB]
                         [--weighting {equal,sqrt_texp}] [--fast]
-                        [--no-library] [--no-clean-subtract] [--ladder-pair]
+                        [--klip-gram {target,zone}] [--no-library]
+                        [--no-clean-subtract] [--ladder-pair]
                         [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                         [--bin-min N] [--bin-max N] [--known RHO PA]
                         [--metric {mawet,fmmf}] [--run-dir RUN_DIR]
@@ -105,6 +106,16 @@ options:
                         min(workers, 2 x partitions)
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
+  --klip-gram {target,zone}
+                        how the per-target KLIP forms each target's reference
+                        covariance. 'target' (default) works from its
+                        references' pixels and forms all modes. 'zone' reads
+                        it off one Gram matrix per zone and projects the
+                        target without forming the modes, the same KLIP to
+                        float64 rounding but not to the bit, and about twice
+                        as fast per target at small bins. A run keeps the mode
+                        it was started or last resumed with (its
+                        klip_gram.json) unless this is given
   --no-library
   --no-clean-subtract
   --ladder-pair         two-source annulus: use the pre-2026-09-05 two-rung
@@ -390,7 +401,8 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--group-smooth GROUP_SMOOTH] [--max-frames MAX_FRAMES]
                      [--workers WORKERS] [--pool {auto,processes,threads}]
                      [--threads-per-job THREADS_PER_JOB]
-                     [--weighting {equal,sqrt_texp}] [--fast] [--no-library]
+                     [--weighting {equal,sqrt_texp}] [--fast]
+                     [--klip-gram {target,zone}] [--no-library]
                      [--no-clean-subtract] [--ladder-pair]
                      [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                      [--bin-min N] [--bin-max N] [--known RHO PA]
@@ -452,6 +464,16 @@ options:
                         min(workers, 2 x partitions)
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
+  --klip-gram {target,zone}
+                        how the per-target KLIP forms each target's reference
+                        covariance. 'target' (default) works from its
+                        references' pixels and forms all modes. 'zone' reads
+                        it off one Gram matrix per zone and projects the
+                        target without forming the modes, the same KLIP to
+                        float64 rounding but not to the bit, and about twice
+                        as fast per target at small bins. A run keeps the mode
+                        it was started or last resumed with (its
+                        klip_gram.json) unless this is given
   --no-library
   --no-clean-subtract
   --ladder-pair         two-source annulus: use the pre-2026-09-05 two-rung
@@ -737,7 +759,8 @@ usage: klip-tpe resume [-h] [--instrument {near,nomic,generic,ales}]
                        [--group-smooth GROUP_SMOOTH] [--max-frames MAX_FRAMES]
                        [--workers WORKERS] [--pool {auto,processes,threads}]
                        [--threads-per-job THREADS_PER_JOB]
-                       [--weighting {equal,sqrt_texp}] [--fast] [--no-library]
+                       [--weighting {equal,sqrt_texp}] [--fast]
+                       [--klip-gram {target,zone}] [--no-library]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                        [--bin-min N] [--bin-max N] [--known RHO PA]
@@ -778,6 +801,16 @@ options:
                         min(workers, 2 x partitions)
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
+  --klip-gram {target,zone}
+                        how the per-target KLIP forms each target's reference
+                        covariance. 'target' (default) works from its
+                        references' pixels and forms all modes. 'zone' reads
+                        it off one Gram matrix per zone and projects the
+                        target without forming the modes, the same KLIP to
+                        float64 rounding but not to the bit, and about twice
+                        as fast per target at small bins. A run keeps the mode
+                        it was started or last resumed with (its
+                        klip_gram.json) unless this is given
   --no-library
   --no-clean-subtract
   --ladder-pair         two-source annulus: use the pre-2026-09-05 two-rung
@@ -966,7 +999,8 @@ usage: klip-tpe extend [-h] [--instrument {near,nomic,generic,ales}]
                        [--group-smooth GROUP_SMOOTH] [--max-frames MAX_FRAMES]
                        [--workers WORKERS] [--pool {auto,processes,threads}]
                        [--threads-per-job THREADS_PER_JOB]
-                       [--weighting {equal,sqrt_texp}] [--fast] [--no-library]
+                       [--weighting {equal,sqrt_texp}] [--fast]
+                       [--klip-gram {target,zone}] [--no-library]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                        [--bin-min N] [--bin-max N] [--known RHO PA]
@@ -1004,6 +1038,16 @@ options:
                         min(workers, 2 x partitions)
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
+  --klip-gram {target,zone}
+                        how the per-target KLIP forms each target's reference
+                        covariance. 'target' (default) works from its
+                        references' pixels and forms all modes. 'zone' reads
+                        it off one Gram matrix per zone and projects the
+                        target without forming the modes, the same KLIP to
+                        float64 rounding but not to the bit, and about twice
+                        as fast per target at small bins. A run keeps the mode
+                        it was started or last resumed with (its
+                        klip_gram.json) unless this is given
   --no-library
   --no-clean-subtract
   --ladder-pair         two-source annulus: use the pre-2026-09-05 two-rung
@@ -1215,7 +1259,8 @@ usage: klip-tpe replay [-h] [--instrument {near,nomic,generic,ales}]
                        [--group-smooth GROUP_SMOOTH] [--max-frames MAX_FRAMES]
                        [--workers WORKERS] [--pool {auto,processes,threads}]
                        [--threads-per-job THREADS_PER_JOB]
-                       [--weighting {equal,sqrt_texp}] [--fast] [--no-library]
+                       [--weighting {equal,sqrt_texp}] [--fast]
+                       [--klip-gram {target,zone}] [--no-library]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                        [--bin-min N] [--bin-max N] [--known RHO PA]
@@ -1256,6 +1301,16 @@ options:
                         min(workers, 2 x partitions)
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
+  --klip-gram {target,zone}
+                        how the per-target KLIP forms each target's reference
+                        covariance. 'target' (default) works from its
+                        references' pixels and forms all modes. 'zone' reads
+                        it off one Gram matrix per zone and projects the
+                        target without forming the modes, the same KLIP to
+                        float64 rounding but not to the bit, and about twice
+                        as fast per target at small bins. A run keeps the mode
+                        it was started or last resumed with (its
+                        klip_gram.json) unless this is given
   --no-library
   --no-clean-subtract
   --ladder-pair         two-source annulus: use the pre-2026-09-05 two-rung
@@ -1446,7 +1501,8 @@ usage: klip-tpe compare [-h] [--instrument {near,nomic,generic,ales}]
                         [--pool {auto,processes,threads}]
                         [--threads-per-job THREADS_PER_JOB]
                         [--weighting {equal,sqrt_texp}] [--fast]
-                        [--no-library] [--no-clean-subtract] [--ladder-pair]
+                        [--klip-gram {target,zone}] [--no-library]
+                        [--no-clean-subtract] [--ladder-pair]
                         [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                         [--bin-min N] [--bin-max N] [--known RHO PA]
                         [--metric {mawet,fmmf}] --idl-run IDL_RUN --out OUT
@@ -1491,6 +1547,16 @@ options:
                         min(workers, 2 x partitions)
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
+  --klip-gram {target,zone}
+                        how the per-target KLIP forms each target's reference
+                        covariance. 'target' (default) works from its
+                        references' pixels and forms all modes. 'zone' reads
+                        it off one Gram matrix per zone and projects the
+                        target without forming the modes, the same KLIP to
+                        float64 rounding but not to the bit, and about twice
+                        as fast per target at small bins. A run keeps the mode
+                        it was started or last resumed with (its
+                        klip_gram.json) unless this is given
   --no-library
   --no-clean-subtract
   --ladder-pair         two-source annulus: use the pre-2026-09-05 two-rung

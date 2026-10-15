@@ -136,6 +136,23 @@ selection places only the frames it adds.  On Linux the log reports, after the
 search and after validation, the workers' peak resident memory and what they hold together,
 which is what a given pool size needs on that machine.
 
+### The per-target KLIP at small bins (`--klip-gram zone`)
+
+At a small bin the KLIP step is most of a night job.  For every target the per-target path
+forms the covariance of its references, `R Rᵀ`, from their pixels, decomposes it, and forms
+all M modes, of which it keeps k.  `--klip-gram zone` forms one Gram matrix per zone instead,
+before the targets, reads each target's covariance off it, and projects the target on its
+first k modes without forming them.  On NEAR night 6 at bin 5, with annulus 5's zones and
+k 45, the night's KLIP takes 3.5 s where it took 7.6 s on one thread, and 1 of 1.4 million
+residual pixels differs, by one float32 unit.  It is the same KLIP to float64 rounding but
+not to the bit, since the Gram's dot products are summed in another order, so `target` is the
+default.  `temp_mean` keeps the per-target path in either mode.
+
+A run keeps the mode it was started with.  `klip-tpe resume --klip-gram zone` switches a
+stopped run from that point on and writes the switch, with its time, into `klip_gram.json`
+in the run directory, so every later resume keeps it.  `--klip-gram target` switches it back.
+The log says when a run uses `zone`.
+
 ## Interruptions
 
 The run checkpoints after every evaluation, every validation trial, every post-annulus hook
