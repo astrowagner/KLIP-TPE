@@ -355,6 +355,7 @@ def test_gnome_scaling_is_read_from_mutter(monkeypatch):
 
 
 def _wayland_env(monkeypatch, scaling=None):
+    monkeypatch.setattr(winsize.sys, "platform", "linux")     # a Linux session, wherever the tests run
     for k in ("QT_QPA_PLATFORM", "GDK_BACKEND", "KLIP_TPE_WAYLAND"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
