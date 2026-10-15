@@ -195,7 +195,7 @@ lists all of them.
 * `docs/TUTORIALS.md` — the notebooks and what to read when.
 * `docs/BUDGET.md` — **how many evaluations a run needs**, measured: warm-up, search, validation.
 * `docs/PYNOMIC.md` — LBTI/NOMIC via pyNOMIC: loading, image groups as partitions, checks.
-* `docs/ALES.md` — LBTI/ALES integral-field cubes: wavelength groups as partitions, the group flags, a reference star as a searched library (`nkeep_psfref` from plain ADI to the whole pool), ADI + SDI + RDI in one KLIP step (`nkeep_sdi`), the WISPIT 2 run.
+* `docs/ALES.md` — LBTI/ALES integral-field cubes: wavelength groups as partitions, the group flags, a reference star as a searched library (`nkeep_psfref` from plain ADI to the whole pool), ADI + SDI + RDI in one KLIP step (`nkeep_sdi`), running it.
 * `docs/RUNNING.md` — the NEAR production protocol from a terminal or Jupyter.
 * `docs/DISPLAY.md` — the live panel, cell by cell, and every product file.
 * `docs/BACKENDS.md` — pyKLIP / VIP / spaceKLIP: parameter mapping, conventions, ingestion.

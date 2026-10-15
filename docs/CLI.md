@@ -282,8 +282,7 @@ LBTI/ALES (--instrument ales):
                         whole pool, on top of the ADI references (needs
                         --ales-ref)
   --ales-ref-bin N      the reference star's frames in consecutive means of N
-                        before anything else (default 5: 248 HIP 91748 frames
-                        make 49 means; 1 = every frame)
+                        before anything else (default 5; 1 = every frame)
   --ales-reflib-science {all,searched}
                         the science pool of the searched library: every frame
                         the ADI rule admits (default) or a searched count too,
@@ -307,8 +306,8 @@ LBTI/ALES (--instrument ales):
                         spaced in ln(lambda) (default 20; 15 = one R = 40
                         resolution element each)
   --ales-channels C0 C1
-                        first and last usable channel, inclusive (default 6 88
-                        = 2.899-4.175 um)
+                        first and last usable channel, inclusive (default 6
+                        88)
   --ales-only gNN [gNN ...]
                         load these groups only (checks and short runs)
   --ales-max-excluded N
@@ -329,8 +328,8 @@ LBTI/ALES (--instrument ales):
                         (default 2 spaxels: the star's core and halo; 6, the
                         generic default, is background-dominated here)
   --ales-cache DIR      directory for the group cubes as .npy, written once
-                        and read back after (the full cube is 814 MB on a slow
-                        volume)
+                        and read back after (a group mean reads the whole
+                        cube, which may sit on a slow volume)
   --ales-selection {binary,two_slot}
                         group flags: one 0/1 dimension per group (default) or
                         --max-drop drop slots
@@ -630,8 +629,7 @@ LBTI/ALES (--instrument ales):
                         whole pool, on top of the ADI references (needs
                         --ales-ref)
   --ales-ref-bin N      the reference star's frames in consecutive means of N
-                        before anything else (default 5: 248 HIP 91748 frames
-                        make 49 means; 1 = every frame)
+                        before anything else (default 5; 1 = every frame)
   --ales-reflib-science {all,searched}
                         the science pool of the searched library: every frame
                         the ADI rule admits (default) or a searched count too,
@@ -655,8 +653,8 @@ LBTI/ALES (--instrument ales):
                         spaced in ln(lambda) (default 20; 15 = one R = 40
                         resolution element each)
   --ales-channels C0 C1
-                        first and last usable channel, inclusive (default 6 88
-                        = 2.899-4.175 um)
+                        first and last usable channel, inclusive (default 6
+                        88)
   --ales-only gNN [gNN ...]
                         load these groups only (checks and short runs)
   --ales-max-excluded N
@@ -677,8 +675,8 @@ LBTI/ALES (--instrument ales):
                         (default 2 spaxels: the star's core and halo; 6, the
                         generic default, is background-dominated here)
   --ales-cache DIR      directory for the group cubes as .npy, written once
-                        and read back after (the full cube is 814 MB on a slow
-                        volume)
+                        and read back after (a group mean reads the whole
+                        cube, which may sit on a slow volume)
   --ales-selection {binary,two_slot}
                         group flags: one 0/1 dimension per group (default) or
                         --max-drop drop slots
@@ -860,8 +858,7 @@ LBTI/ALES (--instrument ales):
                         whole pool, on top of the ADI references (needs
                         --ales-ref)
   --ales-ref-bin N      the reference star's frames in consecutive means of N
-                        before anything else (default 5: 248 HIP 91748 frames
-                        make 49 means; 1 = every frame)
+                        before anything else (default 5; 1 = every frame)
   --ales-reflib-science {all,searched}
                         the science pool of the searched library: every frame
                         the ADI rule admits (default) or a searched count too,
@@ -885,8 +882,8 @@ LBTI/ALES (--instrument ales):
                         spaced in ln(lambda) (default 20; 15 = one R = 40
                         resolution element each)
   --ales-channels C0 C1
-                        first and last usable channel, inclusive (default 6 88
-                        = 2.899-4.175 um)
+                        first and last usable channel, inclusive (default 6
+                        88)
   --ales-only gNN [gNN ...]
                         load these groups only (checks and short runs)
   --ales-max-excluded N
@@ -907,8 +904,8 @@ LBTI/ALES (--instrument ales):
                         (default 2 spaxels: the star's core and halo; 6, the
                         generic default, is background-dominated here)
   --ales-cache DIR      directory for the group cubes as .npy, written once
-                        and read back after (the full cube is 814 MB on a slow
-                        volume)
+                        and read back after (a group mean reads the whole
+                        cube, which may sit on a slow volume)
   --ales-selection {binary,two_slot}
                         group flags: one 0/1 dimension per group (default) or
                         --max-drop drop slots
@@ -1080,8 +1077,7 @@ LBTI/ALES (--instrument ales):
                         whole pool, on top of the ADI references (needs
                         --ales-ref)
   --ales-ref-bin N      the reference star's frames in consecutive means of N
-                        before anything else (default 5: 248 HIP 91748 frames
-                        make 49 means; 1 = every frame)
+                        before anything else (default 5; 1 = every frame)
   --ales-reflib-science {all,searched}
                         the science pool of the searched library: every frame
                         the ADI rule admits (default) or a searched count too,
@@ -1105,8 +1101,8 @@ LBTI/ALES (--instrument ales):
                         spaced in ln(lambda) (default 20; 15 = one R = 40
                         resolution element each)
   --ales-channels C0 C1
-                        first and last usable channel, inclusive (default 6 88
-                        = 2.899-4.175 um)
+                        first and last usable channel, inclusive (default 6
+                        88)
   --ales-only gNN [gNN ...]
                         load these groups only (checks and short runs)
   --ales-max-excluded N
@@ -1127,8 +1123,8 @@ LBTI/ALES (--instrument ales):
                         (default 2 spaxels: the star's core and halo; 6, the
                         generic default, is background-dominated here)
   --ales-cache DIR      directory for the group cubes as .npy, written once
-                        and read back after (the full cube is 814 MB on a slow
-                        volume)
+                        and read back after (a group mean reads the whole
+                        cube, which may sit on a slow volume)
   --ales-selection {binary,two_slot}
                         group flags: one 0/1 dimension per group (default) or
                         --max-drop drop slots
@@ -1339,8 +1335,7 @@ LBTI/ALES (--instrument ales):
                         whole pool, on top of the ADI references (needs
                         --ales-ref)
   --ales-ref-bin N      the reference star's frames in consecutive means of N
-                        before anything else (default 5: 248 HIP 91748 frames
-                        make 49 means; 1 = every frame)
+                        before anything else (default 5; 1 = every frame)
   --ales-reflib-science {all,searched}
                         the science pool of the searched library: every frame
                         the ADI rule admits (default) or a searched count too,
@@ -1364,8 +1359,8 @@ LBTI/ALES (--instrument ales):
                         spaced in ln(lambda) (default 20; 15 = one R = 40
                         resolution element each)
   --ales-channels C0 C1
-                        first and last usable channel, inclusive (default 6 88
-                        = 2.899-4.175 um)
+                        first and last usable channel, inclusive (default 6
+                        88)
   --ales-only gNN [gNN ...]
                         load these groups only (checks and short runs)
   --ales-max-excluded N
@@ -1386,8 +1381,8 @@ LBTI/ALES (--instrument ales):
                         (default 2 spaxels: the star's core and halo; 6, the
                         generic default, is background-dominated here)
   --ales-cache DIR      directory for the group cubes as .npy, written once
-                        and read back after (the full cube is 814 MB on a slow
-                        volume)
+                        and read back after (a group mean reads the whole
+                        cube, which may sit on a slow volume)
   --ales-selection {binary,two_slot}
                         group flags: one 0/1 dimension per group (default) or
                         --max-drop drop slots
@@ -1586,8 +1581,7 @@ LBTI/ALES (--instrument ales):
                         whole pool, on top of the ADI references (needs
                         --ales-ref)
   --ales-ref-bin N      the reference star's frames in consecutive means of N
-                        before anything else (default 5: 248 HIP 91748 frames
-                        make 49 means; 1 = every frame)
+                        before anything else (default 5; 1 = every frame)
   --ales-reflib-science {all,searched}
                         the science pool of the searched library: every frame
                         the ADI rule admits (default) or a searched count too,
@@ -1611,8 +1605,8 @@ LBTI/ALES (--instrument ales):
                         spaced in ln(lambda) (default 20; 15 = one R = 40
                         resolution element each)
   --ales-channels C0 C1
-                        first and last usable channel, inclusive (default 6 88
-                        = 2.899-4.175 um)
+                        first and last usable channel, inclusive (default 6
+                        88)
   --ales-only gNN [gNN ...]
                         load these groups only (checks and short runs)
   --ales-max-excluded N
@@ -1633,8 +1627,8 @@ LBTI/ALES (--instrument ales):
                         (default 2 spaxels: the star's core and halo; 6, the
                         generic default, is background-dominated here)
   --ales-cache DIR      directory for the group cubes as .npy, written once
-                        and read back after (the full cube is 814 MB on a slow
-                        volume)
+                        and read back after (a group mean reads the whole
+                        cube, which may sit on a slow volume)
   --ales-selection {binary,two_slot}
                         group flags: one 0/1 dimension per group (default) or
                         --max-drop drop slots

@@ -1,10 +1,10 @@
 """The LBTI/ALES adapter: an IFS cube as wavelength groups, with group flags.
 
-From the ALES reduction's handoff of 2026-10-13 (WISPIT 2, 535 frames x 99 channels of
-62 x 62 spaxels).  What must hold:
+From the ALES reduction's handoff of 2026-10-13.  What must hold:
 
 * the group table is the handoff's rule, section 6.2: constant-R groups over channels 6-88,
-  which on WISPIT 2's wavelengths gives its 20-row table exactly;
+  group edges equally spaced in ln(lambda), each channel in the group that holds its
+  wavelength (checked here on an ALES-like wavelength solution);
 * the loader reads ``(wavelength, frame, y, x)``, means each group's channels (NaN-aware),
   adds the 180 deg to the angles once, gives every group its own template, wavelength and
   FWHM, and keeps the group table in the run's setup file;
@@ -37,31 +37,34 @@ from klip_tpe.space import Config
 
 QUIET = (lambda s: None)
 
-#: WISPIT 2's 99 channel wavelengths (um), ``WISPIT2_waves.fits``
-WAVES = [2.7615, 2.7852, 2.8086, 2.8316, 2.8543, 2.8766, 2.8986, 2.9203, 2.9418, 2.9629, 2.9838, 3.0044,
-         3.0248, 3.0449, 3.0648, 3.0845, 3.1039, 3.1232, 3.1422, 3.161, 3.1797, 3.1982, 3.2165, 3.2346,
-         3.2525, 3.2703, 3.2879, 3.3054, 3.3227, 3.3398, 3.3569, 3.3737, 3.3905, 3.4071, 3.4236, 3.4399,
-         3.4561, 3.4722, 3.4882, 3.5041, 3.5198, 3.5354, 3.551, 3.5664, 3.5817, 3.5969, 3.612, 3.627, 3.642,
-         3.6568, 3.6715, 3.6861, 3.7007, 3.7151, 3.7295, 3.7438, 3.758, 3.7721, 3.7861, 3.8001, 3.814, 3.8278,
-         3.8415, 3.8552, 3.8687, 3.8822, 3.8957, 3.9091, 3.9224, 3.9356, 3.9487, 3.9618, 3.9749, 3.9878,
-         4.0008, 4.0136, 4.0264, 4.0391, 4.0518, 4.0644, 4.0769, 4.0894, 4.1019, 4.1142, 4.1266, 4.1388,
-         4.1511, 4.1632, 4.1753, 4.1874, 4.1994, 4.2114, 4.2233, 4.2352, 4.247, 4.2588, 4.2705, 4.2822, 4.2938]
-
-#: the handoff's table: (first channel, last channel, mean wavelength to 3 decimals)
-HANDOFF_TABLE = [(6, 7, 2.910), (8, 10, 2.963), (11, 13, 3.025), (14, 16, 3.084), (17, 19, 3.142),
-                 (20, 22, 3.198), (23, 25, 3.253), (26, 29, 3.314), (30, 33, 3.382), (34, 37, 3.448),
-                 (38, 41, 3.512), (42, 45, 3.574), (46, 50, 3.642), (51, 54, 3.708), (55, 59, 3.772),
-                 (60, 65, 3.848), (66, 70, 3.922), (71, 76, 3.994), (77, 82, 4.071), (83, 88, 4.145)]
+#: an ALES-like wavelength solution (um): 99 channels from 2.76 to 4.29, the spacing shrinking
+#: towards the red end as ALES's does
+WAVES = [float(w) for w in 2.76 + 0.024 * np.arange(99) - 8.56e-5 * np.arange(99) ** 2]
 
 
-def test_the_group_table_is_the_handoffs():
+def _channel_edges(w, c):
+    return 0.5 * (w[c - 1] + w[c]), 0.5 * (w[c] + w[c + 1])
+
+
+def test_the_group_table_is_the_handoffs_rule():
+    w = np.asarray(WAVES)
     table = ales.group_table(WAVES)
-    assert [(g["channels"][0], g["channels"][-1]) for g in table] == [t[:2] for t in HANDOFF_TABLE]
-    assert all(abs(g["lam_mean"] - t[2]) <= 6e-4 for g, t in zip(table, HANDOFF_TABLE))     # the table's 3 decimals
-    assert [g["name"] for g in table] == [f"g{i:02d}" for i in range(20)]
-    assert sum(g["n"] for g in table) == 83 and table[0]["lam_lo"] == pytest.approx(0.5 * (WAVES[5] + WAVES[6]))
-    assert table[-1]["lam_hi"] == pytest.approx(0.5 * (WAVES[88] + WAVES[89]))
-    # 15 groups: one R = 40 element each, still a partition of the channels
+    assert len(table) == 20 and [g["name"] for g in table] == [f"g{i:02d}" for i in range(20)]
+    # a partition of channels 6-88, in order, each group contiguous
+    chans = [c for g in table for c in g["channels"]]
+    assert chans == list(range(6, 89))
+    assert all(g["channels"] == list(range(g["channels"][0], g["channels"][-1] + 1)) for g in table)
+    # the edges: equally spaced in ln(lambda), from channel 6's lower edge to channel 88's upper edge
+    edges = np.array([table[0]["lam_lo"]] + [g["lam_hi"] for g in table])
+    assert edges[0] == pytest.approx(_channel_edges(w, 6)[0]) and edges[-1] == pytest.approx(_channel_edges(w, 88)[1])
+    np.testing.assert_allclose(np.diff(np.log(edges)), np.log(edges[-1] / edges[0]) / 20, rtol=1e-9)
+    assert all(table[i]["lam_hi"] == pytest.approx(table[i + 1]["lam_lo"]) for i in range(19))
+    # every channel in the group whose edges hold its wavelength, and the group's numbers
+    for g in table:
+        assert all(g["lam_lo"] <= w[c] < g["lam_hi"] for c in g["channels"])
+        assert g["n"] == len(g["channels"]) and g["lam_mean"] == pytest.approx(w[g["channels"]].mean())
+    assert table[0]["n"] < table[-1]["n"], "fewer channels per group where the channels are wider"
+    # 15 groups: still a partition of the channels
     t15 = ales.group_table(WAVES, ngrp=15)
     assert len(t15) == 15 and sorted(c for g in t15 for c in g["channels"]) == list(range(6, 89))
     with pytest.raises(ValueError):
@@ -76,7 +79,7 @@ NW, NF, N = 12, 40, 48          # channels, frames, spaxels
 
 def _ifs(tmp_path, planet=None, edge_nan=True):
     """``(NW, NF, N, N)`` cube of a speckle-free star with a halo, noise, NaN edges on some
-    frames, PA -20..+24 like WISPIT 2; a template on a 50 x 54 grid with the star at (27, 25).
+    frames, PA -20..+24; a template on a 50 x 54 grid with the star at (27, 25).
     ``planet``: ``(rho_spx, pa_deg, contrast)`` planted in every channel with the handoff's
     sense of rotation (the source moves clockwise on the detector as LBT_PARA grows)."""
     rng = np.random.default_rng(7)
@@ -322,14 +325,14 @@ def test_the_reference_star_as_a_searched_library(tmp_path):
     assert ds1["g01"].ref_cube.shape == (10, N, N) and ds1["g01"].meta["provenance"]["ref_bin"] == 1
     with pytest.raises(ValueError, match="no mean"):
         ales.reference_means(raw, 11)
-    # HIP 91748's layout: 78 + 78 + 92 frames in fives are 15 + 15 + 18 = 48 means, the last
-    # 3, 3 and 2 frames of the blocks unused, and no mean across the 3 h gap
-    seq = np.arange(248, dtype=np.float32)[:, None, None] * np.ones((1, 2, 2), np.float32)
-    blocks = [0] * 78 + [1] * 78 + [2] * 92
+    # three observing blocks of 23, 41 and 37 frames in fives are 4 + 8 + 7 = 19 means, the last
+    # 3, 1 and 2 frames of the blocks unused, and no mean across a gap
+    seq = np.arange(101, dtype=np.float32)[:, None, None] * np.ones((1, 2, 2), np.float32)
+    blocks = [0] * 23 + [1] * 41 + [2] * 37
     m = ales.reference_means(seq, 5, blocks=blocks)
-    assert m.shape == (48, 2, 2)
-    np.testing.assert_allclose(m[:, 0, 0], [np.mean(np.arange(a, a + 5)) for a in list(range(0, 75, 5)) + list(range(78, 153, 5)) + list(range(156, 246, 5))])
-    assert ales.reference_means(seq, 5).shape == (49, 2, 2), "the whole sequence as one block"
+    assert m.shape == (19, 2, 2)
+    np.testing.assert_allclose(m[:, 0, 0], [np.mean(np.arange(a, a + 5)) for a in list(range(0, 20, 5)) + list(range(23, 63, 5)) + list(range(64, 99, 5))])
+    assert ales.reference_means(seq, 5).shape == (20, 2, 2), "the whole sequence as one block"
     assert ales.frame_blocks(os.path.join(d, "nowhere.csv")) is None
     np.testing.assert_array_equal(ales.frame_blocks(os.path.join(d, "REF_frametags.csv")), ["0"] * 4 + ["1"] * 6)
     with pytest.raises(ValueError, match="block labels"):

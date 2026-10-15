@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — 2026-10-15 (`ales.WISPIT2B` removed)
+
+- `klip_tpe.instruments.ales.WISPIT2B` is gone.  A companion's position goes to
+  `ales.default_config(known=[(RHO, PA)], forbidden_pa=[(PA, 25.0)])`, or to `--known RHO PA
+  --forbidden-pa PA 25` on the command line, as for any target.
+- The ALES documentation, docstrings, command-line help and tests no longer quote numbers from
+  the first ALES data set.  `tests/test_ales.py` checks the group rule on an ALES-like
+  wavelength solution and the reference means on a synthetic block layout.
+
 ## Unreleased — 2026-10-14c (the frames before KLIP one bin group at a time: a night read once per reduction, no injected cube held)
 
 From the NEAR2 session's note of 2026-10-14 on the per-frame passes of a draw (its items 1 and
@@ -84,13 +93,13 @@ space and the optimizer elects the mix.
 - **Reference means within observing blocks**: `reference_means(blocks=...)` never lets a mean
   straddle a block, the blocks come from the `block` column of `<ref>_frametags.csv` beside the
   products (`frame_blocks`), the whole sequence is one block without it; `run_setup.json` records
-  the block sizes.  HIP 91748's 78 + 78 + 92 frames in fives are 48 means, as the reduction's own
-  `bin5` column has them, where one straight run made 49 with two means across a gap, one of 3 h.
+  the block sizes.  A reference star's means now match the reduction's own `bin5` column, where
+  one straight run had put means across the gaps between its blocks.
 - `tests/test_sdi.py` (the rescaling, the displacement rule, the shared arrays from a forked
   child, `nkeep_sdi = 0` to the bit through the partitioned reducer with processes and threads,
   the three pools together and the pure-SDI corner, the FM rows at `r s`, the lenders switch,
   the cost estimate) and `tests/test_ales.py` (the adapter, the command line, a tiny run with the
-  three pools and KLIP-FM on worker processes).  Checked on the WISPIT 2 cube over three annuli:
+  three pools and KLIP-FM on worker processes).  Checked on an ALES cube over three annuli:
   `nkeep_sdi = nkeep_psfref = 0` is plain ADI to the bit, the SDI count changes the images from
   1 up.  The run itself is reported with the data.
 
@@ -134,14 +143,14 @@ dead.
   `resume` restores the three options.  `docs/ALES.md` section 3, `tests/test_ales.py`.
 - **`--bin-max N`** (generic and ALES): the top of the searched temporal-bin range, for a winner
   that sits on it.
-- Checked on the WISPIT 2 cube over the whole field: `nkeep_psfref = 0` through the adapter is
+- Checked on an ALES cube over the whole field: `nkeep_psfref = 0` through the adapter is
   plain ADI to the bit (the clean image, every group, an injected image and its score), and the
   count changes the images from 1 up; at bin 5 on two cores the whole pool costs a 20-group
   evaluation about a third more than ADI.  The run itself is reported with the data.
 
 ## Unreleased — 2026-10-14 (LBTI/ALES integral-field cubes: wavelength groups as partitions with on/off flags)
 
-From the ALES reduction's handoff of 2026-10-13 (WISPIT 2, the package's first IFS data set).
+From the ALES reduction's handoff of 2026-10-13 (the package's first IFS data set).
 
 - **`klip_tpe.instruments.ales`, `klip-tpe near --instrument ales`** reads an ALES reduction's
   products (the `(wavelength, frame, y, x)` cube, `LBT_PARA`, the wavelengths, the per-channel
@@ -160,18 +169,15 @@ From the ALES reduction's handoff of 2026-10-13 (WISPIT 2, the package's first I
     label and a `provenance` dict.
   - `KLIPReducer` default `hp_nan_aware` (False as before): the science frames' high-pass with
     `smooth(/nan)` semantics.  The registered ALES frames carry NaN along their edges, and IDL's
-    boxcar carries a NaN along the whole frame: at bin 5 that emptied 40 of WISPIT 2's 108
-    bins, and b's matched-filter S/N on the reduction's own parameters fell from 6.2 to 5.3.  The
-    adapter sets it.
+    boxcar carries a NaN along the whole frame, which empties every bin holding such a frame.
+    The adapter sets it.
   - The adapter's metric does not de-spike (`declip_nsig=None`): at 2.1-3.0 spaxels per FWHM a
-    source's peak stands 6 robust σ above its 3 x 3 median and was replaced by it (b's S/N 6.2 →
-    3.9, and 3.5 with the IDL boxcar as well).
+    source's peak stands 6 robust σ above its 3 x 3 median and was replaced by it.
   - `--bin-min N` on the command line floors the temporal bin (`MinBinGuard`) for the generic
     and ALES guards; `--forbidden-pa PA HALFWIDTH` reaches the sampler for both.
-  - On WISPIT 2 the derotation lands b at (38, 26) against the reduction's (38.1, 26.4), and the
-    reduction's parameters on groups g08-g18 give b a matched-filter S/N of 6.2 and an aperture
-    S/N of 8.2 (the reduction's own metric: 8.6).  The run itself, the first search on the
-    annulus that holds b, is reported with the data.  `tests/test_ales.py`.
+  - On the first ALES cube the derotation puts the known companion where the reduction puts it,
+    and the reduction's own parameters give it close to the S/N the reduction measures.  The
+    run itself is reported with the data.  `tests/test_ales.py`.
   - `generic.make_reducer` centres a template at the loader's `meta['psf_center']` when there is
     one (the ALES header's `STARX`, `STARY`), and at the centroid of its peak otherwise, as before.
 

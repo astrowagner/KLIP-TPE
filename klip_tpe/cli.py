@@ -240,7 +240,7 @@ def _add_near_args(p):
                          "whole pool, on top of the ADI references (needs --ales-ref)")
     ga.add_argument("--ales-ref-bin", type=int, default=5, metavar="N",
                     help="the reference star's frames in consecutive means of N before anything else "
-                         "(default 5: 248 HIP 91748 frames make 49 means; 1 = every frame)")
+                         "(default 5; 1 = every frame)")
     ga.add_argument("--ales-reflib-science", default="all", choices=["all", "searched"],
                     help="the science pool of the searched library: every frame the ADI rule admits "
                          "(default) or a searched count too, nkeep_altroll, whose 0 is pure RDI")
@@ -260,7 +260,7 @@ def _add_near_args(p):
                     help="wavelength groups over the usable channels, equally spaced in ln(lambda) (default 20; "
                          "15 = one R = 40 resolution element each)")
     ga.add_argument("--ales-channels", type=int, nargs=2, default=None, metavar=("C0", "C1"),
-                    help="first and last usable channel, inclusive (default 6 88 = 2.899-4.175 um)")
+                    help="first and last usable channel, inclusive (default 6 88)")
     ga.add_argument("--ales-only", nargs="+", default=None, metavar="gNN",
                     help="load these groups only (checks and short runs)")
     ga.add_argument("--ales-max-excluded", type=int, default=10, metavar="N",
@@ -278,7 +278,7 @@ def _add_near_args(p):
                          "core and halo; 6, the generic default, is background-dominated here)")
     ga.add_argument("--ales-cache", default=None, metavar="DIR",
                     help="directory for the group cubes as .npy, written once and read back after "
-                         "(the full cube is 814 MB on a slow volume)")
+                         "(a group mean reads the whole cube, which may sit on a slow volume)")
     ga.add_argument("--ales-selection", default="binary", choices=["binary", "two_slot"],
                     help="group flags: one 0/1 dimension per group (default) or --max-drop drop slots")
     p.add_argument("--nights", type=int, nargs="+", default=[1, 2, 3, 4, 5, 6])

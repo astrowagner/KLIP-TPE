@@ -10,18 +10,15 @@ Each group carries its own wavelength (so ``angsep`` in lambda/D and the Mawet a
 are right for it), its own PSF template (the group mean of the per-channel template) and,
 when asked, its own reference-star library.  One parameter block is shared by every group,
 and a 0/1 flag per group (``sel_gNN``) lets the optimizer leave groups out, at most
-``max_excluded`` of them (:class:`GroupCountGuard`).
-
-The first data set was WISPIT 2 (UT 2026-06-05, DX aperture, 535 frames x 99 channels,
-62 x 62 spaxels), described in the ALES reduction's handoff of 2026-10-13::
+``max_excluded`` of them (:class:`GroupCountGuard`).  The products are those the ALES
+reduction's handoff of 2026-10-13 describes.  From Python::
 
     from klip_tpe.instruments import ales
-    datasets, lam_m, fwhm_px, table = ales.load_ales(PRODUCTS, "WISPIT2")
+    datasets, lam_m, fwhm_px, table = ales.load_ales(PRODUCTS, TARGET)
     red = ales.make_reducer(datasets, lam_m, fwhm_px, max_workers=4)
     space = ales.make_space(red)                       # shared block + sel_g00 .. sel_g19
     space.project = ales.make_guard(red, max_excluded=10)
-    objective, sampler = ales.default_config(red, known=[ales.WISPIT2B],
-                                             forbidden_pa=[(ales.WISPIT2B[1], 25.0)])
+    objective, sampler = ales.default_config(red, known=[(RHO, PA)], forbidden_pa=[(PA, 25.0)])
 
 or on the command line, ``klip-tpe near --instrument ales --root PRODUCTS ...``.
 
@@ -30,8 +27,8 @@ With ``make_reducer(..., reflib=True)`` (``--ales-reflib``) it is a searched one
 frame's basis is the science frames the ADI rule admits for it plus the ``nkeep_psfref``
 reference means most correlated with it in the annulus, with ``nkeep_psfref`` a dimension of
 the search from 0, plain ADI to the bit, to the whole pool.  The reference frames are taken
-in consecutive means of ``ref_bin`` (``--ales-ref-bin``, 5 by default: 248 HIP 91748 frames
-make 49 means) so the count means one thing whatever the science ``bin`` is.
+in consecutive means of ``ref_bin`` (``--ales-ref-bin``, 5 by default) so the count means one
+thing whatever the science ``bin`` is.
 
 Conventions (ALES reduction README, section 4):
 
@@ -59,7 +56,7 @@ from ..reducer import Dataset, PartitionedReducer
 from ..space import SearchSpace
 from . import generic
 
-__all__ = ["ALES", "WISPIT2B", "BASELINE", "group_table", "group_mean", "reference_means", "frame_blocks", "load_groups",
+__all__ = ["ALES", "BASELINE", "group_table", "group_mean", "reference_means", "frame_blocks", "load_groups",
            "load_ales", "make_reducer", "make_space", "make_guard", "default_config", "GroupCountGuard",
            "product_paths", "representative_group"]
 
@@ -67,20 +64,15 @@ __all__ = ["ALES", "WISPIT2B", "BASELINE", "group_table", "group_mean", "referen
 class ALES:
     """Instrument constants (the ALES reduction README's assumptions)."""
 
-    pxscale = 0.0345            # arcsec / spaxel, ASSUMED (MWC 758 value; not calibrated on 2026-06-05)
+    pxscale = 0.0345            # arcsec / spaxel, ASSUMED (MWC 758 value; not calibrated on the night)
     diam_m = 8.4                # one LBT aperture (DX only, no Fizeau)
     fwhm_lod = 1.03             # measured broadband FWHM / (lambda/D) at 3.5 um
     angle_offset = 180.0        # derotation = CCW by LBT_PARA + 180 deg
     texp_frame = 4.9176         # s per frame (5 x 0.9835 s ramp intervals)
-    c0, c1 = 6, 88              # usable channels (2.899-4.175 um)
+    c0, c1 = 6, 88              # usable channels
     ngrp = 20                   # groups over them (R_group = 54; 15 = one R = 40 element each)
     tag_r_in = 2.0              # quality tags from r >= 2 spaxels (r >= 6 is background-dominated there)
 
-
-#: WISPIT 2b as the ALES reduction places it in these frames: ``(rho_arcsec, pa_deg)`` at the
-#: assumed plate scale, 8.663 spaxels.  A sign/offset check of the derotation only, and the
-#: ``known`` source its noise rings leave out.
-WISPIT2B = (8.663344937255616 * ALES.pxscale, 241.46154214127014)
 
 #: the ALES reduction's own ADI-KLIP parameters, the seed of the search: 5-frame bins, a
 #: 13-spaxel boxcar high-pass, k = 5, references at >= 0.75 FWHM = 0.77 lambda/D of rotation, no
@@ -134,7 +126,7 @@ def group_table(waves_um: Sequence[float], c0: int = ALES.c0, c1: int = ALES.c1,
 
 def group_mean(cube: np.ndarray, channels: Sequence[int], dtype=np.float32) -> np.ndarray:
     """``nanmean`` of a ``(wavelength, frame, y, x)`` cube over ``channels``, in blocks of
-    frames so an 814 MB cube is never expanded whole (a memory-mapped FITS stays on disk)."""
+    frames so the full cube is never expanded whole (a memory-mapped FITS stays on disk)."""
     ch = [int(c) for c in channels]
     nfr = cube.shape[1]
     per_frame = int(np.prod(cube.shape[2:])) * len(ch) * 8
@@ -159,9 +151,9 @@ def reference_means(cube: np.ndarray, n: int, blocks: Optional[Sequence[Any]] = 
                     dtype=np.float32) -> np.ndarray:
     """``nanmean`` of consecutive runs of ``n`` frames of a ``(frame, y, x)`` cube, within
     each observing block when ``blocks`` (one label per frame) is given, the frames a block
-    has left over at its end dropped.  HIP 91748's 248 frames come in blocks of 78, 78 and
-    92 (the last three hours after the first two): in fives that is 15 + 15 + 18 = 48 means,
-    and no mean straddles a gap.  Without ``blocks`` the whole sequence is one block.
+    has left over at its end dropped.  Blocks of 23, 41 and 37 frames in fives make
+    4 + 8 + 7 = 19 means, and no mean straddles a gap.  Without ``blocks`` the whole sequence
+    is one block.
 
     The reference star's frames are not derotated, so there is no angle to close a run
     early on, and a fixed run gives the searched count ``nkeep_psfref`` one meaning for the
@@ -283,7 +275,7 @@ def load_groups(cube: Optional[np.ndarray], angles: Sequence[float], waves_um: S
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", RuntimeWarning)
                 tpl = np.nanmean(t[ch], axis=0) if t.ndim == 3 else t
-            tpl = np.where(np.isfinite(tpl), tpl, 0.0)          # 50 all-NaN pixels in WISPIT 2's template
+            tpl = np.where(np.isfinite(tpl), tpl, 0.0)          # the template's all-NaN pixels
         rg = None
         meta = {"provenance": {"instrument": "ALES", "group": name, "channels": list(ch),
                                "lam_um": [float(w[c]) for c in ch], "lam_mean_um": g["lam_mean"],
@@ -354,8 +346,8 @@ def load_ales(products_dir: str, target: str = "WISPIT2", ref: Optional[str] = N
     and attaches its group means as each group's RDI library, in consecutive means of
     ``ref_bin`` frames (:func:`reference_means`; 1 = every frame).  ``cache`` is a
     directory: the group cubes are written there as ``.npy`` the first time and read back
-    after, which matters when the products live on a slow volume (the full cube is 814 MB
-    and a group mean reads all of it); the reference star's group means are cached
+    after, which matters when the products live on a slow volume (a group mean reads the
+    whole cube); the reference star's group means are cached
     unbinned, so ``ref_bin`` may change between runs.  The means never straddle an
     observing block: the blocks come from the ``block`` column of ``<ref>_frametags.csv``
     beside the products (:func:`frame_blocks`), the whole sequence is one block without it.
@@ -445,11 +437,9 @@ def make_reducer(datasets: Dict[str, Dataset], lam_m: Dict[str, float], fwhm_px:
 
     The high-pass of the science frames is NaN-aware here (``hp_nan_aware``, which
     ``defaults`` may override).  The registered ALES frames carry NaN along their edges
-    (rows and columns the registration shifted in, all beyond 27 spaxels), and the IDL
-    boxcar carries a NaN along the whole frame: at bin 5 it emptied 40 of WISPIT 2's 108
-    bins, and b's matched-filter S/N on the reduction's own parameters fell from 6.2 to 5.3
-    (to 3.5 with the de-spiking below as well).  The ALES reduction's own high-pass is
-    NaN-aware too.
+    (rows and columns the registration shifted in), and the IDL boxcar carries a NaN along
+    the whole frame, so every bin holding such a frame would come out NaN and be dropped.
+    The ALES reduction's own high-pass is NaN-aware too.
 
     ``reflib`` makes the reference star a searched library
     (:meth:`~klip_tpe.reducer.KLIPReducer.set_reference_library`, one per group, the
@@ -667,14 +657,14 @@ def default_config(reducer: PartitionedReducer, clean_subtract: bool = True, kno
     """:func:`generic.default_config`: the Mawet objective with the representative group's
     FWHM and matched filter, and the one sampler.  ``known`` keeps the companions out of the
     noise rings and the injections away from them; ``forbidden_pa`` keeps the injections out
-    of PA wedges (WISPIT 2b: ``known=[WISPIT2B], forbidden_pa=[(WISPIT2B[1], 25.0)]``, so no
-    source lands within 25 deg of it in azimuth).
+    of PA wedges (a companion at ``(RHO, PA)``: ``known=[(RHO, PA)], forbidden_pa=[(PA, 25.0)]``,
+    so no source lands within 25 deg of it in azimuth).
 
     The metric's de-spiking is off here (``declip_nsig=None``, which ``metric_kw`` may set
     back).  It replaces a pixel that stands more than 6 robust sigma above its 3 x 3 median
     by that median, which on NEAR's 6.2 px FWHM never touches a source.  ALES samples the
     PSF at 2.1-3.0 spaxels per FWHM, and a point source's peak stands that far above its
-    neighbours: on the baseline image it cut WISPIT 2b's matched-filter S/N from 6.2 to 3.9.
+    neighbours, so the de-spiking would cut a companion's peak and its S/N with it.
     The reduction has already repaired its bad spaxels and 5 sigma temporal outliers.
     """
     kw = dict(declip_nsig=None)

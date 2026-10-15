@@ -245,7 +245,7 @@ class KLIPReducer(Reducer):
             NaN all over, since the boxcar's running sum carries the NaN along its line.
             True is ``smooth(/nan)``: each NaN pixel stays NaN and the rest of the frame is
             filtered.  For frames with NaN at their registration edges, say ALES's, where
-            False dropped every bin with such a frame -- 40 of 108 at bin 5 on WISPIT 2.)
+            False drops every bin with such a frame.)
         prep_fused (bool, default True: the frames before KLIP are made one bin group at a
             time, see below.  False makes them a whole cube per step, the reference the
             fused path is tested against, to the bit.)

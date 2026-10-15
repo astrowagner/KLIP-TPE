@@ -3,15 +3,14 @@
 klip-tpe reads the products of an ALES reduction (a `(wavelength, frame, y, x)` cube, its
 parallactic angles, its wavelengths and a per-channel PSF template) and optimizes the
 KLIP/ADI post-processing over the usual parameters plus one on/off flag per wavelength
-group.  The first data set was WISPIT 2 (UT 2026-06-05, DX aperture, 535 frames x 99
-channels of 62 x 62 spaxels); the report on that run lives with the data
-(`WISPIT2_ALES/klip_tpe/REPLY_2026-10-14_ALES_WISPIT2.md`).
+group.  The adapter follows the ALES reduction's handoff of 2026-10-13.  The reports on the
+runs live with the data.
 
 ## 1. The cube as wavelength groups
 
 ALES delivers 99 channels at R ~ 40-55 over 2.76-4.29 um.  Neighbouring channels share a
 resolution element, so a channel is not the unit to switch on and off.  The adapter cuts
-the usable channels (6-88, 2.899-4.175 um) into `ngrp` groups of equal width in `ln lambda`,
+the usable channels (6-88 by default) into `ngrp` groups of equal width in `ln lambda`,
 about one resolution element each at `ngrp = 15` and 0.73 at the default 20, and means each
 group's channels into one `(frame, y, x)` cube.  Within a group the speckle pattern scales
 by at most 2 % in radius, 0.2 spaxels at 0.3", far below the FWHM, so the mean loses
@@ -20,27 +19,26 @@ nothing and the reduction costs 1/(channels per group) of a per-channel one.
 The rule (`ales.group_table`): a channel's edges are the midpoints to its neighbours, the
 group edges are equally spaced in `ln lambda` from the lower edge of channel `c0` to the
 upper edge of `c1`, and a channel belongs to the group whose edges contain its wavelength.
-On WISPIT 2's wavelengths the 20 groups are g00 = channels 6-7 (2.910 um) to g19 = channels
-83-88 (4.145 um), 2 to 6 channels each.  The realised table goes into the run's
-`run_setup.json` under `reducer.provenance.groups`, and each group's channels and
-wavelengths under `reducer.partitions.gNN.frames`.
+At the default 20 the groups hold from 2 channels at the blue end to 6 at the red end.  The
+realised table goes into the run's `run_setup.json` under `reducer.provenance.groups`, and
+each group's channels and wavelengths under `reducer.partitions.gNN.frames`.
 
 Each group is one partition of a `PartitionedReducer`, like a night or a roll:
 
-* its own wavelength `lam_m` and FWHM `1.03 lambda/D` (2.13 spaxels at 2.91 um, 3.04 at
-  4.15), so `angsep` in lambda/D and the Mawet apertures are right for it;
+* its own wavelength `lam_m` and FWHM `1.03 lambda/D` (about 2.1 spaxels at the blue end and
+  3.0 at the red end), so `angsep` in lambda/D and the Mawet apertures are right for it;
 * its own PSF template, the group mean of the per-channel template, normalised in 3
   spaxels (`ee_radius_px`).  The template is the median of the registered science frames,
   in the frames' units, so `flux_unit` is the star's flux in that group and an injected
   `contrast` is a flux ratio to the star there;
 * frame-quality tags from its own frames (`quality_tags`, `tag_r_in = 2`: from 6 spaxels
-  out the frames are background-dominated and the correlations fall to 0.14-0.50);
+  out ALES frames are background-dominated and their correlations fall);
 * optionally the group mean of a reference star's cube as its RDI library (`ref=`,
   `--ales-ref`), off unless asked.
 
 One parameter block is shared by every group (`bin`, `n_ang`, `filter`, `angsep`,
 `anglemax`, the three frame-selection thresholds, `k_klip`), and the group at the mean
-wavelength (g10, 3.512 um, on WISPIT 2) stands for the combined image: the metric's FWHM
+wavelength (g10 at the default 20) stands for the combined image: the metric's FWHM
 and the sampler's floor are its (`PartitionedReducer.representative`).  The groups are
 combined with equal weights.
 
@@ -50,7 +48,7 @@ combined with equal weights.
 draw includes each group with probability 0.75, a proposal may switch any number off, and
 an all-off draw decodes to all on.  `GroupCountGuard` (first in `ales.make_guard`) bounds
 it: a proposal with more than `max_excluded` (10) groups off has groups switched back on,
-nearest `prefer_um` (3.7 um, where the companion's S/N per group peaks) first, or at
+nearest `prefer_um` (3.7 um by default) first, or at
 random for a random draw, until exactly `max_excluded` are off.  The projected vector is
 what is evaluated and recorded, so `results.jsonl` never holds a selection past the bound;
 `run_setup.json` records the guard under `projection`.
@@ -76,8 +74,8 @@ library instead (`KLIPReducer.set_reference_library`, the `rotation` form, one p
 * The reference frames are taken in consecutive means of `--ales-ref-bin N` (5) before
   anything else, so the count means one thing whatever the science `bin` is, and never across
   an observing block: the blocks come from the `block` column of `NAME_frametags.csv` beside
-  the products (248 HIP 91748 frames in blocks of 78, 78 and 92 make 15 + 15 + 18 = 48 means,
-  a block's last frames unused), the whole sequence is one block without the file.  The cache
+  the products (blocks of 23, 41 and 37 frames make 4 + 8 + 7 = 19 means of five, a block's
+  last frames unused), the whole sequence is one block without the file.  The cache
   keeps the reference group means unbinned, so `N` may change between runs.  `run_setup.json`
   records the pool under `reducer.provenance.reference_library` (source, frames, blocks,
   `ref_bin`, means, the metric, the science pool) and per group under
@@ -137,9 +135,9 @@ frame of group g at an annulus of mid radius r:
   injections.
 * Cost.  A target's KLIP basis grows by up to `nkeep_sdi` rows and the Gram matrix with its
   square, and every sibling frame is rescaled once per group per reduction (about 0.5 ms per
-  62 x 62 frame).  At bin 5 on WISPIT 2 that rescaling is 20 x 19 x 108 frames per reduction,
-  which on two cores is most of the cost of the mode, and on 32 threads about a second per
-  reduction.  `--bin-min 5` keeps the search off the bins where it would be tens of seconds.
+  62 x 62 frame): each of 20 groups rescales the other 19 groups' binned frames.  At bin 5 that
+  is most of the cost of the mode on two cores, and about a second per reduction on 32 threads.
+  `--bin-min 5` keeps the search off the bins where it would be tens of seconds.
   `nkeep_sdi` appears as `nksdi` in the live window and the books.
 
 `klip-tpe resume` restores `--ales-sdi`, `--ales-sdi-cap` and `--ales-sdi-lenders` as well.
@@ -155,34 +153,32 @@ frame of group g at an annulus of mid radius r:
 * 0.0345"/spaxel and the 180 deg are the reduction's assumptions, not calibrated on the
   night.  A companion's position must not be used to calibrate either.
 * The registered frames carry NaN along their edges (the rows and columns the registration
-  shifted in, all beyond 27 spaxels on WISPIT 2).  The science frames' high-pass is
-  NaN-aware here (`KLIPReducer` default `hp_nan_aware`, True from `ales.make_reducer`):
-  IDL's `smooth` without `/nan` carries a NaN along the whole frame, and at bin 5 it had
-  emptied 40 of WISPIT 2's 108 bins.
+  shifted in).  The science frames' high-pass is NaN-aware here (`KLIPReducer` default
+  `hp_nan_aware`, True from `ales.make_reducer`): IDL's `smooth` without `/nan` carries a NaN
+  along the whole frame, which empties every bin holding such a frame.
 * The metric does not de-spike (`declip_nsig=None`): ALES samples the PSF at 2.1-3.0
-  spaxels per FWHM, and the 6 sigma single-pixel de-spiking took WISPIT 2b's peak for a hot
-  pixel (matched-filter S/N 6.2 to 3.9).
+  spaxels per FWHM, and the 6 sigma single-pixel de-spiking takes a companion's peak for a
+  hot pixel.
 * The template is centred on the header's `STARX`, `STARY` (`meta['psf_center']`, which
-  `generic.make_reducer` honours); the centroid of its peak lands within 0.05 spaxel of it on
-  every group, and the 3-spaxel flux unit then differs by up to 1.5 % through the whole-pixel
-  aperture.
+  `generic.make_reducer` honours).  The centroid of its peak lands within a small fraction of a
+  spaxel of it on every group, and the 3-spaxel flux unit differs little through the
+  whole-pixel aperture.
 
 ## 6. Running it
 
 ```
-klip-tpe near --instrument ales --root /Volumes/RAID36TB/LMIRCam/WISPIT2_ALES/reduction/products \
-    --ales-target WISPIT2 --ales-cache /Volumes/RAID36TB/LMIRCam/WISPIT2_ALES/klip_tpe/cache \
-    --known 0.29888 241.46 --forbidden-pa 241.46 25 \
+klip-tpe near --instrument ales --root PRODUCTS --ales-target NAME --ales-cache CACHE \
+    --known RHO PA --forbidden-pa PA 25 \
     --ann-edges 3 6.5 11 16 22 27 --n-iter 300 --n-init 50 --n-remeasure 3 \
     --use-contrast C1 C2 C3 C4 C5 \
-    --run-dir /Volumes/RAID36TB/LMIRCam/WISPIT2_ALES/klip_tpe/run_YYYYMMDD_HHMMSS --workers 16
+    --run-dir RUN_DIR --workers 16
 ```
 
 * `--use-contrast` forces the injected contrast per annulus (0 calibrates it to S/N 5 as
   usual); the reduction's own 5 sigma curve is the place to take the values from.
-* `--root` is the reduction's products directory and is only read; `--ales-cache` holds
-  the 20 group cubes as `.npy` (157 MB) so later runs skip the 814 MB cube; `--run-dir` is
-  where everything else goes (default `./runs/run_...`).
+* `--root` is the reduction's products directory and is only read.  `--ales-cache` holds
+  the group cubes as `.npy`, so later runs skip reading the full cube.  `--run-dir` is where
+  everything else goes (default `./runs/run_...`).
 * `--known RHO PA` keeps a companion's 1.5 FWHM out of every noise ring and the injections
   away from it; `--forbidden-pa PA HALFWIDTH` keeps the injections out of a wedge around
   it.  Say so in the products.
@@ -194,11 +190,10 @@ klip-tpe near --instrument ales --root /Volumes/RAID36TB/LMIRCam/WISPIT2_ALES/re
   adds the other groups' rescaled frames as a pool (section 4), with `--ales-sdi-cap N` (100)
   and `--ales-sdi-lenders {all,selected}` (all); with `--ales-ref` the reference star is the
   third pool.
-* `--bin-min N` floors the temporal bin.  A 535-frame group at bin 1 costs 30 times a bin-5
-  one (97 s against 3 s for 20 groups on two cores); on a machine with many cores it is
-  affordable, on two it is not.  `--bin-max N` is the top of the searched bin range (30 by
-  default here): a winner sitting on it (`distance_to_bounds` bin 0 in `final_results.json`)
-  wants it higher.
+* `--bin-min N` floors the temporal bin.  A group at bin 1 costs many times a bin-5 one.  On
+  a machine with many cores it is affordable, on two it is not.  `--bin-max N` is the top of
+  the searched bin range (30 by default here): a winner sitting on it (`distance_to_bounds`
+  bin 0 in `final_results.json`) wants it higher.
 * The search space's seed is the ALES reduction's baseline (`ales.BASELINE`): bin 5,
   filter 13, k 5, angsep 0.77 lambda/D, anglemax 45, no frame cuts.  `--n-sources`,
   `--n-remeasure`, `--min-r-fwhm` and the rest are as for any run.
@@ -210,14 +205,14 @@ From Python:
 ```python
 from klip_tpe import CalibrationConfig, RunConfig, Runner
 from klip_tpe.instruments import ales
-datasets, lam_m, fwhm_px, table = ales.load_ales(PRODUCTS, "WISPIT2", cache=CACHE)
+datasets, lam_m, fwhm_px, table = ales.load_ales(PRODUCTS, NAME, cache=CACHE)
 red = ales.make_reducer(datasets, lam_m, fwhm_px, max_workers=16, table=table)
-# with a reference star as a searched library: load_ales(..., ref="HIP91748", ref_bin=5, cache=CACHE)
+# with a reference star as a searched library: load_ales(..., ref=REF, ref_bin=5, cache=CACHE)
 # and make_reducer(..., reflib=True); make_space then adds nkeep_psfref.  ADI, SDI and RDI in one
 # step: make_reducer(..., sdi=True, sdi_cap=100, sdi_lenders="all"), which adds nkeep_sdi
 space = ales.make_space(red)
 space.project = ales.make_guard(red, max_excluded=10)
-objective, sampler = ales.default_config(red, known=[ales.WISPIT2B], forbidden_pa=[(ales.WISPIT2B[1], 25.0)])
+objective, sampler = ales.default_config(red, known=[(RHO, PA)], forbidden_pa=[(PA, 25.0)])
 cfg = RunConfig(ann_edges=[6.5, 11], n_iter=300, n_init=50, n_remeasure=3,
                 calibration=CalibrationConfig(forced=[C]))         # the injected contrast
 Runner(red, space, objective, sampler, cfg, RUN_DIR).run()
