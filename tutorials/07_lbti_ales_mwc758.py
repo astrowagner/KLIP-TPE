@@ -115,15 +115,14 @@ print(len(space.names), "dimensions:", space.names[:9], "+", len(space.selection
 # %% [markdown]
 # `known` keeps MWC 758c out of every noise ring and the injections at least 1.5 FWHM from it,
 # and `forbidden_pa` keeps them out of a 50° wedge around its position angle. The search runs
-# in three annuli, 0–0.3″, 0.3–0.6″ and 0.6–1.0″ (0 to 29 spaxels), one after the other. c at
-# 0.603″ falls just inside the third. Where two annuli meet, each one's KLIP zone reaches 2
-# spaxels past the shared edge (`RunConfig.edge_padding`), so the third annulus reduces all of
-# c's light. A default reduction of that annulus, night by night and both together:
+# in one annulus, 0.4–0.8″ (11.6 to 23.2 spaxels), with c in its middle. More edges in
+# `EDGES_AS` add annuli, searched one after the other. A default reduction of the annulus,
+# night by night and both together:
 
 # %%
-EDGES_AS = [0.0, 0.3, 0.6, 1.0]                     # the annuli's edges (arcsec)
-EDGES = [e / red.pxscale for e in EDGES_AS]         # in spaxels: 0, 8.7, 17.4, 29.0
-IC = int(np.searchsorted(EDGES_AS, RHO)) - 1        # the annulus with MWC 758c (the third)
+EDGES_AS = [0.4, 0.8]                               # the annulus' edges (arcsec)
+EDGES = [e / red.pxscale for e in EDGES_AS]         # in spaxels: 11.6, 23.2
+IC = int(np.searchsorted(EDGES_AS, RHO)) - 1        # the annulus with MWC 758c
 nights = {n: [p for p in red.partitions() if p.startswith(n + "_")] for n in ("n1", "n2")}
 
 
@@ -166,13 +165,13 @@ show(default, "default")
 # ## 3. Optimize
 #
 # The space has 49 dimensions, the 9 shared parameters and the 40 flags, so the budget is the
-# production one of `docs/BUDGET.md` rather than tutorial 1's. In each annulus it is 3000
-# evaluations, the first 200 of them warm-up, each scored on three injection draws, and the six
-# best candidates are validated on eight fresh injection sets each. The document's rules of
-# thumb ask for about 30 evaluations and at least 4 warm-up draws per dimension. The contrast is
-# calibrated in each annulus so that the default configuration scores S/N ≈ 5. The injections
-# have the star's spectrum, one contrast in every group, so the search optimizes for a companion
-# with the star's colors. The three searches take more than a day on a desktop.
+# production one of `docs/BUDGET.md` rather than tutorial 1's. It is 3000 evaluations, the
+# first 200 of them warm-up, each scored on three injection draws, and the six best candidates
+# are validated on eight fresh injection sets each. The document's rules of thumb ask for about
+# 30 evaluations and at least 4 warm-up draws per dimension. The contrast is calibrated so that
+# the default configuration scores S/N ≈ 5. The injections have the star's spectrum, one
+# contrast in every group, so the search optimizes for a companion with the star's colors. The
+# search runs for many hours on a desktop.
 
 # %%
 cfg = RunConfig(ann_edges=EDGES, n_iter=3000, n_init=200, seed=7, n_remeasure=3,
@@ -187,8 +186,8 @@ t0 = time.time(); results = runner.run(); print(f"{(time.time() - t0) / 3600:.1f
 # %% [markdown]
 # ## 4. What Did It Decide?
 #
-# Each annulus has its own winner. Its parameters, its validated score against the search's
-# best, and the partitions it keeps, night by night:
+# The winner's parameters, its validated score against the search's best, and the partitions
+# it keeps, night by night:
 
 # %%
 groups = sorted({p.split("_")[1] for p in red.partitions()})
@@ -210,8 +209,8 @@ ax.set_xlabel("group mean wavelength (µm)")
 plt.tight_layout()
 
 # %% [markdown]
-# The third annulus' winner, night by night and combined, with MWC 758c's S/N measured as the
-# search measures the injections:
+# The winner's image, night by night and combined, with MWC 758c's S/N measured as the search
+# measures the injections:
 
 # %%
 r = results[IC]
@@ -231,35 +230,13 @@ print(f"MWC 758c: S/N {metric.per_source(default['both'], None, [RHO], [PA])[0]:
       f"{metric.per_source(winner['both'], None, [RHO], [PA])[0]:.1f} (validated winner)")
 
 # %% [markdown]
-# The three winners stitched into one image, `klip_stitched.fits`:
-
-# %%
-show({"three annuli": fits.getdata(os.path.join(RUN_DIR, "klip_stitched.fits"))}, "stitched")
-
-# %% [markdown]
 # ## 5. Contrast Curve and the Partition Map
-#
-# Each annulus' curve comes from its own winner, so the curve breaks at the edges (gray). The
-# run's `contrast_curve.txt` joins them.
 
 # %%
-def joined(curves):
-    """The annuli's curves as one line, broken between annuli."""
-    r_as, c = [], []
-    for cc in curves:
-        if cc and cc.get("r_as") is not None:
-            r_as += list(cc["r_as"]) + [np.nan]
-            c += list(cc["curve"]) + [np.nan]
-    return np.array(r_as, float), np.array(c, float)
-
-
-r_as, curve = joined(r_.contrast_curve for r_ in results)
-fm_r, fm_c = joined(r_.fm_curve for r_ in results)
-plt.figure(figsize=(6, 4)); plt.semilogy(r_as, curve, "-o", ms=3, label="validated winners")
-if np.isfinite(fm_c).any():
-    plt.semilogy(fm_r, fm_c, "--", label="KLIP-FM cross-check")
-for e in EDGES_AS[1:-1]:
-    plt.axvline(e, color="0.75", lw=0.8)
+cc = r.contrast_curve                       # also in annulus01/contrast_curve.txt, with the KLIP-FM curve after it
+plt.figure(figsize=(6, 4)); plt.semilogy(cc["r_as"], cc["curve"], "-o", ms=3, label="validated winner")
+if r.fm_curve:
+    plt.semilogy(r.fm_curve["r_as"], r.fm_curve["curve"], "--", label="KLIP-FM cross-check")
 plt.axvline(RHO, color="c", ls=":", label="MWC 758c")
 plt.xlabel("separation (arcsec)"); plt.ylabel("S/N=5 contrast")
 plt.legend(); plt.grid(alpha=.3); plt.title("MWC 758, ALES 2.90-4.15 µm, star-colored sources");
@@ -270,10 +247,8 @@ Image(filename=os.path.join(ad, "partition_map.png"), width=900)
 
 # %% [markdown]
 # The contrast is a flux ratio to the star in each group on each night, since every template
-# is the night's own star. The partition map above is the third annulus'. Each annulus' folder,
-# `annulus01` to `annulus03`, has its own `partition_map.png`, the sampled space in
-# `corner.pdf`, `importance.pdf` and `landscapes.pdf`, and `progress.gif`, the movie of its
-# search.
+# is the night's own star. `annulus01/corner.pdf`, `importance.pdf` and `landscapes.pdf` show
+# the sampled space, and `annulus01/progress.gif` is the movie of this run.
 #
 # ## 6. Variations
 #
@@ -291,7 +266,7 @@ Image(filename=os.path.join(ad, "partition_map.png"), width=900)
 #   ```
 #   klip-tpe near --instrument ales --ales-dataset lbti_ales_mwc758 --known 0.603 228.5 \
 #       --forbidden-pa 228.5 25 --ales-max-excluded 20 --bin-min 5 --klip-gram zone \
-#       --ann-edges 0 8.696 17.391 28.986 --n-iter 3000 --n-init 200 --n-remeasure 3 --n-top 6 --n-valid 8 \
+#       --ann-edges 11.594 23.188 --n-iter 3000 --n-init 200 --n-remeasure 3 --n-top 6 --n-valid 8 \
 #       --seed 7 --display-every 5 --pdf-every 100 --run-dir runs/mwc758_ales_cli --show
 #   ```
 #   `--bin-min 5` floors the bin by projection, so the command line's random draws pile up at

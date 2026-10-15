@@ -21,10 +21,10 @@
   `klip-tpe resume` restores both.
 - **Tutorial 7** (`tutorials/07_lbti_ales_mwc758.py` and its notebook, without outputs until it
   has run on the data): the two nights as 40 partitions, MWC 758c (0.603", PA 228.5 deg in the
-  Nov 14 data, Wagner et al. 2023) as a known source, searches of three annuli (0-0.3",
-  0.3-0.6" and 0.6-1.0") at the production budget of `docs/BUDGET.md`, 3000 evaluations each
-  with 200 of them warm-up, the group flags bounded at 20 and bins from 5, and the winners'
-  partitions, images and contrast curves.  README and `docs/TUTORIALS.md` list it.
+  Nov 14 data, Wagner et al. 2023) as a known source, a search of 0.4-0.8" with c in its
+  middle at the production budget of `docs/BUDGET.md` (3000 evaluations, 200 of them warm-up),
+  the group flags bounded at 20 and bins from 5, and the winner's partitions, images and
+  contrast curve.  README and `docs/TUTORIALS.md` list it.
 - `docs/ALES.md` section 7.  `tests/test_ales_release.py`: the loader on two synthetic nights,
   picking nights and groups, mismatched grids, SDI across nights, the space (one block and a
   flag per partition), the data set entry and the command line, and a tiny search (slow).
