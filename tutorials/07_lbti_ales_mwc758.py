@@ -165,20 +165,24 @@ show(default, "default")
 # %% [markdown]
 # ## 3. Optimize
 #
-# The budget is tutorial 1's, in each annulus: 300 evaluations, the first 40 of them warm-up,
-# each scored on three injection draws, and the six best candidates validated on eight fresh
-# injection sets each. The contrast is calibrated in each annulus so that the default
-# configuration scores S/N ≈ 5. The injections have the star's spectrum, one contrast in every
-# group, so the search optimizes for a companion with the star's colors.
+# The space has 49 dimensions, the 9 shared parameters and the 40 flags, so the budget is the
+# production one of `docs/BUDGET.md` rather than tutorial 1's. In each annulus it is 3000
+# evaluations, the first 200 of them warm-up, each scored on three injection draws, and the six
+# best candidates are validated on eight fresh injection sets each. The document's rules of
+# thumb ask for about 30 evaluations and at least 4 warm-up draws per dimension. The contrast is
+# calibrated in each annulus so that the default configuration scores S/N ≈ 5. The injections
+# have the star's spectrum, one contrast in every group, so the search optimizes for a companion
+# with the star's colors. The three searches take more than a day on a desktop.
 
 # %%
-cfg = RunConfig(ann_edges=EDGES, n_iter=300, n_init=40, seed=7, n_remeasure=3,
+cfg = RunConfig(ann_edges=EDGES, n_iter=3000, n_init=200, seed=7, n_remeasure=3,
                 validation=ValidationConfig(n_top=6, n_valid=8),
                 calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=2),
                 fm_curve=True)
-display = LiveDisplay(RUN_DIR, show="inline", window_scale=0.55, every=2, movie_every=10)
+# a panel every 5th evaluation, a PDF of it every 100th, the running movie every 500th
+display = LiveDisplay(RUN_DIR, show="inline", window_scale=0.55, every=5, pdf_every=100, movie_every=500)
 runner = Runner(red, space, objective, sampler, cfg, RUN_DIR, callbacks=[display])
-t0 = time.time(); results = runner.run(); print(f"{(time.time() - t0) / 60:.1f} min")
+t0 = time.time(); results = runner.run(); print(f"{(time.time() - t0) / 3600:.1f} h")
 
 # %% [markdown]
 # ## 4. What Did It Decide?
@@ -287,8 +291,8 @@ Image(filename=os.path.join(ad, "partition_map.png"), width=900)
 #   ```
 #   klip-tpe near --instrument ales --ales-dataset lbti_ales_mwc758 --known 0.603 228.5 \
 #       --forbidden-pa 228.5 25 --ales-max-excluded 20 --bin-min 5 --klip-gram zone \
-#       --ann-edges 0 8.696 17.391 28.986 --n-iter 300 --n-init 40 --n-remeasure 3 --n-top 6 --n-valid 8 \
-#       --seed 7 --display-every 2 --run-dir runs/mwc758_ales_cli --show
+#       --ann-edges 0 8.696 17.391 28.986 --n-iter 3000 --n-init 200 --n-remeasure 3 --n-top 6 --n-valid 8 \
+#       --seed 7 --display-every 5 --pdf-every 100 --run-dir runs/mwc758_ales_cli --show
 #   ```
 #   `--bin-min 5` floors the bin by projection, so the command line's random draws pile up at
 #   bin 5 where this notebook's are spread over 5 to 30.
