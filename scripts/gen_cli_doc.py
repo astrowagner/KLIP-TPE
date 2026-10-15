@@ -7,13 +7,13 @@ import sys
 
 from klip_tpe import cli
 
-COMMANDS = ["generic", "near", "resume", "extend", "fit-chain", "plots", "render", "replay", "compare", "testbed"]
+COMMANDS = ["generic", "near", "resume", "extend", "fit-chain", "rereduce", "plots", "render", "replay", "compare", "testbed"]
 INTRO = """# Command-line reference
 
 Generated from `klip-tpe <command> --help` (`python scripts/gen_cli_doc.py`).  `near` and
 `generic` share the same search / protocol arguments; `--instrument near | nomic | generic`
 selects the data adapter (`klip-tpe generic` is `near --instrument generic`).  `resume`,
-`extend` and `fit-chain` take the same data arguments as the run they read.
+`extend`, `fit-chain` and `rereduce` take the same data arguments as the run they read.
 
 """
 

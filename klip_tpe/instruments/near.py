@@ -247,7 +247,8 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
                  log: Callable[[str], None] = print, use_rdi: bool = False, rdi_mode: str = "ardi",
                  do_destripe: bool = False, mask_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
                  backend: str = "klip", cube_name: Optional[str] = None,
-                 subtract_sources: Optional[Sequence[Any]] = None) -> PartitionedReducer:
+                 subtract_sources: Optional[Sequence[Any]] = None,
+                 inject_sources: Optional[Sequence[Any]] = None) -> PartitionedReducer:
     """Build the per-night :class:`PartitionedReducer` for the NEAR campaign.
     ``backend``: ``'klip'`` (built-in) | ``'pyklip'`` | ``'vip'`` PSF subtraction.
     ``use_rdi``/``rdi_mode`` use ``n<seq>/AB_cube_refstar_clean.fits`` when present
@@ -256,7 +257,9 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
     reduction's line-subtracted ``AB_cube_skysub_cen_clean_abline.fits``.
     ``subtract_sources``: point sources ``(rho_arcsec, pa_deg, contrast)`` taken out of every
     night's frames once, at load (:meth:`~klip_tpe.reducer.KLIPReducer.subtract_sources`),
-    with each night's own injection model.  Both go into the reducer's ``data_edits``."""
+    with each night's own injection model.  ``inject_sources``: point sources added the same
+    way, after the subtraction (:meth:`~klip_tpe.reducer.KLIPReducer.inject_sources`).  All
+    three go into the reducer's ``data_edits``."""
     lib = None
     if use_library:
         try:
@@ -303,6 +306,17 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
         took = _taken_text(pr)
         if took:
             log(f"    the fraction of their flux that left the frames, on a sample of frames: {took}")
+    if inject_sources:
+        src = list(inject_sources)
+        n = pr.inject_sources(src)
+        c = [float(s[2] if not hasattr(s, "contrast") else s.contrast) for s in src]
+        r_ = [float(s[0] if not hasattr(s, "rho") else s.rho) for s in src]
+        log(f"  added {n} source(s) to every night's frames, once, at load: rho {min(r_):.3f}-"
+            f"{max(r_):.3f}\", contrast {min(c):.3g} to {max(c):.3g}")
+        from ..reducer import _taken_text
+        took = _taken_text(pr, "injected_kept")
+        if took:
+            log(f"    the fraction of their flux that reached the frames, on a sample of frames: {took}")
     return pr
 
 

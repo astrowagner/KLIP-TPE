@@ -13,6 +13,8 @@ What must hold:
 * The float32 headroom check judges a negative contrast as it judges the positive one.
 * The flux that left the frames is measured, a chain through 0 does not warn, and a list lost
   to float32 rounding does.
+* Sources added at load (``inject_sources``) are an outside injection with the same code, to
+  the bit, the same list subtracted takes them out again, and the FM model cube sees neither.
 """
 from __future__ import annotations
 
@@ -175,6 +177,30 @@ def test_the_flux_that_left_the_frames_is_measured_and_a_loss_warns():
     assert all(v == pytest.approx(1.0, abs=1e-5) for v in pr.subtracted_kept.values())
     assert re.fullmatch(r"n1 [01]\.\d{7}, n2 [01]\.\d{7}", _taken_text(pr))
     assert _taken_text(_red(_ds())) == ""                                    # nothing subtracted yet
+
+
+def test_sources_added_at_load_are_an_outside_injection_and_a_subtraction_takes_them_out():
+    ds = _ds()
+    keep = ds.cube.copy()
+    red = _red(ds)
+    planets = [Source(0.9, 13.0, 3e-3), Source(1.1, 193.0, 2e-3)]
+    ext = inject_sources(ds.cube, ds.angles, planets, red.model, PX, truenorth=red.truenorth,
+                         angle_convention=red.angle_convention)
+    assert red.inject_sources(planets + [Source(0.7, 50.0, 0.0)]) == 2
+    assert np.array_equal(red.data.cube.view(np.uint32), np.asarray(ext, np.float32).view(np.uint32))
+    assert np.array_equal(ds.cube, keep) and red.injected_kept == pytest.approx(1.0, abs=1e-5)
+    assert red.data_edits["injected_sources"][:2] == [list(s.as_tuple()) for s in planets]
+    assert np.array_equal(red.model_cube([Source(0.9, 45.0, 3e-3)]), _red(ds).model_cube([Source(0.9, 45.0, 3e-3)]))
+    # the same list subtracted takes them out again, to float32 rounding
+    red.subtract_sources(planets)
+    scale = float(np.nanmax(np.abs(ds.cube)))
+    assert np.nanmax(np.abs(red.data.cube - ds.cube)) < 4 * np.finfo(np.float32).eps * scale
+    # every night of a partitioned reducer
+    pr = PartitionedReducer({"n1": _red(_ds(3)), "n2": _red(_ds(4))}, max_workers=1, log=lambda s: None)
+    assert pr.inject_sources(planets) == 2
+    assert sorted(pr.injected_kept) == ["n1", "n2"] and pr.data_edits["injected_sources"] == [
+        list(s.as_tuple()) for s in planets]
+    assert re.fullmatch(r"n1 [01]\.\d{7}, n2 [01]\.\d{7}", _taken_text(pr, "injected_kept"))
 
 
 def test_read_sources(tmp_path):

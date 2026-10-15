@@ -229,8 +229,9 @@ def _flux_taken(orig: np.ndarray, edited: np.ndarray, angles: np.ndarray, source
     """The fraction of the ``sources``' flux that left the frames when they were subtracted
     (1 = all of it), measured on up to ``n_frames`` frames spread over the cube:
     ``sum(sign(m) (orig - edited)) / sum(|m|)``, with ``m`` the sources injected into zeros.
-    float32 rounding loses the part of a source that sits below half a unit in the last place
-    of the pixel it lands on.  Returns ``(fraction, frames measured)``."""
+    For sources added, pass the frames the other way round.  float32 rounding loses the part
+    of a source that sits below half a unit in the last place of the pixel it lands on.
+    Returns ``(fraction, frames measured)``."""
     n = int(orig.shape[0])
     idx = np.unique(np.linspace(0, n - 1, min(n, max(int(n_frames), 1))).round().astype(np.intp))
     m = np.zeros((idx.size,) + tuple(orig.shape[-2:]), np.float32)
@@ -246,10 +247,11 @@ def _flux_taken(orig: np.ndarray, edited: np.ndarray, angles: np.ndarray, source
     return float(np.sum(np.sign(m64[ok]) * took[ok]) / den), int(idx.size)
 
 
-def _taken_text(red) -> str:
+def _taken_text(red, attr: str = "subtracted_kept") -> str:
     """``n4 0.9999998, n6 0.9999997`` (or one number): what :func:`_flux_taken` measured for
-    the sources a reducer subtracted, '' when it measured nothing."""
-    kept = getattr(red, "subtracted_kept", None)
+    the sources a reducer subtracted (``attr="injected_kept"``: added), '' when it measured
+    nothing."""
+    kept = getattr(red, attr, None)
     items = list(kept.items()) if isinstance(kept, dict) else [(None, kept)]
     out = [(k, v) for k, v in items if v is not None and np.isfinite(v)]
     return ", ".join(f"{k} {v:.7f}" if k is not None else f"{v:.7f}" for k, v in out)
@@ -559,42 +561,73 @@ class KLIPReducer(Reducer):
         lose part of their own flux and carry almost none of the chain's.  Returns the number of
         sources subtracted."""
         src = [s if isinstance(s, Source) else Source(*(float(v) for v in s)) for s in sources]
+        n, kept = self._edit_frames(src, -1.0, threads, "subtract_sources")
+        if n:
+            self.subtracted_kept = kept
+        rec = dict(getattr(self, "data_edits", None) or {})
+        rec["subtracted_sources"] = list(rec.get("subtracted_sources") or []) + [list(s.as_tuple()) for s in src]
+        self.data_edits = rec
+        return n
+
+    def inject_sources(self, sources: Sequence[Any], threads: int = 1) -> int:
+        """Add point sources to the data once, before any reduction: planets put into the
+        frames on purpose, to see what a reduction does to them.
+
+        :meth:`subtract_sources` with the opposite sign.  Each source goes into every frame of
+        ``data.cube`` with its own contrast, through the code a draw's injection uses, and from
+        then on it is part of the data: the clean pass, each draw, the reference ranking,
+        validation and param-verify see it, and the KLIP-FM model cube does not.  The flux that
+        reached the frames is measured as for a subtraction (:attr:`injected_kept`).  The edit
+        is kept in :attr:`data_edits` as ``injected_sources``.  After :meth:`subtract_sources`
+        when both are asked for.  Returns the number of sources added."""
+        src = [s if isinstance(s, Source) else Source(*(float(v) for v in s)) for s in sources]
+        n, kept = self._edit_frames(src, 1.0, threads, "inject_sources")
+        if n:
+            self.injected_kept = kept
+        rec = dict(getattr(self, "data_edits", None) or {})
+        rec["injected_sources"] = list(rec.get("injected_sources") or []) + [list(s.as_tuple()) for s in src]
+        self.data_edits = rec
+        return n
+
+    def _edit_frames(self, src: Sequence[Source], sign: float, threads: int, what: str) -> Tuple[int, float]:
+        """``src`` into every frame of ``data.cube`` at ``sign`` times its contrast (-1 takes
+        the sources out, +1 puts them in), on a float32 copy, and the fraction of their flux
+        that moved (:func:`_flux_taken`).  Returns ``(sources applied, fraction)``."""
         ny, nx = self.data.cube.shape[-2:]
         far = [s for s in src if s.rho / self.pxscale > max(ny, nx)]
         if far:
             raise ValueError(f"source at rho={far[0].rho:g} arcsec is {far[0].rho / self.pxscale:.0f} px from the "
                              f"star, beyond the {nx} x {ny} px frame: rho is in arcsec (pixel scale "
                              f"{self.pxscale:g} arcsec/px)")
-        todo = [Source(s.rho, s.theta, -float(s.contrast)) for s in src if float(s.contrast) != 0.0]
-        if todo:
-            if self.model is None:
-                raise ValueError("subtract_sources needs an injection_model")
-            from dataclasses import replace
-            orig = self.data.cube
-            cube = np.array(orig, dtype=np.float32, order="C", copy=True)
-            inject_frames(cube, cube, self.data.angles, todo, self.model, self.pxscale, None,
-                          truenorth=self.truenorth, fallback=self.fallback,
-                          angle_convention=self.angle_convention, threads=max(int(threads), 1))
-            kept, k = _flux_taken(orig, cube, self.data.angles, [Source(s.rho, s.theta, -s.contrast) for s in todo],
-                                  self.model, self.pxscale, truenorth=self.truenorth, fallback=self.fallback,
-                                  angle_convention=self.angle_convention)
-            self.subtracted_kept = kept
-            if np.isfinite(kept) and abs(kept - 1.0) > 1e-3:
-                warnings.warn(f"subtract_sources: {kept:.5f} of the sources' flux left the frames (measured on {k} of "
-                              f"{orig.shape[0]} frames), float32 rounding kept the rest.  flux_unit is "
-                              f"{self.model.flux_unit:.4g} -- if that is a normalised template's own sum rather than "
-                              f"the star's flux in the science frames' units, set star_flux (see "
-                              f"generic.star_flux_from_aperture_photometry).", RuntimeWarning, stacklevel=2)
-            self.data = replace(self.data, cube=cube)
-            # everything worked out from the old frames goes
-            self._peak = None
-            self._inj_cache, self._fm_cache = {}, {}
-            self._crops = {"inj": _CropCache(), "fm": _CropCache()}
-            self._reflib_cache = {}
-        rec = dict(getattr(self, "data_edits", None) or {})
-        rec["subtracted_sources"] = list(rec.get("subtracted_sources") or []) + [list(s.as_tuple()) for s in src]
-        self.data_edits = rec
-        return len(todo)
+        own = [s for s in src if float(s.contrast) != 0.0]
+        todo = [Source(s.rho, s.theta, sign * float(s.contrast)) for s in own]
+        if not todo:
+            return 0, float("nan")
+        if self.model is None:
+            raise ValueError(f"{what} needs an injection_model")
+        from dataclasses import replace
+        orig = self.data.cube
+        cube = np.array(orig, dtype=np.float32, order="C", copy=True)
+        inject_frames(cube, cube, self.data.angles, todo, self.model, self.pxscale, None,
+                      truenorth=self.truenorth, fallback=self.fallback,
+                      angle_convention=self.angle_convention, threads=max(int(threads), 1))
+        before, after = (orig, cube) if sign < 0 else (cube, orig)
+        kept, k = _flux_taken(before, after, self.data.angles, own, self.model, self.pxscale,
+                              truenorth=self.truenorth, fallback=self.fallback, angle_convention=self.angle_convention)
+        if np.isfinite(kept) and abs(kept - 1.0) > 1e-3:
+            warnings.warn(f"{what}: {kept:.5f} of the sources' flux {'left' if sign < 0 else 'reached'} the frames "
+                          f"(measured on {k} of {orig.shape[0]} frames), float32 rounding "
+                          f"{'kept' if sign < 0 else 'lost'} the rest.  flux_unit is {self.model.flux_unit:.4g} -- if "
+                          f"that is a normalised template's own sum rather than the star's flux in the science "
+                          f"frames' units, set star_flux (see generic.star_flux_from_aperture_photometry).",
+                          RuntimeWarning, stacklevel=3)
+        self.data = replace(self.data, cube=cube)
+        # everything worked out from the old frames goes
+        self._peak = None
+        self._inj_cache, self._fm_cache = {}, {}
+        self._crops = {"inj": _CropCache(), "fm": _CropCache()}
+        self._reflib_cache = {}
+        return len(todo), kept
 
     def set_reference_library(self, *, partition, groups=None, metric: str = "cc",
                              shift_px: int = 1, n_min_ref: int = 2,
@@ -1461,21 +1494,30 @@ class PartitionedReducer(Reducer):
         sky, out of every night's frames.  It has to run before the worker processes start,
         since they keep the reducers they were started with, and it refuses afterwards.
         Returns the number of sources subtracted (per partition)."""
+        return self._edit_partitions(sources, threads, "subtract_sources", "subtracted_kept", "subtracted_sources")
+
+    def inject_sources(self, sources: Sequence[Any], threads: int = 1) -> int:
+        """:meth:`KLIPReducer.inject_sources` on every partition: the same sources, on the sky,
+        added to every night's frames, before the worker processes start.  Returns the number
+        of sources added (per partition)."""
+        return self._edit_partitions(sources, threads, "inject_sources", "injected_kept", "injected_sources")
+
+    def _edit_partitions(self, sources: Sequence[Any], threads: int, method: str, attr: str, key: str) -> int:
         if self._procs is not None:
-            raise RuntimeError("subtract_sources has to run before the worker pool starts: the worker "
+            raise RuntimeError(f"{method} has to run before the worker pool starts: the worker "
                                "processes keep the frames they were started with")
         src = [s if isinstance(s, Source) else Source(*(float(v) for v in s)) for s in sources]
         n = 0
         kept: Dict[Any, Optional[float]] = {}
         for pid, r in self.reducers.items():
-            f = getattr(r, "subtract_sources", None)
+            f = getattr(r, method, None)
             if f is None:
-                raise TypeError(f"partition {pid}: a {type(r).__name__} cannot subtract sources")
+                raise TypeError(f"partition {pid}: a {type(r).__name__} cannot {method.replace('_', ' ')}")
             n = f(src, threads=threads)
-            kept[pid] = getattr(r, "subtracted_kept", None)
-        self.subtracted_kept = kept
+            kept[pid] = getattr(r, attr, None)
+        setattr(self, attr, kept)
         rec = dict(getattr(self, "data_edits", None) or {})
-        rec["subtracted_sources"] = list(rec.get("subtracted_sources") or []) + [list(s.as_tuple()) for s in src]
+        rec[key] = list(rec.get(key) or []) + [list(s.as_tuple()) for s in src]
         self.data_edits = rec
         return n
 

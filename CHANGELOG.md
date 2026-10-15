@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased — 2026-10-15e (a finished run's winners on other frames, sources added at load, the verify's injections given)
+
+From the NEAR2 session's reply of 2026-10-15 15:30 MST: the checks on the line need
+run_20261013_194614's winners reduced on frames with the line subtracted, and planets put on
+the line.
+
+- **`klip-tpe rereduce` / `Runner.rereduce`**: each annulus' winning configuration reduced
+  again on the frames the command line asks for (the run's own for every option it leaves
+  out), stitched with the run's weights and seam patching, with the S/N map, the injected and
+  per-night stitches and the final verify, in `<run>_rereduce/` beside the run, which it only
+  reads.  On the run's own frames the products are the run's, to the bit.  `rereduce.json`
+  records the frames, the weights and the injections, and an earlier re-reduction is not
+  written over without `--overwrite`.  `Runner.resume(..., same_frames=False)` builds the
+  runner for it, and a plain resume on other frames is refused as before.
+- **`--verify-sources FILE`** (rereduce): the final verify's calibration injections at given
+  rho, PA and contrast, all of them in every annulus' injected reduction, in place of the
+  winners' validation draws.
+- **`--inject-sources FILE`** and **`KLIPReducer.inject_sources` / `PartitionedReducer.inject_sources`**
+  (`near.make_reducer(inject_sources=)`): point sources added to the frames once, at load,
+  after any subtraction, by the path `--subtract-sources` takes with the sign the other way.
+  Recorded in `RunConfig.data_edits` as `injected_sources`, kept on resume and extend, checked
+  by the `Runner`, and measured as the subtraction is (`injected_kept`).  An all-negative list
+  is refused, pointing to `--subtract-sources`.
+- **The all-negative refusal of `--subtract-sources`** now says when the minus applies: to a
+  list of the negatives to inject.  A line in its own sign goes in as it is, and columns
+  after the third are ignored.
+- `_final_stitch(weights=, extra_header=)` and `_final_verify(header=)` for the re-reduction.
+- `docs/RUNNING.md` (a section on `rereduce`, `--inject-sources`), `docs/CLI.md` (now with
+  `rereduce`), `tests/README.md`.  New tests in `test_rereduce.py`, more in
+  `test_subtract_sources.py` and `test_near_data_edits.py`.
+
 ## Unreleased — 2026-10-15d (edited frames, another cube or point sources taken out at load, a line through the star, the chain fit)
 
 From the NEAR2 session's note of 2026-10-15 on the alpha Cen A-B line (PA 13/193 deg) in
