@@ -63,6 +63,26 @@ def test_newest_panel_is_none_on_a_run_that_has_not_drawn_yet(tmp_path):
     assert viewer.newest_panel(str(tmp_path)) is None
 
 
+def test_the_calibration_panels_show_until_the_search_draws(tmp_path):
+    """An annulus calibrates its injection contrast for minutes before the search draws its
+    first panel, and draws a clean | injected panel per trial.  The window shows those, not a
+    black frame, and the search's panels once they are newer.  The intro is another size and
+    is never shown."""
+    sd = tmp_path / "steps"
+    sd.mkdir()
+    t0 = time.time() - 100
+    for name, dt in (("calib_ann01_trial0003.png", 0), ("intro.png", 10)):
+        (sd / name).write_bytes(b"x")
+        os.utime(sd / name, (t0 + dt, t0 + dt))
+    assert os.path.basename(viewer.newest_panel(str(tmp_path))[0]) == "calib_ann01_trial0003.png"
+    (sd / "step0000.png").write_bytes(b"y")
+    os.utime(sd / "step0000.png", (t0 + 20, t0 + 20))
+    assert os.path.basename(viewer.newest_panel(str(tmp_path))[0]) == "step0000.png"
+    (sd / "calib_ann02_trial0001.png").write_bytes(b"z")          # the next annulus calibrates
+    os.utime(sd / "calib_ann02_trial0001.png", (t0 + 30, t0 + 30))
+    assert os.path.basename(viewer.newest_panel(str(tmp_path))[0]) == "calib_ann02_trial0001.png"
+
+
 def test_find_run_takes_a_path_as_given(tmp_path):
     d = tmp_path / "miri_HIP-65426_F1140C"
     d.mkdir()
