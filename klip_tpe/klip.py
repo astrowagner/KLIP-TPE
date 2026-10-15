@@ -513,12 +513,28 @@ def nw_ang_comb_ref(in_cube: np.ndarray, angles: np.ndarray, ref_cube: np.ndarra
 # ----------------------------------------------------------------------------
 # KLIP core
 # ----------------------------------------------------------------------------
-def klip_basis(R: np.ndarray, k: int, spat_mean: bool = False, temp_mean: bool = False,
-               tol: float = 1e-6) -> np.ndarray:
-    """KL basis of the reference matrix ``R`` (M frames x N pixels), Soummer et al.
-    2012 as in ``get_klip_basis_new``: eigen-decompose ``R R^T`` (float64), drop
-    eigenvalues below ``tol``, ``Z_m = R^T v_m / sqrt(lambda_m)``.  Returns the first
-    ``min(k, M)`` modes as rows (modes with zero eigenvalue are zero rows)."""
+def _eig_desc(C: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Eigenvalues and eigenvectors of the symmetric ``C``, the largest first."""
+    lam, V = np.linalg.eigh(C)
+    order = np.argsort(lam)[::-1]
+    return lam[order], V[:, order]
+
+
+def _basis_scale(lam: np.ndarray, tol: float) -> np.ndarray:
+    """``1 / sqrt(lambda)`` for the modes :func:`klip_basis` keeps (eigenvalue at least
+    ``tol``), 0 for the others."""
+    lam = np.where(lam < tol, 0.0, lam)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(lam > 0, 1.0 / np.sqrt(np.where(lam > 0, lam, 1.0)), 0.0)
+
+
+def _klip_basis_eig(R: np.ndarray, k: int, spat_mean: bool = False, temp_mean: bool = False,
+                    tol: float = 1e-6, only_k: bool = False):
+    """:func:`klip_basis` and what it decomposed: ``(Z, lam, V, R)``, the modes, the
+    eigenvalues of ``R R^T`` (the largest first, before the ``tol`` cut), its eigenvectors
+    and ``R`` as decomposed (float64, centred when asked).  ``only_k`` forms the first
+    ``k`` modes alone, where the default forms all ``M`` and keeps the first ``k``.  They
+    are the same modes, though not necessarily to the bit."""
     R = np.asarray(R, np.float64)
     if R.ndim == 1:
         R = R[None, :]
@@ -528,15 +544,22 @@ def klip_basis(R: np.ndarray, k: int, spat_mean: bool = False, temp_mean: bool =
         R = R - R.mean(axis=0, keepdims=True)
     M = R.shape[0]
     k = int(min(max(k, 1), M))
-    C = R @ R.T
-    lam, V = np.linalg.eigh(C)
-    order = np.argsort(lam)[::-1]
-    lam, V = lam[order], V[:, order]
-    lam = np.where(lam < tol, 0.0, lam)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        scale = np.where(lam > 0, 1.0 / np.sqrt(np.where(lam > 0, lam, 1.0)), 0.0)
-    Z = (V * scale[None, :]).T @ R           # (M, N)
-    return Z[:k]
+    lam, V = _eig_desc(R @ R.T)
+    scale = _basis_scale(lam, tol)
+    if only_k:
+        Z = (V[:, :k] * scale[None, :k]).T @ R
+    else:
+        Z = ((V * scale[None, :]).T @ R)[:k]          # all M modes, the first k kept
+    return Z, lam, V, R
+
+
+def klip_basis(R: np.ndarray, k: int, spat_mean: bool = False, temp_mean: bool = False,
+               tol: float = 1e-6) -> np.ndarray:
+    """KL basis of the reference matrix ``R`` (M frames x N pixels), Soummer et al.
+    2012 as in ``get_klip_basis_new``: eigen-decompose ``R R^T`` (float64), drop
+    eigenvalues below ``tol``, ``Z_m = R^T v_m / sqrt(lambda_m)``.  Returns the first
+    ``min(k, M)`` modes as rows (modes with zero eigenvalue are zero rows)."""
+    return _klip_basis_eig(R, k, spat_mean, temp_mean, tol)[0]
 
 
 def zone_indices(shape: Tuple[int, int], inrad: float, outrad: float, a0_deg: float, a1_deg: float,
@@ -590,13 +613,22 @@ class KLIPParams:
     #: of it, so RDI runs per target instead of from one shared basis.
     ref_lib: Optional[Any] = None
     ref_keep: Optional[Dict[str, int]] = None
+    #: how the per-target path forms a target's reference covariance.  ``"target"``: from
+    #: the references' pixels, ``R R^T`` for every target, all M modes formed and the first k
+    #: kept, as always.  ``"zone"``: one Gram matrix ``G = D D^T`` per zone (the pool's under
+    #: a searched library), each target's covariance read off it as ``G[refs, refs]``, and
+    #: the target projected on its first k modes through ``G[t, refs]`` without forming them
+    #: (:func:`klip_annular`).  The same KLIP to float64 rounding but not to the bit, since the
+    #: Gram's dot products are summed in another order.  The fast path forms only its k modes.
+    gram: str = "target"
 
 
 _FM_TOL = 1e-6                   # eigenvalue tolerance of get_klip_basis_new / the FM block
 
 
 def klip_fm_zone(R: np.ndarray, Mref: Optional[np.ndarray], T: np.ndarray, Mtar: np.ndarray, k: int,
-                 fm_selfsub: bool = True) -> np.ndarray:
+                 fm_selfsub: bool = True, eig: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None
+                 ) -> np.ndarray:
     """KLIP-FM (Pueyo 2016, first order) of one zone -- ``multiklip.pro`` L365-403
     (fast path) / L494-527 (per-target path), same math.
 
@@ -613,21 +645,28 @@ def klip_fm_zone(R: np.ndarray, Mref: Optional[np.ndarray], T: np.ndarray, Mtar:
         dl_k  = u_k . dC u_k
         du_k  = sum_{j != k, |l_k - l_j| > 1e-6 max(|l_k|, 1)} (u_j . dC u_k) / (l_k - l_j) u_j
         dZ_k  = -dl_k / (2 l_k) Z_k + (R^T du_k + M^T u_k) / sqrt(l_k)
+
+    ``eig``: ``(lam, U, Zb)`` already worked out for this ``R`` -- the eigenvalues of
+    ``R R^T`` (the largest first), its eigenvectors and, or None, the first ``k`` modes as
+    above -- so that the decomposition the KLIP basis made is not made a second time.
     """
     R = np.asarray(R, np.float64)
     T = np.asarray(T, np.float64)
     Mtar = np.asarray(Mtar, np.float64)
     nref = R.shape[0]
-    C = R @ R.T
-    lam, U = np.linalg.eigh(C)
-    order = np.argsort(lam)[::-1]
-    lam, U = lam[order], U[:, order]
     nmod = int(min(max(k, 0), nref))
     if nmod == 0:
         return Mtar.copy()
+    if eig is None:
+        lam, U = _eig_desc(R @ R.T)
+    else:
+        lam, U = eig[0], eig[1]
     valid = lam > _FM_TOL
     scale = np.where(valid, 1.0 / np.sqrt(np.where(valid, lam, 1.0)), 0.0)
-    Zb = ((U * scale[None, :]).T @ R)[:nmod]                    # (nmod, npx)
+    if eig is not None and eig[2] is not None:
+        Zb = eig[2]
+    else:
+        Zb = ((U * scale[None, :]).T @ R)[:nmod]                # (nmod, npx)
     dZb = np.zeros_like(Zb)
     if Mref is not None and fm_selfsub:
         Mref = np.asarray(Mref, np.float64)
@@ -693,6 +732,9 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
     k = int(max(p.k_klip, 0))
     fast = bool(p.fast)
     do_fm = fm_cube is not None
+    gram = str(getattr(p, "gram", "target") or "target").lower()
+    if gram not in ("target", "zone"):
+        raise ValueError(f"KLIPParams.gram is 'target' or 'zone', not {getattr(p, 'gram', None)!r}")
     if do_fm and p.k_scan:
         raise ValueError("KLIP-FM is fixed-k: not supported with k_scan")
     if do_fm and fm_cube.shape != cube.shape:
@@ -740,7 +782,7 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
             "rdi": rdi, "n_basis_frames": int(ref_cube.shape[0]) if rdi else n, "fm": do_fm,
             "library_as_adi": lib_as_adi,
             "k_requested": int(k_req), "k_effective": int(k), "k_capped": bool(k_capped),
-            "fm_selfsub": bool(fm_selfsub) if do_fm else None}
+            "fm_selfsub": bool(fm_selfsub) if do_fm else None, "klip_gram": gram}
 
     # A k-scan returns one image per requested k, and that count must NOT depend on the cap:
     # a PartitionedReducer stacks the per-partition scans, and two channels whose binned
@@ -764,9 +806,22 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
             zones.append(idx)
 
     def _basis(R):
+        # the modes, eigenvalues and eigenvectors.  The zone mode forms only the k modes it uses.
         if k == 0:
-            return np.zeros((0, R.shape[1]))
-        return klip_basis(R, k, p.spat_mean, p.temp_mean)
+            return np.zeros((0, R.shape[1])), None, None
+        Z, lam, V, _ = _klip_basis_eig(R, k, p.spat_mean, p.temp_mean, only_k=(gram == "zone"))
+        return Z, lam, V
+
+    def _fm_eig(R, Z, lam, V):
+        # The basis' decomposition, handed to klip_fm_zone so it is not made twice.  The FM
+        # decomposes the raw frames, so only without centring, and it takes the basis' modes
+        # only where its eigenvalue cut keeps the same ones (they differ at lambda == tol).
+        if lam is None or p.spat_mean or p.temp_mean:
+            return None
+        nmod = min(k, R.shape[0])
+        valid = lam[:nmod] > _FM_TOL
+        sf = np.where(valid, 1.0 / np.sqrt(np.where(valid, lam[:nmod], 1.0)), 0.0)
+        return lam, V, (Z[:nmod] if np.array_equal(_basis_scale(lam, 1e-6)[:nmod], sf) else None)
 
     def _project(T, Z, kk):
         # T (t, N), Z (m, N) orthonormal rows -> residuals for modes 0..kk-1
@@ -786,7 +841,7 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
         for idx in zones:
             D = _zero_nan(flat[:, idx].astype(np.float64))          # science frames in the zone
             R = _zero_nan(ref_flat[:, idx].astype(np.float64)) if rdi else D
-            Z = _basis(R)
+            Z, lam, V = _basis(R)
             T = D.copy()
             if p.spat_mean:
                 T -= T.mean(axis=1, keepdims=True)
@@ -813,7 +868,7 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
                 else:
                     Mref = None                                   # RDI without a ref model: no self-sub
                 fo = fm_out.reshape(n, ny * nx)
-                fo[:, idx] = klip_fm_zone(R, Mref, T, Mtar, k, fm_selfsub)
+                fo[:, idx] = klip_fm_zone(R, Mref, T, Mtar, k, fm_selfsub, eig=_fm_eig(R, Z, lam, V))
         return (out, info, fm_out) if do_fm else (out, info)
 
     # ---- per-target (slow) path -------------------------------------------
@@ -843,6 +898,76 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
     basis_flat = ref_flat if use_lib else flat
     basis_zone = [basis_flat[:, idx].astype(np.float64) for idx in zones] if use_lib else zone_data
     n_basis = basis_flat.shape[0]
+    # gram="zone": one Gram matrix per zone, made before the targets.  A target's covariance
+    # is the submatrix of it at its references, its products with them are its row, and its
+    # projection on the first k modes is a weighted sum of the reference frames, so no target
+    # forms its covariance or its modes from the pixels.  temp_mean centres on each target's
+    # own reference set, which no single Gram holds, so it keeps the per-target path.
+    zone_gram = gram == "zone" and k > 0 and not p.temp_mean
+    info["klip_gram"] = "zone" if zone_gram else "target"
+    zgram = []
+    if zone_gram:
+        for D, BD in zip(zone_data, basis_zone):
+            zd = _zero_nan(D)
+            if p.spat_mean:
+                zd = zd - zd.mean(axis=1, keepdims=True)     # each frame's own mean, as klip_basis takes it
+            if use_lib:
+                bzd = _zero_nan(BD)
+                if p.spat_mean:
+                    bzd = bzd - bzd.mean(axis=1, keepdims=True)
+                zgram.append((zd, bzd, bzd @ bzd.T, zd @ bzd.T))
+            else:
+                G = zd @ zd.T
+                zgram.append((zd, zd, G, G))
+
+    def _fm_models(t, refs, idx):
+        # the planet model in the references and in the target, as the FM takes them
+        mflat = fmref_flat if (use_lib and fmref_flat is not None) else fm_flat
+        if use_lib and fmref_flat is None:
+            Mref = None            # library RDI with no model in the references
+        else:
+            Mref = _zero_nan(mflat[refs][:, idx].astype(np.float64))
+        return Mref, _zero_nan(fm_flat[t:t + 1, idx].astype(np.float64))
+
+    def _zone_target(t, r, zi, idx, D, BD, refs):
+        zd, bzd, G, X = zgram[zi]
+        T = zd[t]                                       # zero-filled (and centred), as T below
+        kk_max = min(k, r.size)
+        if kk_max == 0:
+            res = T[None, :]
+            lam = V = None
+        else:
+            lam, V = _eig_desc(G[np.ix_(r, r)])
+            Vk = V[:, :kk_max]
+            # T's coefficient on mode m is (G[t, r] . v_m) / sqrt(lambda_m), and mode m is
+            # R^T v_m / sqrt(lambda_m): the projection is w . R with w = V_k c
+            c = (X[t, r] @ Vk) * _basis_scale(lam, 1e-6)[:kk_max] ** 2
+            if p.k_scan:
+                W = np.zeros((kk_max, bzd.shape[0]))
+                W[:, r] = np.cumsum(Vk * c[None, :], axis=1).T     # row m: the weights of modes 0..m
+                res = T[None, :] - W @ bzd
+            else:
+                w = np.zeros(bzd.shape[0])
+                w[r] = Vk @ c
+                res = (T - w @ bzd)[None, :]
+        if p.k_scan:
+            for kk in range(k_req):
+                out[kk, t].reshape(-1)[idx] = res[min(kk, res.shape[0] - 1)]
+        else:
+            out[t].reshape(-1)[idx] = res[0]
+        if do_fm:
+            Mref, Mtar = _fm_models(t, refs, idx)
+            if p.spat_mean or lam is None:
+                # the FM decomposes the raw frames, which the centred Gram does not hold
+                R = _zero_nan(BD[refs])
+                fm = klip_fm_zone(R, Mref, _zero_nan(D[t:t + 1]), Mtar, k, fm_selfsub)
+            else:
+                R = bzd[r]
+                valid = lam > _FM_TOL
+                sf = np.where(valid, 1.0 / np.sqrt(np.where(valid, lam, 1.0)), 0.0)
+                Zb = (V[:, :kk_max] * sf[None, :kk_max]).T @ R
+                fm = klip_fm_zone(R, Mref, zd[t:t + 1], Mtar, k, fm_selfsub, eig=(lam, V, Zb))
+            fm_out[t].reshape(-1)[idx] = fm[0]
 
     def _target(t):
         if do_drop and nref[t] < p.n_min_ref:
@@ -862,9 +987,13 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
                 refs = np.ones(n, bool)
                 refs[t] = False
         nref_used[t] = int(refs.sum())
-        for idx, D, BD in zip(zones, zone_data, basis_zone):
+        r = np.flatnonzero(refs) if zone_gram else None
+        for zi, (idx, D, BD) in enumerate(zip(zones, zone_data, basis_zone)):
+            if zone_gram:
+                _zone_target(t, r, zi, idx, D, BD, refs)
+                continue
             R = _zero_nan(BD[refs])
-            Z = _basis(R)
+            Z, lam, V = _basis(R)
             T = _zero_nan(D[t:t + 1].copy())
             Star = T.copy()               # raw target (the FM uses the un-adjusted stellar frame, L493)
             if p.spat_mean:
@@ -880,13 +1009,9 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
             else:
                 out[t].reshape(-1)[idx] = _project(T, Z, kk_max)[0]
             if do_fm:
-                mflat = fmref_flat if (use_lib and fmref_flat is not None) else fm_flat
-                if use_lib and fmref_flat is None:
-                    Mref = None            # library RDI with no model in the references
-                else:
-                    Mref = _zero_nan(mflat[refs][:, idx].astype(np.float64))
-                Mtar = _zero_nan(fm_flat[t:t + 1, idx].astype(np.float64))
-                fm_out[t].reshape(-1)[idx] = klip_fm_zone(R, Mref, Star, Mtar, k, fm_selfsub)[0]
+                Mref, Mtar = _fm_models(t, refs, idx)
+                fm_out[t].reshape(-1)[idx] = klip_fm_zone(R, Mref, Star, Mtar, k, fm_selfsub,
+                                                          eig=_fm_eig(R, Z, lam, V))[0]
 
     nthr = int(max(getattr(p, "threads", 1), 1))
     if nthr > 1 and n > 1:

@@ -37,6 +37,7 @@ def _near_objects(a, log=print):
                             weighting=a.weighting, max_workers=a.workers, pool=a.pool, fast=a.fast, log=log,
                             n_min_ref=a.n_min_ref, backend=getattr(a, "backend", "klip"))
     _set_threads_per_job(red, a)
+    _set_klip_gram(red, a, log)
     objective, sampler = near.default_config(red, clean_subtract=not a.no_clean_subtract,
                                              metric=getattr(a, "metric", "mawet"),
                                              known=[tuple(k) for k in (a.known or [])])
@@ -54,6 +55,57 @@ def _set_threads_per_job(red, a) -> None:
     """``--threads-per-job``, before the worker pool starts (it sizes the pool)."""
     if hasattr(red, "threads_per_job"):
         red.threads_per_job = max(int(getattr(a, "threads_per_job", 4) or 4), 1)
+
+
+def _set_klip_gram(red, a, log=print) -> None:
+    """``--klip-gram`` on every KLIP reducer, before the worker pool starts (the workers keep
+    the reducers they were forked with)."""
+    from .reducer import set_klip_gram
+    mode = str(getattr(a, "klip_gram", None) or "target")
+    if set_klip_gram(red, mode) and mode == "zone":
+        log("  KLIP: each target's reference covariance read off one Gram matrix per zone, its "
+            "projection made without forming the modes (--klip-gram zone, the same KLIP to "
+            "float64 rounding, not to the bit)")
+
+
+_KLIP_GRAM_FILE = "klip_gram.json"
+
+
+def _klip_gram_for_run(a) -> None:
+    """Settle ``--klip-gram`` for a command on a run directory: what this command line says,
+    else what the run has been using (``<run>/klip_gram.json``), else ``target``.
+
+    The two modes give the same KLIP to float64 rounding but not to the bit, so a run keeps
+    its mode across resumes, however they are typed.  A command line that changes it writes
+    the new mode there with the time, and every later resume reads it back."""
+    import json
+    import time
+    run_dir = getattr(a, "run_dir", None)
+    path = os.path.join(run_dir, _KLIP_GRAM_FILE) if run_dir else None
+    rec = None
+    if path and os.path.exists(path):
+        try:
+            with open(path) as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            rec = None
+    was = str((rec or {}).get("klip_gram", "target"))
+    if "klip_gram" not in _explicit_dests(getattr(a, "_argv", None)):
+        a.klip_gram = was
+        if rec is not None and was != "target":
+            print(f"  --klip-gram {was}, as the run has been using since "
+                  f"{(rec.get('history') or [{}])[-1].get('since', '?')} ({_KLIP_GRAM_FILE})")
+        return
+    if path is None or a.klip_gram == was:
+        return
+    hist = list((rec or {}).get("history") or [])
+    hist.append({"klip_gram": a.klip_gram, "since": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                 "previous": was})
+    os.makedirs(run_dir, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"klip_gram": a.klip_gram, "history": hist}, f, indent=1)
+    print(f"  --klip-gram {a.klip_gram} from now on (it was {was}), recorded in "
+          f"{os.path.join(os.path.basename(run_dir), _KLIP_GRAM_FILE)} for every later resume")
 
 
 def _generic_objects(a, log=print):
@@ -98,6 +150,7 @@ def _generic_objects(a, log=print):
                                max_workers=a.workers, pool=a.pool, fast=a.fast, n_min_ref=a.n_min_ref,
                                backend=getattr(a, "backend", "klip"), log=log)
     _set_threads_per_job(red, a)
+    _set_klip_gram(red, a, log)
     objective, sampler = generic.default_config(red, clean_subtract=not a.no_clean_subtract,
                                                 known=[tuple(k) for k in (a.known or [])],
                                                 metric=getattr(a, "metric", "mawet"))
@@ -147,6 +200,7 @@ def _nomic_objects(a, log=print):
                              fwhm_px=a.fwhm_px, diam_m=a.diam, psf=(a.psf[0] if a.psf else "airy"), r_ee_px=a.r_ee,
                              backend=getattr(a, "backend", "klip"))
     _set_threads_per_job(red, a)
+    _set_klip_gram(red, a, log)
     objective, sampler = nomic.default_config(red, clean_subtract=not a.no_clean_subtract,
                                               metric=getattr(a, "metric", "mawet"),
                                               known=[tuple(k) for k in (a.known or [])])
@@ -183,6 +237,7 @@ def _ales_objects(a, log=print):
                             sdi=bool(getattr(a, "ales_sdi", False)), sdi_cap=int(getattr(a, "ales_sdi_cap", 100) or 100),
                             sdi_lenders=getattr(a, "ales_sdi_lenders", "all") or "all", log=log)
     _set_threads_per_job(red, a)
+    _set_klip_gram(red, a, log)
     objective, sampler = ales.default_config(red, clean_subtract=not a.no_clean_subtract,
                                              known=[tuple(k) for k in (a.known or [])],
                                              forbidden_pa=[tuple(b) for b in (getattr(a, "forbidden_pa", None) or [])],
@@ -309,6 +364,13 @@ def _add_near_args(p):
                         "processes, never fewer than min(workers, 2 x partitions)")
     p.add_argument("--weighting", default="equal", choices=["equal", "sqrt_texp"])
     p.add_argument("--fast", action="store_true", help="single-basis KLIP (angsep/anglemax not searched)")
+    p.add_argument("--klip-gram", default="target", choices=["target", "zone"],
+                   help="how the per-target KLIP forms each target's reference covariance. 'target' "
+                        "(default) works from its references' pixels and forms all modes. 'zone' reads "
+                        "it off one Gram matrix per zone and projects the target without forming the "
+                        "modes, the same KLIP to float64 rounding but not to the bit, and about twice "
+                        "as fast per target at small bins. A run keeps the mode it was started or "
+                        "last resumed with (its klip_gram.json) unless this is given")
     p.add_argument("--no-library", action="store_true")
     p.add_argument("--no-clean-subtract", action="store_true")
     p.add_argument("--ladder-pair", action="store_true",
@@ -490,6 +552,7 @@ def cmd_near(a):
         a.run_dir = _default_run_dir(a)
         print(f"run directory: {a.run_dir}")
     _register(a.run_dir)
+    _klip_gram_for_run(a)
     if getattr(a, "from_idl_setup", None):
         # mirror an IDL run: nights, annulus, budget, contrast, validation and TPE settings
         from .idl_compare import matched_run_config
@@ -729,6 +792,7 @@ def cmd_resume(a):
     # record the command line this resume resolved to, not the one that was typed, so the
     # next resume inherits an entry that still carries the data root
     _register(a.run_dir, getattr(a, "_record_argv", None))
+    _klip_gram_for_run(a)
     red, objective, sampler, guard, thr = _near_objects(a)
     r = Runner.resume(a.run_dir, red, objective, sampler, project=guard, throughput_fn=thr)
     r.callbacks = _callbacks(a)
@@ -738,6 +802,7 @@ def cmd_resume(a):
 def cmd_extend(a):
     from .runner import Runner
     _resolve_run_dir(a)
+    _klip_gram_for_run(a)
     red, objective, sampler, guard, thr = _near_objects(a)
     Runner.extend(a.run_dir, red, objective, sampler, a.n_iter, project=guard, throughput_fn=thr)
 

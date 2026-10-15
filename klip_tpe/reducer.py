@@ -32,7 +32,7 @@ from .klip import (BLOCK_BYTES, KLIPParams, _highpass_frames, arcdist_deg, bin_b
 from .metrics import Source
 from .space import Config
 
-__all__ = ["reducer_class", "ReductionRequest", "ReductionResult", "Reducer", "Dataset", "KLIPReducer",
+__all__ = ["reducer_class", "set_klip_gram", "KLIP_GRAM_MODES", "ReductionRequest", "ReductionResult", "Reducer", "Dataset", "KLIPReducer",
            "PartitionedReducer", "EvalImages"]
 
 
@@ -249,6 +249,12 @@ class KLIPReducer(Reducer):
         prep_fused (bool, default True: the frames before KLIP are made one bin group at a
             time, see below.  False makes them a whole cube per step, the reference the
             fused path is tested against, to the bit.)
+        klip_gram ('target' | 'zone', default 'target': how the per-target KLIP forms each
+            target's reference covariance, :attr:`klip_tpe.klip.KLIPParams.gram`.  'zone'
+            reads it off one Gram matrix per zone and projects without forming the modes,
+            the same KLIP to float64 rounding and about twice as fast per target at small
+            bins, not the same to the bit.  :func:`set_klip_gram` sets it on every reducer
+            of a partitioned one.)
 
     The chain: frame selection -> inject (the kept frames) -> high-pass -> [destripe 90, 0]
     -> angle-aware binning -> annular KLIP [RDI/ARDI basis, KLIP-FM] -> high-pass
@@ -308,7 +314,8 @@ class KLIPReducer(Reducer):
                          "fast": False, "spat_mean": False, "temp_mean": False,
                          "n_min_ref": 10, "comb_type": "nwadi",
                          "use_rdi": False, "rdi_mode": "ardi", "do_destripe": False, "destripe_clip": 0.0,
-                         "fm_selfsub": True, "hp_nan_aware": False, "prep_fused": True}
+                         "fm_selfsub": True, "hp_nan_aware": False, "prep_fused": True,
+                         "klip_gram": "target"}
         self.defaults.update(defaults or {})
         self._inj_cache: Dict[Tuple, _FrameCache] = {}
         self._fm_cache: Dict[Tuple, _FrameCache] = {}
@@ -1110,7 +1117,7 @@ class KLIPReducer(Reducer):
                         n_min_ref=int(p["n_min_ref"]), spat_mean=bool(p["spat_mean"]),
                         temp_mean=bool(p["temp_mean"]), k_scan=bool(req.k_scan),
                         threads=int(max(getattr(req, "threads", 1), 1)),
-                        ref_lib=ref_lib, ref_keep=ref_keep)
+                        ref_lib=ref_lib, ref_keep=ref_keep, gram=str(p.get("klip_gram", "target") or "target"))
         fm_img = nosub = cadi = None
         with np.errstate(all="ignore"), warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)          # nanmedian of all-NaN corners
@@ -1609,6 +1616,28 @@ class PartitionedReducer(Reducer):
         if self.sdi_lender_ids(list(self.reducers)) is not None:
             d["sdi_lenders"] = str(self.sdi_lenders)
         return d
+
+
+KLIP_GRAM_MODES = ("target", "zone")
+
+
+def set_klip_gram(reducer: Reducer, mode: str) -> List[Any]:
+    """Set ``klip_gram`` (:attr:`klip_tpe.klip.KLIPParams.gram`) as the default of every
+    KLIP reducer in ``reducer``, a :class:`PartitionedReducer`'s partitions or a single one.
+    Returns the partitions (or ``[None]``) it was set on.  Set it before the worker pool
+    starts: the workers keep the reducers they were forked with."""
+    mode = str(mode or "target").lower()
+    if mode not in KLIP_GRAM_MODES:
+        raise ValueError(f"klip_gram is one of {KLIP_GRAM_MODES}, not {mode!r}")
+    subs = getattr(reducer, "reducers", None)
+    items = list(subs.items()) if isinstance(subs, dict) and subs else [(None, reducer)]
+    done = []
+    for pid, r in items:
+        d = getattr(r, "defaults", None)
+        if isinstance(d, dict) and "klip_gram" in d:
+            d["klip_gram"] = mode
+            done.append(pid)
+    return done
 
 
 def reducer_class(backend: str = "klip"):

@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased — 2026-10-15b (one Gram matrix per zone for the per-target KLIP behind `--klip-gram zone`, KLIP-FM on the basis' own decomposition)
+
+From the NEAR2 session's note of 2026-10-14 on the per-target KLIP.  At a small bin a night job
+is KLIP-bound, and for every target the per-target path formed the covariance `R Rᵀ` of its
+references from their pixels and all M of its modes, of which it kept k.
+
+- **`KLIPParams.gram`, the request parameter `klip_gram`, `--klip-gram {target,zone}`.**
+  `zone` forms one Gram matrix `G = D Dᵀ` per zone before the targets (the pool's under a
+  searched library, with the targets' products with it beside), reads each target's
+  covariance off it as `G[refs, refs]`, and projects the target on its first k modes as a
+  weighted sum of its references, `T - w R`, with `w` from `G[t, refs]` and the eigenvectors,
+  without forming the modes.  The k-scan takes every k from one set of cumulative weights,
+  `spat_mean` centres the zone once, and `temp_mean` keeps the per-target path.  The fast path
+  forms only the k modes it keeps.  It is the same KLIP to float64 rounding, not to the bit,
+  so `target` stays the default.
+  - On NEAR2 night 6, one thread, the night's KLIP: bin 5 with annulus 5's zones (37.4-50.7
+    px, two zones, k 45, about 200 references per target) 7.61 s against 3.51 s, bin 9
+    1.36 s against 0.76 s, bin 20 0.21 s against 0.08 s, zones of 56-69 px at bin 5 8.75 s
+    against 3.89 s, and an inner annulus with five zones and about 300 references 19.4 s
+    against 15.2 s, where the eigendecomposition dominates.  Up to 18 residual pixels in a
+    million differ, by one float32 unit.
+  - Over the 52 A/B reductions (NEAR2 nights 6 and 4, a searched library, an ALES cube), 108
+    of 113 arrays are the same to the bit, and 26 pixels of 211,670 differ, by at most 1.2e-7
+    of the image's noise.  NaN masks, dropped targets and reference counts are the same.
+- **A run keeps its mode.**  A command line that changes it writes the new mode and its time
+  into `klip_gram.json` in the run directory, and every later resume reads it back, however it
+  is typed.  `klip-tpe resume --klip-gram zone` switches a stopped run from there on.
+  `docs/RUNNING.md`.
+- **KLIP-FM takes the basis' eigendecomposition** (`klip_fm_zone(..., eig=)`) instead of
+  decomposing the same references a second time, per target and in the fast path.  The numbers
+  are the same to the bit, FM images included, and at bin 5 with annulus 5's zones a reduction
+  with KLIP-FM takes 23.7 s where it took 29.9 s (20.7 s with `zone`).
+- `klip_tpe.reducer.set_klip_gram(reducer, mode)` sets the mode on every partition.
+  `tests/test_klip_gram.py` holds the two modes to each other on ADI, the k-scan, KLIP-FM,
+  `spat_mean`, dropped targets, the fallback below four references, the fast path, a searched
+  library and ADI + SDI + RDI, on one thread and three.  It holds `target` to the old
+  per-target path to the bit, and checks the command line and the run's record.
+
 ## Unreleased — 2026-10-15 (`ales.WISPIT2B` removed)
 
 - `klip_tpe.instruments.ales.WISPIT2B` is gone.  A companion's position goes to
