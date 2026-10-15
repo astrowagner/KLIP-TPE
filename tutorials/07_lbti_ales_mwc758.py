@@ -99,8 +99,8 @@ plt.tight_layout()
 # away and within 45°.
 #
 # The data set keeps every 2.46 s frame, but the search starts its bins at 5 frames (12 s). On
-# one thread a November 14 group takes 85 s to reduce at bin 1 and 1.3 s at bin 5, and an
-# evaluation reduces 40 groups four times. One Gram matrix per zone (`set_klip_gram(red,
+# one thread a November 14 group between 0.41″ and 0.83″ takes 85 s to reduce at bin 1 and
+# 1.3 s at bin 5, and an evaluation reduces 40 groups four times. One Gram matrix per zone (`set_klip_gram(red,
 # "zone")`) shortens the per-target KLIP at these bins, and it is the same KLIP to
 # floating-point rounding.
 
@@ -114,20 +114,24 @@ print(len(space.names), "dimensions:", space.names[:9], "+", len(space.selection
 
 # %% [markdown]
 # `known` keeps MWC 758c out of every noise ring and the injections at least 1.5 FWHM from it,
-# and `forbidden_pa` keeps them out of a 50° wedge around its position angle. The annulus
-# searched here runs from 12 to 24 spaxels (0.41″ to 0.83″) around c's separation. A default
-# reduction of it, night by night and both together:
+# and `forbidden_pa` keeps them out of a 50° wedge around its position angle. The search runs
+# in three annuli, 0–0.3″, 0.3–0.6″ and 0.6–1.0″ (0 to 29 spaxels), one after the other. c at
+# 0.603″ falls just inside the third. Where two annuli meet, each one's KLIP zone reaches 2
+# spaxels past the shared edge (`RunConfig.edge_padding`), so the third annulus reduces all of
+# c's light. A default reduction of that annulus, night by night and both together:
 
 # %%
-INRAD, OUTRAD = 12.0, 24.0
+EDGES_AS = [0.0, 0.3, 0.6, 1.0]                     # the annuli's edges (arcsec)
+EDGES = [e / red.pxscale for e in EDGES_AS]         # in spaxels: 0, 8.7, 17.4, 29.0
+IC = int(np.searchsorted(EDGES_AS, RHO)) - 1        # the annulus with MWC 758c (the third)
 nights = {n: [p for p in red.partitions() if p.startswith(n + "_")] for n in ("n1", "n2")}
 
 
-def annulus(x):
-    """The configuration of vector x, with the annulus' edges in every partition's parameters."""
+def annulus(x, ia=IC):
+    """The configuration of vector x in annulus ia, its edges padded where the runner pads them."""
     cfg = space.decode(x)
     for d in [cfg.params, *cfg.per_partition.values()]:
-        d.update(inrad=INRAD, outrad=OUTRAD)
+        d.update(inrad=EDGES[ia], outrad=EDGES[ia + 1], pad_in=ia > 0, pad_out=ia < len(EDGES) - 2)
     return cfg
 
 
@@ -161,14 +165,14 @@ show(default, "default")
 # %% [markdown]
 # ## 3. Optimize
 #
-# The budget is tutorial 1's: 300 evaluations, the first 40 of them warm-up, each scored on
-# three injection draws, and the six best candidates validated on eight fresh injection sets
-# each. The contrast is calibrated so that the default configuration scores S/N ≈ 5. The
-# injections have the star's spectrum, one contrast in every group, so the search optimizes for
-# a companion with the star's colors.
+# The budget is tutorial 1's, in each annulus: 300 evaluations, the first 40 of them warm-up,
+# each scored on three injection draws, and the six best candidates validated on eight fresh
+# injection sets each. The contrast is calibrated in each annulus so that the default
+# configuration scores S/N ≈ 5. The injections have the star's spectrum, one contrast in every
+# group, so the search optimizes for a companion with the star's colors.
 
 # %%
-cfg = RunConfig(ann_edges=[INRAD, OUTRAD], n_iter=300, n_init=40, seed=7, n_remeasure=3,
+cfg = RunConfig(ann_edges=EDGES, n_iter=300, n_init=40, seed=7, n_remeasure=3,
                 validation=ValidationConfig(n_top=6, n_valid=8),
                 calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=2),
                 fm_curve=True)
@@ -179,33 +183,36 @@ t0 = time.time(); results = runner.run(); print(f"{(time.time() - t0) / 60:.1f} 
 # %% [markdown]
 # ## 4. What Did It Decide?
 #
-# The winner's parameters, its validated score against the search's best, and the partitions
-# it keeps, night by night:
+# Each annulus has its own winner. Its parameters, its validated score against the search's
+# best, and the partitions it keeps, night by night:
 
 # %%
-r = results[0]
-print(f"winner: eval {r.winner_index + 1}, validated {r.validated}, S/N {r.winner_score:.2f}  "
-      f"(search best {r.search_best_score:.2f})")
-blk = r.winner_config["per_partition"][red.partitions()[0]]
-print("  " + "  ".join(f"{k}={v:.3g}" if isinstance(v, float) else f"{k}={v}" for k, v in blk.items()
-                       if k not in ("spat_mean", "temp_mean", "inrad", "outrad", "pad_in", "pad_out")))
 groups = sorted({p.split("_")[1] for p in red.partitions()})
-kept = np.array([[1.0 if f"{n}_{g}" in r.partitions else 0.0 for g in groups] for n in ("n1", "n2")])
-for n, row in zip(("n1", "n2"), kept):
-    print(f"  {n}: {int(row.sum())} of {len(groups)} groups kept")
-fig, ax = plt.subplots(figsize=(10, 1.9))
-ax.imshow(kept, cmap="Greys", vmin=-0.3, vmax=1.3, aspect="auto")
-ax.set_yticks([0, 1], ["Nov 13 (n1)", "Nov 14 (n2)"])
+fig, axes = plt.subplots(len(results), 1, figsize=(10, 1.4 * len(results) + 1.0), sharex=True, squeeze=False)
+for ia, (r, ax) in enumerate(zip(results, axes[:, 0])):
+    band = f"{EDGES_AS[ia]:.1f}-{EDGES_AS[ia + 1]:.1f}″"
+    print(f"annulus {ia + 1} ({band}): winner eval {r.winner_index + 1}, validated {r.validated}, "
+          f"S/N {r.winner_score:.2f} (search best {r.search_best_score:.2f})")
+    blk = r.winner_config["per_partition"][red.partitions()[0]]
+    print("    " + "  ".join(f"{k}={v:.3g}" if isinstance(v, float) else f"{k}={v}" for k, v in blk.items()
+                             if k not in ("spat_mean", "temp_mean", "inrad", "outrad", "pad_in", "pad_out")))
+    kept = np.array([[1.0 if f"{n}_{g}" in r.partitions else 0.0 for g in groups] for n in ("n1", "n2")])
+    print("    " + ", ".join(f"{n}: {int(row.sum())} of {len(groups)} groups kept" for n, row in zip(("n1", "n2"), kept)))
+    ax.imshow(kept, cmap="Greys", vmin=-0.3, vmax=1.3, aspect="auto")
+    ax.set_yticks([0, 1], ["Nov 13 (n1)", "Nov 14 (n2)"])
+    ax.set_title(f"annulus {ia + 1} ({band}): partitions the winner keeps (dark)", fontsize=10)
 ax.set_xticks(range(len(groups)), [f"{rows['n1_' + g]['lam_mean']:.2f}" for g in groups], rotation=60, fontsize=8)
-ax.set_xlabel("group mean wavelength (µm)"); ax.set_title("partitions the winner keeps (dark)")
+ax.set_xlabel("group mean wavelength (µm)")
 plt.tight_layout()
 
 # %% [markdown]
-# The winner's image, night by night and combined, with MWC 758c's S/N measured as the search
-# measures the injections:
+# The third annulus' winner, night by night and combined, with MWC 758c's S/N measured as the
+# search measures the injections:
 
 # %%
-parts = fits.getdata(os.path.join(RUN_DIR, "annulus01", "best_clean_partitions.fits"))
+r = results[IC]
+ad = os.path.join(RUN_DIR, f"annulus{IC + 1:02d}")
+parts = fits.getdata(os.path.join(ad, "best_clean_partitions.fits"))
 parts = parts[None] if parts.ndim == 2 else parts
 winner = {}
 for n in ("n1", "n2"):
@@ -214,31 +221,55 @@ for n in ("n1", "n2"):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)      # pixels outside the annulus are NaN everywhere
             winner[n] = np.nanmean(parts[idx], axis=0)
-winner["both"] = fits.getdata(os.path.join(RUN_DIR, "annulus01", "best_clean.fits"))
+winner["both"] = fits.getdata(os.path.join(ad, "best_clean.fits"))
 show(winner, "winner")
 print(f"MWC 758c: S/N {metric.per_source(default['both'], None, [RHO], [PA])[0]:.1f} (default) -> "
       f"{metric.per_source(winner['both'], None, [RHO], [PA])[0]:.1f} (validated winner)")
 
 # %% [markdown]
-# ## 5. Contrast Curve and the Partition Map
+# The three winners stitched into one image, `klip_stitched.fits`:
 
 # %%
-cc = r.contrast_curve                       # also in annulus01/contrast_curve.txt, with the KLIP-FM curve after it
-plt.figure(figsize=(6, 4)); plt.semilogy(cc["r_as"], cc["curve"], "-o", ms=3, label="validated winner")
-if r.fm_curve:
-    plt.semilogy(r.fm_curve["r_as"], r.fm_curve["curve"], "--", label="KLIP-FM cross-check")
+show({"three annuli": fits.getdata(os.path.join(RUN_DIR, "klip_stitched.fits"))}, "stitched")
+
+# %% [markdown]
+# ## 5. Contrast Curve and the Partition Map
+#
+# Each annulus' curve comes from its own winner, so the curve breaks at the edges (gray). The
+# run's `contrast_curve.txt` joins them.
+
+# %%
+def joined(curves):
+    """The annuli's curves as one line, broken between annuli."""
+    r_as, c = [], []
+    for cc in curves:
+        if cc and cc.get("r_as") is not None:
+            r_as += list(cc["r_as"]) + [np.nan]
+            c += list(cc["curve"]) + [np.nan]
+    return np.array(r_as, float), np.array(c, float)
+
+
+r_as, curve = joined(r_.contrast_curve for r_ in results)
+fm_r, fm_c = joined(r_.fm_curve for r_ in results)
+plt.figure(figsize=(6, 4)); plt.semilogy(r_as, curve, "-o", ms=3, label="validated winners")
+if np.isfinite(fm_c).any():
+    plt.semilogy(fm_r, fm_c, "--", label="KLIP-FM cross-check")
+for e in EDGES_AS[1:-1]:
+    plt.axvline(e, color="0.75", lw=0.8)
 plt.axvline(RHO, color="c", ls=":", label="MWC 758c")
 plt.xlabel("separation (arcsec)"); plt.ylabel("S/N=5 contrast")
 plt.legend(); plt.grid(alpha=.3); plt.title("MWC 758, ALES 2.90-4.15 µm, star-colored sources");
 
 # %%
 from IPython.display import Image
-Image(filename=os.path.join(RUN_DIR, "annulus01", "partition_map.png"), width=900)
+Image(filename=os.path.join(ad, "partition_map.png"), width=900)
 
 # %% [markdown]
 # The contrast is a flux ratio to the star in each group on each night, since every template
-# is the night's own star. `annulus01/corner.pdf`, `importance.pdf` and `landscapes.pdf` show
-# the sampled space, and `annulus01/progress.gif` is the movie of this run.
+# is the night's own star. The partition map above is the third annulus'. Each annulus' folder,
+# `annulus01` to `annulus03`, has its own `partition_map.png`, the sampled space in
+# `corner.pdf`, `importance.pdf` and `landscapes.pdf`, and `progress.gif`, the movie of its
+# search.
 #
 # ## 6. Variations
 #
@@ -256,7 +287,7 @@ Image(filename=os.path.join(RUN_DIR, "annulus01", "partition_map.png"), width=90
 #   ```
 #   klip-tpe near --instrument ales --ales-dataset lbti_ales_mwc758 --known 0.603 228.5 \
 #       --forbidden-pa 228.5 25 --ales-max-excluded 20 --bin-min 5 --klip-gram zone \
-#       --ann-edges 12 24 --n-iter 300 --n-init 40 --n-remeasure 3 --n-top 6 --n-valid 8 \
+#       --ann-edges 0 8.696 17.391 28.986 --n-iter 300 --n-init 40 --n-remeasure 3 --n-top 6 --n-valid 8 \
 #       --seed 7 --display-every 2 --run-dir runs/mwc758_ales_cli --show
 #   ```
 #   `--bin-min 5` floors the bin by projection, so the command line's random draws pile up at
