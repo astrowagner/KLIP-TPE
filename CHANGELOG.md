@@ -29,6 +29,10 @@
   flag per partition), the data set entry and the command line, and a tiny search (slow).
   `tests/test_dataset_cache.py` uses a three-file set by name, since the ALES set now sorts
   first, and checks `roles`.
+- **The quick suite passes on macOS.**  The Wayland tests of `tests/test_winsize.py` set a
+  Linux platform for the session they simulate, and the pyklip/numpy test simulates a numpy
+  with `reshape(copy=)` as well as one without, so neither depends on the machine (a Mac with
+  numpy 1.26 failed five tests).
 
 ## Unreleased — 2026-10-15b (one Gram matrix per zone for the per-target KLIP behind `--klip-gram zone`, KLIP-FM on the basis' own decomposition)
 

@@ -83,8 +83,11 @@ def test_pyklip_numpy_mismatch_is_caught_at_construction(monkeypatch):
     # and a pyklip that does not use the keyword passes on the old numpy
     monkeypatch.setattr(inspect, "getsource", lambda obj: "x = np.reshape(x, s)")
     backend._check_pyklip_numpy()
-    # on a numpy that has the keyword nothing is checked at all
-    monkeypatch.setattr(np, "reshape", real_reshape)
+    # on a numpy that has the keyword nothing is checked at all (simulated too, since the
+    # numpy the tests run on may be older than 2.1)
+    def new_reshape(a, newshape, order="C", copy=None):
+        return real_reshape(a, newshape, order=order)
+    monkeypatch.setattr(np, "reshape", new_reshape)
     monkeypatch.setattr(inspect, "getsource", lambda obj: (_ for _ in ()).throw(OSError("no source")))
     backend._check_pyklip_numpy()
 
