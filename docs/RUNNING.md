@@ -153,26 +153,31 @@ stopped run from that point on and writes the switch, with its time, into `klip_
 in the run directory, so every later resume keeps it.  `--klip-gram target` switches it back.
 The log says when a run uses `zone`.
 
-## Edited frames (`--cube-name`, `--subtract-sources`)
+## Edited frames (`--cube-name`, `--subtract-sources`, `--inject-sources`)
 
-Two options change the frames a run reduces, and the run keeps them.
+These options change the frames a run reduces, and the run keeps them.
 
 * `--cube-name NAME` reads another cube in each night's directory, such as a reduction's
   line-subtracted `AB_cube_skysub_cen_clean_abline.fits`.
 * `--subtract-sources FILE` takes point sources out of every frame once, at load.  The file
-  has one source per line: rho (arcsec), PA (deg) and contrast, with `#` comments.  The
-  contrasts are the sources' own, as they are in the data.  Each source goes in with the
-  negative of its contrast, through the code that injects a draw's sources, so its placement,
-  true north, center, flux unit and throughput are a draw's.  A file whose contrasts are all
-  negative is refused, since a chain written to be injected (`c = -a step / L`) would double
-  the line: flip its signs.
+  has one source per line: rho (arcsec), PA (deg) and contrast, with `#` comments.  Columns
+  after the third are ignored.  The contrasts are the sources' own, as they are in the data,
+  so a planet's or a line's are positive and the list goes in as it is.  Each source goes in
+  with the negative of its contrast, through the code that injects a draw's sources, so its
+  placement, true north, center, flux unit and throughput are a draw's.  A file whose
+  contrasts are all negative is refused, since a list of the negatives to inject, written to
+  take a line out by injection (`c = -a step / L`), would double the line.
 * `--subtract-line FILE` does the same for a line through the star given by its nodes (below).
+* `--inject-sources FILE` adds point sources to every frame once, at load, after any
+  subtraction: planets put on a line, say, to see what its subtraction does to them.  The file
+  is as for `--subtract-sources`, with the contrasts the sources will have in the data.
 
 Every reduction then sees the edited frames: the clean pass, each draw, the reference ranking,
 validation and param-verify.  The KLIP-FM model cube does not, since it is built from zeros.
 A source of contrast 0 is skipped, so a list of zeros changes nothing, to the bit.  On NEAR
 night 6, a 42-source chain subtracted at load gives the frames that an outside subtraction of
-the same list with the same injection code gives, to the bit.
+the same list with the same injection code gives, to the bit.  Sources added at load give the
+frames of an outside injection, to the bit, in the tests.
 
 The log gives the fraction of the sources' flux that left the frames, measured on 32 frames
 per night against the sources injected into zeros.  float32 rounding keeps the part of a source
@@ -185,8 +190,10 @@ the checkpoint).  `klip-tpe resume` and `extend` read them from the checkpoint w
 options are not typed, and refuse a typed value that differs, since a resume cannot change the
 frames its evaluations were made on.  A script that resumes a run with a reducer whose frames
 differ gets the same refusal from the `Runner`.  From Python the options are
-`near.make_reducer(..., cube_name=..., subtract_sources=...)`, or `reducer.subtract_sources(...)`
-on any KLIP reducer before its worker processes start.
+`near.make_reducer(..., cube_name=..., subtract_sources=..., inject_sources=...)`, or
+`reducer.subtract_sources(...)` and `reducer.inject_sources(...)` on any KLIP reducer before
+its worker processes start.  `klip-tpe rereduce` (below) reduces a finished run's winners on
+other frames without a new search.
 
 `RunConfig.subtract_known` is a different tool.  It adds the negatives to the injections of
 every reduction, for a companion whose contrast was fitted, and the reference ranking does not
@@ -253,6 +260,32 @@ values are not needed) and writes the fitted values as `line_fitted.txt`, ready 
 `--subtract-line`.  `--per-night` then fits one amplitude per night to the fitted chain, its
 shape held fixed (`per_night.json`), which says whether the line follows something that
 changes from night to night.
+
+## A finished run's winners on other frames (`klip-tpe rereduce`)
+
+`klip-tpe rereduce --run-dir RUN` reduces each annulus' winning configuration again and
+writes the final products beside the run, in `<run>_rereduce/` (or `--out`).  The frames are
+what the command line types (`--cube-name`, `--subtract-sources`, `--subtract-line`,
+`--inject-sources`), and for each option it leaves out, what the run was made on.  A typed
+subtraction replaces the run's as a whole.  So a line subtracted, or planets added, cost one
+reduction per annulus and kind instead of a new search.
+
+* Each winner is reduced clean, and with the injections of the final verify's calibration
+  block: by default the winner's own validation injections, as in the run.  `--verify-sources
+  FILE` (rho, PA and contrast per line) puts those in instead, all of them into every
+  annulus' injected reduction, each listed under the annulus that holds it.
+* The tiles are stitched with the run's weights (`final_results.json`) and its seam patching.
+  On the run's own frames the products are the run's, to the bit.
+* It writes `klip_stitched.fits`, `klip_stitched_snr.fits`, the injected and per-night
+  stitches, `klip_stitched_params.txt`, `stitched_verify_report.txt` (not with `--no-verify`)
+  and `rereduce.json`, the record of the frames, the weights and the injections.
+* The run directory is only read.  An output that already holds a re-reduction is refused
+  unless `--overwrite` is given.
+* `--known RHO PA` puts a position into the verify as a candidate, a planet added with
+  `--inject-sources` say, and keeps it out of the noise apertures.
+
+From Python, `Runner.resume(run_dir, reducer, objective, sampler, same_frames=False)` with the
+edited reducer, then `runner.rereduce(out_dir, verify_sources=...)`.
 
 ## Interruptions
 

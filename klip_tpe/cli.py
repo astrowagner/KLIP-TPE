@@ -5,6 +5,7 @@
     klip-tpe extend --run-dir runs/run_001 --root ... --n-iter 800 800 0   (per-annulus new totals)
     klip-tpe replay --root ... --idl-log optimize_tpe_results.txt --n 30
     klip-tpe fit-chain --run-dir runs/run_001 --root ... --chain chain.txt   (a line's node values)
+    klip-tpe rereduce --run-dir runs/run_001 --root ... --subtract-line nodes.txt   (winners on other frames)
     klip-tpe testbed --nseed 8 --noise 0.25                    (synthetic density-model comparison)
     klip-tpe plots  --run-dir runs/run_001
 """
@@ -78,22 +79,36 @@ def _first_partition(red):
     return next(iter(subs.values())) if isinstance(subs, dict) and subs else red
 
 
-def _sources_file(path: str):
-    """``--subtract-sources FILE``, refusing a list whose contrasts are all negative: the option
-    takes the sources' own contrasts, as they are in the data, and a chain written to be
-    injected (``c = -a step / L``) is the negative of that, which would double the line."""
+def _sources_file(path: str, option: str = "--subtract-sources"):
+    """A source list for ``--subtract-sources``, ``--inject-sources`` or ``--verify-sources``.
+    All three take the sources' own contrasts, as they are (or will be) in the data, so a
+    list whose contrasts are all negative is refused: for ``--subtract-sources`` it is most
+    likely the negatives written to take a line out by injection (``c = -a step / L``), which
+    would double the line.  ``--verify-sources`` takes positive contrasts only."""
     from .injection import read_sources
     try:
         lst = read_sources(path)
     except (OSError, ValueError) as exc:
-        raise SystemExit(f"--subtract-sources: {exc}")
+        raise SystemExit(f"{option}: {exc}")
     if not lst:
-        raise SystemExit(f"--subtract-sources: no sources in {path}")
+        raise SystemExit(f"{option}: no sources in {path}")
+    base = os.path.basename(path)
+    if option == "--verify-sources":
+        if any(not s.contrast > 0 for s in lst):
+            raise SystemExit(f"--verify-sources: every source in {path} needs a positive contrast, the contrast it "
+                             f"is injected at")
+        return lst
     if all(s.contrast <= 0 for s in lst) and any(s.contrast < 0 for s in lst):
+        if option == "--inject-sources":
+            raise SystemExit(f"--inject-sources: every contrast in {path} is negative.  The option adds the sources "
+                             f"with their own contrasts, as they will be in the data, so these would take light out "
+                             f"of the frames.  To take sources out, give their own contrasts to --subtract-sources.")
         raise SystemExit(f"--subtract-sources: every contrast in {path} is negative.  The option takes the sources' "
-                         f"own contrasts, as they are in the data, and subtracts them.  A chain written to be "
-                         f"injected (c = -a step / L) is the negative of that and would double the line: flip its "
-                         f"signs, e.g. awk '{{print $1, $2, -$3}}' {os.path.basename(path)}")
+                         f"own contrasts, as they are in the data (positive for a planet or a line), and subtracts "
+                         f"them.  A list of the negatives to inject, written to take a line out by injection "
+                         f"(c = -a step / L), has the opposite sign, and subtracting it would double the line.  If "
+                         f"that is what {base} holds, flip its signs, e.g. awk '{{print $1, $2, -$3}}' {base}.  To "
+                         f"add sources to the frames, give their own contrasts to --inject-sources.")
     return lst
 
 
@@ -123,22 +138,47 @@ def _subtract_request(red, a):
     return src, meta
 
 
+def _inject_request(a):
+    """The sources to add (``--inject-sources``), or the checkpoint's list on a command that
+    does not type the option (:func:`_data_edits_for_run`), and the notes for the record."""
+    restored = getattr(a, "_restored_injected", None)
+    if restored is not None:
+        return list(restored), dict(getattr(a, "_restored_inject_meta", None) or {})
+    path = getattr(a, "inject_sources", None)
+    if not path:
+        return [], {}
+    return _sources_file(path, "--inject-sources"), {
+        "inject_file": os.path.abspath(path) if os.path.exists(path) else str(path)}
+
+
 def _subtract(red, a, log=print) -> None:
-    """``--subtract-sources`` / ``--subtract-line`` on a freshly built reducer, before its
-    worker processes start."""
-    src, meta = _subtract_request(red, a)
-    if not src:
-        return
+    """``--subtract-sources`` / ``--subtract-line``, then ``--inject-sources``, on a freshly
+    built reducer, before its worker processes start."""
     from .reducer import _taken_text
-    n = red.subtract_sources(src)
-    red.data_edits = dict(getattr(red, "data_edits", None) or {}, **meta)
-    c = [s.contrast for s in src]
-    log(f"  subtracted {n} source(s) from every partition's frames, once, at load: rho "
-        f"{min(s.rho for s in src):.3f}-{max(s.rho for s in src):.3f}\", contrast {min(c):.3g} to {max(c):.3g}"
-        + (" (the run's own list, from its checkpoint)" if getattr(a, "_restored_sources", None) is not None else ""))
-    took = _taken_text(red)
-    if took:
-        log(f"    the fraction of their flux that left the frames, on a sample of frames: {took}")
+    src, meta = _subtract_request(red, a)
+    if src:
+        n = red.subtract_sources(src)
+        red.data_edits = dict(getattr(red, "data_edits", None) or {}, **meta)
+        c = [s.contrast for s in src]
+        log(f"  subtracted {n} source(s) from every partition's frames, once, at load: rho "
+            f"{min(s.rho for s in src):.3f}-{max(s.rho for s in src):.3f}\", contrast {min(c):.3g} to {max(c):.3g}"
+            + (" (the run's own list, from its checkpoint)" if getattr(a, "_restored_sources", None) is not None
+               else ""))
+        took = _taken_text(red)
+        if took:
+            log(f"    the fraction of their flux that left the frames, on a sample of frames: {took}")
+    add, meta = _inject_request(a)
+    if add:
+        n = red.inject_sources(add)
+        red.data_edits = dict(getattr(red, "data_edits", None) or {}, **meta)
+        c = [s.contrast for s in add]
+        log(f"  added {n} source(s) to every partition's frames, once, at load: rho "
+            f"{min(s.rho for s in add):.3f}-{max(s.rho for s in add):.3f}\", contrast {min(c):.3g} to {max(c):.3g}"
+            + (" (the run's own list, from its checkpoint)" if getattr(a, "_restored_injected", None) is not None
+               else ""))
+        took = _taken_text(red, "injected_kept")
+        if took:
+            log(f"    the fraction of their flux that reached the frames, on a sample of frames: {took}")
 
 
 def _no_cube_name(a, what: str) -> None:
@@ -167,11 +207,13 @@ def _line_mask(red, a, log=print):
 
 
 def _data_edits_for_run(a) -> None:
-    """``--cube-name`` and ``--subtract-sources`` on a run directory that holds a checkpoint.
+    """``--cube-name``, ``--subtract-sources`` and ``--inject-sources`` on a run directory that
+    holds a checkpoint.
 
     A run's evaluations were made on particular frames, so a later command on it reduces the
     same ones.  What the checkpoint recorded (``RunConfig.data_edits``) is used when an option
-    is not typed.  A typed value that differs from the record is refused rather than mixed in."""
+    is not typed.  A typed value that differs from the record is refused rather than mixed in.
+    ``klip-tpe rereduce``, which only reads the run, uses :func:`_data_edits_for_rereduce`."""
     run_dir = getattr(a, "run_dir", None)
     if not run_dir or not os.path.isdir(str(run_dir)):
         return
@@ -209,6 +251,60 @@ def _data_edits_for_run(a) -> None:
         print(f"  --subtract-sources: the {len(was)} source(s) {name} was started with (its checkpoint)")
     # a typed --subtract-line is built from the reducer's model, and the Runner compares the
     # result with the record before anything is reduced
+    was_add = [[float(v) for v in s] for s in (rec.get("injected_sources") or [])]
+    if "inject_sources" in given:
+        now = [list(s.as_tuple()) for s in _sources_file(a.inject_sources, "--inject-sources")]
+        if now != was_add:
+            raise SystemExit(f"{name} was made with {len(was_add)} source(s) added, and --inject-sources "
+                             f"{a.inject_sources} lists {'others' if now and was_add else len(now)}.  A resume "
+                             f"cannot change the frames its evaluations were made on: leave the option out (the "
+                             f"checkpoint's list is used), or start a new run directory.")
+    elif was_add:
+        from .metrics import Source
+        a._restored_injected = [Source(*s) for s in was_add]
+        a._restored_inject_meta = {k: rec[k] for k in ("inject_file",) if rec.get(k)}
+        print(f"  --inject-sources: the {len(was_add)} source(s) {name} was started with (its checkpoint)")
+
+
+def _data_edits_for_rereduce(a) -> None:
+    """The frames ``klip-tpe rereduce`` reduces a finished run's winners on: what this command
+    line types, and for each option it leaves out, what the run was made on (its checkpoint).
+
+    A typed ``--subtract-sources`` or ``--subtract-line`` replaces the run's subtraction as a
+    whole, and a typed ``--inject-sources`` its added sources.  Nothing is refused, since the
+    run is only read."""
+    run_dir = getattr(a, "run_dir", None)
+    rec = {}
+    if run_dir and os.path.isdir(str(run_dir)):
+        from .runner import checkpoint_candidates, load_checkpoint
+        if checkpoint_candidates(run_dir):
+            st, _ = load_checkpoint(run_dir, log=lambda s: None)
+            rec = dict(((st or {}).get("config") or {}).get("data_edits") or {})
+    from .metrics import Source
+    given = _explicit_dests(getattr(a, "_argv", None))
+    name = os.path.basename(os.path.abspath(str(run_dir or ".")))
+    if "cube_name" not in given:
+        a.cube_name = rec.get("cube_name") or None
+        if a.cube_name:
+            print(f"  --cube-name {a.cube_name}, as {name} was made (its checkpoint)")
+    if not ({"subtract_sources", "subtract_line"} & given):
+        a.subtract_sources = a.subtract_line = None
+        was = [[float(v) for v in s] for s in (rec.get("subtracted_sources") or [])]
+        if was:
+            a._restored_sources = [Source(*s) for s in was]
+            a._restored_meta = {k: rec[k] for k in ("subtract_file", "subtract_line") if rec.get(k)}
+            print(f"  --subtract-sources: the {len(was)} source(s) {name} was made with (its checkpoint)")
+    else:
+        for k in ("subtract_sources", "subtract_line"):
+            if k not in given:
+                setattr(a, k, None)
+    if "inject_sources" not in given:
+        a.inject_sources = None
+        was_add = [[float(v) for v in s] for s in (rec.get("injected_sources") or [])]
+        if was_add:
+            a._restored_injected = [Source(*s) for s in was_add]
+            a._restored_inject_meta = {k: rec[k] for k in ("inject_file",) if rec.get(k)}
+            print(f"  --inject-sources: the {len(was_add)} source(s) {name} was made with (its checkpoint)")
 
 
 _KLIP_GRAM_FILE = "klip_gram.json"
@@ -588,6 +684,12 @@ def _add_near_args(p):
                         "on each half-line. The chain is a source every step px from the first node to rho_max "
                         "(default the crop edge), each at a(s) step / L, with L the injection PSF's line integral; "
                         "as --subtract-sources otherwise (klip-tpe fit-chain --line-nodes writes such a file)")
+    p.add_argument("--inject-sources", default=None, metavar="FILE",
+                   help="point sources added to every frame once, at load, after any subtraction: one per line, "
+                        "rho (arcsec), PA (deg) and contrast, by the code a draw's injection uses, e.g. planets "
+                        "put on a line to see what its subtraction does to them. Every reduction sees them, the "
+                        "KLIP-FM model cube does not. Recorded in the run's checkpoint, and kept on resume and "
+                        "extend when not typed")
     p.add_argument("--metric", default="mawet", choices=["mawet", "fmmf"],
                    help="detection metric: 'mawet' (default) filters with the injection PSF; "
                         "'fmmf' forward-models that PSF through each configuration's own subtraction "
@@ -946,7 +1048,8 @@ def _fill_from_registry(a, argv=None) -> None:
               "ales_max_excluded", "ales_prefer_um", "ales_representative", "ales_angle_offset",
               "ales_tag_r_in", "ales_cache", "ales_selection", "ales_reflib", "ales_ref_bin",
               "ales_reflib_science", "ales_sdi", "ales_sdi_cap", "ales_sdi_lenders", "bin_min", "bin_max",
-              "ales_dataset", "ales_nights", "cube_name", "subtract_sources", "subtract_line", "mask_line"):
+              "ales_dataset", "ales_nights", "cube_name", "subtract_sources", "subtract_line", "inject_sources",
+              "mask_line"):
         if k in given:                     # the user said so on this command line
             continue
         v = getattr(prev, k, None)
@@ -1062,6 +1165,33 @@ def cmd_fit_chain(a):
                           rho_range=rho_range)
     except ValueError as exc:
         raise SystemExit(f"fit-chain: {exc}")
+
+
+def cmd_rereduce(a):
+    """``klip-tpe rereduce``: a finished run's winners reduced again, on other frames (a line
+    subtracted, planets added), with the final stitch at the run's weights, its S/N map and
+    the final verify, beside the run (:meth:`klip_tpe.runner.Runner.rereduce`)."""
+    from .runner import Runner
+    try:
+        _fill_from_registry(a, getattr(a, "_argv", None))
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"  (could not read the run record: {exc!r}; carrying on with what was given)")
+    _resolve_run_dir(a)
+    _klip_gram_for_run(a, record=False)    # the run directory is only read
+    _data_edits_for_rereduce(a)
+    vs = _sources_file(a.verify_sources, "--verify-sources") if a.verify_sources else None
+    out = os.path.abspath(a.out or (os.path.abspath(a.run_dir).rstrip(os.sep) + "_rereduce"))
+    if os.path.exists(os.path.join(out, "rereduce.json")) and not a.overwrite:
+        raise SystemExit(f"{out} already holds a re-reduction (rereduce.json): give --out another directory, or "
+                         f"--overwrite")
+    red, objective, sampler, guard, thr = _near_objects(a)
+    r = Runner.resume(a.run_dir, red, objective, sampler, project=guard, throughput_fn=thr, same_frames=False)
+    try:
+        r.rereduce(out, verify_sources=vs, verify=not a.no_verify)
+    except ValueError as exc:
+        raise SystemExit(f"rereduce: {exc}")
 
 
 def cmd_replay(a):
@@ -1289,6 +1419,21 @@ def _build_parser():
     p.add_argument("--out", default=None, metavar="DIR",
                    help="output directory (default <run>_chainfit beside the run, which is left as it is)")
     p.set_defaults(func=cmd_fit_chain)
+
+    p = sub.add_parser("rereduce", help="a finished run's winners reduced again on other frames (a line "
+                                        "subtracted, planets added), stitched with the run's weights, with the "
+                                        "S/N map and the final verify, beside the run")
+    _add_near_args(p)
+    p.add_argument("--run-dir", default="last", help="the finished run (default: the newest on record)")
+    p.add_argument("--verify-sources", default=None, metavar="FILE",
+                   help="the final verify's injections: one per line, rho (arcsec), PA (deg) and contrast, all of "
+                        "them in every annulus' injected reduction (default: the winners' own validation "
+                        "injections, as in the run)")
+    p.add_argument("--no-verify", action="store_true", help="the stitch and its S/N map only")
+    p.add_argument("--out", default=None, metavar="DIR",
+                   help="output directory (default <run>_rereduce beside the run, which is left as it is)")
+    p.add_argument("--overwrite", action="store_true", help="write over an earlier re-reduction in --out")
+    p.set_defaults(func=cmd_rereduce)
 
     p = sub.add_parser("replay", help="re-score configurations from an IDL optimize_tpe_results.txt")
     _add_near_args(p)

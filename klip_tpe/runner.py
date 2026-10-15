@@ -674,14 +674,16 @@ class RunCallback:
 
 def _core_edits(d: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """The part of a ``data_edits`` record that says what the frames are, for comparison:
-    the cube name and the subtracted sources (a file name is only where they came from)."""
+    the cube name and the sources subtracted and added (a file name is only where they came
+    from)."""
     d = dict(d or {})
     out: Dict[str, Any] = {}
     if d.get("cube_name"):
         out["cube_name"] = str(d["cube_name"])
-    src = [[float(v) for v in s] for s in (d.get("subtracted_sources") or [])]
-    if src:
-        out["subtracted_sources"] = src
+    for key in ("subtracted_sources", "injected_sources"):
+        src = [[float(v) for v in s] for s in (d.get(key) or [])]
+        if src:
+            out[key] = src
     return out
 
 
@@ -691,10 +693,11 @@ def _describe_edits(d: Dict[str, Any]) -> str:
     bits = []
     if d.get("cube_name"):
         bits.append(f"cube {d['cube_name']}")
-    src = d.get("subtracted_sources") or []
-    if src:
-        c = [s[2] for s in src]
-        bits.append(f"{len(src)} subtracted source(s), contrast {min(c):.3g} to {max(c):.3g}")
+    for key, what in (("subtracted_sources", "subtracted"), ("injected_sources", "added")):
+        src = d.get(key) or []
+        if src:
+            c = [s[2] for s in src]
+            bits.append(f"{len(src)} {what} source(s), contrast {min(c):.3g} to {max(c):.3g}")
     return ", ".join(bits)
 
 
@@ -3838,7 +3841,11 @@ class Runner:
         self.log(f"run complete: {len(results)} annuli, {self.records_count} evaluations")
         self._emit("on_finish")
 
-    def _final_stitch(self, results: Sequence[AnnulusResult]) -> Optional[Dict[str, Any]]:
+    def _final_stitch(self, results: Sequence[AnnulusResult], weights: Optional[Sequence[float]] = None,
+                      extra_header: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """The final stitch of the annuli' winner images.  ``weights`` replaces the
+        sensitivity weights (:meth:`rereduce` keeps the run's), and ``extra_header`` goes into
+        every FITS header."""
         from .products import snr_map
         from .stitch import seam_pixels, stitch_stacks, stitch_tiles, write_params_table
         items = [(r, self._annulus_images(r.annulus)) for r in results]
@@ -3848,7 +3855,7 @@ class Runner:
         cleans = [d["clean"] for _, d in items]
         zones = [tuple(d["zone"]) for _, d in items]
         edges = [z[0] for z in zones] + [zones[-1][1]]
-        w = self._stitch_weights(cleans, zones)
+        w = self._stitch_weights(cleans, zones) if weights is None else np.asarray(weights, float)
         pads = self._tile_pads(zones)
         st = stitch_tiles(cleans, zones, w, pads=pads)
         # seam patching: pixels inside the searched span left NaN -> a re-run of that annulus'
@@ -3901,6 +3908,7 @@ class Runner:
                "NTOP": self.cfg.validation.n_top, "GAMMA": self.cfg.gamma, "NCAND": self.cfg.ncand,
                "SEED": self.cfg.seed, "RUNDIR": os.path.basename(os.path.abspath(self.run_dir)),
                "OPTWIDTH": int(self.cfg.opt_width)}
+        hdr.update(extra_header or {})
         files = {"clean": os.path.join(self.run_dir, "klip_stitched.fits")}
         _write_fits(files["clean"], st_f, hdr, hist)
         snr = snr_map(st_f, self.fwhm)
@@ -3958,9 +3966,10 @@ class Runner:
         self._emit("on_stitch", "final", files)
         return out
 
-    def _final_verify(self, stitched: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _final_verify(self, stitched: Dict[str, Any], header: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         """``near2_verify`` on the stitched per-partition cubes (known sources as
-        candidates, all validated injections as the calibration block)."""
+        candidates, all validated injections as the calibration block).  ``header`` adds
+        lines to the report's header."""
         from .verify import verify_candidates, write_verify_table
         stack = stitched.get("nights")
         if stack is None:
@@ -3979,10 +3988,131 @@ class Runner:
                                        n_boot=int(self.cfg.verify_n_boot), rng=rng,
                                        angle_convention=self.reducer.angle_convention, return_maps=True)
         path = os.path.join(self.run_dir, "stitched_verify_report.txt")
-        write_verify_table(path, rows, maps.get("limits"), header={"run": os.path.abspath(self.run_dir)})
+        write_verify_table(path, rows, maps.get("limits"), header=dict({"run": os.path.abspath(self.run_dir)},
+                                                                       **(header or {})))
         out = {"rows": rows, "limits": maps.get("limits"), "report": path}
         self._emit("on_verify", -1, "verify", out)
         return out
+
+    def rereduce(self, out_dir: str, *, verify_sources: Optional[Sequence[Any]] = None, verify: bool = True,
+                 log: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
+        """A finished run's winners reduced again, on this runner's reducer, with the final
+        stitch, its S/N map and the final verify written to ``out_dir``.  The run directory is
+        only read.
+
+        The point is other frames: a line subtracted, planets added (the reducer's
+        ``data_edits``), without a new search.  Build the runner with :meth:`resume` and
+        ``same_frames=False``.  Each annulus' winning configuration is reduced clean, and with
+        the injections of the verify's calibration block: the winner's own validation sources
+        (each in its annulus, as in the run), or ``verify_sources`` (``(rho_arcsec, pa_deg,
+        contrast)``, all of them in every annulus' injected reduction, each listed under the
+        annulus that holds it).  The tiles are stitched with the run's weights
+        (``final_results.json``, else worked out from its winner images as the run did) and
+        the run's seam patching, so on the run's own frames the products are the run's.
+
+        Writes ``klip_stitched.fits``, ``klip_stitched_snr.fits``, the injected and
+        per-partition stitches, ``klip_stitched_params.txt``, ``stitched_verify_report.txt``
+        (unless ``verify`` is False) and ``rereduce.json``.  Returns that record."""
+        log = log or self.log
+        t0 = time.time()
+        results = [r for r in (self.results or []) if r is not None]
+        src_run = os.path.abspath(self.run_dir)
+        if not results or len(results) < self.cfg.nann:
+            raise ValueError(f"{os.path.basename(src_run)} has not finished: {len(results)} of {self.cfg.nann} "
+                             f"annuli have a winner")
+        out_dir = os.path.abspath(out_dir)
+        if out_dir == src_run or out_dir.startswith(src_run + os.sep):
+            raise ValueError(f"{out_dir} is inside the run: rereduce writes beside it")
+        # the run's own winner images, for the zones and the stitch weights
+        items = [(r, self._annulus_images(r.annulus)) for r in results]
+        if any(d is None or d.get("clean") is None for _, d in items):
+            raise ValueError("an annulus' winner images are missing (the run kept no FITS products?)")
+        zones = [tuple(float(v) for v in d["zone"]) for _, d in items]
+        weights, w_from = None, ""
+        try:
+            with open(os.path.join(src_run, "final_results.json")) as f:
+                wl = json.load(f).get("stitch_weights")
+            if wl is not None and len(wl) == len(items):
+                weights, w_from = [float(v) for v in wl], "final_results.json"
+        except (OSError, ValueError):
+            pass
+        if weights is None:
+            weights = [float(v) for v in self._stitch_weights([d["clean"] for _, d in items], zones)]
+            w_from = "the run's winner images"
+        # the injections: per annulus, what goes in and what the verify lists under it
+        if verify_sources is None:
+            listed = {r.annulus: [Source(*(float(v) for v in s)) for s in r.winner_sources] for r, _ in items}
+            put_in = dict(listed)
+            v_from = "the winners' validation injections"
+        else:
+            vs = [s if isinstance(s, Source) else Source(*(float(v) for v in s)) for s in verify_sources]
+            listed = {r.annulus: [] for r, _ in items}
+            for s in vs:
+                rp = float(s.rho) / self.pxscale
+                hold = [r.annulus for (r, _), z in zip(items, zones) if z[0] <= rp < z[1]]
+                if not hold and abs(rp - zones[-1][1]) < 1e-6:
+                    hold = [items[-1][0].annulus]
+                if not hold:
+                    raise ValueError(f"verify source at rho={s.rho:g}\" ({rp:.1f} px) lies outside the run's annuli "
+                                     f"({zones[0][0]:.1f}-{zones[-1][1]:.1f} px)")
+                listed[hold[0]].append(s)
+            put_in = {r.annulus: list(vs) for r, _ in items}
+            v_from = f"{len(vs)} given source(s)"
+        edits = dict(getattr(self.reducer, "data_edits", None) or {})
+        frames, run_frames = _describe_edits(_core_edits(edits)), _describe_edits(_core_edits(self.cfg.data_edits))
+        log(f"rereduce {os.path.basename(src_run)}: {len(items)} annulus winner(s) on {frames} (the run was made on "
+            f"{run_frames}), stitch weights from {w_from}, verify injections: {v_from}")
+        self._start_workers()
+        new: Dict[int, Dict[str, Any]] = {}
+        per_ann = []
+        ia_keep = self.ia
+        try:
+            for (r, d), z in zip(items, zones):
+                t1 = time.time()
+                self.ia = r.annulus
+                cfg = self._config_from_dict(r.winner_config)
+                ev_c = self._reduce(cfg, None, tag=f"rereduce_a{r.annulus + 1}_clean")
+                src = put_in[r.annulus]
+                ev_i = self._reduce(cfg, src, tag=f"rereduce_a{r.annulus + 1}_inj") if src else None
+                if ev_c.image is None or (ev_i is not None and ev_i.image is None):
+                    raise ValueError(f"annulus {r.annulus + 1}: the winner's reduction returned no image")
+                new[r.annulus] = {
+                    "clean": ev_c.image, "inj": None if ev_i is None else ev_i.image, "zone": z,
+                    "clean_stack": ev_c.stack, "inj_stack": None if ev_i is None else ev_i.stack,
+                    "parts": [str(p) for p in (ev_c.partitions or r.partitions or cfg.selected)],
+                    "sources": [s.as_tuple() for s in listed[r.annulus]], "contrast": d.get("contrast"),
+                    "weights": ev_c.weights}
+                per_ann.append({"annulus": r.annulus + 1, "zone_px": list(z), "winner_eval": int(r.winner_index) + 1,
+                                "injected": len(src), "listed": len(listed[r.annulus]),
+                                "seconds": round(time.time() - t1, 1)})
+                log(f"  annulus {r.annulus + 1}: the winner (eval {r.winner_index + 1}) reduced clean"
+                    + (f" and with {len(src)} injection(s)" if src else "") + f" ({time.time() - t1:.1f} s)")
+        finally:
+            self.ia = ia_keep
+        os.makedirs(out_dir, exist_ok=True)
+        mod = [replace(r, winner_sources=[s.as_tuple() for s in listed[r.annulus]]) for r in results]
+        keep = (self.run_dir, self._ann_images, self.results)
+        nsub, nadd = len(edits.get("subtracted_sources") or []), len(edits.get("injected_sources") or [])
+        try:
+            self.run_dir, self._ann_images, self.results = out_dir, new, list(mod)
+            stitched = self._final_stitch(mod, weights=weights, extra_header={
+                "REREDUCE": 1, "FROMRUN": os.path.basename(src_run)[:60], "NSUBSRC": nsub, "NADDSRC": nadd})
+            ver = None
+            if verify and stitched is not None:
+                ver = self._final_verify(stitched, header={
+                    "run": f"{out_dir} (the winners of {src_run} reduced again on {frames})"})
+        finally:
+            self.run_dir, self._ann_images, self.results = keep
+        rec = {"run_dir": src_run, "out_dir": out_dir, "frames": frames, "run_frames": run_frames,
+               "data_edits": edits, "run_data_edits": dict(self.cfg.data_edits or {}),
+               "stitch_weights": weights, "weights_from": w_from, "verify_injections": v_from,
+               "verify_sources": None if verify_sources is None else [s.as_tuple() for s in vs],
+               "annuli": per_ann, "files": dict((stitched or {}).get("files") or {}),
+               "verify_report": None if ver is None else ver.get("report"),
+               "seconds": round(time.time() - t0, 1)}
+        _atomic_write(os.path.join(out_dir, "rereduce.json"), json.dumps(rec, indent=1, default=_json_default))
+        log(f"  wrote {out_dir} ({rec['seconds']:.0f} s)")
+        return rec
 
     # ---------------------------------------------------------------- checkpoint
     #: Seconds between ROUTINE checkpoints (the save after each evaluation).  Rewriting the
@@ -4171,13 +4301,15 @@ class Runner:
         except Exception:
             pass
 
-    def _apply_checkpoint(self, st: Dict[str, Any], project=None) -> None:
+    def _apply_checkpoint(self, st: Dict[str, Any], project=None, same_frames: bool = True) -> None:
         """Adopt a checkpoint's state -- and its configuration -- onto this runner.
 
         The search configuration and space come from the checkpoint rather than from
         whatever the caller built, by design: the recorded history was produced under those
         settings and would not be comparable with evaluations made under any others.  A
-        caller that wants different settings wants a new run directory.
+        caller that wants different settings wants a new run directory.  ``same_frames=False``
+        skips the check that the reducer reduces the run's frames, for a runner that only
+        reads the run (:meth:`rereduce`).
         """
         self.cfg = RunConfig.from_dict(st["config"])
         self._apply_sampler_config()
@@ -4218,7 +4350,8 @@ class Runner:
         self.log(f"resumed {self.run_dir}: annulus {self.ia + 1}, "
                  f"{0 if self.history is None else len(self.history)} evaluations, "
                  f"contrast {self.contrast:.3e}")
-        self._check_data_edits()
+        if same_frames:
+            self._check_data_edits()
 
     def _check_data_edits(self) -> None:
         """The frames this runner reduces, against the run's record of them
@@ -4231,8 +4364,8 @@ class Runner:
             if want and want != have:
                 raise ValueError(f"RunConfig.data_edits asks for {_describe_edits(want)}, and the reducer holds "
                                  f"{_describe_edits(have)}: build the reducer with them "
-                                 f"(near.make_reducer(cube_name=..., subtract_sources=...) or "
-                                 f"reducer.subtract_sources(...))")
+                                 f"(near.make_reducer(cube_name=..., subtract_sources=..., inject_sources=...), or "
+                                 f"reducer.subtract_sources(...) and reducer.inject_sources(...))")
             if have:
                 self.cfg.data_edits = dict(getattr(self.reducer, "data_edits", None) or {})
                 self.log(f"  data: {_describe_edits(have)} (recorded in the run's configuration)")
@@ -4240,9 +4373,10 @@ class Runner:
         if want != have:
             raise ValueError(f"this run's evaluations were made on {_describe_edits(want)}, and the reducer here "
                              f"holds {_describe_edits(have)}.  A resume cannot change the frames.  Build the "
-                             f"reducer as the run was started (klip-tpe resume and extend read --cube-name and "
-                             f"--subtract-sources from the checkpoint when they are not typed), or start a new "
-                             f"run directory.")
+                             f"reducer as the run was started (klip-tpe resume and extend read --cube-name, "
+                             f"--subtract-sources and --inject-sources from the checkpoint when they are not "
+                             f"typed), or start a new run directory.  klip-tpe rereduce reduces a finished run's "
+                             f"winners on other frames.")
 
     def _auto_resume(self) -> None:
         """Continue a check-pointed run in this directory, unless told not to.
@@ -4264,13 +4398,17 @@ class Runner:
 
     @classmethod
     def resume(cls, run_dir: str, reducer: Reducer, objective: Objective, sampler: PositionSampler,
-               project=None, throughput_fn=None, log=print, callbacks: Sequence[RunCallback] = ()) -> "Runner":
+               project=None, throughput_fn=None, log=print, callbacks: Sequence[RunCallback] = (),
+               same_frames: bool = True) -> "Runner":
         """Rebuild a runner from ``run_dir/checkpoint.json``.  The search configuration,
         space, contrast, RNG state and history come from the checkpoint -- no other
         keywords are accepted, by design.  Histories of already-completed annuli are
         reconstructed from ``results.jsonl`` on demand (:meth:`annulus_history`), so the
         final stitch / verification of a resumed multi-annulus run is complete.  The
-        checkpoint is the furthest-along copy (:func:`load_checkpoint`)."""
+        checkpoint is the furthest-along copy (:func:`load_checkpoint`).  The reducer has to
+        reduce the frames the run was made on (:attr:`RunConfig.data_edits`), unless
+        ``same_frames=False``: a runner that only reads a finished run, to reduce its winners
+        on other frames (:meth:`rereduce`)."""
         st, _ = load_checkpoint(run_dir, log=log)
         if st is None:
             raise FileNotFoundError(f"no readable checkpoint in {run_dir} (checkpoint.json or a synced copy of it)")
@@ -4278,7 +4416,7 @@ class Runner:
         space = SearchSpace.from_dict(st["space"], project=project)
         r = cls(reducer, space, objective, sampler, cfg, run_dir, throughput_fn=throughput_fn, log=log,
                 callbacks=callbacks, _from_checkpoint=True)
-        r._apply_checkpoint(st, project=project)
+        r._apply_checkpoint(st, project=project, same_frames=same_frames)
         return r
 
     @classmethod

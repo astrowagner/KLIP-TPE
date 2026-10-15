@@ -147,8 +147,69 @@ def test_a_run_without_edits_resumes_as_before_and_refuses_edited_frames(tmp_pat
 
 def _ns(run_dir, argv):
     a = argparse.Namespace(run_dir=str(run_dir), cube_name=None, subtract_sources=None, subtract_line=None,
-                           _argv=argv)
+                           inject_sources=None, _argv=argv)
     return a
+
+
+ADD = [(0.9, 100.0, 2e-3), (0.9, 280.0, 2e-3)]
+
+
+def test_added_sources_are_recorded_restored_and_checked_like_subtracted_ones(tmp_path, capsys):
+    red = _red(EDIT)
+    red.inject_sources(ADD)
+    assert red.data_edits["injected_sources"] == [list(map(float, e)) for e in ADD]
+    r, space, obj, samp = _run(red, tmp_path / "run")
+    r.run()
+    from klip_tpe.runner import load_checkpoint
+    st, _ = load_checkpoint(str(tmp_path / "run"))
+    assert st["config"]["data_edits"]["injected_sources"] == [list(map(float, e)) for e in ADD]
+
+    def same(edit=EDIT, add=ADD):
+        x = _red(edit)
+        if add:
+            x.inject_sources(add)
+        return x
+    Runner.resume(str(tmp_path / "run"), same(), obj, samp, log=lambda s: None)
+    for other in (same(add=None), same(add=ADD[:1])):
+        with pytest.raises(ValueError, match="cannot change the frames"):
+            Runner.resume(str(tmp_path / "run"), other, obj, samp, log=lambda s: None)
+    # the command line restores the list, and refuses another one
+    base = ["resume", "--run-dir", str(tmp_path / "run")]
+    a = _ns(tmp_path / "run", base)
+    cli._data_edits_for_run(a)
+    assert [s.as_tuple() for s in a._restored_injected] == [tuple(map(float, e)) for e in ADD]
+    assert [s.as_tuple() for s in cli._inject_request(a)[0]] == [tuple(map(float, e)) for e in ADD]
+    assert "--inject-sources: the 2 source(s) run was started with" in capsys.readouterr().out
+    g = tmp_path / "planets.txt"
+    g.write_text("0.9 100 3e-3\n")
+    a = _ns(tmp_path / "run", base + ["--inject-sources", str(g)])
+    a.inject_sources = str(g)
+    with pytest.raises(SystemExit, match="cannot change the frames"):
+        cli._data_edits_for_run(a)
+
+
+def test_rereduce_takes_the_typed_frames_and_the_record_for_the_rest(tmp_path, capsys):
+    r, *_ = _run(_red(EDIT), tmp_path / "run")
+    r.run()
+    base = ["rereduce", "--run-dir", str(tmp_path / "run")]
+    # nothing typed: the run's own frames
+    a = _ns(tmp_path / "run", base)
+    a.subtract_sources = "/registry/restored.txt"          # what the run record may have put there
+    cli._data_edits_for_rereduce(a)
+    assert a.subtract_sources is None and [s.as_tuple() for s in a._restored_sources] == [
+        tuple(map(float, e)) for e in EDIT]
+    # a typed subtraction replaces the run's, and added sources come in on top
+    f = tmp_path / "line.txt"
+    f.write_text("0.6 13 5e-4\n")
+    g = tmp_path / "planets.txt"
+    g.write_text("".join(f"{r_} {p} {c}\n" for r_, p, c in ADD))
+    a = _ns(tmp_path / "run", base + ["--subtract-sources", str(f), "--inject-sources", str(g)])
+    a.subtract_sources, a.inject_sources, a.subtract_line = str(f), str(g), "/registry/nodes.txt"
+    cli._data_edits_for_rereduce(a)                         # nothing is refused: the run is only read
+    assert getattr(a, "_restored_sources", None) is None and a.subtract_line is None
+    src, _ = cli._subtract_request(None, a)
+    assert [s.as_tuple() for s in src] == [(0.6, 13.0, 5e-4)]
+    assert [s.as_tuple() for s in cli._inject_request(a)[0]] == [tuple(map(float, e)) for e in ADD]
 
 
 def test_the_command_line_takes_the_record_and_refuses_other_frames(tmp_path, capsys):
@@ -184,15 +245,18 @@ def test_the_command_line_takes_the_record_and_refuses_other_frames(tmp_path, ca
 
 
 def test_the_options_parse_and_resume_restores_them_from_the_record():
+    import inspect
     a = cli._build_parser().parse_args(["near", "--root", "/r", "--cube-name", "c.fits", "--subtract-sources",
-                                        "s.txt", "--mask-line", "13", "6", "--forbidden-pa", "13", "8"])
-    assert (a.cube_name, a.subtract_sources, a.mask_line, a.forbidden_pa) == ("c.fits", "s.txt", [[13.0, 6.0]],
-                                                                              [[13.0, 8.0]])
-    for k in ("cube_name", "subtract_sources", "subtract_line", "mask_line"):
+                                        "s.txt", "--inject-sources", "p.txt", "--mask-line", "13", "6",
+                                        "--forbidden-pa", "13", "8"])
+    assert (a.cube_name, a.subtract_sources, a.inject_sources, a.mask_line, a.forbidden_pa) == (
+        "c.fits", "s.txt", "p.txt", [[13.0, 6.0]], [[13.0, 8.0]])
+    for k in ("cube_name", "subtract_sources", "subtract_line", "inject_sources", "mask_line"):
         assert k in cli._explicit_dests(["resume", "--cube-name", "c", "--subtract-sources", "s",
-                                         "--subtract-line", "n", "--mask-line", "13", "6"])
-    src = open(cli.__file__).read()
-    assert '"cube_name", "subtract_sources", "subtract_line", "mask_line"' in src
+                                         "--subtract-line", "n", "--inject-sources", "p", "--mask-line", "13", "6"])
+    src = inspect.getsource(cli._fill_from_registry)
+    for k in ("cube_name", "subtract_sources", "subtract_line", "inject_sources", "mask_line"):
+        assert f'"{k}"' in src
 
 
 # ---------------------------------------------------------------- injections and noise off the line
@@ -260,9 +324,16 @@ def test_near_and_resume_on_the_command_line_keep_the_subtraction(root, tmp_path
 
 
 def test_an_all_negative_list_is_refused_since_it_would_double_the_line(tmp_path):
-    f = tmp_path / "abline_chain.txt"
+    f = tmp_path / "negatives_to_inject.txt"
     f.write_text("0.95 13 -1.2e-8\n0.97 13 -1.3e-8\n")
     with pytest.raises(SystemExit, match="every contrast in .* is negative"):
         cli._sources_file(str(f))
+    with pytest.raises(SystemExit, match="--inject-sources: every contrast"):
+        cli._sources_file(str(f), "--inject-sources")
     f.write_text("0.95 13 1.2e-8\n0.97 13 -1.3e-8\n")           # mixed signs: a fitted chain can be
     assert len(cli._sources_file(str(f))) == 2
+    with pytest.raises(SystemExit, match="needs a positive contrast"):
+        cli._sources_file(str(f), "--verify-sources")
+    # a line in its own sign, with a fourth column (the side), goes in as it is
+    f.write_text("# rho pa contrast side\n0.95 13 1.2e-8 B\n0.95 193 0.4e-8 F\n")
+    assert [s.as_tuple() for s in cli._sources_file(str(f))] == [(0.95, 13.0, 1.2e-8), (0.95, 193.0, 0.4e-8)]
