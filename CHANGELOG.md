@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased — 2026-10-15c (ALES over several nights: a data set in the release layout, the MWC 758 data of tutorial 7)
+
+- **`ales.load_release`** reads an ALES data set in the release layout as one partition per
+  night and wavelength group, `<night>_<group>` (`n1_g07`).  Per night the layout has a meta
+  file (a template per group, then `ANGLES`, `FRAMES`, `GROUPS` and `WAVES`) and one
+  `(frame, y, x)` cube per group, and every night shares one group grid, so a group is one
+  band on all of them.  Nights whose grids differ are refused.  `nights=` picks nights by date
+  or label (a night loaded alone keeps its label), `only=` picks groups on every night, and
+  `labels=` renames the nights.  The plate scale and the angle convention come from the meta
+  header.  `ales.release_nights` lists a data set's nights.
+- **`datasets.fetch("lbti_ales_mwc758")`**: LBTI/ALES of MWC 758 on 2019 Nov 13 and 14, from
+  the `tutorial-data` release.  It holds 959 and 1594 frames of 2.46 s, 109 and 127 deg of
+  rotation, as 20 groups over 2.90-4.15 um, 786 MB in 42 files.  The frames come from
+  K. Wagner's IDL ALES reduction, and they are the frames with the star at the center.
+  `fetch(..., roles=[...])` downloads part of a set.
+- **`make_reducer(..., sdi=True)` refuses partitions from more than one night**: the SDI
+  pool would lend one night's frames to the other's groups.
+- **Command line:** `--ales-dataset NAME` in place of `--root`, and `--ales-nights NIGHT ...`.
+  `klip-tpe resume` restores both.
+- **Tutorial 7** (`tutorials/07_lbti_ales_mwc758.py` and its notebook, without outputs until it
+  has run on the data): the two nights as 40 partitions, MWC 758c (0.603", PA 228.5 deg in the
+  Nov 14 data, Wagner et al. 2023) as a known source, a 300-evaluation search of 12-24 spaxels
+  with the group flags bounded at 20 and bins from 5, and the winner's partitions, images and
+  contrast curve.  README and `docs/TUTORIALS.md` list it.
+- `docs/ALES.md` section 7.  `tests/test_ales_release.py`: the loader on two synthetic nights,
+  picking nights and groups, mismatched grids, SDI across nights, the space (one block and a
+  flag per partition), the data set entry and the command line, and a tiny search (slow).
+  `tests/test_dataset_cache.py` uses a three-file set by name, since the ALES set now sorts
+  first, and checks `roles`.
+
 ## Unreleased — 2026-10-15b (one Gram matrix per zone for the per-target KLIP behind `--klip-gram zone`, KLIP-FM on the basis' own decomposition)
 
 From the NEAR2 session's note of 2026-10-14 on the per-target KLIP.  At a small bin a night job

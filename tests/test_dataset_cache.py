@@ -17,6 +17,7 @@ import pytest
 from klip_tpe import datasets
 
 PAYLOAD = b"klip-tpe test cube " * 12_000          # comfortably over the 2880-byte floor
+SMALL = "naco_betapic"                              # three files (the ALES release has 42)
 
 
 @pytest.fixture
@@ -40,7 +41,7 @@ def _slow_retrieve(seen):
 def test_concurrent_fetches_do_not_corrupt_the_cache(cold_cache, monkeypatch):
     seen, out, errs = [], {}, []
     monkeypatch.setattr(urllib.request, "urlretrieve", _slow_retrieve(seen))
-    name = sorted(datasets.DATASETS)[0]
+    name = SMALL
 
     def go(k):
         try:
@@ -64,7 +65,7 @@ def test_concurrent_fetches_do_not_corrupt_the_cache(cold_cache, monkeypatch):
 
 def test_no_scratch_files_are_left_behind(cold_cache, monkeypatch):
     monkeypatch.setattr(urllib.request, "urlretrieve", _slow_retrieve([]))
-    datasets.fetch(sorted(datasets.DATASETS)[0], quiet=True)
+    datasets.fetch(SMALL, quiet=True)
     assert not [f for f in os.listdir(cold_cache) if ".part" in f], os.listdir(cold_cache)
 
 
@@ -77,15 +78,28 @@ def test_a_failed_download_leaves_no_half_file(cold_cache, monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlretrieve", boom)
     with pytest.raises(OSError):
-        datasets.fetch(sorted(datasets.DATASETS)[0], quiet=True)
+        datasets.fetch(SMALL, quiet=True)
     assert not [f for f in os.listdir(cold_cache) if ".part" in f], os.listdir(cold_cache)
 
 
 def test_a_warm_cache_does_not_download_again(cold_cache, monkeypatch):
     calls = []
     monkeypatch.setattr(urllib.request, "urlretrieve", _slow_retrieve(calls))
-    name = sorted(datasets.DATASETS)[0]
+    name = SMALL
     datasets.fetch(name, quiet=True)
     n = len(calls)
     datasets.fetch(name, quiet=True)
     assert len(calls) == n, "a warm cache re-downloaded"
+
+
+def test_roles_limit_a_fetch(cold_cache, monkeypatch):
+    """``roles`` downloads those files of a set and nothing else (a few groups of the ALES set)."""
+    calls = []
+    monkeypatch.setattr(urllib.request, "urlretrieve", _slow_retrieve(calls))
+    roles = ["meta_20191113", "g07_20191113"]
+    out = datasets.fetch("lbti_ales_mwc758", quiet=True, roles=roles)
+    assert sorted(out) == sorted(roles)
+    assert len(calls) == 2
+    assert all(os.path.basename(out[r]) == datasets.DATASETS["lbti_ales_mwc758"][r] for r in roles)
+    with pytest.raises(KeyError):
+        datasets.fetch("lbti_ales_mwc758", quiet=True, roles=["g20_20191113"])
