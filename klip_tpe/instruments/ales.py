@@ -57,8 +57,8 @@ from ..space import SearchSpace
 from . import generic
 
 __all__ = ["ALES", "BASELINE", "group_table", "group_mean", "reference_means", "frame_blocks", "load_groups",
-           "load_ales", "make_reducer", "make_space", "make_guard", "default_config", "GroupCountGuard",
-           "product_paths", "representative_group"]
+           "load_ales", "load_release", "release_nights", "make_reducer", "make_space", "make_guard",
+           "default_config", "GroupCountGuard", "product_paths", "representative_group"]
 
 
 class ALES:
@@ -411,6 +411,113 @@ def load_ales(products_dir: str, target: str = "WISPIT2", ref: Optional[str] = N
     return datasets, lam_m, fwhm_px, table
 
 
+def release_nights(files: Dict[str, str]) -> List[str]:
+    """The nights of a data set in the release layout, as the dates of its ``meta_<date>``
+    roles, in date order."""
+    return sorted(str(k)[5:] for k in files if str(k).startswith("meta_"))
+
+
+def load_release(files: Dict[str, str], nights: Optional[Sequence[str]] = None, only: Optional[Sequence[str]] = None,
+                 labels: Optional[Dict[str, str]] = None, *, pxscale: Optional[float] = None,
+                 diam_m: float = ALES.diam_m, fwhm_lod: float = ALES.fwhm_lod, angle_offset: Optional[float] = None,
+                 angle_sign: float = 1.0, tags: Any = "auto", tag_r_in: float = ALES.tag_r_in,
+                 nan_policy: str = "keep", log: Callable[[str], None] = print
+                 ) -> Tuple[Dict[str, Dataset], Dict[str, float], Dict[str, float], List[Dict[str, Any]]]:
+    """An ALES data set in the release layout as partitions, one per night and wavelength group.
+
+    The layout is the one :func:`klip_tpe.datasets.fetch` returns for ``"lbti_ales_mwc758"``:
+    for each night a ``meta_<date>`` file (its primary HDU one template per group, then the
+    ``ANGLES``, ``FRAMES``, ``GROUPS`` and ``WAVES`` extensions) and one ``gNN_<date>`` cube per
+    group, ``(frame, y, x)``, the mean of that group's channels.  Every night shares one group
+    grid (the meta header's ``GRIDLO``, ``GRIDHI``, ``NGROUP``), so ``g07`` covers the same
+    wavelengths on each night while its mean wavelength follows that night's channels.
+
+    ``nights``: the nights to keep, as dates or labels (default all of them).  They are
+    labelled ``n1``, ``n2``, ... in the date order of the whole data set, so a night loaded alone
+    keeps its label, unless ``labels`` maps a date to a label.  ``only``: the groups to keep, the
+    same on every night.  The partitions are ``<label>_<group>`` (``n1_g07``).  The plate
+    scale and the angle convention come from the meta header (``PIXSCALE``, ``ANGCONV`` =
+    ``LBT_PARA + 180``) unless ``pxscale`` or ``angle_offset`` is given.  Each template is the
+    night's own (the star is at the header's ``STARCEN``, the array centre), so a contrast is a
+    flux ratio to the star in that group on that night.
+
+    Returns ``(datasets, lam_m, fwhm_px, table)`` as :func:`load_groups` does, the table with
+    one row per partition (``name``, ``night``, ``date``, ``group``, ``channels``, ``lam_lo``,
+    ``lam_hi``, ``lam_mean``, ``n``, ``fwhm_px``, ``n_nan``)."""
+    from astropy.io import fits
+    have = release_nights(files)
+    if not have:
+        raise ValueError("no meta_<date> file in this data set (the release layout of datasets.fetch)")
+    # n1, n2, ... by position in the whole data set, so a night keeps its label when it is loaded alone
+    lab = {d: f"n{i + 1}" for i, d in enumerate(have)}
+    lab.update({str(k): str(v) for k, v in (labels or {}).items()})
+    by_label = {v: k for k, v in lab.items()}
+    keep = have if nights is None else [by_label.get(str(d), str(d)) for d in nights]
+    unknown = [d for d in keep if d not in have]
+    if unknown:
+        raise ValueError(f"nights {unknown} are not in this data set ({have}, labelled {[lab[d] for d in have]})")
+    datasets: Dict[str, Dataset] = {}
+    lam_m: Dict[str, float] = {}
+    fwhm_px: Dict[str, float] = {}
+    table: List[Dict[str, Any]] = []
+    grid = None
+    for date in keep:
+        with fits.open(files[f"meta_{date}"], memmap=False) as hd:
+            h = hd[0].header
+            tpl_all = np.asarray(hd[0].data, float)
+            ang = np.asarray(hd["ANGLES"].data, float).ravel()
+            gt = hd["GROUPS"].data
+            rows = [{"group": str(gt["NAME"][i]).strip(), "lam_lo": float(gt["LAM_LO"][i]),
+                     "lam_hi": float(gt["LAM_HI"][i]), "lam_mean": float(gt["LAM_MEAN"][i]),
+                     "n": int(gt["NCHAN"][i]), "c0": int(gt["CHAN0"][i]), "c1": int(gt["CHAN1"][i]), "slot": i}
+                    for i in range(len(gt))]
+        g = (h.get("GRIDLO"), h.get("GRIDHI"), h.get("NGROUP"))
+        if grid is None:
+            grid = g
+        elif g != grid:
+            raise ValueError(f"night {date} has the group grid {g}, the first night {grid}: the groups would not match")
+        px = float(pxscale if pxscale is not None else h.get("PIXSCALE", ALES.pxscale))
+        off = angle_offset
+        if off is None:
+            conv = str(h.get("ANGCONV", ""))
+            off = float(conv.split("+")[1]) if "+" in conv else ALES.angle_offset
+        texp = float(h.get("EXPTIME", ALES.texp_frame))
+        ny, nx = tpl_all.shape[1:]
+        centre = ((nx - 1) / 2.0, (ny - 1) / 2.0)
+        log(f"ALES night {lab[date]} ({date[:4]}-{date[4:6]}-{date[6:]}): {ang.size} frames, LBT_PARA "
+            f"{ang.min():.2f} to {ang.max():.2f} deg, {len(rows)} groups over {grid[0]}-{grid[1]} um")
+        for r in rows:
+            if only is not None and r["group"] not in {str(o) for o in only}:
+                continue
+            pid = f"{lab[date]}_{r['group']}"
+            cube = np.asarray(fits.getdata(files[f"{r['group']}_{date}"]), np.float32)
+            if cube.shape[0] != ang.size:
+                raise ValueError(f"{pid}: {cube.shape[0]} frames but {ang.size} angles")
+            tpl = np.where(np.isfinite(tpl_all[r["slot"]]), tpl_all[r["slot"]], 0.0)
+            ch = list(range(r["c0"], r["c1"] + 1))
+            meta = {"psf_center": centre,
+                    "provenance": {"instrument": "ALES", "night": lab[date], "date": date, "group": r["group"],
+                                   "channels": ch, "lam_mean_um": r["lam_mean"],
+                                   "lam_edges_um": [r["lam_lo"], r["lam_hi"]], "nframes": int(cube.shape[0]),
+                                   "source": files[f"{r['group']}_{date}"], "angle_offset_deg": float(off),
+                                   "angle_sign": float(angle_sign), "pxscale": px}}
+            ds = generic.load_cube(cube, ang, psf=tpl, name=pid, angle_sign=angle_sign, angle_offset=off,
+                                   texp=texp * cube.shape[0], tags=tags, tag_r_in=tag_r_in,
+                                   nan_policy=nan_policy, meta=meta)
+            datasets[pid] = ds
+            lam_m[pid] = r["lam_mean"] * 1e-6
+            fwhm_px[pid] = _fwhm_px(lam_m[pid], px, diam_m, fwhm_lod)
+            table.append({"name": pid, "night": lab[date], "date": date, "group": r["group"], "channels": ch,
+                          "lam_lo": r["lam_lo"], "lam_hi": r["lam_hi"], "lam_mean": r["lam_mean"], "n": r["n"],
+                          "slot": r["slot"], "fwhm_px": fwhm_px[pid],
+                          "n_nan": int(np.count_nonzero(~np.isfinite(ds.cube)))})
+    if not datasets:
+        raise ValueError(f"none of the groups {list(only or [])} is in this data set")
+    log(f"  {len(datasets)} partitions ({len(keep)} night{'s' if len(keep) > 1 else ''} x "
+        f"{len(datasets) // max(len(keep), 1)} groups), FWHM {min(fwhm_px.values()):.2f}-{max(fwhm_px.values()):.2f} px")
+    return datasets, lam_m, fwhm_px, table
+
+
 def representative_group(lam_m: Dict[str, float], at_m: Optional[float] = None) -> str:
     """The group whose wavelength is nearest ``at_m`` (default: the mean of the groups'
     wavelengths): it stands for the combined image's FWHM and matched filter."""
@@ -482,6 +589,11 @@ def make_reducer(datasets: Dict[str, Dataset], lam_m: Dict[str, float], fwhm_px:
     log(f"  representative group {rep}: {lam_m[rep] * 1e6:.3f} um, fwhm {red.fwhm:.2f} px, "
         f"lambda/D {red.lam_over_d_px:.2f} px (the metric's and the sampler's)")
     if reflib or sdi:
+        nights = {((ds.meta or {}).get("provenance") or {}).get("night") for ds in datasets.values()} - {None}
+        if sdi and len(nights) > 1:
+            raise ValueError(f"an SDI pool takes frames from every other partition, and these come from "
+                             f"{len(nights)} nights ({sorted(nights)}).  Load one night for SDI "
+                             f"(load_release(nights=[...]))")
         if reflib_science not in ("all", "searched"):
             raise ValueError(f"reflib_science is 'all' or 'searched', not {reflib_science!r}")
         if str(sdi_lenders) not in ("all", "selected"):

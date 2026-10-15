@@ -19,8 +19,9 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--angle-sign ANGLE_SIGN] [--crop-half CROP_HALF]
                         [--center CENTER CENTER] [--wv-index WV_INDEX]
                         [--no-tags] [--forbidden-pa PA HALFWIDTH]
-                        [--ales-target NAME] [--ales-ref NAME] [--ales-reflib]
-                        [--ales-ref-bin N]
+                        [--ales-dataset NAME]
+                        [--ales-nights NIGHT [NIGHT ...]] [--ales-target NAME]
+                        [--ales-ref NAME] [--ales-reflib] [--ales-ref-bin N]
                         [--ales-reflib-science {all,searched}] [--ales-sdi]
                         [--ales-sdi-cap N] [--ales-sdi-lenders {all,selected}]
                         [--ales-groups N] [--ales-channels C0 C1]
@@ -87,8 +88,8 @@ options:
                         NEAR: data root. nomic: pyNOMIC working directory (one
                         per --obj, or one for all). generic: optional base
                         directory for the run directory. ales: the reduction's
-                        products directory (read only; the run goes to --run-
-                        dir)
+                        products directory, read only (the run goes to --run-
+                        dir), or --ales-dataset
   --nights NIGHTS [NIGHTS ...]
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
@@ -282,6 +283,13 @@ generic cubes (--instrument generic / klip-tpe generic):
                         disk); may repeat
 
 LBTI/ALES (--instrument ales):
+  --ales-dataset NAME   a public ALES data set in the release layout,
+                        downloaded once into $KLIP_TPE_DATA
+                        (klip_tpe.datasets: lbti_ales_mwc758), one partition
+                        per night and wavelength group, in place of --root
+  --ales-nights NIGHT [NIGHT ...]
+                        with --ales-dataset: the nights to load, as dates
+                        (20191113) or labels (n1), all by default
   --ales-target NAME    prefix of the product files under --root
                         (NAME_cube_cen_clean.fits ...; default WISPIT2)
   --ales-ref NAME       reference star whose products sit beside the target's
@@ -382,6 +390,7 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--angle-sign ANGLE_SIGN] [--crop-half CROP_HALF]
                      [--center CENTER CENTER] [--wv-index WV_INDEX]
                      [--no-tags] [--forbidden-pa PA HALFWIDTH]
+                     [--ales-dataset NAME] [--ales-nights NIGHT [NIGHT ...]]
                      [--ales-target NAME] [--ales-ref NAME] [--ales-reflib]
                      [--ales-ref-bin N] [--ales-reflib-science {all,searched}]
                      [--ales-sdi] [--ales-sdi-cap N]
@@ -445,8 +454,8 @@ options:
                         NEAR: data root. nomic: pyNOMIC working directory (one
                         per --obj, or one for all). generic: optional base
                         directory for the run directory. ales: the reduction's
-                        products directory (read only; the run goes to --run-
-                        dir)
+                        products directory, read only (the run goes to --run-
+                        dir), or --ales-dataset
   --nights NIGHTS [NIGHTS ...]
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
@@ -640,6 +649,13 @@ generic cubes (--instrument generic / klip-tpe generic):
                         disk); may repeat
 
 LBTI/ALES (--instrument ales):
+  --ales-dataset NAME   a public ALES data set in the release layout,
+                        downloaded once into $KLIP_TPE_DATA
+                        (klip_tpe.datasets: lbti_ales_mwc758), one partition
+                        per night and wavelength group, in place of --root
+  --ales-nights NIGHT [NIGHT ...]
+                        with --ales-dataset: the nights to load, as dates
+                        (20191113) or labels (n1), all by default
   --ales-target NAME    prefix of the product files under --root
                         (NAME_cube_cen_clean.fits ...; default WISPIT2)
   --ales-ref NAME       reference star whose products sit beside the target's
@@ -740,6 +756,7 @@ usage: klip-tpe resume [-h] [--instrument {near,nomic,generic,ales}]
                        [--angle-sign ANGLE_SIGN] [--crop-half CROP_HALF]
                        [--center CENTER CENTER] [--wv-index WV_INDEX]
                        [--no-tags] [--forbidden-pa PA HALFWIDTH]
+                       [--ales-dataset NAME] [--ales-nights NIGHT [NIGHT ...]]
                        [--ales-target NAME] [--ales-ref NAME] [--ales-reflib]
                        [--ales-ref-bin N]
                        [--ales-reflib-science {all,searched}] [--ales-sdi]
@@ -782,8 +799,8 @@ options:
                         NEAR: data root. nomic: pyNOMIC working directory (one
                         per --obj, or one for all). generic: optional base
                         directory for the run directory. ales: the reduction's
-                        products directory (read only; the run goes to --run-
-                        dir)
+                        products directory, read only (the run goes to --run-
+                        dir), or --ales-dataset
   --nights NIGHTS [NIGHTS ...]
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
@@ -880,6 +897,13 @@ generic cubes (--instrument generic / klip-tpe generic):
                         disk); may repeat
 
 LBTI/ALES (--instrument ales):
+  --ales-dataset NAME   a public ALES data set in the release layout,
+                        downloaded once into $KLIP_TPE_DATA
+                        (klip_tpe.datasets: lbti_ales_mwc758), one partition
+                        per night and wavelength group, in place of --root
+  --ales-nights NIGHT [NIGHT ...]
+                        with --ales-dataset: the nights to load, as dates
+                        (20191113) or labels (n1), all by default
   --ales-target NAME    prefix of the product files under --root
                         (NAME_cube_cen_clean.fits ...; default WISPIT2)
   --ales-ref NAME       reference star whose products sit beside the target's
@@ -980,6 +1004,7 @@ usage: klip-tpe extend [-h] [--instrument {near,nomic,generic,ales}]
                        [--angle-sign ANGLE_SIGN] [--crop-half CROP_HALF]
                        [--center CENTER CENTER] [--wv-index WV_INDEX]
                        [--no-tags] [--forbidden-pa PA HALFWIDTH]
+                       [--ales-dataset NAME] [--ales-nights NIGHT [NIGHT ...]]
                        [--ales-target NAME] [--ales-ref NAME] [--ales-reflib]
                        [--ales-ref-bin N]
                        [--ales-reflib-science {all,searched}] [--ales-sdi]
@@ -1019,8 +1044,8 @@ options:
                         NEAR: data root. nomic: pyNOMIC working directory (one
                         per --obj, or one for all). generic: optional base
                         directory for the run directory. ales: the reduction's
-                        products directory (read only; the run goes to --run-
-                        dir)
+                        products directory, read only (the run goes to --run-
+                        dir), or --ales-dataset
   --nights NIGHTS [NIGHTS ...]
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
@@ -1110,6 +1135,13 @@ generic cubes (--instrument generic / klip-tpe generic):
                         disk); may repeat
 
 LBTI/ALES (--instrument ales):
+  --ales-dataset NAME   a public ALES data set in the release layout,
+                        downloaded once into $KLIP_TPE_DATA
+                        (klip_tpe.datasets: lbti_ales_mwc758), one partition
+                        per night and wavelength group, in place of --root
+  --ales-nights NIGHT [NIGHT ...]
+                        with --ales-dataset: the nights to load, as dates
+                        (20191113) or labels (n1), all by default
   --ales-target NAME    prefix of the product files under --root
                         (NAME_cube_cen_clean.fits ...; default WISPIT2)
   --ales-ref NAME       reference star whose products sit beside the target's
@@ -1240,6 +1272,7 @@ usage: klip-tpe replay [-h] [--instrument {near,nomic,generic,ales}]
                        [--angle-sign ANGLE_SIGN] [--crop-half CROP_HALF]
                        [--center CENTER CENTER] [--wv-index WV_INDEX]
                        [--no-tags] [--forbidden-pa PA HALFWIDTH]
+                       [--ales-dataset NAME] [--ales-nights NIGHT [NIGHT ...]]
                        [--ales-target NAME] [--ales-ref NAME] [--ales-reflib]
                        [--ales-ref-bin N]
                        [--ales-reflib-science {all,searched}] [--ales-sdi]
@@ -1282,8 +1315,8 @@ options:
                         NEAR: data root. nomic: pyNOMIC working directory (one
                         per --obj, or one for all). generic: optional base
                         directory for the run directory. ales: the reduction's
-                        products directory (read only; the run goes to --run-
-                        dir)
+                        products directory, read only (the run goes to --run-
+                        dir), or --ales-dataset
   --nights NIGHTS [NIGHTS ...]
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
@@ -1379,6 +1412,13 @@ generic cubes (--instrument generic / klip-tpe generic):
                         disk); may repeat
 
 LBTI/ALES (--instrument ales):
+  --ales-dataset NAME   a public ALES data set in the release layout,
+                        downloaded once into $KLIP_TPE_DATA
+                        (klip_tpe.datasets: lbti_ales_mwc758), one partition
+                        per night and wavelength group, in place of --root
+  --ales-nights NIGHT [NIGHT ...]
+                        with --ales-dataset: the nights to load, as dates
+                        (20191113) or labels (n1), all by default
   --ales-target NAME    prefix of the product files under --root
                         (NAME_cube_cen_clean.fits ...; default WISPIT2)
   --ales-ref NAME       reference star whose products sit beside the target's
@@ -1479,8 +1519,9 @@ usage: klip-tpe compare [-h] [--instrument {near,nomic,generic,ales}]
                         [--angle-sign ANGLE_SIGN] [--crop-half CROP_HALF]
                         [--center CENTER CENTER] [--wv-index WV_INDEX]
                         [--no-tags] [--forbidden-pa PA HALFWIDTH]
-                        [--ales-target NAME] [--ales-ref NAME] [--ales-reflib]
-                        [--ales-ref-bin N]
+                        [--ales-dataset NAME]
+                        [--ales-nights NIGHT [NIGHT ...]] [--ales-target NAME]
+                        [--ales-ref NAME] [--ales-reflib] [--ales-ref-bin N]
                         [--ales-reflib-science {all,searched}] [--ales-sdi]
                         [--ales-sdi-cap N] [--ales-sdi-lenders {all,selected}]
                         [--ales-groups N] [--ales-channels C0 C1]
@@ -1528,8 +1569,8 @@ options:
                         NEAR: data root. nomic: pyNOMIC working directory (one
                         per --obj, or one for all). generic: optional base
                         directory for the run directory. ales: the reduction's
-                        products directory (read only; the run goes to --run-
-                        dir)
+                        products directory, read only (the run goes to --run-
+                        dir), or --ales-dataset
   --nights NIGHTS [NIGHTS ...]
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
@@ -1636,6 +1677,13 @@ generic cubes (--instrument generic / klip-tpe generic):
                         disk); may repeat
 
 LBTI/ALES (--instrument ales):
+  --ales-dataset NAME   a public ALES data set in the release layout,
+                        downloaded once into $KLIP_TPE_DATA
+                        (klip_tpe.datasets: lbti_ales_mwc758), one partition
+                        per night and wavelength group, in place of --root
+  --ales-nights NIGHT [NIGHT ...]
+                        with --ales-dataset: the nights to load, as dates
+                        (20191113) or labels (n1), all by default
   --ales-target NAME    prefix of the product files under --root
                         (NAME_cube_cen_clean.fits ...; default WISPIT2)
   --ales-ref NAME       reference star whose products sit beside the target's

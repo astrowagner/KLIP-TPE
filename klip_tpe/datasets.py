@@ -12,6 +12,16 @@
   1100.C-0481, 63 frames x 2 channels, 241x241 px crops, 33.8 deg of rotation) with the
   unsaturated flux frames; HD 95086 b at 0.62", PA ~145 deg.  Reduced with K. Wagner's
   IDL SPHERE pipeline; distributed from the klip-tpe GitHub release ``tutorial-data``.
+* ``lbti_ales_mwc758`` -- LBTI/ALES integral-field cubes of MWC 758 from two nights, 2019 Nov
+  13 and 14 (959 and 1594 frames of 2.46 s, 109 and 127 deg of rotation, 62x62 spaxels of an
+  assumed 0.0345", star at the centre), as 20 wavelength groups over 2.90-4.15 um with the same
+  edges on both nights: per night one ``(frame, y, x)`` cube per group (the mean of its
+  channels) and a meta file (a template per group, the angles, the frame, group and channel
+  tables).  Registered and cleaned with K. Wagner's IDL ALES pipeline.  The frames are those
+  with the star at the centre.  MWC 758c sits at 0.603", PA 228.5 deg in the Nov 14 data
+  (Wagner et al. 2023).
+  From the klip-tpe GitHub release ``tutorial-data``.  Read it with
+  :func:`klip_tpe.instruments.ales.load_release`.
 
 The VIP files come from https://github.com/vortex-exoplanet/VIP_extras (data distribution
 of the VIP project); see that repository for provenance.  The cache directory is
@@ -57,9 +67,14 @@ DATASETS: Dict[str, Dict[str, str]] = {
         "psf_K2": "hd95086_irdis_K2_psf.fits",
         "angles": "hd95086_irdis_angles.fits",
     },
+    # roles meta_<date> and gNN_<date>: the release layout of ales.load_release
+    "lbti_ales_mwc758": {
+        **{f"meta_{d}": f"mwc758_ales_{d}_meta.fits" for d in ("20191113", "20191114")},
+        **{f"g{g:02d}_{d}": f"mwc758_ales_{d}_g{g:02d}.fits" for d in ("20191113", "20191114") for g in range(20)},
+    },
 }
 #: which base URL serves each set
-_SOURCE = {name: ("kt" if name.startswith("sphere_hd95086") else "vip") for name in DATASETS}
+_SOURCE = {name: ("kt" if name.startswith(("sphere_hd95086", "lbti_ales")) else "vip") for name in DATASETS}
 
 #: instrument constants that go with the data sets (arcsec/px, wavelength m, aperture m)
 INSTRUMENT = {
@@ -75,6 +90,11 @@ INSTRUMENT = {
     # brightness was used to check it.  star_flux = the flux frame's own sum.
     "sphere_hd95086": {"pxscale": 0.01225, "lam_m": 2.110e-6, "lam_m_K2": 2.251e-6, "diam_m": 8.2, "truenorth": 0.0,
                        "dit_science": 96.0, "dit_flux": 0.837464, "nd_transmission": 0.0851},
+    # LBTI/ALES on one LBT aperture.  The plate scale is assumed, not calibrated on these nights.
+    # The frames are north up, east left once rotated counter-clockwise by LBT_PARA + 180 deg.
+    "lbti_ales_mwc758": {"pxscale": 0.0345, "diam_m": 8.4, "truenorth": 0.0, "angle_offset": 180.0,
+                         "texp_frame": 2.4588, "nights": ["20191113", "20191114"], "lam_range_um": (2.90, 4.15),
+                         "ngroup": 20},
 }
 
 #: Absolute stellar photometry for the sets that HAVE some, in the science frames' own
@@ -211,14 +231,22 @@ def data_dir() -> str:
     return d
 
 
-def fetch(name: str, quiet: bool = False) -> Dict[str, str]:
+def fetch(name: str, quiet: bool = False, roles=None) -> Dict[str, str]:
     """Download (once) the files of data set ``name`` and return ``{role: local path}``
-    (roles: ``cube``, ``angles``, and ``psf`` / ``ref_cube`` when the set has them)."""
+    (roles: ``cube``, ``angles``, and ``psf`` / ``ref_cube`` when the set has them, and for the
+    ALES release ``meta_<date>`` and ``gNN_<date>``).  ``roles`` limits the download to those
+    roles, e.g. a few wavelength groups of the ALES set."""
     if name not in DATASETS:
         raise KeyError(f"unknown data set {name!r}; known: {sorted(DATASETS)}")
+    items = DATASETS[name]
+    if roles is not None:
+        missing = [r for r in roles if r not in items]
+        if missing:
+            raise KeyError(f"{name} has no roles {missing}")
+        items = {r: items[r] for r in roles}
     out = {}
     d = data_dir()
-    for role, fn in DATASETS[name].items():
+    for role, fn in items.items():
         path = os.path.join(d, fn)
         if not os.path.exists(path) or os.path.getsize(path) < 2880:
             url = (_KT_BASE if _SOURCE.get(name) == "kt" else _BASE) + fn

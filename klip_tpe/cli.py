@@ -209,24 +209,43 @@ def _nomic_objects(a, log=print):
 
 
 def _ales_objects(a, log=print):
-    """Reducer / objective / sampler / guard for an ALES integral-field cube: the reduction's
-    products under ``--root``, wavelength groups as partitions (``klip_tpe.instruments.ales``)."""
+    """Reducer / objective / sampler / guard for ALES integral-field cubes, wavelength groups as
+    partitions (``klip_tpe.instruments.ales``): a reduction's products under ``--root``, or a
+    public data set in the release layout (``--ales-dataset``, one partition per night and
+    group)."""
     from .instruments import ales
     from .parallel import resolve_workers
-    if not a.root:
-        raise SystemExit("--instrument ales needs --root, the reduction's products directory")
-    root = a.root[0] if isinstance(a.root, (list, tuple)) else a.root
+    dataset = getattr(a, "ales_dataset", None)
+    if not a.root and not dataset:
+        raise SystemExit("--instrument ales needs --root, the reduction's products directory, or --ales-dataset NAME")
     a.workers = resolve_workers(a.workers)
-    c0, c1 = (int(a.ales_channels[0]), int(a.ales_channels[1])) if a.ales_channels else (ales.ALES.c0, ales.ALES.c1)
-    px = a.pxscale if a.pxscale is not None else ales.ALES.pxscale
     reflib = bool(getattr(a, "ales_reflib", False))
     if reflib and not a.ales_ref:
         raise SystemExit("--ales-reflib needs the reference star: --ales-ref NAME (HIP91748)")
-    datasets, lam_m, fwhm_px, table = ales.load_ales(
-        root, a.ales_target, ref=a.ales_ref, c0=c0, c1=c1, ngrp=a.ales_groups, only=a.ales_only,
-        pxscale=px, diam_m=a.diam, angle_offset=a.ales_angle_offset, angle_sign=a.angle_sign,
-        tags=None if a.no_tags else "auto", tag_r_in=a.ales_tag_r_in, cache=a.ales_cache,
-        ref_bin=int(getattr(a, "ales_ref_bin", 5) or 1), log=log)
+    if dataset:
+        from . import datasets as _datasets
+        if a.ales_ref:
+            raise SystemExit(f"--ales-ref: the data set {dataset} carries no reference star")
+        try:
+            files = _datasets.fetch(dataset)
+        except KeyError as exc:
+            raise SystemExit(f"--ales-dataset: {exc.args[0]}")
+        if not ales.release_nights(files):
+            raise SystemExit(f"--ales-dataset {dataset} is not an ALES data set in the release layout")
+        datasets, lam_m, fwhm_px, table = ales.load_release(
+            files, nights=getattr(a, "ales_nights", None), only=a.ales_only, pxscale=a.pxscale, diam_m=a.diam,
+            angle_offset=a.ales_angle_offset, angle_sign=a.angle_sign, tags=None if a.no_tags else "auto",
+            tag_r_in=a.ales_tag_r_in, log=log)
+        px = float(next(iter(datasets.values())).meta["provenance"]["pxscale"])
+    else:
+        root = a.root[0] if isinstance(a.root, (list, tuple)) else a.root
+        c0, c1 = (int(a.ales_channels[0]), int(a.ales_channels[1])) if a.ales_channels else (ales.ALES.c0, ales.ALES.c1)
+        px = a.pxscale if a.pxscale is not None else ales.ALES.pxscale
+        datasets, lam_m, fwhm_px, table = ales.load_ales(
+            root, a.ales_target, ref=a.ales_ref, c0=c0, c1=c1, ngrp=a.ales_groups, only=a.ales_only,
+            pxscale=px, diam_m=a.diam, angle_offset=a.ales_angle_offset, angle_sign=a.angle_sign,
+            tags=None if a.no_tags else "auto", tag_r_in=a.ales_tag_r_in, cache=a.ales_cache,
+            ref_bin=int(getattr(a, "ales_ref_bin", 5) or 1), log=log)
     if a.fwhm_px:
         fwhm_px = {k: float(a.fwhm_px) for k in fwhm_px}
     red = ales.make_reducer(datasets, lam_m, fwhm_px, pxscale=px, diam_m=a.diam,
@@ -259,7 +278,7 @@ def _add_near_args(p):
     p.add_argument("--root", nargs="+", default=None,
                    help="NEAR: data root. nomic: pyNOMIC working directory (one per --obj, or one for all). "
                         "generic: optional base directory for the run directory. "
-                        "ales: the reduction's products directory (read only; the run goes to --run-dir)")
+                        "ales: the reduction's products directory, read only (the run goes to --run-dir), or --ales-dataset")
     gg = p.add_argument_group("generic cubes (--instrument generic / klip-tpe generic)")
     gg.add_argument("--cube", nargs="+", default=None, help="registered cube(s), (n, ny, nx) FITS; one per partition")
     gg.add_argument("--angles", nargs="+", default=None, help="derotation angles FITS (one per cube; CCW to North-up)")
@@ -284,6 +303,12 @@ def _add_near_args(p):
                     help="generic / ales: no injection within HALFWIDTH deg of position angle PA "
                          "(a known companion's azimuth, a disk); may repeat")
     ga = p.add_argument_group("LBTI/ALES (--instrument ales)")
+    ga.add_argument("--ales-dataset", default=None, metavar="NAME",
+                    help="a public ALES data set in the release layout, downloaded once into $KLIP_TPE_DATA "
+                         "(klip_tpe.datasets: lbti_ales_mwc758), one partition per night and wavelength group, "
+                         "in place of --root")
+    ga.add_argument("--ales-nights", nargs="+", default=None, metavar="NIGHT",
+                    help="with --ales-dataset: the nights to load, as dates (20191113) or labels (n1), all by default")
     ga.add_argument("--ales-target", default="WISPIT2", metavar="NAME",
                     help="prefix of the product files under --root (NAME_cube_cen_clean.fits ...; default WISPIT2)")
     ga.add_argument("--ales-ref", default=None, metavar="NAME",
@@ -742,7 +767,8 @@ def _fill_from_registry(a, argv=None) -> None:
               "no_tags", "ales_target", "ales_ref", "ales_groups", "ales_channels", "ales_only",
               "ales_max_excluded", "ales_prefer_um", "ales_representative", "ales_angle_offset",
               "ales_tag_r_in", "ales_cache", "ales_selection", "ales_reflib", "ales_ref_bin",
-              "ales_reflib_science", "ales_sdi", "ales_sdi_cap", "ales_sdi_lenders", "bin_min", "bin_max"):
+              "ales_reflib_science", "ales_sdi", "ales_sdi_cap", "ales_sdi_lenders", "bin_min", "bin_max",
+              "ales_dataset", "ales_nights"):
         if k in given:                     # the user said so on this command line
             continue
         v = getattr(prev, k, None)

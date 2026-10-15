@@ -3,8 +3,8 @@
 The tutorials are Jupyter notebooks in `tutorials/`. Each one is written as
 `tutorials/NN_name.py`, with `# %%` cell markers, and `python tutorials/_build_notebooks.py`
 turns the scripts into `.ipynb` files (`--execute` also runs them and stores the outputs).
-All six are stored with their outputs, so they read as documents without running anything.
-Notebooks 1, 2 and 4 run on data the package downloads itself. Notebooks 3, 5 and 6 need
+Tutorials 1 to 6 are stored with their outputs, so they read as documents without running
+anything. Notebooks 1, 2, 4 and 7 run on data the package downloads itself. Notebooks 3, 5 and 6 need
 JWST data from MAST and the STPSF model of the coronagraph.
 
 | # | Notebook | Data | What it covers |
@@ -15,6 +15,7 @@ JWST data from MAST and the STPSF model of the coronagraph.
 | 4 | `04_known_sources.ipynb` | VLT/NACO β Pic (the data of tutorial 1) | **Known companions and disks.** What `known=[(ρ, PA)]` does to the injections, the noise rings and the contrast curve, and what forgetting it costs. `forbidden_pa` and `pixel_mask` for extended signal, and tuning *for* a known companion. |
 | 5 | `05_jwst_miri_hip65426.ipynb` | JWST/MIRI F1140C of HIP 65426, its reference star and the program's background pointings (MAST, `scripts/fetch_jwst_ar.py --targets hip65426_miri`) | **The four-quadrant phase mask.** Throughput as a function of position rather than radius: a factor of 6.5 at one separation, boundaries 4° off the detector axes, and two-fold rather than four-fold symmetry. The three things that have to happen to the dead zones, and the one that must not. What an archive download of one program contains, including the files the pipeline has already background-subtracted. A contrast axis anchored to another filter and checked against the published values. |
 | 6 | `06_jwst_miri_hr8799.ipynb` | JWST/MIRI F1065C (also F1140C and F1550C) of HR 8799 and its reference star in a 9-point small-grid dither (MAST, `scripts/fetch_jwst_ar.py --targets hr8799`) | **A one-roll observation.** With no field rotation, ADI is impossible, and the partition layout decides whether `mode` means anything. The reference-library dimensions that matter when RDI is all there is, four companions at four position angles as a test of a two-dimensional throughput, why the tutorial leaves their positions to you, and a stellar flux that agrees to 1% with one derived from WISE and AKARI. |
+| 7 | `07_lbti_ales_mwc758.ipynb` | LBTI/ALES integral-field cubes of MWC 758 from 2019 November 13 and 14, 20 wavelength groups per night (786 MB from the GitHub release) | **An integral-field spectrograph over two nights.** Wavelength groups as partitions and the second night as 20 more, on one wavelength grid for two cube-builder solutions. The group flags and the bound that lets the search drop a night, a faint red companion (MWC 758c) as a known source, and what injections with the star's spectrum optimize for. |
 | — | `notebooks/near2_production_run.ipynb` | NEAR campaign (private) | The production run from Jupyter: a background thread, a watch cell, and resuming. |
 
 Every notebook that searches draws a **live panel** while it runs. The panel is where you
@@ -30,9 +31,9 @@ to you.
 
 Reading order: 1, then 4 if your field has a real companion or disk, then 2 or 3 depending on
 your data. For JWST/MIRI, read 3 first for the spaceKLIP path, then 5 for everything the
-four-quadrant masks change, then 6 if your observation has a single roll. pyNOMIC users need 1
-for the concepts and then `docs/PYNOMIC.md`, because the NOMIC adapter does what tutorial 2
-does by hand.
+four-quadrant masks change, then 6 if your observation has a single roll. For an integral-field
+spectrograph, read 2 for partitions and then 7. pyNOMIC users need 1 for the concepts and then
+`docs/PYNOMIC.md`, because the NOMIC adapter does what tutorial 2 does by hand.
 
 ## Requirements
 

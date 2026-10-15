@@ -4,7 +4,8 @@ klip-tpe reads the products of an ALES reduction (a `(wavelength, frame, y, x)` 
 parallactic angles, its wavelengths and a per-channel PSF template) and optimizes the
 KLIP/ADI post-processing over the usual parameters plus one on/off flag per wavelength
 group.  The adapter follows the ALES reduction's handoff of 2026-10-13.  The reports on the
-runs live with the data.
+runs live with the data.  A data set of several nights in the release layout, such as the
+MWC 758 data of tutorial 7, is read as one partition per night and group (section 7).
 
 ## 1. The cube as wavelength groups
 
@@ -222,3 +223,50 @@ A single reduction outside the runner, for checks: `cfg = space.decode(space.def
 add `inrad`, `outrad`, `pad_in`, `pad_out` to `cfg.params` and each `cfg.per_partition[pid]`,
 then `red.reduce_config(cfg)` gives `EvalImages` with `.image`, `.stack` (one image per group)
 and `.meta` per group.
+
+## 7. Several nights: a data set in the release layout
+
+klip-tpe treats a night as a partition, and a wavelength group as one too, so two nights of
+ALES data are 2 x 20 partitions.  `ales.load_release` reads a data set in the layout that
+`datasets.fetch("lbti_ales_mwc758")` downloads (the MWC 758 data of tutorial 7):
+
+* per night, a meta file `<name>_<date>_meta.fits`: one template per group in its primary
+  HDU, then `ANGLES` (LBT_PARA per frame), `FRAMES` (raw file, UT, LBT_PARA and airmass per
+  frame), `GROUPS` (name, edges, mean wavelength and channels per group) and `WAVES` (the
+  night's channel wavelengths).
+* per night and group, a cube `<name>_<date>_gNN.fits`, `(frame, y, x)`, the mean of the
+  group's channels.
+
+The nights share one group grid (`GRIDLO`, `GRIDHI` and `NGROUP` in the meta header), so
+`g07` is one band on both nights, while its mean wavelength follows each night's own channels.
+The two MWC 758 nights have different cube-builder wavelength solutions (100 and 98 channels,
+from 2.750 and 2.789 um).  Their grid, 20 groups over 2.90-4.15 um, puts 2 to 6 channels in
+each group on both nights.
+
+```python
+from klip_tpe import datasets
+from klip_tpe.instruments import ales
+files = datasets.fetch("lbti_ales_mwc758")                  # 786 MB, downloaded once
+ds, lam_m, fwhm_px, table = ales.load_release(files)         # n1_g00 ... n2_g19
+red = ales.make_reducer(ds, lam_m, fwhm_px, table=table)
+space = ales.make_space(red)                                 # one block, 40 flags
+space.project = ales.make_guard(red, max_excluded=20, bin_min=5)
+```
+
+* The partitions are `<night>_<group>`.  The nights are `n1`, `n2`, ... in date order
+  (`labels=` renames them), and a night loaded alone keeps its label:
+  `load_release(files, nights=["n2"])` gives `n2_g00` to `n2_g19`.  `only=["g15", ...]` keeps
+  the same groups on every night.
+* Each partition has its night's angles, its night's template (the star at the array center)
+  and its night's frame tags, so a contrast is a flux ratio to the star in that group on that
+  night.
+* One parameter block is shared by every night and group, and there is one flag per
+  partition.  The search drops a night group by group, so `max_excluded` must be at least 20
+  for it to drop a whole night of 20 groups.
+* An SDI pool (`sdi=True`) would lend one night's frames to the other night's groups, and
+  `make_reducer` refuses it on more than one night.  Load one night for SDI.
+* `datasets.fetch(..., roles=[...])` downloads part of a data set, such as a few groups.  The
+  roles are `meta_<date>` and `gNN_<date>`.
+* On the command line, `klip-tpe near --instrument ales --ales-dataset lbti_ales_mwc758`
+  replaces `--root`, and `--ales-nights n2` (or a date) loads one night.  `klip-tpe resume`
+  restores both options.
