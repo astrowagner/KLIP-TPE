@@ -33,6 +33,10 @@
   Linux platform for the session they simulate, and the pyklip/numpy test simulates a numpy
   with `reshape(copy=)` as well as one without, so neither depends on the machine (a Mac with
   numpy 1.26 failed five tests).
+- **`klip-tpe view` shows the calibration panels.**  While an annulus calibrates its
+  injection contrast, for minutes before the search draws its first panel, the window
+  showed a black frame.  It now shows the newest `steps/calib_annNN_trialNNNN.png` until a
+  search panel is newer.
 
 ## Unreleased — 2026-10-15b (one Gram matrix per zone for the per-target KLIP behind `--klip-gram zone`, KLIP-FM on the basis' own decomposition)
 

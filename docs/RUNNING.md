@@ -271,5 +271,7 @@ klip-tpe view --run-dir <dir> --once           # status only, no window
 ```
 
 It watches the panels the run writes to `steps/` and shows whichever is newest, with the
-evaluation count, the rate and the age of the newest panel. It can be attached to and
-detached from a run that is already going, and it is read-only.
+evaluation count, the rate and the age of the newest panel. While an annulus calibrates its
+injection contrast, before the search draws anything, the newest panel is the latest
+calibration trial's clean and injected pair. It can be attached to and detached from a run
+that is already going, and it is read-only.

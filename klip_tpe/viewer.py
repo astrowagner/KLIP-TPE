@@ -30,8 +30,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 __all__ = ["newest_panel", "run_status", "find_run", "view"]
 
-#: panels the viewer will show, newest first
-PANEL_GLOBS = ("steps/step*.png", "annulus*/step_display_white.png", "annulus*/*_panel.png")
+#: panels the viewer will show, newest first.  The calibration trials' clean | injected panels
+#: count: an annulus calibrates its contrast for minutes before the search draws its first
+#: panel, and the window was black for all of it.  ``intro.png`` does not (another size).
+PANEL_GLOBS = ("steps/step*.png", "steps/calib_ann*_trial*.png", "annulus*/step_display_white.png",
+               "annulus*/*_panel.png")
 
 
 def find_run(run_dir: Optional[str] = None, root: Optional[str] = None) -> str:
