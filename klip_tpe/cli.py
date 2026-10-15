@@ -4,6 +4,7 @@
     klip-tpe resume --run-dir runs/run_001 --root ...          (config comes from the checkpoint)
     klip-tpe extend --run-dir runs/run_001 --root ... --n-iter 800 800 0   (per-annulus new totals)
     klip-tpe replay --root ... --idl-log optimize_tpe_results.txt --n 30
+    klip-tpe fit-chain --run-dir runs/run_001 --root ... --chain chain.txt   (a line's node values)
     klip-tpe testbed --nseed 8 --noise 0.25                    (synthetic density-model comparison)
     klip-tpe plots  --run-dir runs/run_001
 """
@@ -35,12 +36,15 @@ def _near_objects(a, log=print):
     a.workers = resolve_workers(a.workers)
     red = near.make_reducer(root, a.nights, frames=frames, use_library=not a.no_library,
                             weighting=a.weighting, max_workers=a.workers, pool=a.pool, fast=a.fast, log=log,
-                            n_min_ref=a.n_min_ref, backend=getattr(a, "backend", "klip"))
+                            n_min_ref=a.n_min_ref, backend=getattr(a, "backend", "klip"),
+                            cube_name=getattr(a, "cube_name", None) or None)
+    _subtract(red, a, log)
     _set_threads_per_job(red, a)
     _set_klip_gram(red, a, log)
     objective, sampler = near.default_config(red, clean_subtract=not a.no_clean_subtract,
                                              metric=getattr(a, "metric", "mawet"),
-                                             known=[tuple(k) for k in (a.known or [])])
+                                             known=[tuple(k) for k in (a.known or [])],
+                                             forbidden_pa=_forbidden(a), pixel_mask=_line_mask(red, a, log))
     guard = near.make_guard(red, n_min_ref=a.n_min_ref, ref_frac=a.ref_frac) if not a.fast else None
     red.start_workers()                    # logs the worker budget and the pool kind it got
     thr = None
@@ -68,10 +72,149 @@ def _set_klip_gram(red, a, log=print) -> None:
             "float64 rounding, not to the bit)")
 
 
+def _first_partition(red):
+    """The first partition's reducer of a partitioned reducer, or the reducer itself."""
+    subs = getattr(red, "reducers", None)
+    return next(iter(subs.values())) if isinstance(subs, dict) and subs else red
+
+
+def _sources_file(path: str):
+    """``--subtract-sources FILE``, refusing a list whose contrasts are all negative: the option
+    takes the sources' own contrasts, as they are in the data, and a chain written to be
+    injected (``c = -a step / L``) is the negative of that, which would double the line."""
+    from .injection import read_sources
+    try:
+        lst = read_sources(path)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"--subtract-sources: {exc}")
+    if not lst:
+        raise SystemExit(f"--subtract-sources: no sources in {path}")
+    if all(s.contrast <= 0 for s in lst) and any(s.contrast < 0 for s in lst):
+        raise SystemExit(f"--subtract-sources: every contrast in {path} is negative.  The option takes the sources' "
+                         f"own contrasts, as they are in the data, and subtracts them.  A chain written to be "
+                         f"injected (c = -a step / L) is the negative of that and would double the line: flip its "
+                         f"signs, e.g. awk '{{print $1, $2, -$3}}' {os.path.basename(path)}")
+    return lst
+
+
+def _subtract_request(red, a):
+    """The sources to take out and the notes for the record: what the checkpoint recorded, on a
+    command that types neither option (:func:`_data_edits_for_run`), else the sources of
+    ``--subtract-sources`` and the chain ``--subtract-line`` describes (built with the first
+    partition's injection model, :func:`klip_tpe.chainfit.line_chain`)."""
+    restored = getattr(a, "_restored_sources", None)
+    if restored is not None:
+        return list(restored), dict(getattr(a, "_restored_meta", None) or {})
+    src, meta = [], {}
+    path = getattr(a, "subtract_sources", None)
+    if path:
+        src += _sources_file(path)
+        meta["subtract_file"] = os.path.abspath(path) if os.path.exists(path) else str(path)
+    lpath = getattr(a, "subtract_line", None)
+    if lpath:
+        from .chainfit import line_chain, read_line_nodes
+        try:
+            spec = read_line_nodes(lpath)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"--subtract-line: {exc}")
+        first = _first_partition(red)
+        src += line_chain(spec, first.model, first.pxscale, tuple(first.data.cube.shape[-2:]), fallback=first.fallback)
+        meta["subtract_line"] = dict(spec, file=os.path.abspath(lpath))
+    return src, meta
+
+
+def _subtract(red, a, log=print) -> None:
+    """``--subtract-sources`` / ``--subtract-line`` on a freshly built reducer, before its
+    worker processes start."""
+    src, meta = _subtract_request(red, a)
+    if not src:
+        return
+    from .reducer import _taken_text
+    n = red.subtract_sources(src)
+    red.data_edits = dict(getattr(red, "data_edits", None) or {}, **meta)
+    c = [s.contrast for s in src]
+    log(f"  subtracted {n} source(s) from every partition's frames, once, at load: rho "
+        f"{min(s.rho for s in src):.3f}-{max(s.rho for s in src):.3f}\", contrast {min(c):.3g} to {max(c):.3g}"
+        + (" (the run's own list, from its checkpoint)" if getattr(a, "_restored_sources", None) is not None else ""))
+    took = _taken_text(red)
+    if took:
+        log(f"    the fraction of their flux that left the frames, on a sample of frames: {took}")
+
+
+def _no_cube_name(a, what: str) -> None:
+    if getattr(a, "cube_name", None):
+        raise SystemExit(f"--cube-name names the cube in each NEAR night's directory; {what} reads its cubes "
+                         f"another way")
+
+
+def _forbidden(a):
+    return [tuple(b) for b in (getattr(a, "forbidden_pa", None) or [])]
+
+
+def _line_mask(red, a, log=print):
+    """``--mask-line PA HALFWIDTH``: the strips to keep out of the noise apertures, as a
+    ``pixel_mask`` of the reducer's frame (None for none)."""
+    lines = [tuple(float(v) for v in b) for b in (getattr(a, "mask_line", None) or [])]
+    if not lines:
+        return None
+    from .metrics import line_mask
+    first = _first_partition(red)
+    shape = tuple(first.data.cube.shape[-2:])
+    m = line_mask(shape, lines, angle_convention=getattr(first, "angle_convention", "pa"))
+    log(f"  noise apertures: {int(m.sum())} pixels along "
+        + ", ".join(f"PA {pa:g} deg (+-{hw:g} px)" for pa, hw in lines) + " left out (--mask-line)")
+    return m
+
+
+def _data_edits_for_run(a) -> None:
+    """``--cube-name`` and ``--subtract-sources`` on a run directory that holds a checkpoint.
+
+    A run's evaluations were made on particular frames, so a later command on it reduces the
+    same ones.  What the checkpoint recorded (``RunConfig.data_edits``) is used when an option
+    is not typed.  A typed value that differs from the record is refused rather than mixed in."""
+    run_dir = getattr(a, "run_dir", None)
+    if not run_dir or not os.path.isdir(str(run_dir)):
+        return
+    from .runner import checkpoint_candidates, load_checkpoint
+    if not checkpoint_candidates(run_dir):
+        return
+    st, _ = load_checkpoint(run_dir, log=lambda s: None)
+    if st is None:
+        return
+    rec = dict((st.get("config") or {}).get("data_edits") or {})
+    given = _explicit_dests(getattr(a, "_argv", None))
+    name = os.path.basename(os.path.abspath(run_dir))
+    was_cube = rec.get("cube_name") or None
+    if "cube_name" in given:
+        if (a.cube_name or None) != was_cube:
+            raise SystemExit(f"{name} was made on {was_cube or 'the default cube'}, and this command asks for "
+                             f"--cube-name {a.cube_name}.  A resume cannot change the frames its evaluations were "
+                             f"made on: leave the option out, or start a new run directory.")
+    elif was_cube:
+        a.cube_name = was_cube
+        print(f"  --cube-name {was_cube}, as {name} was started (its checkpoint)")
+    was = [[float(v) for v in s] for s in (rec.get("subtracted_sources") or [])]
+    typed_src, typed_line = "subtract_sources" in given, "subtract_line" in given
+    if typed_src and not typed_line:
+        now = [list(s.as_tuple()) for s in _sources_file(a.subtract_sources)]
+        if now != was:
+            raise SystemExit(f"{name} was made with {len(was)} source(s) subtracted, and --subtract-sources "
+                             f"{a.subtract_sources} lists {'others' if now and was else len(now)}.  A resume cannot "
+                             f"change the frames its evaluations were made on: leave the option out (the "
+                             f"checkpoint's list is used), or start a new run directory.")
+    elif not typed_src and not typed_line and was:
+        from .metrics import Source
+        a._restored_sources = [Source(*s) for s in was]
+        a._restored_meta = {k: rec[k] for k in ("subtract_file", "subtract_line") if rec.get(k)}
+        print(f"  --subtract-sources: the {len(was)} source(s) {name} was started with (its checkpoint)")
+    # a typed --subtract-line is built from the reducer's model, and the Runner compares the
+    # result with the record before anything is reduced
+
+
 _KLIP_GRAM_FILE = "klip_gram.json"
 
 
-def _klip_gram_for_run(a) -> None:
+def _klip_gram_for_run(a, record: bool = True) -> None:
     """Settle ``--klip-gram`` for a command on a run directory: what this command line says,
     else what the run has been using (``<run>/klip_gram.json``), else ``target``.
 
@@ -97,6 +240,9 @@ def _klip_gram_for_run(a) -> None:
                   f"{(rec.get('history') or [{}])[-1].get('since', '?')} ({_KLIP_GRAM_FILE})")
         return
     if path is None or a.klip_gram == was:
+        return
+    if not record:
+        print(f"  --klip-gram {a.klip_gram} for this command only (the run used {was}; not recorded)")
         return
     hist = list((rec or {}).get("history") or [])
     hist.append({"klip_gram": a.klip_gram, "since": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -149,11 +295,15 @@ def _generic_objects(a, log=print):
                                truenorth=a.truenorth, star_flux=star_flux or None, weighting=a.weighting,
                                max_workers=a.workers, pool=a.pool, fast=a.fast, n_min_ref=a.n_min_ref,
                                backend=getattr(a, "backend", "klip"), log=log)
+    _no_cube_name(a, "--instrument generic")
+    _subtract(red, a, log)
     _set_threads_per_job(red, a)
     _set_klip_gram(red, a, log)
+    pm = _line_mask(red, a, log)
     objective, sampler = generic.default_config(red, clean_subtract=not a.no_clean_subtract,
                                                 known=[tuple(k) for k in (a.known or [])],
-                                                metric=getattr(a, "metric", "mawet"))
+                                                metric=getattr(a, "metric", "mawet"), forbidden_pa=_forbidden(a),
+                                                **({} if pm is None else {"pixel_mask": pm}))
     guard = generic.make_guard(red, n_min_ref=a.n_min_ref, ref_frac=a.ref_frac,
                                bin_min=getattr(a, "bin_min", 1) or 1) if not a.fast else None
     return red, objective, sampler, guard, None
@@ -199,6 +349,8 @@ def _nomic_objects(a, log=print):
                              n_min_ref=a.n_min_ref, truenorth=a.truenorth, log=log,
                              fwhm_px=a.fwhm_px, diam_m=a.diam, psf=(a.psf[0] if a.psf else "airy"), r_ee_px=a.r_ee,
                              backend=getattr(a, "backend", "klip"))
+    _no_cube_name(a, "--instrument nomic")
+    _subtract(red, a, log)
     _set_threads_per_job(red, a)
     _set_klip_gram(red, a, log)
     objective, sampler = nomic.default_config(red, clean_subtract=not a.no_clean_subtract,
@@ -255,12 +407,16 @@ def _ales_objects(a, log=print):
                             reflib=reflib, reflib_science=getattr(a, "ales_reflib_science", "all") or "all",
                             sdi=bool(getattr(a, "ales_sdi", False)), sdi_cap=int(getattr(a, "ales_sdi_cap", 100) or 100),
                             sdi_lenders=getattr(a, "ales_sdi_lenders", "all") or "all", log=log)
+    _no_cube_name(a, "--instrument ales")
+    _subtract(red, a, log)
     _set_threads_per_job(red, a)
     _set_klip_gram(red, a, log)
+    pm = _line_mask(red, a, log)
     objective, sampler = ales.default_config(red, clean_subtract=not a.no_clean_subtract,
                                              known=[tuple(k) for k in (a.known or [])],
-                                             forbidden_pa=[tuple(b) for b in (getattr(a, "forbidden_pa", None) or [])],
-                                             metric=getattr(a, "metric", "mawet"))
+                                             forbidden_pa=_forbidden(a),
+                                             metric=getattr(a, "metric", "mawet"),
+                                             **({} if pm is None else {"pixel_mask": pm}))
     guard = None
     if not a.fast:
         guard = ales.make_guard(red, max_excluded=None if a.ales_max_excluded < 0 else a.ales_max_excluded,
@@ -300,8 +456,12 @@ def _add_near_args(p):
     gg.add_argument("--wv-index", type=int, default=None, help="channel of a 4-d IFS cube")
     gg.add_argument("--no-tags", action="store_true", help="no data-derived frame-quality tags (no frame selection)")
     gg.add_argument("--forbidden-pa", type=float, nargs=2, action="append", metavar=("PA", "HALFWIDTH"),
-                    help="generic / ales: no injection within HALFWIDTH deg of position angle PA "
-                         "(a known companion's azimuth, a disk); may repeat")
+                    help="near / generic / ales: no injection within HALFWIDTH deg of position angle PA "
+                         "(a known companion's azimuth, a disk, a line through the star); may repeat")
+    gg.add_argument("--mask-line", type=float, nargs=2, action="append", metavar=("PA", "HALFWIDTH"),
+                    help="near / generic / ales: leave the pixels within HALFWIDTH px of the line through the "
+                         "star at position angle PA (both sides) out of the noise apertures; may repeat. Pair "
+                         "it with --forbidden-pa on the same PA and PA+180, so injections stay off it too")
     ga = p.add_argument_group("LBTI/ALES (--instrument ales)")
     ga.add_argument("--ales-dataset", default=None, metavar="NAME",
                     help="a public ALES data set in the release layout, downloaded once into $KLIP_TPE_DATA "
@@ -411,6 +571,23 @@ def _add_near_args(p):
                    help="generic / ales: top of the searched temporal-bin range, frames per bin (default: ales 30, "
                         "generic nframes / 8). A winner sitting on it (distance_to_bounds bin = 0) wants it higher")
     p.add_argument("--known", type=float, nargs=2, action="append", metavar=("RHO", "PA"))
+    p.add_argument("--cube-name", default=None, metavar="NAME",
+                   help="near: the cube read in each night's directory (default AB_cube_skysub_cen_clean.fits, "
+                        "or AB_cube_crop150.fits where only that is there), e.g. a reduction's "
+                        "AB_cube_skysub_cen_clean_abline.fits. Recorded in the run's checkpoint, and kept on "
+                        "resume and extend when not typed")
+    p.add_argument("--subtract-sources", default=None, metavar="FILE",
+                   help="point sources taken out of every frame once, at load: one per line, rho (arcsec), PA "
+                        "(deg) and contrast, each injected with the negative of its contrast by the injection "
+                        "code, so placement, true north, centre, flux unit and throughput are a draw's. Every "
+                        "reduction sees the edited frames, the KLIP-FM model cube does not. Recorded in the "
+                        "run's checkpoint, and kept on resume and extend when not typed")
+    p.add_argument("--subtract-line", default=None, metavar="FILE",
+                   help="a line through the star taken out of every frame once, at load, from a node file: 'pa', "
+                        "'step' (px) and optional 'rho_max' lines, then |s| (arcsec) with the ridge's peak contrast "
+                        "on each half-line. The chain is a source every step px from the first node to rho_max "
+                        "(default the crop edge), each at a(s) step / L, with L the injection PSF's line integral; "
+                        "as --subtract-sources otherwise (klip-tpe fit-chain --line-nodes writes such a file)")
     p.add_argument("--metric", default="mawet", choices=["mawet", "fmmf"],
                    help="detection metric: 'mawet' (default) filters with the injection PSF; "
                         "'fmmf' forward-models that PSF through each configuration's own subtraction "
@@ -578,6 +755,7 @@ def cmd_near(a):
         print(f"run directory: {a.run_dir}")
     _register(a.run_dir)
     _klip_gram_for_run(a)
+    _data_edits_for_run(a)                 # a near command on a check-pointed directory resumes it
     if getattr(a, "from_idl_setup", None):
         # mirror an IDL run: nights, annulus, budget, contrast, validation and TPE settings
         from .idl_compare import matched_run_config
@@ -768,7 +946,7 @@ def _fill_from_registry(a, argv=None) -> None:
               "ales_max_excluded", "ales_prefer_um", "ales_representative", "ales_angle_offset",
               "ales_tag_r_in", "ales_cache", "ales_selection", "ales_reflib", "ales_ref_bin",
               "ales_reflib_science", "ales_sdi", "ales_sdi_cap", "ales_sdi_lenders", "bin_min", "bin_max",
-              "ales_dataset", "ales_nights"):
+              "ales_dataset", "ales_nights", "cube_name", "subtract_sources", "subtract_line", "mask_line"):
         if k in given:                     # the user said so on this command line
             continue
         v = getattr(prev, k, None)
@@ -819,6 +997,7 @@ def cmd_resume(a):
     # next resume inherits an entry that still carries the data root
     _register(a.run_dir, getattr(a, "_record_argv", None))
     _klip_gram_for_run(a)
+    _data_edits_for_run(a)
     red, objective, sampler, guard, thr = _near_objects(a)
     r = Runner.resume(a.run_dir, red, objective, sampler, project=guard, throughput_fn=thr)
     r.callbacks = _callbacks(a)
@@ -829,8 +1008,60 @@ def cmd_extend(a):
     from .runner import Runner
     _resolve_run_dir(a)
     _klip_gram_for_run(a)
+    _data_edits_for_run(a)
     red, objective, sampler, guard, thr = _near_objects(a)
     Runner.extend(a.run_dir, red, objective, sampler, a.n_iter, project=guard, throughput_fn=thr)
+
+
+def cmd_fit_chain(a):
+    """``klip-tpe fit-chain``: the node values of a chain of point sources (a line through the
+    star) fitted to a finished run's final image through its winners (:mod:`klip_tpe.chainfit`)."""
+    from .chainfit import fit_chain, fit_per_night, line_basis, read_chain, read_line_nodes
+    from .runner import Runner
+    try:
+        _fill_from_registry(a, getattr(a, "_argv", None))
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"  (could not read the run record: {exc!r}; carrying on with what was given)")
+    _resolve_run_dir(a)
+    _klip_gram_for_run(a, record=False)    # the run directory is only read
+    _data_edits_for_run(a)
+    if bool(a.chain) == bool(a.line_nodes):
+        raise SystemExit("fit-chain needs one of --chain FILE and --line-nodes FILE")
+    spec = None
+    if a.chain:
+        try:
+            labels, nodes = read_chain(a.chain)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"--chain: {exc}")
+    else:
+        try:
+            spec = read_line_nodes(a.line_nodes)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"--line-nodes: {exc}")
+    red, objective, sampler, guard, thr = _near_objects(a)
+    if spec is not None:
+        first = _first_partition(red)
+        labels, nodes = line_basis(spec, first.model, first.pxscale, tuple(first.data.cube.shape[-2:]),
+                                   fallback=first.fallback)
+    line_pa = a.line_pa if a.line_pa is not None else (spec["pa"] if spec is not None else None)
+    r = Runner.resume(a.run_dir, red, objective, sampler, project=guard, throughput_fn=thr)
+    masks = [(m[0], m[1], m[2] if m[2] > 0 else None) for m in (a.mask or [])]
+    rho_range = tuple(a.rho_range) if getattr(a, "rho_range", None) else None
+    out = a.out or os.path.abspath(a.run_dir).rstrip(os.sep) + "_chainfit"
+    try:
+        fit_chain(r, nodes, labels, line_pa=line_pa, halfwidth_px=a.halfwidth, masks=masks,
+                  mask_known=not a.no_mask_known, candidate_tiers=a.mask_candidates or "", out_dir=out,
+                  line_spec=spec, rho_range=rho_range)
+        if a.per_night:
+            from .injection import read_sources
+            print("  one amplitude per night for the fitted chain:")
+            fit_per_night(r, read_sources(os.path.join(out, "chain_fitted.txt")), line_pa=line_pa,
+                          halfwidth_px=a.halfwidth, masks=masks, mask_known=not a.no_mask_known, out_dir=out,
+                          rho_range=rho_range)
+    except ValueError as exc:
+        raise SystemExit(f"fit-chain: {exc}")
 
 
 def cmd_replay(a):
@@ -1026,6 +1257,38 @@ def _build_parser():
     p.add_argument("--run-dir", required=True)
     p.add_argument("--n-iter", type=int, nargs="+", required=True, help="new total evaluations per annulus")
     p.set_defaults(func=cmd_extend)
+
+    p = sub.add_parser("fit-chain", help="fit the node values of a chain of point sources (a line through the "
+                                         "star) to a finished run's final image, through its winners with KLIP-FM")
+    _add_near_args(p)
+    p.add_argument("--run-dir", default="last", help="the finished run (default: the newest on record)")
+    p.add_argument("--chain", default=None, metavar="FILE",
+                   help="one source per line: rho (arcsec), PA (deg), contrast per unit node value, and a node "
+                        "label; a source shared by two nodes is on two lines. Without labels the whole chain is "
+                        "one node and the fit scales it")
+    p.add_argument("--line-nodes", default=None, metavar="FILE",
+                   help="in place of --chain: a node file (as --subtract-line reads), one basis per node and "
+                        "half-line, piecewise linear and held at the last node to rho_max; the fitted ridge "
+                        "contrasts go to line_fitted.txt, ready for --subtract-line")
+    p.add_argument("--per-night", action="store_true",
+                   help="then one amplitude per night for the fitted chain, its shape held fixed (per_night.json)")
+    p.add_argument("--line-pa", type=float, default=None, metavar="PA",
+                   help="PA of the line the fit region follows (default: the chain's own line)")
+    p.add_argument("--halfwidth", type=float, default=12.0, metavar="PX",
+                   help="fit the pixels within PX of the line (default 12)")
+    p.add_argument("--rho-range", type=float, nargs=2, default=None, metavar=("RMIN", "RMAX"),
+                   help="fit only the pixels RMIN-RMAX arcsec from the star, e.g. 0.95 3.07 (default: the run's "
+                        "annuli)")
+    p.add_argument("--mask", type=float, nargs=3, action="append", metavar=("RHO", "PA", "RADIUS"),
+                   help="leave a circle out of the fit and the noise: RHO (arcsec), PA (deg), RADIUS (px; 0 for "
+                        "1.5 FWHM); may repeat")
+    p.add_argument("--mask-candidates", default="", metavar="TIERS",
+                   help="also leave out the run's candidates (cand/candidates.txt) of these tiers, e.g. A or AB. "
+                        "The line's own peaks can be listed as candidates, so name only tiers that are not it")
+    p.add_argument("--no-mask-known", action="store_true", help="keep the run's known sources in the fit")
+    p.add_argument("--out", default=None, metavar="DIR",
+                   help="output directory (default <run>_chainfit beside the run, which is left as it is)")
+    p.set_defaults(func=cmd_fit_chain)
 
     p = sub.add_parser("replay", help="re-score configurations from an IDL optimize_tpe_results.txt")
     _add_near_args(p)

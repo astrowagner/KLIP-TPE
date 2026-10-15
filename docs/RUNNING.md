@@ -153,6 +153,107 @@ stopped run from that point on and writes the switch, with its time, into `klip_
 in the run directory, so every later resume keeps it.  `--klip-gram target` switches it back.
 The log says when a run uses `zone`.
 
+## Edited frames (`--cube-name`, `--subtract-sources`)
+
+Two options change the frames a run reduces, and the run keeps them.
+
+* `--cube-name NAME` reads another cube in each night's directory, such as a reduction's
+  line-subtracted `AB_cube_skysub_cen_clean_abline.fits`.
+* `--subtract-sources FILE` takes point sources out of every frame once, at load.  The file
+  has one source per line: rho (arcsec), PA (deg) and contrast, with `#` comments.  The
+  contrasts are the sources' own, as they are in the data.  Each source goes in with the
+  negative of its contrast, through the code that injects a draw's sources, so its placement,
+  true north, center, flux unit and throughput are a draw's.  A file whose contrasts are all
+  negative is refused, since a chain written to be injected (`c = -a step / L`) would double
+  the line: flip its signs.
+* `--subtract-line FILE` does the same for a line through the star given by its nodes (below).
+
+Every reduction then sees the edited frames: the clean pass, each draw, the reference ranking,
+validation and param-verify.  The KLIP-FM model cube does not, since it is built from zeros.
+A source of contrast 0 is skipped, so a list of zeros changes nothing, to the bit.  On NEAR
+night 6, a 42-source chain subtracted at load gives the frames that an outside subtraction of
+the same list with the same injection code gives, to the bit.
+
+The log gives the fraction of the sources' flux that left the frames, measured on 32 frames
+per night against the sources injected into zeros.  float32 rounding keeps the part of a source
+that sits below half a unit in the last place of the pixels it lands on, and a warning says so
+when that is more than 0.1 % of the list's flux.  On NEAR nights 4 and 6 a 216-source line of
+contrasts 1e-8 to 3e-7 left the frames to 1.3e-4 or better.
+
+The frames go into the run's configuration (`RunConfig.data_edits`, in `run_setup.json` and
+the checkpoint).  `klip-tpe resume` and `extend` read them from the checkpoint when the
+options are not typed, and refuse a typed value that differs, since a resume cannot change the
+frames its evaluations were made on.  A script that resumes a run with a reducer whose frames
+differ gets the same refusal from the `Runner`.  From Python the options are
+`near.make_reducer(..., cube_name=..., subtract_sources=...)`, or `reducer.subtract_sources(...)`
+on any KLIP reducer before its worker processes start.
+
+`RunConfig.subtract_known` is a different tool.  It adds the negatives to the injections of
+every reduction, for a companion whose contrast was fitted, and the reference ranking does not
+see them.
+
+## A line through the star (`--forbidden-pa`, `--mask-line`, `klip-tpe fit-chain`)
+
+For a feature fixed on the sky along one direction on both sides of the star, such as the NEAR
+line through alpha Cen A along the A-B direction (PA 13 and 193 deg):
+
+* `--forbidden-pa PA HALFWIDTH` keeps the injections out of a wedge, on `near` as on `generic`
+  and `ales`.  Give it for PA and for PA + 180.
+* `--mask-line PA HALFWIDTH` leaves the pixels within HALFWIDTH px of the line out of the noise
+  apertures, on both sides of the star (`metrics.line_mask`).  As for any noise mask, choose it
+  from what is known before the image is looked at.
+* `klip-tpe fit-chain --run-dir RUN --chain FILE` fits the node values of a chain of point
+  sources to a finished run's final image.
+
+The chain file has one source per line, `rho pa contrast node`.  A node's lines are its basis,
+each source at its contrast per unit node value, so a source shared by two nodes is on two
+lines.  Without labels the chain is one node and the fit scales it.  For each node, its sources
+go through every annulus' winner as the KLIP-FM model, and the FM images are stitched with the
+final stitch's weights and tiles.  The fit takes the pixels within `--halfwidth` px of the line
+(default 12) inside the run's annuli, or inside `--rho-range RMIN RMAX` (arcsec) within them,
+weighted by 1/sigma(r)² from the image outside the strip.  `--mask RHO PA RADIUS` circles, the
+run's known sources and, with `--mask-candidates A`, its candidates of that tier are left out.
+A node that puts no signal in the fit region, one beyond the run's annuli say, is refused
+rather than fitted to 0 ± 0.  The errors are scaled by the square root of the pixels per beam.
+It writes, in `<run>_chainfit/` beside the run:
+
+* `chainfit.json`: the node values, their errors and covariance, chi², the masks and the
+  annuli,
+* `chain_fitted.txt`: the fitted chain, ready for `--subtract-sources`,
+* `chainfit_model.fits`, `chainfit_residual.fits`, `chainfit_basis.fits` (one stitched FM
+  image per node) and `chainfit_region.fits`.
+
+It rebuilds the run's reducer, so it takes the run's data options as `resume` does.  It only
+reads the run directory, so a finished run stays as it is, and `--out` puts its output
+elsewhere.  On a run made with the line subtracted, it fits what is left of the line.
+
+A line can also be given by its nodes, in a file `--subtract-line` and `fit-chain --line-nodes`
+read:
+
+```
+pa 13            # PA of the first half-line (deg), the second is pa + 180
+step 0.5         # px between the chain's sources (default 0.5)
+rho_max 3.4      # arcsec, the last value is held out to here (default: the crop's edge)
+# |s| (arcsec)   a, first half-line   a, second half-line
+1.0  1.0e-6  0.5e-6
+1.5  2.0e-6  1.0e-6
+2.0  1.5e-6  1.0e-6
+3.0  3.0e-6  2.5e-6
+```
+
+`a` is the ridge's peak contrast: across the line, the ridge peaks where a point source of
+contrast `a` would.  It is piecewise linear between the nodes and held at the last one.
+The chain has a source every `step` px from the first node to `rho_max`, each at
+`a(s) step / L`, where `L` is the injection PSF's line integral through its center along the
+radial direction, over its central value (`chainfit.psf_line_integral`).  On NEAR, `L` is 7.6 px
+for the n4 library PSF out to 1.05", and beyond it 7.1 and 7.2 px for the B-star templates of
+nights 4 and 6.  The chain takes `L` from the first night's models.
+`fit-chain --line-nodes FILE` makes one basis per node and half-line from the same file (its
+values are not needed) and writes the fitted values as `line_fitted.txt`, ready for
+`--subtract-line`.  `--per-night` then fits one amplitude per night to the fitted chain, its
+shape held fixed (`per_night.json`), which says whether the line follows something that
+changes from night to night.
+
 ## Interruptions
 
 The run checkpoints after every evaluation, every validation trial, every post-annulus hook

@@ -24,8 +24,37 @@ from scipy import ndimage
 
 __all__ = ["radprof", "declip", "gaussian_kernel", "source_xy", "mawet_peak_snr",
            "injection_difference_snr", "aperture_mawet_snr", "clip0", "MawetPeakSNR",
-           "InjectionDifferenceSNR", "Objective", "Source", "nanmedian_even", "pa_wedge_mask",
+           "InjectionDifferenceSNR", "Objective", "Source", "nanmedian_even", "pa_wedge_mask", "line_mask",
            "why_failed", "WHY_GUARD", "WHY_RING", "WHY_NOISE"]
+
+
+def line_mask(shape: Tuple[int, int], lines: Sequence[Tuple[float, float]], angle_convention: str = "pa",
+              r_range: Optional[Tuple[float, float]] = None) -> np.ndarray:
+    """Boolean mask (True = exclude) of straight strips through the star, for ``pixel_mask``.
+
+    ``lines`` = ``[(pa_deg, half_width_px), ...]``.  A strip holds the pixels within
+    ``half_width_px`` of the line through the star at position angle ``pa_deg``, on both sides
+    of the star (``pa_deg + 180`` is the same line).  Built for a feature fixed on the sky
+    along one direction, one beam wide -- the line through alpha Cen A along the A-B
+    direction in the NEAR data -- which a wedge (:func:`pa_wedge_mask`) masks too widely far
+    out and too narrowly close in.  The caution of :func:`pa_wedge_mask` applies: choose the
+    strip from what is known before the image is looked at, and keep injections off it too
+    (:class:`~klip_tpe.positions.PositionSampler`'s ``forbidden_pa``).
+
+    ``r_range`` (pixels) limits the strips radially.
+    """
+    ny, nx = int(shape[0]), int(shape[1])
+    cx, cy = star_center((ny, nx))
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    dx, dy = xx - cx, yy - cy
+    out = np.zeros((ny, nx), bool)
+    for pa, hw in lines:
+        phi = np.deg2rad(float(pa) + (90.0 if angle_convention == "pa" else 0.0))   # as source_xy
+        out |= np.abs(dx * np.sin(phi) - dy * np.cos(phi)) <= float(hw)
+    if r_range is not None:
+        rr = np.hypot(dx, dy)
+        out &= (rr >= float(r_range[0])) & (rr <= float(r_range[1]))
+    return out
 
 
 def pa_wedge_mask(shape: Tuple[int, int], bands: Sequence[Tuple[float, float]],
