@@ -24,7 +24,33 @@ from scipy import ndimage
 from .metrics import Source
 
 __all__ = ["InjectionModel", "GaussianPSF", "TemplatePSF", "AiryPSF", "FramePSF", "LibraryPSF", "inject_sources",
-           "inject_frames", "shift_bilinear", "add_stamp", "takes_azimuth"]
+           "inject_frames", "shift_bilinear", "add_stamp", "takes_azimuth", "read_sources"]
+
+
+def read_sources(path: str, columns: int = 3):
+    """Point sources from a text file, one per line: ``rho pa contrast`` with ``rho`` in
+    arcsec, ``pa`` in degrees East of North and ``contrast`` in the injection model's flux
+    unit (for NEAR, alpha Cen A).  Whitespace or commas separate the values, ``#`` starts a
+    comment, and blank lines are skipped.  Columns after the third are ignored here
+    (:func:`klip_tpe.chainfit.read_chain` reads a node label from the fourth).  Returns a
+    list of :class:`~klip_tpe.metrics.Source`."""
+    out = []
+    with open(path) as f:
+        for i, line in enumerate(f, 1):
+            s = line.split("#", 1)[0].replace(",", " ").split()
+            if not s:
+                continue
+            if len(s) < columns:
+                raise ValueError(f"{path}:{i}: need rho, pa and contrast, got {line.strip()!r}")
+            try:
+                rho, pa, c = (float(v) for v in s[:3])
+            except ValueError:
+                raise ValueError(f"{path}:{i}: not three numbers: {line.strip()!r}") from None
+            if not (np.isfinite(rho) and np.isfinite(pa) and np.isfinite(c)) or rho < 0:
+                raise ValueError(f"{path}:{i}: rho must be finite and >= 0, pa and contrast finite: "
+                                 f"{line.strip()!r}")
+            out.append(Source(rho, pa, c))
+    return out
 
 
 def takes_azimuth(model) -> bool:
@@ -415,12 +441,19 @@ class LibraryPSF(InjectionModel):
 
 
 def cube_peak(cube: np.ndarray) -> float:
-    """The brightest pixel of ``cube`` as the float32 cube holds it, from a strided
-    subsample of about two million pixels (what :func:`_check_float32_headroom` reads)."""
+    """The level of the brightest pixels of ``cube`` as the float32 cube holds them: the
+    99.9th percentile of ``|pixel|`` in a strided subsample of about two million pixels (what
+    :func:`_check_float32_headroom` reads).  A percentile rather than the maximum, so that one
+    hot pixel does not set the level: on NEAR night 6 the sample's maximum, one pixel at 1.9e3
+    counts 29 px out, made the check warn that a 1e-6 source at 0.5" would be lost, where the
+    pixels it lands on are of order 10 counts and the subtraction of such a chain was exact to
+    3e-7 of its flux.  The percentile there is 67 counts."""
     if not cube.size:
         return float("nan")
     s = max(1, int(cube.size // 2_000_000))
-    return float(np.nanmax(np.abs(np.asarray(cube.reshape(-1)[::s], np.float32))))
+    v = np.abs(np.asarray(cube.reshape(-1)[::s], np.float32))
+    v = v[np.isfinite(v)]
+    return float(np.percentile(v, 99.9)) if v.size else float("nan")
 
 
 def _check_float32_headroom(cube: np.ndarray, sources: Sequence[Source], model: InjectionModel,
@@ -464,7 +497,7 @@ def _check_float32_headroom(cube: np.ndarray, sources: Sequence[Source], model: 
         if amp < 32 * quantum:
             warnings.warn(
                 f"injection at rho={s.rho:.3f}\" contrast={s.contrast:.3e} peaks at "
-                f"{amp:.3e} counts, within float32 rounding of a cube whose pixels reach "
+                f"{amp:.3e} counts, within float32 rounding of a cube whose brightest pixels reach "
                 f"{peak:.3e}: most of its flux will be lost and the recovered S/N will not "
                 f"scale with the contrast.  flux_unit is {m.flux_unit:.4g} -- if that is a "
                 f"normalised template's own sum rather than the star's flux in the science "

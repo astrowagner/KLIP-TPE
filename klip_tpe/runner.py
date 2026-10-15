@@ -331,6 +331,14 @@ class RunConfig:
     #: rings and the score.  Only the positive injections are ever scored; the known-source
     #: exclusions still apply, to the residual.  Empty (the default) changes nothing.
     subtract_known: List[Tuple[float, float, float]] = field(default_factory=list)
+    #: What the frames are, when they are not the instrument's default: ``cube_name`` (the
+    #: cube file read for each night) and ``subtracted_sources`` (``[[rho, pa, contrast],
+    #: ...]`` taken out of every frame once, at load, :meth:`KLIPReducer.subtract_sources`),
+    #: as the reducer reports them in its ``data_edits``.  A new run records them here, so
+    #: the checkpoint holds them, and a resume refuses a reducer whose frames differ.  The
+    #: command line fills the reducer from here on ``klip-tpe resume`` and ``extend`` when
+    #: ``--cube-name`` / ``--subtract-sources`` are not typed.  Empty: the default frames.
+    data_edits: Dict[str, Any] = field(default_factory=dict)
 
     def per_annulus(self, val, ia: int) -> int:
         if isinstance(val, (list, tuple, np.ndarray)):
@@ -662,6 +670,32 @@ class RunCallback:
     def on_stitch(self, runner, kind: str, files: Dict[str, str]) -> None: ...
     def on_verify(self, runner, annulus: int, kind: str, result: Any) -> None: ...
     def on_finish(self, runner) -> None: ...
+
+
+def _core_edits(d: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The part of a ``data_edits`` record that says what the frames are, for comparison:
+    the cube name and the subtracted sources (a file name is only where they came from)."""
+    d = dict(d or {})
+    out: Dict[str, Any] = {}
+    if d.get("cube_name"):
+        out["cube_name"] = str(d["cube_name"])
+    src = [[float(v) for v in s] for s in (d.get("subtracted_sources") or [])]
+    if src:
+        out["subtracted_sources"] = src
+    return out
+
+
+def _describe_edits(d: Dict[str, Any]) -> str:
+    if not d:
+        return "the default frames"
+    bits = []
+    if d.get("cube_name"):
+        bits.append(f"cube {d['cube_name']}")
+    src = d.get("subtracted_sources") or []
+    if src:
+        c = [s[2] for s in src]
+        bits.append(f"{len(src)} subtracted source(s), contrast {min(c):.3g} to {max(c):.3g}")
+    return ", ".join(bits)
 
 
 class Runner:
@@ -3670,6 +3704,8 @@ class Runner:
 
     def run(self) -> List[AnnulusResult]:
         self._auto_resume()            # any run is resumable, however it was constructed
+        if not self._resumed:
+            self._check_data_edits()   # a resume checked them as it adopted the checkpoint
         self._register()
         self._start_workers()          # before the heartbeat thread: the fork copies one thread
         self.hb.start()                # from here on the directory says whether this is alive
@@ -4182,6 +4218,31 @@ class Runner:
         self.log(f"resumed {self.run_dir}: annulus {self.ia + 1}, "
                  f"{0 if self.history is None else len(self.history)} evaluations, "
                  f"contrast {self.contrast:.3e}")
+        self._check_data_edits()
+
+    def _check_data_edits(self) -> None:
+        """The frames this runner reduces, against the run's record of them
+        (:attr:`RunConfig.data_edits`).  A new run records what its reducer reports, so the
+        checkpoint holds it.  A resumed run has to reduce the same frames its evaluations
+        were made on, and a reducer whose ``data_edits`` differ is refused."""
+        have = _core_edits(getattr(self.reducer, "data_edits", None))
+        want = _core_edits(self.cfg.data_edits)
+        if not self._resumed:
+            if want and want != have:
+                raise ValueError(f"RunConfig.data_edits asks for {_describe_edits(want)}, and the reducer holds "
+                                 f"{_describe_edits(have)}: build the reducer with them "
+                                 f"(near.make_reducer(cube_name=..., subtract_sources=...) or "
+                                 f"reducer.subtract_sources(...))")
+            if have:
+                self.cfg.data_edits = dict(getattr(self.reducer, "data_edits", None) or {})
+                self.log(f"  data: {_describe_edits(have)} (recorded in the run's configuration)")
+            return
+        if want != have:
+            raise ValueError(f"this run's evaluations were made on {_describe_edits(want)}, and the reducer here "
+                             f"holds {_describe_edits(have)}.  A resume cannot change the frames.  Build the "
+                             f"reducer as the run was started (klip-tpe resume and extend read --cube-name and "
+                             f"--subtract-sources from the checkpoint when they are not typed), or start a new "
+                             f"run directory.")
 
     def _auto_resume(self) -> None:
         """Continue a check-pointed run in this directory, unless told not to.

@@ -1,5 +1,64 @@
 # Changelog
 
+## Unreleased — 2026-10-15d (edited frames, another cube or point sources taken out at load, a line through the star, the chain fit)
+
+From the NEAR2 session's note of 2026-10-15 on the alpha Cen A-B line (PA 13/193 deg) in
+run_20261013_194614's final image.
+
+- **`KLIPReducer.subtract_sources` / `PartitionedReducer.subtract_sources`** take point sources
+  out of `data.cube` once, at load, through `inject_frames` with the contrasts negated, so the
+  placement, true north, center, flux unit and throughput are a draw's.  Every reduction sees
+  the edited frames (the clean pass, the draws, `_clean_bins`, validation, param-verify) and the
+  KLIP-FM model cube does not.  Contrasts of 0 are skipped, so a list of zeros changes nothing
+  to the bit.  The edited frames are a copy, and a partitioned reducer refuses once its worker
+  processes run.  The edit is in the reducer's `data_edits` and `describe()`.  The fraction of
+  the sources' flux that left the frames is measured on 32 frames against the sources in zeros
+  (`subtracted_kept`, in the log), and a loss to float32 rounding above 0.1 % warns.  This
+  replaces the per-source headroom check there, which warned for the faintest sources of a
+  chain whose contrasts pass through 0, where they carry almost none of the chain's flux.  On
+  NEAR nights 4 and 6 a 216-source line left the frames to 1.3e-4 or better.
+  `injection.read_sources` reads `rho pa contrast` files.
+- **`--cube-name NAME`** (near: the cube in each night's directory) and **`--subtract-sources
+  FILE`** (near, generic, nomic, ales) on `near`, `generic`, `resume`, `extend`, `replay` and
+  `fit-chain`; `near.make_reducer(cube_name=, subtract_sources=)`.
+- **`RunConfig.data_edits`**: a new run records the reducer's `data_edits` (cube name,
+  subtracted sources, the file), so the checkpoint holds them.  `resume` and `extend` take them
+  from the checkpoint when the options are not typed and refuse typed values that differ, and
+  the `Runner` refuses a resume whose reducer reduces other frames.
+- **`--forbidden-pa` on `near`** (`near.default_config(forbidden_pa=, pixel_mask=)`), and
+  **`--mask-line PA HALFWIDTH`** (near, generic, ales): the strip about a line through the star
+  left out of the noise apertures, `metrics.line_mask`.
+- **`klip-tpe fit-chain`** (`klip_tpe.chainfit`): a chain's node values fitted to a finished
+  run's final image.  Each node's basis goes through every annulus' winner as the KLIP-FM model,
+  the FM images are stitched with the final stitch's weights, and the fit is noise-weighted in a
+  strip about the line, with masks, the run's known sources and chosen candidate tiers left out,
+  inside the run's annuli or `--rho-range RMIN RMAX`.  A node with no signal in that region is
+  refused rather than fitted to 0 +- 0.  It writes the values with errors, the fitted chain for
+  `--subtract-sources`, and the model, residual, basis and region images, beside the run
+  (`<run>_chainfit/`), which it only reads.  On synthetic data with a two-node line it recovers
+  0.991 +- 0.023 and 0.605 +- 0.023 for 1.0 and 0.6, and the 8 values of a four-node line on
+  both half-lines come back within 0.6 sigma.  `--per-night` fits one amplitude per night to the
+  fitted chain (`fit_per_night`).
+- **A line by its nodes** (`read_line_nodes`, `line_chain`, `line_basis`,
+  `psf_line_integral`): the PA, the step, `rho_max` and the ridge's peak contrast at each node on
+  both half-lines, piecewise linear and held at the last node.  The chain puts a source every
+  `step` px at `a(s) step / L`, with `L` the injection PSF's line integral along the radius
+  (7.6 px for NEAR's n4 library PSF, and 7.1 and 7.2 px for the B templates of nights 4 and 6
+  beyond 1.05").
+  `--subtract-line FILE` subtracts it at load, `fit-chain --line-nodes FILE` fits the node values
+  and writes `line_fitted.txt`.
+- **`--subtract-sources` refuses a file whose contrasts are all negative**: it takes the
+  sources' own contrasts, and a chain written to be injected (`c = -a step / L`) would double
+  the line.
+- **The float32 headroom check reads the 99.9th percentile of the bright pixels** in place of
+  the brightest one (`injection.cube_peak`).  On NEAR night 6 one pixel at 1.9e3 counts, 29 px
+  out, made it warn that 1e-6 sources at 0.5" would be lost, where they land on pixels of order
+  10 counts.  The new level there is 67 counts.
+  It judges a negative contrast by its size, as before, and only ever warns.
+- Tests: `test_subtract_sources.py`, `test_near_data_edits.py` (one slow, the command line from
+  `near` to `resume`), `test_chainfit.py` (one slow, `klip-tpe fit-chain` on generic cubes),
+  `test_line_model.py`.
+
 ## Unreleased — 2026-10-15c (ALES over several nights: a data set in the release layout, the MWC 758 data of tutorial 7)
 
 - **`ales.load_release`** reads an ALES data set in the release layout as one partition per

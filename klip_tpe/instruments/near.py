@@ -246,11 +246,17 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
                  fast: bool = False, n_min_ref: int = 10, datasets: Optional[Dict[int, Dataset]] = None,
                  log: Callable[[str], None] = print, use_rdi: bool = False, rdi_mode: str = "ardi",
                  do_destripe: bool = False, mask_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
-                 backend: str = "klip") -> PartitionedReducer:
+                 backend: str = "klip", cube_name: Optional[str] = None,
+                 subtract_sources: Optional[Sequence[Any]] = None) -> PartitionedReducer:
     """Build the per-night :class:`PartitionedReducer` for the NEAR campaign.
     ``backend``: ``'klip'`` (built-in) | ``'pyklip'`` | ``'vip'`` PSF subtraction.
     ``use_rdi``/``rdi_mode`` use ``n<seq>/AB_cube_refstar_clean.fits`` when present
-    (nights without one fall back to ADI); ``mask_fn`` e.g. :func:`legacy_masks`."""
+    (nights without one fall back to ADI); ``mask_fn`` e.g. :func:`legacy_masks`.
+    ``cube_name``: the cube file read in each night's directory (:func:`load_night`), e.g. a
+    reduction's line-subtracted ``AB_cube_skysub_cen_clean_abline.fits``.
+    ``subtract_sources``: point sources ``(rho_arcsec, pa_deg, contrast)`` taken out of every
+    night's frames once, at load (:meth:`~klip_tpe.reducer.KLIPReducer.subtract_sources`),
+    with each night's own injection model.  Both go into the reducer's ``data_edits``."""
     lib = None
     if use_library:
         try:
@@ -259,7 +265,8 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
             log(f"  psflib unavailable ({exc!r}); using the B template + analytic throughput")
     reducers = {}
     for seq in nights:
-        ds = datasets[seq] if datasets and seq in datasets else load_night(root, seq, frames=frames)
+        ds = datasets[seq] if datasets and seq in datasets else load_night(root, seq, frames=frames,
+                                                                             cube_name=cube_name)
         psf = ds.meta.get("psf_template")
         fu = template_flux_unit(psf) if psf is not None else 1.0
         thru = lib.throughput if lib is not None else analytic_throughput
@@ -280,6 +287,22 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
             f"texp {ds.texp:.0f} s, tags {'yes' if ds.tags else 'no'}, ref-star frames {nref}")
     pr = PartitionedReducer(reducers, weighting=weighting, max_workers=max_workers, pool=pool, log=log)
     pr.name = "near"
+    if cube_name:
+        pr.data_edits = dict(getattr(pr, "data_edits", None) or {}, cube_name=str(cube_name))
+        for r in reducers.values():
+            r.data_edits = dict(getattr(r, "data_edits", None) or {}, cube_name=str(cube_name))
+        log(f"  cube: {cube_name} in every night's directory")
+    if subtract_sources:
+        src = list(subtract_sources)
+        n = pr.subtract_sources(src)
+        c = [float(s[2] if not hasattr(s, "contrast") else s.contrast) for s in src]
+        r_ = [float(s[0] if not hasattr(s, "rho") else s.rho) for s in src]
+        log(f"  subtracted {n} source(s) from every night's frames, once, at load: rho {min(r_):.3f}-"
+            f"{max(r_):.3f}\", contrast {min(c):.3g} to {max(c):.3g}")
+        from ..reducer import _taken_text
+        took = _taken_text(pr)
+        if took:
+            log(f"    the fraction of their flux that left the frames, on a sample of frames: {took}")
     return pr
 
 
@@ -385,17 +408,26 @@ def make_guard(reducer: PartitionedReducer, n_min_ref: int = 10, ref_frac: float
 
 
 def default_config(reducer: PartitionedReducer, clean_subtract: bool = True, known=(),
-                   measured_kernel: bool = True, metric: str = "mawet"):
+                   measured_kernel: bool = True, metric: str = "mawet", forbidden_pa=(),
+                   pixel_mask: Optional[np.ndarray] = None):
     """Objective + position sampler with the production metric settings.  (The two-source
     area-midpoint rule lives in ``RunConfig.pair_area_midpoint``, applied by the Runner.)
-    ``metric='fmmf'`` swaps the matched filter for the forward-modelled one."""
+    ``metric='fmmf'`` swaps the matched filter for the forward-modelled one.
+
+    ``forbidden_pa`` = ``[(centre_pa_deg, half_width_deg), ...]``: wedges the injections keep
+    out of.  ``pixel_mask`` (True = exclude, the cropped frame's shape) keeps pixels out of
+    the noise apertures, e.g. :func:`klip_tpe.metrics.line_mask` for the A-B line.  Use the
+    two together, as :func:`klip_tpe.instruments.generic.default_config` explains."""
     kfn = reducer.matched_filter_kernel if measured_kernel else None
     kw = dict(pxscale=NEAR.pxscale, fwhm=NEAR.fwhm_px, kernel_fn=kfn, known=list(known))
+    if pixel_mask is not None:
+        kw["pixel_mask"] = np.asarray(pixel_mask, bool)
     if str(metric).lower() == "fmmf":
         from ..fmmf import FMMFSNR
         metric = FMMFSNR(**kw)
     else:
         metric = MawetPeakSNR(**kw)
     objective = Objective(metric, clean_subtract=clean_subtract)
-    sampler = PositionSampler(fwhm_as=NEAR.fwhm_px * NEAR.pxscale, known=list(known))
+    sampler = PositionSampler(fwhm_as=NEAR.fwhm_px * NEAR.pxscale, known=list(known),
+                              forbidden_pa=[tuple(float(v) for v in b) for b in forbidden_pa])
     return objective, sampler
