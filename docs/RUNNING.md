@@ -281,6 +281,9 @@ reduction per annulus and kind instead of a new search.
   and `rereduce.json`, the record of the frames, the weights and the injections.
 * The run directory is only read.  An output that already holds a re-reduction is refused
   unless `--overwrite` is given.
+* On the run's own frames it verifies a finished run again with the current verify.  Since
+  2026-10-20 each injection's noise ring leaves out the other injections, and the report says
+  so above its calibration block.
 * `--known RHO PA` puts a position into the verify as a candidate, a planet added with
   `--inject-sources` say, and keeps it out of the noise apertures.
 

@@ -926,6 +926,10 @@ class Runner:
         except Exception:
             return []
 
+    def _excl_fwhm(self) -> float:
+        """The metric's keep-out around a source (FWHM), which the verify's noise rings use too."""
+        return float(getattr(getattr(self.objective, "metric", None), "excl_fwhm", 1.5) or 1.5)
+
     def _nsrc_asked(self, ia: int) -> Optional[int]:
         """The count ``RunConfig.n_sources`` asks for in annulus ``ia``, or None for the rule."""
         ns = self.cfg.n_sources
@@ -3506,7 +3510,7 @@ class Runner:
             rows, maps = verify_candidates(stack, ids, list(known), self.fwhm, self.pxscale, known=known,
                                            injected=(istack, src), n_boot=int(self.cfg.verify_n_boot), rng=rng,
                                            weights=ev_c.weights, angle_convention=self.reducer.angle_convention,
-                                           return_maps=True)
+                                           excl_fwhm=self._excl_fwhm(), return_maps=True)
             path = os.path.join(d, "verify_report.txt")
             write_verify_table(path, rows, maps.get("limits"), header={"run": os.path.abspath(self.run_dir)})
             self._durable_later(path)              # the hook's checkpoint records it as done
@@ -3986,7 +3990,8 @@ class Runner:
         rows, maps = verify_candidates(stack, stitched.get("night_ids"), known, self.fwhm, self.pxscale, known=known,
                                        injected=None if (istack is None or not allsrc) else (istack, allsrc),
                                        n_boot=int(self.cfg.verify_n_boot), rng=rng,
-                                       angle_convention=self.reducer.angle_convention, return_maps=True)
+                                       angle_convention=self.reducer.angle_convention,
+                                       excl_fwhm=self._excl_fwhm(), return_maps=True)
         path = os.path.join(self.run_dir, "stitched_verify_report.txt")
         write_verify_table(path, rows, maps.get("limits"), header=dict({"run": os.path.abspath(self.run_dir)},
                                                                        **(header or {})))
