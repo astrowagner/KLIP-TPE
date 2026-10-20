@@ -32,7 +32,7 @@ from .klip import (BLOCK_BYTES, KLIPParams, _highpass_frames, arcdist_deg, bin_b
 from .metrics import Source
 from .space import Config
 
-__all__ = ["reducer_class", "set_klip_gram", "KLIP_GRAM_MODES", "ReductionRequest", "ReductionResult", "Reducer", "Dataset", "KLIPReducer",
+__all__ = ["reducer_class", "set_klip_gram", "set_zone_center", "KLIP_GRAM_MODES", "ReductionRequest", "ReductionResult", "Reducer", "Dataset", "KLIPReducer",
            "PartitionedReducer", "EvalImages"]
 
 
@@ -275,6 +275,18 @@ def _zone_ext(p: Dict[str, Any]) -> Tuple[float, float]:
     return (max(float(p.get("zone_in", 0.0) or 0.0), 0.0), max(float(p.get("zone_out", 0.0) or 0.0), 0.0))
 
 
+def _zone_center(p: Dict[str, Any]) -> Optional[Tuple[float, float]]:
+    """``zone_center`` of a request's parameters as ``(x, y)`` px, or None: the zones are then
+    drawn about ``(nx / 2, ny / 2)`` (:func:`klip_tpe.klip.zone_indices`)."""
+    c = p.get("zone_center")
+    if c is None:
+        return None
+    c = [float(v) for v in c]
+    if len(c) != 2:
+        raise ValueError(f"zone_center is (x, y), not {p.get('zone_center')!r}")
+    return (c[0], c[1])
+
+
 class KLIPReducer(Reducer):
     """Reference annular KLIP/ADI reducer.
 
@@ -308,6 +320,13 @@ class KLIPReducer(Reducer):
         post_hp (bool, default True: the KLIP residuals are high-passed again, with the same
             box, before they are derotated, as ``reduce_near_2`` does.  False derotates them
             as they come out of KLIP, as the ALES reduction's ADI images of MWC 758 do.)
+        zone_center ((x, y) px, default None: the zones' radii and sector angles are measured
+            from ``(nx / 2, ny / 2)``, half a pixel past the star of an even-sized frame, the
+            NEAR ``getzone``.  The 2015 ``getzone`` the ALES paper reduction used measures from
+            ``(nx / 2 - 1, ny / 2 - 1)``.  :func:`set_zone_center` sets it on every reducer.)
+        zone_angles ('ccw' | 'getzone2015', default 'ccw': sector angles CCW from +x in
+            [0, 360).  'getzone2015' measures them as the 2015 ``getzone`` does, atan2 + 180 in
+            (0, 360], so with its centre the sectors are its pixels, in its order.)
 
     The chain: frame selection -> inject (the kept frames) -> high-pass -> [destripe 90, 0]
     -> angle-aware binning -> annular KLIP [RDI/ARDI basis, KLIP-FM] -> [high-pass
@@ -1283,7 +1302,8 @@ class KLIPReducer(Reducer):
                         temp_mean=bool(p["temp_mean"]), k_scan=bool(req.k_scan),
                         threads=int(max(getattr(req, "threads", 1), 1)),
                         ref_lib=ref_lib, ref_keep=ref_keep, gram=str(p.get("klip_gram", "target") or "target"),
-                        arc_radii=ann if widened else None)
+                        arc_radii=ann if widened else None, zone_center=_zone_center(p),
+                        zone_angles=str(p.get("zone_angles") or "ccw"))
         if widened:
             meta["annulus"] = [ann[0], ann[1]]
         fm_img = nosub = cadi = None
@@ -1925,6 +1945,38 @@ class PartitionedReducer(Reducer):
 
 
 KLIP_GRAM_MODES = ("target", "zone")
+
+
+def set_zone_center(reducer: Reducer, center: Optional[Sequence[float]], angles: Optional[str] = None) -> List[Any]:
+    """Set ``zone_center`` (``(x, y)`` px, the point the KLIP zones' radii and sector angles are
+    measured from) and, when given, ``zone_angles`` (how those angles are counted:
+    ``'getzone2015'`` as the 2015 IDL ``getzone``) as the defaults of every KLIP reducer in
+    ``reducer``, a :class:`PartitionedReducer`'s partitions or a single one; None goes back to the
+    default ``(nx / 2, ny / 2)`` and ``'ccw'``.  The ALES paper reduction of MWC 758 is
+    ``set_zone_center(red, (30, 30), "getzone2015")``.  Returns the partitions (or ``[None]``) it
+    was set on.  Set it before the worker pool starts: the workers keep the reducers they were
+    forked with."""
+    from .klip import ZONE_ANGLES
+    c = None if center is None else _zone_center({"zone_center": center})
+    if angles is not None and angles not in ZONE_ANGLES:
+        raise ValueError(f"zone angles are one of {ZONE_ANGLES}, not {angles!r}")
+    subs = getattr(reducer, "reducers", None)
+    items = list(subs.items()) if isinstance(subs, dict) and subs else [(None, reducer)]
+    done = []
+    for pid, r in items:
+        d = getattr(r, "defaults", None)
+        if isinstance(d, dict):
+            if c is None:
+                d.pop("zone_center", None)
+                d.pop("zone_angles", None)
+            else:
+                d["zone_center"] = c
+                if angles is None or angles == "ccw":
+                    d.pop("zone_angles", None)
+                else:
+                    d["zone_angles"] = angles
+            done.append(pid)
+    return done
 
 
 def set_klip_gram(reducer: Reducer, mode: str) -> List[Any]:

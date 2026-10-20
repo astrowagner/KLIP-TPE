@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased — 2026-10-20 (the ALES paper's processing geometry, held)
+
+The c-tuned two-night run searched the KLIP zone's reach beyond the annulus and the number of
+sectors, and its winner processed 11.5-27 spaxels in one sector, where the paper processes one
+5-27 spaxel annulus in six.
+
+- **`make_space(..., pin={name: value})`** (near, generic and ales): reduction parameters held
+  at a value for every evaluation, out of the search (`SearchSpace.fixed`).
+- **`zone_center`** and **`zone_angles`** (KLIPReducer parameters; `set_zone_center(red, (x, y),
+  angles)` sets them on every reducer): the point the zones are drawn about, by default
+  `(nx / 2, ny / 2)`, and how sector angles are counted, `'ccw'` from +x by default or
+  `'getzone2015'`, atan2 + 180 as the 2015 IDL `getzone` counts them.  `KLIPParams.zone_angles`,
+  `klip.zone_indices(..., angles=)`.  With `(30, 30)` and `'getzone2015'` the zones of the
+  MWC 758 ALES reduction are its pixels, sector by sector.  Unset, every reduction is as it was.
+- **`scripts/run_mwc758_ales_clike.py --geometry paper`**, now the default: the zone held at the
+  paper's 5-27 spaxels about (30, 30) in six sectors, the injections and the score still in the
+  0.4-0.8" annulus; `--free-sectors` searches the sectors; `--geometry searched` is the run of
+  2026-10-18.  A run is not resumed with another zone centre.
+- **`scripts/compare_mwc758_fig1b_clike.py`**: a finished run's winner next to Fig. 1b's source.
+
 ## Unreleased — 2026-10-20 (the verify measures each injection without the others)
 
 The NEAR2 session's note of 2026-10-20 found that the final verify counted the other injected

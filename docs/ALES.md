@@ -314,8 +314,29 @@ be searched, which the ALES reduction of MWC 758 in Wagner et al. (2023) needs:
 The paper's ADI step for 2019 Nov 14 in these terms, in the 0.4-0.8" annulus: `bin` 15,
 `filter` 11, `k_klip` 15, `n_ang` 6, `angsep` 0.01, `anglemax` at its top, no frame cuts,
 `zone_in` 6.6, `zone_out` 3.8 (one 5-27 spaxel zone) and `post_hp` 0, on the 3.4-4.15 um
-groups.  It still differs from the paper in two ways: KLIP runs on group means of 2 to 6
+groups.
+
+To keep the paper's processing geometry rather than search it, hold the zone and its sectors
+and draw them as its IDL did:
+
+```python
+from klip_tpe.reducer import set_zone_center
+E0, E1 = 0.4 / red.pxscale, 0.8 / red.pxscale       # the annulus the run scores, 11.6-23.2 spaxels
+set_zone_center(red, (30, 30), "getzone2015")       # the 2015 getzone: about (sc/2 - 1, sc/2 - 1)
+space = ales.make_space(red, search_post_hp=True,
+                        pin={"zone_in": E0 - 5.0, "zone_out": 27.0 - E1, "n_ang": 6})
+```
+
+`pin` takes those parameters out of the search and gives every evaluation the values given.
+klip-tpe draws its zones about `(nx / 2, ny / 2)` = (31, 31) on these 62-spaxel frames, and
+counts sector angles from +x; the 2015 `getzone` of the paper's reduction draws them about
+(30, 30) and counts from -x (atan2 + 180).  The star is at (30.5, 30.5) in both, and so is the
+centre of the derotation.  With `set_zone_center(red, (30, 30), "getzone2015")` the 5-27 spaxel
+zone holds the paper's 2220 spaxels and each of the six sectors the paper's own.
+
+It still differs from the paper in two ways: KLIP runs on group means of 2 to 6
 channels rather than on each channel, and the paper's ASDI images follow the ADI step with a
 separate SDI step, where `sdi=True` is one KLIP step with an SDI pool (section 4).
-`scripts/run_mwc758_ales_clike.py` is tutorial 7's search with c's spectrum, these
-dimensions and that configuration as its seed.
+`scripts/run_mwc758_ales_clike.py` is tutorial 7's search with c's spectrum and that
+configuration as its seed.  By default it holds the paper's geometry (`--geometry paper`);
+`--geometry searched` searches `zone_in`, `zone_out` and `n_ang` instead.

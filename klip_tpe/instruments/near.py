@@ -329,7 +329,8 @@ def make_space(reducer: PartitionedReducer, per_night: bool = True, k_klip_max: 
                anglemax_hi: Optional[float] = None, defaults: Optional[Dict[str, Any]] = None,
                width_range: Optional[Tuple[float, float]] = None, search_k: bool = True,
                max_drop: int = 2, bin_range: Optional[Tuple[int, int]] = None,
-               zone_range: Optional[Tuple[float, float]] = None, search_post_hp: bool = False) -> SearchSpace:
+               zone_range: Optional[Tuple[float, float]] = None, search_post_hp: bool = False,
+               pin: Optional[Dict[str, Any]] = None) -> SearchSpace:
     """The production search space: 9 parameters per night (+ drop1/drop2).
 
     ``width_range=(w0, w1)`` adds the searched global integer ``width`` dim of the
@@ -347,7 +348,11 @@ def make_space(reducer: PartitionedReducer, per_night: bool = True, k_klip_max: 
     reaches inside and outside the annulus the run scores (0 = the annulus; the reducer's
     ``outrad_cap`` still bounds the outer edge), and ``search_post_hp=True`` adds the 0/1
     ``post_hp``, whether the residuals are high-passed again before derotation (1, the
-    reference).  Their defaults come from ``defaults`` (else 0, 0 and 1)."""
+    reference).  Their defaults come from ``defaults`` (else 0, 0 and 1).
+
+    ``pin={name: value}`` holds reduction parameters at a value for every evaluation: a
+    parameter of the block is taken out of the search, and any other name (``zone_in`` without
+    ``zone_range``, say) is passed to the reducer as given (``SearchSpace.fixed``)."""
     d = dict(production_defaults)
     d.update(defaults or {})
     if k_klip_max is None:
@@ -409,6 +414,11 @@ def make_space(reducer: PartitionedReducer, per_night: bool = True, k_klip_max: 
         if float(b.hi) <= float(b.lo):
             fixed[b.name] = b.default if b.default is not None else b.lo
             pin_ids.add(id(b))
+    for name, v in (pin or {}).items():
+        for b in block:
+            if b.name == name:
+                pin_ids.add(id(b))
+        fixed[name] = v
     block = [b for b in block if id(b) not in pin_ids]
     sp = SearchSpace(fixed=fixed)
     if per_night and len(parts) > 1:
