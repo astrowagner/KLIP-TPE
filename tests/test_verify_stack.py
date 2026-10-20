@@ -1,5 +1,6 @@
 """Synthetic-image tests for the verification stack (verify / candidates / param_verify)."""
 import os
+import warnings
 
 import numpy as np
 import pytest
@@ -113,6 +114,63 @@ def test_verify_empty_field_and_report(tmp_path):
     assert p.exists() and "TABLE 1" in txt and "decision" in txt
     V.write_curve_table(str(tmp_path / "verify_curve.txt"), lim, "test")
     assert (tmp_path / "verify_curve.txt").exists()
+    assert "leaves out the other sources and the known ones (1.5 FWHM keep-out)" in txt
+
+
+def _odd_noise(nn, seed, n):
+    """``_noise_stack`` on an odd ``n x n`` frame, so the star sits on a pixel centre and a
+    source at an integer offset sits on a pixel."""
+    from scipy.ndimage import gaussian_filter
+    rng = np.random.default_rng(seed)
+    st = np.stack([gaussian_filter(f, FWHM / 2.3548, mode="wrap") for f in rng.normal(0, 1.0, (nn, n, n))])
+    st /= st.std(axis=(1, 2), keepdims=True)
+    c = (n - 1) / 2
+    yy, xx = np.mgrid[0:n, 0:n]
+    st[:, np.hypot(xx - c, yy - c) < 1.5 * FWHM] = np.nan
+    return st
+
+
+@pytest.mark.parametrize("dx, dy, parity", [(8, 15, 0), (12, 16, 1)])    # 17 px: nap 26; 20 px: nap 31
+def test_verify_injections_pair_at_one_radius(dx, dy, parity):
+    """Two injections 180 deg apart at one radius each get the S/N they get injected alone, to
+    the noise.  With ``nap`` even a ring sample lands on the other source, with ``nap`` odd two
+    sit beside it; neither counts now (NEAR2 note, 2026-10-20)."""
+    from klip_tpe.metrics import gaussian_kernel
+    n, nn, snr = 81, 4, 15.0
+    c = (n - 1) / 2
+    r = float(np.hypot(dx, dy))
+    pa = float(np.degrees(np.arctan2(dy, dx))) - 90.0
+    A, B = (r * PX, pa % 360.0, 1e-3), (r * PX, (pa + 180.0) % 360.0, 1e-3)
+    k = gaussian_kernel(FWHM)
+    resp = (k * _gauss(k.shape[0], k.shape[1], (k.shape[1] - 1) / 2, (k.shape[0] - 1) / 2, FWHM, 1.0)).sum()
+    yy, xx = np.mgrid[0:n, 0:n]
+    band = np.abs(np.hypot(xx - c, yy - c) - r) <= FWHM
+    alone_r, ring_r, before_r, stim, stim_before = [], [], [], [], []
+    for seed in range(8):
+        st = _odd_noise(nn, seed, n)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)      # the masked star: all-NaN columns
+            comb = np.nanmean(st, axis=0)
+        amp = snr * float(np.std(V.mf_convolve(comb, FWHM)[band & np.isfinite(comb)], ddof=1)) / resp
+        ga, gb = _gauss(n, n, c + dx, c + dy, FWHM, amp), _gauss(n, n, c - dx, c - dy, FWHM, amp)
+        pair, pm = V.verify_injections(st + (ga + gb)[None], [A, B], FWHM, PX)
+        for p, g, s, o in zip(pair, (ga, gb), (A, B), (B, A)):
+            assert int(np.floor(2 * np.pi * np.hypot(p["x"] - c, p["y"] - c) / FWHM)) % 2 == parity
+            alone = V.verify_injections(st + g[None], [s], FWHM, PX)[0][0]
+            # the same ring: the other source's position left out of the lone source's ring too
+            ring = V.verify_injections(st + g[None], [s], FWHM, PX, known=[o[:2]])[0][0]
+            alone_r.append(p["snr"] / alone["snr"])
+            ring_r += [p["snr"] / ring["snr"]] + [p["subsets"][q] / ring["subsets"][q] for q in V.SUBSET_NAMES[1:]]
+            stim.append(p["stim_fap"] - alone["stim_fap"])
+            # what the ring held before 2026-10-20, and holds in the IDL: the other source in it
+            before = V.snr_fap(pm["subsets"]["combined"], s[0], s[1], PX, FWHM, 1.5 * FWHM, 1.5,
+                               mfmap=pm["mf"]["combined"])["snr"]
+            before_r.append(before / alone["snr"])
+            stim_before.append(V.stim_fap(pm["stim"], p["x"], p["y"], r, FWHM)[1] - p["stim_fap"])
+    assert abs(np.mean(alone_r) - 1.0) < 0.1           # the pair's rings lost a few noise samples
+    assert np.max(np.abs(np.asarray(ring_r) - 1.0)) < 0.1    # left: the other source's wings past 1.5 FWHM
+    assert np.max(np.abs(stim)) < 2e-3
+    assert np.mean(before_r) < 0.6 and np.mean(stim_before) > 0
 
 
 # ----------------------------------------------------------------------------

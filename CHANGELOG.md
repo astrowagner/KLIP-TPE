@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased — 2026-10-20 (the verify measures each injection without the others)
+
+The NEAR2 session's note of 2026-10-20 found that the final verify counted the other injected
+planets as noise.
+
+- **`verify_injections`** (the calibration block of the per-annulus and final verify, the
+  verify books and `rereduce`) leaves out of each injected source's noise ring, in the
+  combined image and the four subsets, the other sources of the block and the known ones,
+  within the metric's keep-out of their positions (`excl_fwhm`, 1.5 FWHM by default), as the
+  metric does in the search.  The STIM FAP's annulus drops them within the same keep-out.
+  Two sources 180 deg apart at one radius put a ring sample on the other source when `nap`
+  is even, and two beside it when `nap` is odd, so each S/N came out low.  Now each source
+  gets the S/N it gets injected alone, to the noise (`tests/test_verify_stack.py`).  The
+  runner and the verify books pass the metric's `excl_fwhm` to the verify, which used its
+  own default.
+- **The limits of earlier runs' final images change.**  Wherever two injections share a
+  separation, their S/N rises and the TABLE 1 and TABLE 2 contrasts of `verify_report.txt`
+  and `stitched_verify_report.txt` fall.  On run_20261013_194614 the NEAR2 session found the
+  pairs' S/N doubled (7.3 and 9.4 to 14.6 and 20.2 at 0.77") and c@TAP90 fell by 1.4 to 3.2
+  times.  An annulus with one source does not change, and neither do the search, its scores
+  or `verify_curve.txt`, whose S/N is the metric's.
+- **To verify a finished run again,** run `klip-tpe rereduce` on its own frames.  The products
+  are the run's, to the bit, and `<run>_rereduce/stitched_verify_report.txt` holds the new
+  calibration block.  A report says above that block how its rings were measured, so an
+  earlier one can be told apart.
+- The candidates' STIM FAP drops the known sources from its annulus, as their S/N rings
+  always did.  The verify books (`verify_limits.pdf`, `verify_subsets_inj.pdf`) pass the
+  run's known sources and angle convention, as the runner's verify does.
+- The IDL `near2_verify` calls `near2v_snrfap` without `exclude` (verify 588-591 and
+  655-656) and keeps every pixel of the STIM annulus (660).  So its calibration block, and
+  `near2v_collect` behind its `verify_curve.txt` (430), leave the other injections in the
+  rings, and since 2026-09-05 `near2m_randpos` puts an annulus' two sources at one radius,
+  180 deg apart.  The module docstring lists this with the other deliberate deviations.
+
 ## Unreleased — 2026-10-18 (coloured injections; the ALES paper's ADI step in the space)
 
 Tutorial 7's winner suits star-coloured injections and not MWC 758c, a much redder source

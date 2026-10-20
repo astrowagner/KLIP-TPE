@@ -3094,6 +3094,7 @@ def render_verify_books(run_dir: str, ia: int, out_dir: Optional[str] = None,
     from matplotlib.backends.backend_pdf import PdfPages
     from .verify import (DEFAULT_FAP_LIST, DEFAULT_TAP_LIST, SUBSET_NAMES, contrast_limit, limit_tables,
                          verify_injections)
+    run = run or load_run(run_dir)
     ad = annulus_from_run(run_dir, ia, run)
     d = os.path.join(run_dir, f"annulus{ia + 1:02d}")
     out_dir = out_dir or d
@@ -3108,7 +3109,10 @@ def render_verify_books(run_dir: str, ia: int, out_dir: Optional[str] = None,
     if istack is None or not src:
         return out
     fwhm, px = float(ad.fwhm), float(ad.pxscale)
-    rows, maps = verify_injections(istack, src, fwhm, px)
+    setup = run.get("setup") or run.get("checkpoint") or {}
+    excl = float(((setup.get("objective") or {}).get("metric") or {}).get("excl_fwhm") or 1.5)
+    vkw = dict(known=[tuple(k) for k in (ad.known or ())], angle_convention=ad.angle_convention, excl_fwhm=excl)
+    rows, maps = verify_injections(istack, src, fwhm, px, **vkw)
     # ---- page 1: limits vs separation (winner injections) + search-eval curve (all evals)
     ev_rows = []
     for i in range(len(ad.y)):
@@ -3146,7 +3150,7 @@ def render_verify_books(run_dir: str, ia: int, out_dir: Optional[str] = None,
     out["verify_limits"] = path1
     # ---- page 2: combined clean + night-STIM, subset stamps per injection
     path2 = os.path.join(out_dir, "verify_subsets_inj.pdf")
-    cmaps = verify_injections(np.asarray(stack, float), src, fwhm, px)[1] if stack is not None else maps
+    cmaps = verify_injections(np.asarray(stack, float), src, fwhm, px, **vkw)[1] if stack is not None else maps
     with _rc(), PdfPages(path2) as pdf:
         nsrc = len(rows)
         fig = Figure(figsize=(11, 3.4 + 2.4 * nsrc))

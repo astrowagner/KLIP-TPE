@@ -32,6 +32,16 @@ Deliberate deviations from the IDL (each also flagged at the call site):
 * The injected-STIM empirical FAP (verify 660) omits the 1.5-FWHM keep-out
   around the source that the candidate FAP (verify 601) applies; we apply the
   keep-out in both cases (brief C.6).
+* The driver calls ``near2v_snrfap`` without ``exclude`` (verify 588-591 and
+  655-656), so a noise ring holds the known sources and, in the injection
+  calibration block, the other injected sources.  We leave out of every ring the
+  known sources, and out of an injection's ring (combined and subsets) the other
+  injections of the block, within ``excl_fwhm`` FWHM, as the run's metric
+  (:func:`~klip_tpe.metrics.mawet_peak_snr`, IDL ``near2_snrpk``) does.  The
+  STIM FAP annulus drops the same positions within the same keep-out.  Two
+  injections at one radius, 180 deg apart (the two-source layout of
+  ``near2m_randpos``), otherwise put a ring sample on, or two beside, the other
+  source.
 * ``median`` of the per-bin S/N uses ``numpy.median`` (mean of the two middle
   values) rather than IDL's upper-middle default.
 """
@@ -238,10 +248,12 @@ def night_stim(stack: np.ndarray, weights: Optional[np.ndarray] = None) -> np.nd
 
 
 def stim_fap(stim: np.ndarray, x: float, y: float, rho_px: float, fwhm: float,
-             keepout: Optional[float] = None) -> Tuple[float, float]:
+             keepout: Optional[float] = None, *,
+             exclude_xy: Sequence[Tuple[float, float]] = ()) -> Tuple[float, float]:
     """Empirical STIM FAP (verify 594-602): the value at the rounded source pixel
     ranked against the annulus ``|r - rho_px| <= fwhm`` (finite pixels farther
-    than ``keepout`` (default ``1.5 fwhm``) from the source).  Returns
+    than ``keepout`` (default ``1.5 fwhm``) from the source and from every
+    ``exclude_xy`` position: other sources, which are not noise).  Returns
     ``(stim_value, fraction >= value)``."""
     ny, nx = stim.shape
     cx, cy = star_center(stim.shape)
@@ -253,6 +265,8 @@ def stim_fap(stim: np.ndarray, x: float, y: float, rho_px: float, fwhm: float,
     rr = np.hypot(xx - cx, yy - cy)
     dsrc = np.hypot(xx - sx, yy - sy)
     ann = (np.abs(rr - rho_px) <= fwhm) & np.isfinite(stim) & (dsrc > keepout)
+    for ex, ey in exclude_xy:
+        ann &= np.hypot(xx - ex, yy - ey) > keepout
     if not ann.any() or not np.isfinite(val):
         return val, float("nan")
     return val, float(np.mean(stim[ann] >= val))
@@ -350,11 +364,13 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
     candidates
         ``[(rho_arcsec, theta_deg), ...]``.
     known
-        real sources excluded from the noise rings (verify ``exclude``).
+        real sources left out of the noise rings and the STIM annulus (verify
+        ``exclude``).
     injected
         optional ``(inj_stack, sources)`` with ``sources = [(rho, theta,
         contrast), ...]``: the injected twin of ``stack`` used for the
-        calibration block and the detection-limit tables.
+        calibration block and the detection-limit tables.  Each source's noise
+        is measured without the other sources (:func:`verify_injections`).
     weights
         per-night weights (IDL: ``sqrt(texp)``); default equal.
     rng
@@ -393,7 +409,7 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
                 for name in SUBSET_NAMES}
         # Path B: STIM at the nominal (rounded) position with the annulus null (594-602)
         xs, ys = source_xy(rho, theta, pxscale, cx, cy, angle_convention)
-        sval, sfap = stim_fap(stim, float(xs[0]), float(ys[0]), rho / pxscale, fwhm)
+        sval, sfap = stim_fap(stim, float(xs[0]), float(ys[0]), rho / pxscale, fwhm, exr, exclude_xy=kxy)
         bsig = bootstrap_nights(stack, w, rho, theta, pxscale, fwhm, drift_px, n_boot, rng,
                                 angle_convention) if (n_boot and nn >= 2) else float("nan")
         part = [ssub[k] for k in SUBSET_NAMES[1:]]
@@ -432,8 +448,15 @@ def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, floa
     """Injection calibration block (verify 621-735): Path-A S/N / FAP, subset S/N,
     injected-STIM value + annulus FAP per injected source ``(rho, theta,
     contrast)``, then the detection-limit tables from sources with finite
-    ``snr > 0`` and ``contrast > 0``.  DEVIATION: the STIM FAP applies the
-    1.5-FWHM keep-out (the IDL, line 660, does not)."""
+    ``snr > 0`` and ``contrast > 0``.
+
+    Each source's noise ring (combined image and subsets) leaves out the other
+    sources and the ``known`` ones within ``excl_fwhm`` FWHM of their nominal
+    positions, as the run's metric does, and its STIM annulus drops them, and the
+    source itself, within the same keep-out.  So a source's S/N is what it would
+    be injected alone, to the noise.  DEVIATIONS: the IDL (verify 655-656, 660)
+    leaves every other source in the ring and the annulus, and keeps no keep-out
+    around the source in the STIM annulus."""
     inj_stack = np.asarray(inj_stack, float)
     if inj_stack.ndim == 2:
         inj_stack = inj_stack[None]
@@ -442,18 +465,20 @@ def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, floa
     w = np.ones(nn) if weights is None else np.asarray(weights, float)[:nn]
     exr = excl_fwhm * fwhm
     kxy = _known_xy(known, pxscale, cx, cy, angle_convention)
+    sxy = _known_xy([(s[0], s[1]) for s in sources], pxscale, cx, cy, angle_convention)
     maps = verify_maps(inj_stack, w, fwhm)
     rows: List[Dict[str, Any]] = []
     for m, src in enumerate(sources):
         rho, theta = float(src[0]), float(src[1])
         con = float(src[2]) if len(src) > 2 else float("nan")
+        excl = kxy + sxy[:m] + sxy[m + 1:]            # the known sources and the block's others
         s = snr_fap(maps["subsets"]["combined"], rho, theta, pxscale, fwhm, exr, drift_px,
-                    exclude_xy=kxy, mfmap=maps["mf"]["combined"], angle_convention=angle_convention)
+                    exclude_xy=excl, mfmap=maps["mf"]["combined"], angle_convention=angle_convention)
         ssub = {name: snr_fap(maps["subsets"][name], rho, theta, pxscale, fwhm, exr, drift_px,
-                              exclude_xy=kxy, mfmap=maps["mf"][name], angle_convention=angle_convention)["snr"]
+                              exclude_xy=excl, mfmap=maps["mf"][name], angle_convention=angle_convention)["snr"]
                 for name in SUBSET_NAMES}
         xs, ys = source_xy(rho, theta, pxscale, cx, cy, angle_convention)
-        sval, sfap = stim_fap(maps["stim"], float(xs[0]), float(ys[0]), rho / pxscale, fwhm)
+        sval, sfap = stim_fap(maps["stim"], float(xs[0]), float(ys[0]), rho / pxscale, fwhm, exr, exclude_xy=excl)
         rows.append({"kind": "injection", "index": m + 1, "rho": rho, "theta": theta, "contrast": con,
                      "x": s["x"], "y": s["y"], "snr": s["snr"], "fap": s["fap"], "nap": s["nap"],
                      "peak": s["peak"], "subsets": ssub, "stim": sval, "stim_fap": sfap})
@@ -564,6 +589,8 @@ def write_verify_table(path: str, rows: Sequence[Dict[str, Any]], limits: Option
         L.append("")
     if injs:
         L.append(f"# ---- injection calibration ({len(injs)} sources) ----")
+        L.append(f"#   each source's noise ring leaves out the other sources and the known ones "
+                 f"({float(meta.get('excl_fwhm', 1.5)):.1f} FWHM keep-out)")
         L.append("#   columns: rho[\"] PA[deg] contrast  | combined S/N  FAP  | injected-STIM  STIM-FAP")
         for r in injs:
             s = r["subsets"]
