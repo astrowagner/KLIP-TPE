@@ -562,18 +562,28 @@ def klip_basis(R: np.ndarray, k: int, spat_mean: bool = False, temp_mean: bool =
     return _klip_basis_eig(R, k, spat_mean, temp_mean, tol)[0]
 
 
+ZONE_ANGLES = ("ccw", "getzone2015")
+
+
 def zone_indices(shape: Tuple[int, int], inrad: float, outrad: float, a0_deg: float, a1_deg: float,
-                 center: Optional[Tuple[float, float]] = None) -> np.ndarray:
+                 center: Optional[Tuple[float, float]] = None, angles: str = "ccw") -> np.ndarray:
     """Flat indices of the pixels with ``inrad <= r <= outrad`` and ``a0 <= ang <= a1``
-    (inclusive, degrees CCW from +x).  ``center`` defaults to ``(nx/2, ny/2)`` -- the
+    (inclusive, degrees).  ``center`` defaults to ``(nx/2, ny/2)`` -- the
     IDL ``getzone`` convention (half a pixel off the star for even sizes; kept for
-    fidelity, only the zone mask is affected)."""
+    fidelity, only the zone mask is affected).  ``angles='ccw'``: ``ang`` CCW from +x in
+    ``[0, 360)``; ``'getzone2015'``: ``atan2 + 180`` in ``(0, 360]``, as the 2015 ``getzone`` /
+    ``angmask`` measure it (CCW from -x), so its sectors are the same pixels in the same order."""
     ny, nx = shape
     if center is None:
         center = (nx / 2.0, ny / 2.0)
     yy, xx = np.mgrid[0:ny, 0:nx]
     r = np.hypot(xx - center[0], yy - center[1])
-    ang = np.rad2deg(np.arctan2(yy - center[1], xx - center[0])) % 360.0
+    if angles == "getzone2015":
+        ang = np.rad2deg(np.arctan2(yy - center[1], xx - center[0])) + 180.0
+    elif angles == "ccw":
+        ang = np.rad2deg(np.arctan2(yy - center[1], xx - center[0])) % 360.0
+    else:
+        raise ValueError(f"zone angles are one of {ZONE_ANGLES}, not {angles!r}")
     m = (r >= inrad) & (r <= outrad) & (ang >= a0_deg) & (ang <= a1_deg)
     return np.flatnonzero(m.ravel())
 
@@ -625,6 +635,8 @@ class KLIPParams:
     #: rotation, when the zone reaches beyond it (``zone_in`` / ``zone_out`` of the reducer);
     #: None: the zone's own ``inrad`` and ``outrad``
     arc_radii: Optional[Tuple[float, float]] = None
+    #: how the sectors' angles are measured about ``zone_center`` (:func:`zone_indices`)
+    zone_angles: str = "ccw"
 
 
 _FM_TOL = 1e-6                   # eigenvalue tolerance of get_klip_basis_new / the FM block
@@ -806,7 +818,7 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
     for jj in range(int(max(p.n_ang, 1))):
         a0 = jj * 360.0 / p.n_ang
         a1 = min((jj + 1) * 360.0 / p.n_ang, 360.0)
-        idx = zone_indices((ny, nx), p.inrad, p.outrad, a0, a1, p.zone_center)
+        idx = zone_indices((ny, nx), p.inrad, p.outrad, a0, a1, p.zone_center, p.zone_angles)
         if idx.size:
             zones.append(idx)
 

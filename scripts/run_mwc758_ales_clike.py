@@ -10,10 +10,14 @@ S/N 1.9 in it against 3.6-3.7 in the paper's images.  This run differs in four t
   tests used for November 14 (``MWC758_spec_2_Lp_fix.sav``), so a group gets the source at
   (lambda / 3.8 um)^alpha times the contrast quoted, which is c's at L' (``--alpha`` sets the index,
   ``--spectrum star`` is tutorial 7's flat spectrum);
-* the KLIP zone may reach beyond the annulus (``zone_in``, ``zone_out``, 0-8 px each) and the residuals'
-  second high-pass is a searched switch (``post_hp``), so the paper's ADI step is in the space: 15-frame
-  bins, an 11-px high-pass, 15 modes, 6 sectors of one 5-27 px zone, references 0.01 lambda/D away, no
-  frame cuts, no second high-pass;
+* the KLIP zone is the paper's for every evaluation (``--geometry paper``, the default): one 5-27 px
+  annulus about the paper's zone centre (30, 30) in 6 sectors, while the injections and the score stay in
+  tutorial 7's 0.4-0.8" annulus round c.  ``--free-sectors`` searches the number of sectors again, and
+  ``--geometry searched`` searches the zone's reach beyond the annulus as well (``zone_in``, ``zone_out``,
+  0-8 px each), which is how the two-night run of 2026-10-18 ran;
+* the residuals' second high-pass is a searched switch (``post_hp``), so the paper's ADI step is in the
+  space: 15-frame bins, an 11-px high-pass, 15 modes, references 0.01 lambda/D away, no frame cuts, no
+  second high-pass;
 * that configuration, on the 3.4-4.15 um groups, is the seed: trial 0, and the configuration the
   contrast is calibrated on;
 * with both nights the partitions are weighted by the square root of their exposure, so January 5 (18 % of
@@ -27,7 +31,7 @@ the paper's Fig. 1b; ``--sdi`` (one night only) adds the other groups' frames as
   python3 scripts/run_mwc758_ales_clike.py --nights nov14        # November 14 alone
   python3 scripts/run_mwc758_ales_clike.py --quick               # a 12-evaluation smoke test first
 
-Run from the repository root.  The run directory defaults to tutorials/runs/mwc758_ales_clike[_nov14][_sdi].
+Run from the repository root.  The run directory defaults to tutorials/runs/mwc758_ales_clike[_nov14][_zonesearched][_sdi].
 The same command again resumes an interrupted run.
 """
 import argparse
@@ -42,7 +46,7 @@ sys.path.insert(0, os.getcwd())
 from klip_tpe import CalibrationConfig, RunConfig, Runner, ValidationConfig, datasets   # noqa: E402
 from klip_tpe.instruments import ales                                                     # noqa: E402
 from klip_tpe.metrics import MawetPeakSNR                                                 # noqa: E402
-from klip_tpe.reducer import set_klip_gram                                                # noqa: E402
+from klip_tpe.reducer import set_klip_gram, set_zone_center                               # noqa: E402
 
 RHO, PA = 0.603, 228.5          # MWC 758c in the 2019 November 14 ALES data
 SAV = "/Users/kevinwagner/Library/CloudStorage/Dropbox/Astrophysics/Research/MWC 758/MWC758_ALES/MWC758_spec_2_Lp_fix.sav"
@@ -56,7 +60,15 @@ ap.add_argument("--alpha", type=float, default=None, help="power-law index of c'
 ap.add_argument("--weighting", choices=("sqrt_texp", "equal"), default=None,
                 help="partition weights (default sqrt_texp with both nights)")
 ap.add_argument("--sdi", action="store_true", help="a searched SDI pool (needs --nights nov14)")
+ap.add_argument("--geometry", choices=("paper", "searched"), default="paper",
+                help="paper: the KLIP zone is the paper's 5-27 px about (30, 30) in 6 sectors, fixed; searched: "
+                     "zone_in, zone_out and n_ang are searched (the two-night run of 2026-10-18)")
+ap.add_argument("--free-sectors", action="store_true", help="with --geometry paper, search the number of sectors")
 ap.add_argument("--no-seed-paper", action="store_true", help="seed with tutorial 7's baseline instead")
+ap.add_argument("--max-contrast", type=float, default=None,
+                help="cap on the injected contrast, through the calibration and every re-calibration "
+                     "(CalibrationConfig.ceiling); with c's spectrum it is the contrast at 3.8 um, the number "
+                     "the log reports, and the reddest group gets 1.7 times it")
 ap.add_argument("--n-iter", type=int, default=3000)
 ap.add_argument("--n-init", type=int, default=200)
 ap.add_argument("--workers", default="auto")
@@ -109,8 +121,18 @@ EDGES = [e / red.pxscale for e in EDGES_AS]                    # 11.59, 23.19 sp
 PAPER = {"bin": 15, "filter": 11, "k_klip": 15, "n_ang": 6, "angsep": 0.01, "anglemax": 360.0,
          "corr_thresh": 0.0, "noise_max": 3.0, "coronoise_max": 3.0,
          "zone_in": EDGES[0] - 5.0, "zone_out": 27.0 - EDGES[1], "post_hp": 0}
-space = ales.make_space(red, bin_range=(5, 30), zone_range=(0.0, 8.0), search_post_hp=True,
-                        defaults=None if a.no_seed_paper else PAPER)
+if a.geometry == "paper":
+    # the processing geometry of reduce_ales_mwc758_2.pro: adiklip's annmode_inout=[5, 27] and n_ang=6, the
+    # zones drawn by the 2015 getzone about (sc/2 - 1, sc/2 - 1) = (30, 30), which the run never moves
+    pin = {"zone_in": PAPER["zone_in"], "zone_out": PAPER["zone_out"]}
+    if not a.free_sectors:
+        pin["n_ang"] = PAPER["n_ang"]
+    set_zone_center(red, (30.0, 30.0), angles="getzone2015")
+    space = ales.make_space(red, bin_range=(5, 30), search_post_hp=True, pin=pin,
+                            defaults=None if a.no_seed_paper else PAPER)
+else:
+    space = ales.make_space(red, bin_range=(5, 30), zone_range=(0.0, 8.0), search_post_hp=True,
+                            defaults=None if a.no_seed_paper else PAPER)
 n_part = len(red.partitions())
 space.project = ales.make_guard(red, max_excluded=n_part // 2, prefer_m=3.95e-6)
 objective, sampler = ales.default_config(red, known=[(RHO, PA)], forbidden_pa=[(PA, 25.0)])
@@ -119,21 +141,32 @@ objective, sampler = ales.default_config(red, known=[(RHO, PA)], forbidden_pa=[(
 seed_sel = {} if a.no_seed_paper else {f"sel_{p}": (1 if int(p.split("_g")[1]) >= 9 else 0) for p in red.partitions()}
 print(f"{len(space.names)} dimensions: {', '.join(n for n in space.names if not n.startswith('sel_'))} "
       f"+ {len(space.selection_dims)} group flags; weights {weighting}", flush=True)
+if a.max_contrast:
+    print(f"injected contrast capped at {a.max_contrast:.3g}" + (" at 3.8 um, so at most "
+          f"{a.max_contrast * max(red.injection_scale.values()):.3g} in the reddest group" if red.injection_scale else ""),
+          flush=True)
+if a.geometry == "paper":
+    print(f"KLIP zone held at the paper's: {EDGES[0] - pin['zone_in']:.2f}-{min(EDGES[1] + pin['zone_out'], 27.0):.2f} px "
+          f"about (30, 30)" + (", 6 sectors" if "n_ang" in pin else ", sectors searched"), flush=True)
 
 tag = "_nov14" if a.nights == "nov14" else ""
+tag += "_zonesearched" if a.geometry == "searched" else ""
+tag += f"_cmax{a.max_contrast:g}" if a.max_contrast else ""
 tag += "_sdi" if a.sdi else ""
 tag += "_star" if a.spectrum == "star" else ""
 run_dir = os.path.abspath(a.run_dir or os.path.join("tutorials", "runs", f"mwc758_ales_clike{tag}" + ("_quick" if a.quick else "")))
 if a.quick:
     cfg = RunConfig(ann_edges=EDGES, n_iter=12, n_init=6, seed=a.seed, n_remeasure=1, defaults=seed_sel,
                     validation=ValidationConfig(n_top=2, n_valid=2),
-                    calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=1, scan_k=a.no_seed_paper),
+                    calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=1, scan_k=a.no_seed_paper,
+                                                  ceiling=a.max_contrast),
                     fm_curve=False,
                     param_verify=False, notes="c-coloured smoke test")
 else:
     cfg = RunConfig(ann_edges=EDGES, n_iter=a.n_iter, n_init=a.n_init, seed=a.seed, n_remeasure=3, defaults=seed_sel,
                     validation=ValidationConfig(n_top=6, n_valid=8),
-                    calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=2, scan_k=a.no_seed_paper),
+                    calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=2, scan_k=a.no_seed_paper,
+                                                  ceiling=a.max_contrast),
                     fm_curve=True,
                     notes=f"tutorial 7 with c-coloured injections ({spec_label or 'star spectrum'}); the paper's ADI as seed")
 # the same command again resumes the run (Runner.run picks up its checkpoint); a run started with another
@@ -146,6 +179,18 @@ if os.path.exists(setup):
     if set(of) != set(nf) or any(abs(of[k] - nf[k]) > 1e-5 * max(abs(of[k]), 1e-9) for k in of):
         sys.exit(f"{run_dir} was started with another injected spectrum ({old.get('label', 'the star spectrum')}); "
                  f"give --run-dir for a new run")
+    p0 = red.partitions()[0]
+    zc_old = (((json.load(open(setup)).get("reducer") or {}).get("partitions") or {}).get(str(p0)) or {}) \
+        .get("defaults", {}).get("zone_center")
+    zc_new = red.reducers[p0].defaults.get("zone_center")
+    if (zc_old is None) != (zc_new is None) or (zc_old is not None and list(map(float, zc_old)) != list(map(float, zc_new))):
+        sys.exit(f"{run_dir} was started with its zones about {zc_old or 'the frame centre'}, this run draws them about "
+                 f"{zc_new or 'the frame centre'} (--geometry); give --run-dir for a new run")
+    # the checkpoint holds the run's configuration, so a resume would keep the cap it was started with
+    cap_old = ((json.load(open(setup)).get("config") or {}).get("calibration") or {}).get("ceiling")
+    if (cap_old is None) != (a.max_contrast is None) or (cap_old is not None and abs(cap_old - a.max_contrast) > 1e-12):
+        sys.exit(f"{run_dir} was started with the injected contrast capped at {cap_old}, not {a.max_contrast} "
+                 f"(--max-contrast): resuming would keep {cap_old}.  Give --run-dir for a new run")
 callbacks = []
 if a.show != "none":
     from klip_tpe.display import LiveDisplay

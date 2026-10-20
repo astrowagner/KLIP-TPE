@@ -685,7 +685,10 @@ def make_space(reducer: PartitionedReducer, defaults: Optional[Dict[str, Any]] =
     residuals' second high-pass (``post_hp``).  The ALES paper reduction of MWC 758 fits
     one 5-27 spaxel zone and derotates the residuals without a second high-pass: in a
     0.4-0.8" annulus that is ``zone_in`` 6.6, ``zone_out`` 3.8 (the 62-spaxel frames cap the
-    zone at 27 anyway) and ``post_hp`` 0."""
+    zone at 27 anyway) and ``post_hp`` 0.  ``pin={"zone_in": ..., "zone_out": ..., "n_ang": 6}``
+    holds that zone and its six sectors fixed instead, and
+    :func:`~klip_tpe.reducer.set_zone_center` ``(red, (30, 30), "getzone2015")`` draws them as the
+    paper's 2015 ``getzone`` did, the same pixels in the same sectors."""
     d = dict(BASELINE)
     d.update(defaults or {})
     kw.setdefault("per_night", False)

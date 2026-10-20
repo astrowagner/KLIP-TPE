@@ -245,3 +245,73 @@ def test_a_tiny_coloured_search_with_the_paper_dimensions(tmp_path):
     recs = [json.loads(l) for l in open(tmp_path / "run" / "results.jsonl")]
     seed = recs[0]["config"]["params"]
     assert seed["zone_in"] == 2.0 and seed["post_hp"] == 0
+
+
+# ------------------------------------------------------------------------ the paper's geometry, held
+def test_set_zone_center_moves_the_zones_and_none_restores_them():
+    from klip_tpe.reducer import set_zone_center
+    red, _ = _reducer()
+    base, _ = _one(red)
+    assert set_zone_center(red, (22.0, 22.0)) == red.partitions()
+    assert all(r.defaults["zone_center"] == (22.0, 22.0) for r in red.reducers.values())
+    moved, _ = _one(red)
+    assert not np.array_equal(np.isfinite(base), np.isfinite(moved)), "the zone footprint moves with its centre"
+    set_zone_center(red, None)
+    assert all("zone_center" not in r.defaults for r in red.reducers.values())
+    np.testing.assert_array_equal(_one(red)[0], base)
+    with pytest.raises(ValueError, match="zone_center"):
+        set_zone_center(red, (1.0, 2.0, 3.0))
+
+
+def test_pin_holds_reduction_parameters_out_of_the_search():
+    red, _ = _reducer()
+    plain = ales.make_space(red)
+    sp = ales.make_space(red, search_post_hp=True, pin={"n_ang": 6, "zone_in": 6.6, "zone_out": 3.8})
+    assert "n_ang" in plain.names and "n_ang" not in sp.names
+    assert not {"zone_in", "zone_out"} & set(sp.names) and "post_hp" in sp.names
+    assert len(sp.names) == len(plain.names), "n_ang out, post_hp in"
+    cfg = sp.decode(sp.default_vector())
+    for d in [cfg.params, *cfg.per_partition.values()]:
+        assert (d["n_ang"], d["zone_in"], d["zone_out"]) == (6, 6.6, 3.8)
+    # a pinned dimension of the zone search goes too
+    sp2 = ales.make_space(red, zone_range=(0.0, 8.0), pin={"zone_in": 1.0})
+    assert "zone_in" not in sp2.names and "zone_out" in sp2.names
+    assert sp2.decode(sp2.default_vector()).params["zone_in"] == 1.0
+
+
+def test_getzone2015_zones_are_the_paper_reductions_pixels():
+    """The 2015 getzone (MWC758_ALES reduce_ales_mwc758_2.pro): dist_circle and angmask about (sc/2 - 1,
+    sc/2 - 1) in single precision, ang = atan2 + pi, zone jj = [jj, jj + 1] * 360 / n_ang deg, both ends
+    inclusive, with annmode_inout = [5, 27].  zone_indices with that centre and 'getzone2015' angles
+    gives the same pixels in every sector, where the default angles move one row of 23 pixels."""
+    from klip_tpe.klip import zone_indices
+    n, c, n_ang = 62, np.float32(30.0), 6
+    x2 = (np.arange(n, dtype=np.float32) - c) ** 2
+    r = np.sqrt(x2[None, :] + x2[:, None]).astype(np.float32)
+    yy, xx = np.mgrid[0:n, 0:n].astype(np.float32)
+    ang = (np.arctan2(yy - c, xx - c).astype(np.float32) + np.float32(np.pi)).astype(np.float32)
+    dtor, step = np.float32(np.pi / 180.0), np.float32(360.0) / np.float32(n_ang)
+    idl = [np.flatnonzero(((ang >= np.float32(np.float32(j) * step) * dtor) & (ang <= np.float32(np.float32(j + 1) * step) * dtor)
+                           & (r >= 5) & (r <= 27)).ravel()) for j in range(n_ang)]
+    ours = [zone_indices((n, n), 5.0, 27.0, j * 60.0, (j + 1) * 60.0, (30.0, 30.0), "getzone2015") for j in range(n_ang)]
+    for j in range(n_ang):
+        np.testing.assert_array_equal(ours[j], idl[j])
+    ccw = [zone_indices((n, n), 5.0, 27.0, j * 60.0, (j + 1) * 60.0, (30.0, 30.0)) for j in range(n_ang)]
+    assert sum(len(set(ccw[(j + 3) % 6].tolist()) ^ set(idl[j].tolist())) for j in range(n_ang)) == 46
+    with pytest.raises(ValueError, match="zone angles"):
+        zone_indices((n, n), 5.0, 27.0, 0.0, 60.0, (30.0, 30.0), "cw")
+
+
+def test_the_reducer_draws_its_zones_as_set():
+    from klip_tpe.reducer import set_zone_center
+    red, _ = _reducer()
+    set_zone_center(red, (24.0, 24.0), angles="getzone2015")
+    assert all(r.defaults["zone_center"] == (24.0, 24.0) and r.defaults["zone_angles"] == "getzone2015"
+               for r in red.reducers.values())
+    a, _ = _one(red, n_ang=4)
+    set_zone_center(red, (24.0, 24.0))                       # the default angles, the same centre
+    assert all("zone_angles" not in r.defaults for r in red.reducers.values())
+    b, _ = _one(red, n_ang=4)
+    assert np.array_equal(np.isfinite(a), np.isfinite(b)), "the angles move sectors, not the zone"
+    with pytest.raises(ValueError, match="zone angles"):
+        set_zone_center(red, (24.0, 24.0), angles="cw")
