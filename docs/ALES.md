@@ -239,14 +239,14 @@ ALES data are 2 x 20 partitions.  `ales.load_release` reads a data set in the la
 
 The nights share one group grid (`GRIDLO`, `GRIDHI` and `NGROUP` in the meta header), so
 `g07` is one band on both nights, while its mean wavelength follows each night's own channels.
-The two MWC 758 nights have different cube-builder wavelength solutions (100 and 98 channels,
-from 2.750 and 2.789 um).  Their grid, 20 groups over 2.90-4.15 um, puts 2 to 6 channels in
-each group on both nights.
+The two MWC 758 nights, 2019 Jan 5 and Nov 14, have different cube-builder wavelength
+solutions (99 and 98 channels, from 2.738 and 2.789 um).  Their grid, 20 groups over
+2.90-4.15 um, puts 2 to 6 channels in each group on both nights.
 
 ```python
 from klip_tpe import datasets
 from klip_tpe.instruments import ales
-files = datasets.fetch("lbti_ales_mwc758")                  # 786 MB, downloaded once
+files = datasets.fetch("lbti_ales_mwc758")                  # 670 MB, downloaded once
 ds, lam_m, fwhm_px, table = ales.load_release(files)         # n1_g00 ... n2_g19
 red = ales.make_reducer(ds, lam_m, fwhm_px, table=table)
 space = ales.make_space(red)                                 # one block, 40 flags
@@ -267,6 +267,55 @@ space.project = ales.make_guard(red, max_excluded=20, bin_min=5)
   `make_reducer` refuses it on more than one night.  Load one night for SDI.
 * `datasets.fetch(..., roles=[...])` downloads part of a data set, such as a few groups.  The
   roles are `meta_<date>` and `gNN_<date>`.
+* A third MWC 758 night, 2019 Nov 13, is its own data set, `lbti_ales_mwc758_20191113`, in the
+  same layout and group grid.  `load_release({**files, **datasets.fetch("lbti_ales_mwc758_20191113")})`
+  loads the three nights, `n1` to `n3` in date order.
 * On the command line, `klip-tpe near --instrument ales --ales-dataset lbti_ales_mwc758`
   replaces `--root`, and `--ales-nights n2` (or a date) loads one night.  `klip-tpe resume`
   restores both options.
+
+## 8. A companion's colours, and the paper reduction's ADI step
+
+The search scores injected sources, so it tunes for the sources it injects.  By default they
+have the star's spectrum: one contrast in every group.  A companion much redder than its star,
+such as MWC 758c, puts most of its flux in the red groups, and a configuration tuned on
+star-coloured sources need not suit it.  `make_reducer(..., spectrum=...)` gives the injected
+sources a spectrum (`PartitionedReducer.set_injection_spectrum`):
+
+```python
+red = ales.make_reducer(ds, lam_m, fwhm_px, table=table,
+                        spectrum=lambda lam_um: (lam_um / 3.8) ** 6.76,   # relative contrast to the star
+                        spectrum_norm=3.8e-6, spectrum_label="MWC 758c power law")
+```
+
+* A source of contrast `c` goes into each group at `c` times the spectrum there, over the
+  spectrum at `spectrum_norm`: the representative group by default, another partition id, or
+  a wavelength in metres.  The run's calibrated contrast and its contrast curves are then the
+  contrast at that wavelength, for a source of that spectrum.
+* The spectrum is a callable of the wavelength in microns, a `(lambda_um, values)` table
+  (linear in wavelength, held at its end values outside it) or `{partition: factor}`.  Every
+  injection of the run gets it: the search's, the calibration's and the validation's, the
+  KLIP-FM sources and the frames an SDI pool borrows.  A negative source, a known companion
+  taken out of the frames (`RunConfig.subtract_known`), keeps its contrast.  The factors are in
+  the setup file, under `reducer.injection_spectrum`.
+
+Two steps of the built-in KLIP that the production space leaves at their reference values can
+be searched, which the ALES reduction of MWC 758 in Wagner et al. (2023) needs:
+
+* `make_space(..., zone_range=(0, 8))` adds `zone_in` and `zone_out`: the KLIP zone reaches
+  that many spaxels inside and outside the annulus the run scores, so the basis is fitted over
+  a wider ring.  `angsep`'s lambda/D of arc and the bin's PA span stay the annulus', where the
+  sources are.  The frames' size caps the outer edge (27 spaxels on the 62-spaxel MWC 758
+  frames).
+* `make_space(..., search_post_hp=True)` adds `post_hp`: 1 high-passes the KLIP residuals again,
+  with the same box, before they are derotated (the reference chain), and 0 derotates them as
+  KLIP leaves them, as the paper's ADI images do.
+
+The paper's ADI step for 2019 Nov 14 in these terms, in the 0.4-0.8" annulus: `bin` 15,
+`filter` 11, `k_klip` 15, `n_ang` 6, `angsep` 0.01, `anglemax` at its top, no frame cuts,
+`zone_in` 6.6, `zone_out` 3.8 (one 5-27 spaxel zone) and `post_hp` 0, on the 3.4-4.15 um
+groups.  It still differs from the paper in two ways: KLIP runs on group means of 2 to 6
+channels rather than on each channel, and the paper's ASDI images follow the ADI step with a
+separate SDI step, where `sdi=True` is one KLIP step with an SDI pool (section 4).
+`scripts/run_mwc758_ales_clike.py` is tutorial 7's search with c's spectrum, these
+dimensions and that configuration as its seed.

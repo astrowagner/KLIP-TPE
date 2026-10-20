@@ -635,6 +635,9 @@ def test_inline_outside_notebook_falls_back_to_window(monkeypatch):
     monkeypatch.setattr(dm, "_in_notebook", lambda: False)
     d = LiveDisplay("/tmp/klip_tpe_inline_probe", show="inline")
     assert d.inline is False and d.show is True and d._inline_fallback is True
+    # a scale chosen for a notebook cell does not shrink the fixed-size window it falls back to
+    assert LiveDisplay("/tmp/klip_tpe_inline_probe", show="inline", window_scale=0.55).window_scale == 1.0
+    assert LiveDisplay("/tmp/klip_tpe_inline_probe", show="window", window_scale=0.55).window_scale == 0.55
     logs = []
     d._log = logs.append
     d._interactive_backend(None)
@@ -643,6 +646,7 @@ def test_inline_outside_notebook_falls_back_to_window(monkeypatch):
     monkeypatch.setattr(dm, "_in_notebook", lambda: True)
     d2 = LiveDisplay("/tmp/klip_tpe_inline_probe", show="inline")
     assert d2.inline is True and d2._inline_fallback is False
+    assert LiveDisplay("/tmp/klip_tpe_inline_probe", show="inline", window_scale=0.55).window_scale == 0.55
     # "auto" already resolved correctly and must keep doing so
     assert LiveDisplay("/tmp/klip_tpe_inline_probe", show="auto").inline is True
     monkeypatch.setattr(dm, "_in_notebook", lambda: False)

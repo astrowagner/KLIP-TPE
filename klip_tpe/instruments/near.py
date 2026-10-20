@@ -328,7 +328,8 @@ def make_space(reducer: PartitionedReducer, per_night: bool = True, k_klip_max: 
                opt_framesel: bool = True, search_angles: bool = True, selection: Optional[str] = "two_slot",
                anglemax_hi: Optional[float] = None, defaults: Optional[Dict[str, Any]] = None,
                width_range: Optional[Tuple[float, float]] = None, search_k: bool = True,
-               max_drop: int = 2, bin_range: Optional[Tuple[int, int]] = None) -> SearchSpace:
+               max_drop: int = 2, bin_range: Optional[Tuple[int, int]] = None,
+               zone_range: Optional[Tuple[float, float]] = None, search_post_hp: bool = False) -> SearchSpace:
     """The production search space: 9 parameters per night (+ drop1/drop2).
 
     ``width_range=(w0, w1)`` adds the searched global integer ``width`` dim of the
@@ -338,7 +339,15 @@ def make_space(reducer: PartitionedReducer, per_night: bool = True, k_klip_max: 
     selection (2 = IDL drop1/drop2; raise it when nights x image groups give many
     partitions).  ``bin_range`` = (lo, hi) frames per temporal bin (default the NEAR
     production 5-30; short sequences need a smaller range -- see
-    :func:`klip_tpe.instruments.generic.make_space`)."""
+    :func:`klip_tpe.instruments.generic.make_space`).
+
+    Two dimensions of the built-in KLIP that the production space leaves at their reference
+    values can be searched too (both off by default, so the space is the one it was):
+    ``zone_range=(lo, hi)`` adds ``zone_in`` and ``zone_out``, px by which the KLIP zone
+    reaches inside and outside the annulus the run scores (0 = the annulus; the reducer's
+    ``outrad_cap`` still bounds the outer edge), and ``search_post_hp=True`` adds the 0/1
+    ``post_hp``, whether the residuals are high-passed again before derotation (1, the
+    reference).  Their defaults come from ``defaults`` (else 0, 0 and 1)."""
     d = dict(production_defaults)
     d.update(defaults or {})
     if k_klip_max is None:
@@ -376,6 +385,16 @@ def make_space(reducer: PartitionedReducer, per_night: bool = True, k_klip_max: 
     if search_k:
         block += [Param("k_klip", 1, k_klip_max, "int", grid=kgrid(k_klip_max), default=min(d["k_klip"], k_klip_max),
                         doc="KL modes (non-uniform sampling grid)")]
+    if zone_range is not None:
+        z0, z1 = float(zone_range[0]), float(zone_range[1])
+        clip = lambda v: float(np.clip(float(v), z0, z1))
+        block += [Param("zone_in", z0, z1, "float", default=clip(d.get("zone_in", 0.0)),
+                        doc="KLIP zone inside the annulus (px)"),
+                  Param("zone_out", z0, z1, "float", default=clip(d.get("zone_out", 0.0)),
+                        doc="KLIP zone outside the annulus (px)")]
+    if search_post_hp:
+        block += [Param("post_hp", 0, 1, "int", default=int(bool(d.get("post_hp", 1))),
+                        doc="high-pass the residuals again before derotating (0/1)")]
     parts = reducer.partitions()
     # A parameter whose range has collapsed to a point is not a search dimension, it is a
     # constant wearing one.  It still costs the sampler a coordinate, the TPE a density to

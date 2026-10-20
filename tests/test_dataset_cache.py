@@ -96,10 +96,10 @@ def test_roles_limit_a_fetch(cold_cache, monkeypatch):
     """``roles`` downloads those files of a set and nothing else (a few groups of the ALES set)."""
     calls = []
     monkeypatch.setattr(urllib.request, "urlretrieve", _slow_retrieve(calls))
-    roles = ["meta_20191113", "g07_20191113"]
+    roles = ["meta_20190105", "g07_20190105"]
     out = datasets.fetch("lbti_ales_mwc758", quiet=True, roles=roles)
     assert sorted(out) == sorted(roles)
     assert len(calls) == 2
     assert all(os.path.basename(out[r]) == datasets.DATASETS["lbti_ales_mwc758"][r] for r in roles)
     with pytest.raises(KeyError):
-        datasets.fetch("lbti_ales_mwc758", quiet=True, roles=["g20_20191113"])
+        datasets.fetch("lbti_ales_mwc758", quiet=True, roles=["g20_20190105"])

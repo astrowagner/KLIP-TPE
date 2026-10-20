@@ -88,6 +88,11 @@ class PreparedFrames:
     hp_binned: bool
     nth: int
     meta: Dict[str, Any]
+    #: the annulus the zone was made from, ``(inner, outer)`` px with the runner's edge
+    #: padding: ``inrad``/``outrad`` are the KLIP zone, which ``zone_in``/``zone_out`` widen
+    #: beyond it.  ``angsep``'s arc and the bin's PA span are measured on the annulus.  None
+    #: (a caller that builds one itself): the zone is the annulus.
+    ann: Optional[Tuple[float, float]] = None
 
     def siblings_payload(self, pid: Any, lam_m: float) -> SiblingFrames:
         return SiblingFrames(pid, float(lam_m), np.ascontiguousarray(self.bcube, np.float32),
@@ -264,6 +269,12 @@ def _flag(v) -> bool:
     return bool(v)
 
 
+def _zone_ext(p: Dict[str, Any]) -> Tuple[float, float]:
+    """``(zone_in, zone_out)`` of a request's parameters, px >= 0: how far the KLIP zone
+    reaches inside and outside the annulus (0, 0 when the request does not say)."""
+    return (max(float(p.get("zone_in", 0.0) or 0.0), 0.0), max(float(p.get("zone_out", 0.0) or 0.0), 0.0))
+
+
 class KLIPReducer(Reducer):
     """Reference annular KLIP/ADI reducer.
 
@@ -289,10 +300,18 @@ class KLIPReducer(Reducer):
             the same KLIP to float64 rounding and about twice as fast per target at small
             bins, not the same to the bit.  :func:`set_klip_gram` sets it on every reducer
             of a partitioned one.)
+        zone_in, zone_out (px, default 0: the KLIP zone is the annulus.  The zone's inner
+            edge moves in by zone_in and its outer edge out by zone_out, so the basis is
+            fitted over a wider ring than the one the run scores, as the ALES paper reduction
+            of MWC 758 fits one 5-27 px annulus.  ``angsep``'s lambda/D of arc and the bin's
+            PA span stay those of the annulus, where the sources are.)
+        post_hp (bool, default True: the KLIP residuals are high-passed again, with the same
+            box, before they are derotated, as ``reduce_near_2`` does.  False derotates them
+            as they come out of KLIP, as the ALES reduction's ADI images of MWC 758 do.)
 
     The chain: frame selection -> inject (the kept frames) -> high-pass -> [destripe 90, 0]
-    -> angle-aware binning -> annular KLIP [RDI/ARDI basis, KLIP-FM] -> high-pass
-    (NaN-aware) -> derotate -> combine [-> mask_fn].  The selection reads only the frame
+    -> angle-aware binning -> annular KLIP [RDI/ARDI basis, KLIP-FM] -> [high-pass
+    (NaN-aware)] -> derotate -> combine [-> mask_fn].  The selection reads only the frame
     tags, so injecting the kept frames alone changes no number.
 
     Everything before KLIP is done one bin group at a time (:meth:`_prep_fused`): a group's
@@ -407,6 +426,8 @@ class KLIPReducer(Reducer):
             n_ang = int(max(round(p["n_ang"]), 1))
             inrad = max(float(p["inrad"]), 0.0)
             outrad = min(float(p["outrad"]), self.outrad_cap)
+            z_in, z_out = _zone_ext(p)                  # the KLIP zone beyond the annulus
+            zin, zout = max(inrad - z_in, 0.0), min(outrad + z_out, self.outrad_cap)
             # a searched library's counts: more rows in every target's basis, and the SDI
             # pool's rescaling of every sibling frame
             spec = self._reflib_spec or {}
@@ -421,7 +442,8 @@ class KLIPReducer(Reducer):
                             n_sdi = int(max(round(float(v)), 0))
             key = (k, bin_, filt > 1, n_ang, round(inrad, 2), round(outrad, 2), p["corr_thresh"], p["noise_max"],
                    p["coronoise_max"], round(float(p["angsep"]), 3), round(float(p["anglemax"]), 2),
-                   bool(p["fast"]), bool(k_scan), int(n_inject), bool(fm), int(extra), int(n_sdi))
+                   bool(p["fast"]), bool(k_scan), int(n_inject), bool(fm), int(extra), int(n_sdi),
+                   round(zin, 2), round(zout, 2))
             hit = self._cost_cache.get(key)
             if hit is not None:
                 return hit
@@ -432,7 +454,7 @@ class KLIPReducer(Reducer):
             n_kept = int(ang.size)
             m = int(bin_groups(ang, bin_, self.dth_max_deg(outrad)).max()) + 1 if n_kept else 0
             npix = int(np.prod(ds.cube.shape[1:]))
-            zone = np.pi * max(outrad ** 2 - inrad ** 2, 1.0)
+            zone = np.pi * max(zout ** 2 - zin ** 2, 1.0)
             span = float(ang.max() - ang.min()) if n_kept > 1 else 0.0
             sep = float(p["angsep"]) * abs(arcdist_deg(inrad, outrad, self.lam_over_d_px))
             amax = float(p["anglemax"])
@@ -751,9 +773,11 @@ class KLIPReducer(Reducer):
                                 mid_px=1.0 if n_sdi else None)
 
     def _reflib(self, bcube, ref, bkeep_partition, filt, inrad, outrad, key_extra=(), sim_cube=None,
-                bang=None, sdi=None):
+                bang=None, sdi=None, mid_px=None):
         """The library for this evaluation: ``(selection, basis)``.  ``bang``: the binned
         angles, which a ``rotation`` science pool selects by (they follow from the key).
+        ``mid_px``: the radius the SDI pool's displacement rule measures at (default the
+        mid radius of ``inrad``-``outrad``; the annulus' when the zone reaches beyond it).
 
         The SELECTION -- the groups and the similarity matrix that ranks each target's
         references -- is built once per distinct (binning, frame selection, filter, annulus)
@@ -838,7 +862,8 @@ class KLIPReducer(Reducer):
         full = ReferenceLibrary(groups, sim, target_partition=bkeep_partition, metric=spec["metric"],
                                 n_min_ref=spec["n_min_ref"],
                                 angles=np.concatenate([ang, np.asarray(sdi["angles"], float)]),
-                                mid_px=max(float(inrad) + abs(float(outrad) - float(inrad)) / 2.0, 1.0))
+                                mid_px=max(float(inrad) + abs(float(outrad) - float(inrad)) / 2.0, 1.0)
+                                if mid_px is None else max(float(mid_px), 1.0))
         library = np.concatenate([bcube, np.asarray(sdi["rows"], bcube.dtype)] + ([ref] if ref is not None else []),
                                  axis=0)
         return full, library
@@ -907,8 +932,14 @@ class KLIPReducer(Reducer):
         # request without the marks pads both, as the IDL does.
         pad_in = self.zone_pad if _flag(p.get("pad_in", True)) else 0.0
         pad_out = self.zone_pad if _flag(p.get("pad_out", True)) else 0.0
-        inrad = max(float(p["inrad"]) - pad_in, 0.0)
-        outrad = min(float(p["outrad"]) + pad_out, self.outrad_cap)
+        ann_in = max(float(p["inrad"]) - pad_in, 0.0)
+        ann_out = min(float(p["outrad"]) + pad_out, self.outrad_cap)
+        ann_in = min(ann_in, ann_out - 1.0)
+        # zone_in / zone_out widen the zone beyond the annulus (0, 0: the zone is the annulus).
+        # The bin's PA span and angsep's arc stay the annulus', where the sources are.
+        z_in, z_out = _zone_ext(p)
+        inrad = max(ann_in - z_in, 0.0)
+        outrad = min(ann_out + z_out, self.outrad_cap)
         inrad = min(inrad, outrad - 1.0)
         ds = self.data
         meta: Dict[str, Any] = {}
@@ -920,7 +951,7 @@ class KLIPReducer(Reducer):
             do_fm = False
         keep = frame_selection_mask(ds.nframes, ds.tags, p["corr_thresh"], p["noise_max"],
                                     p["coronoise_max"], bin_, k)
-        dth = self.dth_max_deg(outrad)
+        dth = self.dth_max_deg(ann_out)
         # ``hp_order="binned"`` (under test, off by default): bin first, then high-pass the
         # binned frames.  Both are linear, so the images agree to rounding, and the high-pass
         # costs 1/bin as much.  The means are taken in double precision: binned before the
@@ -964,7 +995,7 @@ class KLIPReducer(Reducer):
                 f"masked cube must be cropped to its finite region before it reaches the "
                 f"reducer.")
         return PreparedFrames(p, k, bin_, filt, inrad, outrad, dth, keep, bcube, bang, grp, bkeep, mcube,
-                              hp_nan, hp_binned, nth, meta)
+                              hp_nan, hp_binned, nth, meta, ann=(ann_in, ann_out))
 
     # ------------------------------------------------------------------ the fused path
     def _prep_fused(self, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth, injections=None, fm_sources=None):
@@ -1183,6 +1214,10 @@ class KLIPReducer(Reducer):
         meta, nth = prep.meta, prep.nth
         ds = self.data
         spec = self._reflib_spec
+        # a zone reaching beyond its annulus (zone_in / zone_out) keeps angsep's arc, and the
+        # SDI displacement rule's radius, on the annulus
+        ann = None if prep.ann is None else (float(prep.ann[0]), float(prep.ann[1]))
+        widened = ann is not None and (ann[0] != float(inrad) or ann[1] != float(outrad))
         # the SDI pool: the other groups' frames, rescaled, when the count asks for any
         sdi = None
         if spec is not None and spec.get("sdi") and int(round(float(p.get("nkeep_sdi", 0) or 0))) > 0:
@@ -1222,7 +1257,8 @@ class KLIPReducer(Reducer):
                     if k0 not in self._reflib_cache:
                         sim_cube = self._clean_bins(p, keep, bin_, filt, dth, prep.hp_nan, prep.hp_binned, nth)
                 ref_lib, ref_basis = self._reflib(bcube, ref, bpart, filt, inrad, outrad, key_extra=kx,
-                                                  sim_cube=sim_cube, bang=bang, sdi=sdi)
+                                                  sim_cube=sim_cube, bang=bang, sdi=sdi,
+                                                  mid_px=0.5 * (ann[0] + ann[1]) if widened else None)
                 ref_keep = ref_lib.keep_from_config(p)
                 if mcube is not None:
                     fm_ref = np.concatenate(
@@ -1246,7 +1282,10 @@ class KLIPReducer(Reducer):
                         n_min_ref=int(p["n_min_ref"]), spat_mean=bool(p["spat_mean"]),
                         temp_mean=bool(p["temp_mean"]), k_scan=bool(req.k_scan),
                         threads=int(max(getattr(req, "threads", 1), 1)),
-                        ref_lib=ref_lib, ref_keep=ref_keep, gram=str(p.get("klip_gram", "target") or "target"))
+                        ref_lib=ref_lib, ref_keep=ref_keep, gram=str(p.get("klip_gram", "target") or "target"),
+                        arc_radii=ann if widened else None)
+        if widened:
+            meta["annulus"] = [ann[0], ann[1]]
         fm_img = nosub = cadi = None
         with np.errstate(all="ignore"), warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)          # nanmedian of all-NaN corners
@@ -1314,9 +1353,12 @@ class KLIPReducer(Reducer):
         fm_res = out[2] if len(out) > 2 else None
         ct = p["comb_type"]
         nth = int(max(getattr(req, "threads", 1) or 1, 1))
+        # the residuals' second high-pass (reduce_near_2's); post_hp = False leaves them as KLIP
+        # made them, as the ALES reduction's ADI images of MWC 758 are
+        post_hp = filt > 1 and _flag(p.get("post_hp", True))
 
         def _post(rc: np.ndarray) -> np.ndarray:
-            if filt > 1:
+            if post_hp:
                 rc = highpass_stack(rc, filt, nan_aware=True, threads=nth)
             return derotate(rc, bang, self.truenorth, threads=nth)
 
@@ -1432,6 +1474,11 @@ class PartitionedReducer(Reducer):
     _threads_fallback = False
     _start_lock = threading.Lock()
     _recent_costs = None
+    #: ``{pid: factor}``: partition ``pid`` gets every injected source at its contrast times
+    #: ``factor`` (:meth:`set_injection_spectrum`); None, the default, injects the contrast
+    #: given in every partition, a source with the star's spectrum
+    injection_scale: Optional[Dict[Any, float]] = None
+    injection_spectrum_info: Optional[Dict[str, Any]] = None
 
     def __init__(self, reducers: Dict[Any, Reducer], weighting: str = "equal", max_workers=1,
                  pool: str = "auto", log=None, threads_per_job: int = 4, representative: Any = None):
@@ -1488,6 +1535,95 @@ class PartitionedReducer(Reducer):
 
     def matched_filter_kernel(self, rho_as: float):
         return self.reducers[getattr(self, "representative", next(iter(self.reducers)))].matched_filter_kernel(rho_as)
+
+    # -- the injected sources' spectrum ----------------------------------------------
+    def set_injection_spectrum(self, spectrum: Any, norm: Any = None, label: Optional[str] = None
+                               ) -> Optional[Dict[Any, float]]:
+        """Give every injected source a spectrum across the partitions.
+
+        A source of contrast ``c`` goes into partition ``pid`` at ``c * factor[pid]``, in every
+        reduction this reducer makes for the run: the search's, calibration's and validation's
+        injections, the KLIP-FM sources and the frames an SDI pool borrows.  ``c`` is then the
+        contrast where the factor is 1, which is ``norm``: the representative partition by
+        default (the one whose template is the matched filter), another partition id, or a
+        wavelength in metres.  A source of negative contrast, a known companion taken out of
+        the frames (``RunConfig.subtract_known``), keeps the contrast given.
+
+        ``spectrum``: None (flat: the contrast given in every partition, a source with the
+        star's colours, the default); ``{pid: factor}`` (normalised at ``norm`` too); a callable
+        ``f(lambda_um) -> relative contrast``, read at each partition's wavelength (``lam_m``);
+        or ``(lambda_um, values)``, interpolated linearly in wavelength and held at its end
+        values outside.  Factors are finite and >= 0 (0: no source in that partition).
+        ``label`` says what the spectrum is in :meth:`describe` and the run's setup file.
+
+        Set it before the run starts: the run's calibrated contrast is in its units.  Returns
+        the factors (None for flat)."""
+        if spectrum is None:
+            self.injection_scale = None
+            self.injection_spectrum_info = None
+            return None
+        lam_um = {pid: (float(getattr(r, "lam_m", np.nan)) * 1e6) for pid, r in self.reducers.items()}
+        if isinstance(spectrum, dict):
+            raw = {pid: float(spectrum[pid]) for pid in self.reducers if pid in spectrum}
+            missing = [pid for pid in self.reducers if pid not in raw]
+            if missing:
+                raise KeyError(f"the spectrum has no factor for partitions {missing[:4]}")
+            fn = None
+            kind = "per partition"
+        else:
+            if callable(spectrum):
+                fn = spectrum
+                kind = "function of wavelength"
+            else:
+                wl, val = (np.asarray(v, float).ravel() for v in spectrum)
+                if wl.size != val.size or wl.size < 1:
+                    raise ValueError(f"spectrum table: {wl.size} wavelengths and {val.size} values")
+                o = np.argsort(wl)
+                wl, val = wl[o], val[o]
+                fn = lambda x, wl=wl, val=val: float(np.interp(float(x), wl, val))
+                kind = f"table of {wl.size} wavelengths, {wl[0]:.3f}-{wl[-1]:.3f} um, linear"
+            bad = [pid for pid, v in lam_um.items() if not np.isfinite(v)]
+            if bad:
+                raise ValueError(f"partitions {bad[:4]} have no wavelength (lam_m) to read the spectrum at")
+            raw = {pid: float(fn(lam_um[pid])) for pid in self.reducers}
+        rep = getattr(self, "representative", next(iter(self.reducers)))
+        if norm is None or norm in self.reducers:
+            at = rep if norm is None else norm
+            ref = raw[at]
+            at_txt = f"partition {at} ({lam_um[at]:.3f} um)" if np.isfinite(lam_um[at]) else f"partition {at}"
+        else:
+            if fn is None:
+                raise ValueError(f"norm={norm!r} is not a partition, and a per-partition spectrum has no "
+                                 f"value at a wavelength")
+            ref = float(fn(float(norm) * 1e6))
+            at_txt = f"{float(norm) * 1e6:.3f} um"
+        if not (np.isfinite(ref) and ref > 0):
+            raise ValueError(f"the spectrum is {ref!r} at its normalisation ({at_txt}); it must be > 0 there")
+        fac = {pid: v / ref for pid, v in raw.items()}
+        bad = {pid: v for pid, v in fac.items() if not (np.isfinite(v) and v >= 0)}
+        if bad:
+            raise ValueError(f"spectrum factors must be finite and >= 0: {dict(list(bad.items())[:4])}")
+        self.injection_scale = fac
+        self.injection_spectrum_info = {
+            "label": label or kind, "kind": kind, "normalised_at": at_txt,
+            "factors": {str(pid): round(float(v), 6) for pid, v in fac.items()},
+            "lam_um": {str(pid): round(float(v), 5) for pid, v in lam_um.items() if np.isfinite(v)}}
+        vals = np.array(list(fac.values()))
+        getattr(self, "_log", lambda s: None)(
+            f"  injected spectrum ({label or kind}): contrast x {vals.min():.3g}-{vals.max():.3g} across "
+            f"{len(fac)} partitions, 1 at {at_txt}")
+        return dict(fac)
+
+    def scaled_sources(self, sources: Optional[Sequence[Source]], pid: Any) -> Optional[Sequence[Source]]:
+        """``sources`` as partition ``pid`` injects them: each positive contrast times the
+        partition's spectrum factor (:meth:`set_injection_spectrum`); unchanged without one."""
+        scale = getattr(self, "injection_scale", None)
+        if not sources or not scale:
+            return sources
+        f = float(scale.get(pid, 1.0))
+        if f == 1.0:
+            return sources
+        return [Source(s.rho, s.theta, float(s.contrast) * f) if float(s.contrast) > 0 else s for s in sources]
 
     def subtract_sources(self, sources: Sequence[Any], threads: int = 1) -> int:
         """:meth:`KLIPReducer.subtract_sources` on every partition: the same sources, on the
@@ -1657,8 +1793,9 @@ class PartitionedReducer(Reducer):
         lenders = self.sdi_lender_ids(sel)
         if lenders is None or int(round(float(config.params.get("nkeep_sdi", 0) or 0))) <= 0:
             return None, None
-        jobs = [(self.reducers[pid], ReductionRequest(config.params_for(pid), injections, k_scan,
-                                                      f"{tag}_{pid}_prep", fm_sources=fm_sources,
+        jobs = [(self.reducers[pid], ReductionRequest(config.params_for(pid), self.scaled_sources(injections, pid),
+                                                      k_scan, f"{tag}_{pid}_prep",
+                                                      fm_sources=self.scaled_sources(fm_sources, pid),
                                                       threads=per, stage="prepare"))
                 for pid in lenders]
         payload = {pid: sf for pid, sf in zip(lenders, self._map(jobs))}
@@ -1693,8 +1830,10 @@ class PartitionedReducer(Reducer):
         kind = self.start_workers() if self.max_workers > 1 else "serial"
         per = self.job_threads(len(sel))          # threads inside each partition job
         siblings, shared = self._prepare_siblings(config, sel, injections, k_scan, tag, fm_sources, per, kind)
-        jobs = [(self.reducers[pid], ReductionRequest(config.params_for(pid), injections, k_scan,
-                                                      f"{tag}_{pid}", fm_sources=fm_sources, extras=extras,
+        # each partition injects the sources at its own point of their spectrum, when they have one
+        jobs = [(self.reducers[pid], ReductionRequest(config.params_for(pid), self.scaled_sources(injections, pid),
+                                                      k_scan, f"{tag}_{pid}",
+                                                      fm_sources=self.scaled_sources(fm_sources, pid), extras=extras,
                                                       threads=per, siblings=siblings))
                 for pid in sel]
         keys = None
@@ -1776,6 +1915,8 @@ class PartitionedReducer(Reducer):
                  partition_label=getattr(self, "partition_label", "night"),
                  provenance=getattr(self, "provenance", None),
                  partitions={str(k): r.describe() for k, r in self.reducers.items()})
+        if getattr(self, "injection_spectrum_info", None):
+            d["injection_spectrum"] = dict(self.injection_spectrum_info)
         if getattr(self, "data_edits", None):
             d["data_edits"] = dict(self.data_edits)
         if self.sdi_lender_ids(list(self.reducers)) is not None:

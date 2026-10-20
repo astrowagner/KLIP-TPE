@@ -153,7 +153,10 @@ def test_one_block_and_a_flag_per_partition(tmp_path):
 def test_the_data_set_entry_and_the_command_line(tmp_path, monkeypatch):
     entry = datasets.DATASETS["lbti_ales_mwc758"]
     assert len(entry) == 42 and datasets._SOURCE["lbti_ales_mwc758"] == "kt"
-    assert sorted(k for k in entry if k.startswith("meta_")) == ["meta_20191113", "meta_20191114"]
+    assert sorted(k for k in entry if k.startswith("meta_")) == ["meta_20190105", "meta_20191114"]
+    extra = datasets.DATASETS["lbti_ales_mwc758_20191113"]          # the third night, its own data set
+    assert len(extra) == 21 and datasets._SOURCE["lbti_ales_mwc758_20191113"] == "kt"
+    assert ales.release_nights({**entry, **extra}) == ["20190105", "20191113", "20191114"]
     files = _release(tmp_path)
     monkeypatch.setenv("KLIP_TPE_DATA", str(tmp_path / "data"))
     monkeypatch.setitem(datasets.DATASETS, "syn_ales", {k: os.path.basename(v) for k, v in files.items()})
