@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — 2026-10-20 (tutorial 7 on November 14)
+
+- **Tutorial 7** searches 2019 November 14 alone, the longer of the paper's two nights: 20
+  wavelength groups as 20 partitions, `n2_g00` to `n2_g19`, the labels of the two-night data
+  set.  It downloads that night only, 491 MB in 21 files, with `datasets.fetch(...,
+  roles=...)`, and the guard lets the search drop up to 10 groups.  January 5, and the
+  partition weights by exposure time, are a variation now.  Its run directory is
+  `runs/mwc758_ales_nov14`, so an earlier two-night run is not resumed into it.
+  `docs/TUTORIALS.md` and the README follow.
+
 ## Unreleased — 2026-10-20 (the ALES paper's processing geometry, held)
 
 The c-tuned two-night run searched the KLIP zone's reach beyond the annulus and the number of
