@@ -12,16 +12,19 @@
   1100.C-0481, 63 frames x 2 channels, 241x241 px crops, 33.8 deg of rotation) with the
   unsaturated flux frames; HD 95086 b at 0.62", PA ~145 deg.  Reduced with K. Wagner's
   IDL SPHERE pipeline; distributed from the klip-tpe GitHub release ``tutorial-data``.
-* ``lbti_ales_mwc758`` -- LBTI/ALES integral-field cubes of MWC 758 from two nights, 2019 Nov
-  13 and 14 (959 and 1594 frames of 2.46 s, 109 and 127 deg of rotation, 62x62 spaxels of an
-  assumed 0.0345", star at the centre), as 20 wavelength groups over 2.90-4.15 um with the same
-  edges on both nights: per night one ``(frame, y, x)`` cube per group (the mean of its
-  channels) and a meta file (a template per group, the angles, the frame, group and channel
-  tables).  Registered and cleaned with K. Wagner's IDL ALES pipeline.  The frames are those
-  with the star at the centre.  MWC 758c sits at 0.603", PA 228.5 deg in the Nov 14 data
-  (Wagner et al. 2023).
+* ``lbti_ales_mwc758`` -- LBTI/ALES integral-field cubes of MWC 758 from the two nights of
+  Wagner et al. (2023, Nature Astronomy 7, 1208), 2019 Jan 5 and Nov 14 (583 frames of 1.48 s
+  and 1594 of 2.46 s, 71 and 127 deg of rotation, 62x62 spaxels of an assumed 0.0345", star at
+  the centre), as 20 wavelength groups over 2.90-4.15 um with the same edges on both nights:
+  per night one ``(frame, y, x)`` cube per group (the mean of its channels) and a meta file (a
+  template per group, the angles, the frame, group and channel tables).  Registered and cleaned
+  with K. Wagner's IDL ALES pipeline.  The frames are those with the star at the centre.
+  MWC 758c sits at 0.603", PA 228.5 deg in the Nov 14 data (Wagner et al. 2023).
   From the klip-tpe GitHub release ``tutorial-data``.  Read it with
   :func:`klip_tpe.instruments.ales.load_release`.
+* ``lbti_ales_mwc758_20191113`` -- a third night in the same layout and group grid, 2019 Nov 13
+  (959 frames of 2.46 s, 109 deg of rotation), which the paper does not use.  Merged with the
+  two nights' files, ``load_release`` reads all three (``n1`` to ``n3`` in date order).
 
 The VIP files come from https://github.com/vortex-exoplanet/VIP_extras (data distribution
 of the VIP project); see that repository for provenance.  The cache directory is
@@ -69,8 +72,12 @@ DATASETS: Dict[str, Dict[str, str]] = {
     },
     # roles meta_<date> and gNN_<date>: the release layout of ales.load_release
     "lbti_ales_mwc758": {
-        **{f"meta_{d}": f"mwc758_ales_{d}_meta.fits" for d in ("20191113", "20191114")},
-        **{f"g{g:02d}_{d}": f"mwc758_ales_{d}_g{g:02d}.fits" for d in ("20191113", "20191114") for g in range(20)},
+        **{f"meta_{d}": f"mwc758_ales_{d}_meta.fits" for d in ("20190105", "20191114")},
+        **{f"g{g:02d}_{d}": f"mwc758_ales_{d}_g{g:02d}.fits" for d in ("20190105", "20191114") for g in range(20)},
+    },
+    "lbti_ales_mwc758_20191113": {
+        "meta_20191113": "mwc758_ales_20191113_meta.fits",
+        **{f"g{g:02d}_20191113": f"mwc758_ales_20191113_g{g:02d}.fits" for g in range(20)},
     },
 }
 #: which base URL serves each set
@@ -92,9 +99,13 @@ INSTRUMENT = {
                        "dit_science": 96.0, "dit_flux": 0.837464, "nd_transmission": 0.0851},
     # LBTI/ALES on one LBT aperture.  The plate scale is assumed, not calibrated on these nights.
     # The frames are north up, east left once rotated counter-clockwise by LBT_PARA + 180 deg.
+    # texp_frame: s per frame, by night (each meta header's EXPTIME, which load_release reads).
     "lbti_ales_mwc758": {"pxscale": 0.0345, "diam_m": 8.4, "truenorth": 0.0, "angle_offset": 180.0,
-                         "texp_frame": 2.4588, "nights": ["20191113", "20191114"], "lam_range_um": (2.90, 4.15),
-                         "ngroup": 20},
+                         "texp_frame": {"20190105": 1.47528, "20191114": 2.4588}, "nights": ["20190105", "20191114"],
+                         "lam_range_um": (2.90, 4.15), "ngroup": 20},
+    "lbti_ales_mwc758_20191113": {"pxscale": 0.0345, "diam_m": 8.4, "truenorth": 0.0, "angle_offset": 180.0,
+                                  "texp_frame": {"20191113": 2.4588}, "nights": ["20191113"],
+                                  "lam_range_um": (2.90, 4.15), "ngroup": 20},
 }
 
 #: Absolute stellar photometry for the sets that HAVE some, in the science frames' own

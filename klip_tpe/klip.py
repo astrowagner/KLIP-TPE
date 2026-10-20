@@ -621,6 +621,10 @@ class KLIPParams:
     #: (:func:`klip_annular`).  The same KLIP to float64 rounding but not to the bit, since the
     #: Gram's dot products are summed in another order.  The fast path forms only its k modes.
     gram: str = "target"
+    #: ``(inner, outer)`` px of the annulus whose mid radius turns ``angsep`` into degrees of
+    #: rotation, when the zone reaches beyond it (``zone_in`` / ``zone_out`` of the reducer);
+    #: None: the zone's own ``inrad`` and ``outrad``
+    arc_radii: Optional[Tuple[float, float]] = None
 
 
 _FM_TOL = 1e-6                   # eigenvalue tolerance of get_klip_basis_new / the FM block
@@ -762,7 +766,8 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
     # construction -- so the shortcut has to stand down.
     if not fast and not use_lib and p.angsep <= 0 and p.anglemax >= paspan:
         fast, auto_fast = True, True
-    arc = arcdist_deg(p.inrad, p.outrad, lam_over_d_px)
+    a_in, a_out = (p.inrad, p.outrad) if p.arc_radii is None else (float(p.arc_radii[0]), float(p.arc_radii[1]))
+    arc = arcdist_deg(a_in, a_out, lam_over_d_px)
     angsep_deg = p.angsep * abs(arc)
     # A shared basis built from the frames it is about to subtract (fast/auto_fast without
     # RDI: R = D) spans those frames exactly, so mode n annihilates every one of them and

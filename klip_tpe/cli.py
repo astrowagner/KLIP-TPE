@@ -564,7 +564,7 @@ def _add_near_args(p):
                          "(klip_tpe.datasets: lbti_ales_mwc758), one partition per night and wavelength group, "
                          "in place of --root")
     ga.add_argument("--ales-nights", nargs="+", default=None, metavar="NIGHT",
-                    help="with --ales-dataset: the nights to load, as dates (20191113) or labels (n1), all by default")
+                    help="with --ales-dataset: the nights to load, as dates (20191114) or labels (n1), all by default")
     ga.add_argument("--ales-target", default="WISPIT2", metavar="NAME",
                     help="prefix of the product files under --root (NAME_cube_cen_clean.fits ...; default WISPIT2)")
     ga.add_argument("--ales-ref", default=None, metavar="NAME",

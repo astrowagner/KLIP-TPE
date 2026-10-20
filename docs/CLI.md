@@ -330,7 +330,7 @@ LBTI/ALES (--instrument ales):
                         per night and wavelength group, in place of --root
   --ales-nights NIGHT [NIGHT ...]
                         with --ales-dataset: the nights to load, as dates
-                        (20191113) or labels (n1), all by default
+                        (20191114) or labels (n1), all by default
   --ales-target NAME    prefix of the product files under --root
                         (NAME_cube_cen_clean.fits ...; default WISPIT2)
   --ales-ref NAME       reference star whose products sit beside the target's
@@ -737,7 +737,7 @@ LBTI/ALES (--instrument ales):
                         per night and wavelength group, in place of --root
   --ales-nights NIGHT [NIGHT ...]
                         with --ales-dataset: the nights to load, as dates
-                        (20191113) or labels (n1), all by default
+                        (20191114) or labels (n1), all by default
   --ales-target NAME    prefix of the product files under --root
                         (NAME_cube_cen_clean.fits ...; default WISPIT2)
   --ales-ref NAME       reference star whose products sit beside the target's
@@ -1026,7 +1026,7 @@ LBTI/ALES (--instrument ales):
                         per night and wavelength group, in place of --root
   --ales-nights NIGHT [NIGHT ...]
                         with --ales-dataset: the nights to load, as dates
-                        (20191113) or labels (n1), all by default
+                        (20191114) or labels (n1), all by default
   --ales-target NAME    prefix of the product files under --root
                         (NAME_cube_cen_clean.fits ...; default WISPIT2)
   --ales-ref NAME       reference star whose products sit beside the target's
@@ -1305,7 +1305,7 @@ LBTI/ALES (--instrument ales):
                         per night and wavelength group, in place of --root
   --ales-nights NIGHT [NIGHT ...]
                         with --ales-dataset: the nights to load, as dates
-                        (20191113) or labels (n1), all by default
+                        (20191114) or labels (n1), all by default
   --ales-target NAME    prefix of the product files under --root
                         (NAME_cube_cen_clean.fits ...; default WISPIT2)
   --ales-ref NAME       reference star whose products sit beside the target's
@@ -1618,7 +1618,7 @@ LBTI/ALES (--instrument ales):
                         per night and wavelength group, in place of --root
   --ales-nights NIGHT [NIGHT ...]
                         with --ales-dataset: the nights to load, as dates
-                        (20191113) or labels (n1), all by default
+                        (20191114) or labels (n1), all by default
   --ales-target NAME    prefix of the product files under --root
                         (NAME_cube_cen_clean.fits ...; default WISPIT2)
   --ales-ref NAME       reference star whose products sit beside the target's
@@ -1908,7 +1908,7 @@ LBTI/ALES (--instrument ales):
                         per night and wavelength group, in place of --root
   --ales-nights NIGHT [NIGHT ...]
                         with --ales-dataset: the nights to load, as dates
-                        (20191113) or labels (n1), all by default
+                        (20191114) or labels (n1), all by default
   --ales-target NAME    prefix of the product files under --root
                         (NAME_cube_cen_clean.fits ...; default WISPIT2)
   --ales-ref NAME       reference star whose products sit beside the target's
@@ -2226,7 +2226,7 @@ LBTI/ALES (--instrument ales):
                         per night and wavelength group, in place of --root
   --ales-nights NIGHT [NIGHT ...]
                         with --ales-dataset: the nights to load, as dates
-                        (20191113) or labels (n1), all by default
+                        (20191114) or labels (n1), all by default
   --ales-target NAME    prefix of the product files under --root
                         (NAME_cube_cen_clean.fits ...; default WISPIT2)
   --ales-ref NAME       reference star whose products sit beside the target's
@@ -2532,7 +2532,7 @@ LBTI/ALES (--instrument ales):
                         per night and wavelength group, in place of --root
   --ales-nights NIGHT [NIGHT ...]
                         with --ales-dataset: the nights to load, as dates
-                        (20191113) or labels (n1), all by default
+                        (20191114) or labels (n1), all by default
   --ales-target NAME    prefix of the product files under --root
                         (NAME_cube_cen_clean.fits ...; default WISPIT2)
   --ales-ref NAME       reference star whose products sit beside the target's

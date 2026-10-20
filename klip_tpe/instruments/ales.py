@@ -533,6 +533,7 @@ def make_reducer(datasets: Dict[str, Dataset], lam_m: Dict[str, float], fwhm_px:
                  table: Optional[Sequence[Dict[str, Any]]] = None, defaults: Optional[Dict[str, Any]] = None,
                  reflib: bool = False, reflib_science: str = "all", reflib_metric: str = "cc",
                  reflib_n_min_ref: int = 2, sdi: bool = False, sdi_cap: int = 100, sdi_lenders: str = "all",
+                 spectrum: Any = None, spectrum_norm: Any = None, spectrum_label: Optional[str] = None,
                  log: Callable[[str], None] = print) -> PartitionedReducer:
     """:func:`generic.make_reducer` over the groups, with the group at the mean wavelength
     standing for the combination (:func:`representative_group`): the metric's FWHM and
@@ -568,7 +569,16 @@ def make_reducer(datasets: Dict[str, Dataset], lam_m: Dict[str, float], fwhm_px:
     groups lend frames: ``'all'`` (an excluded group still does) or ``'selected'``.  A
     reference star given (``load_ales(ref=...)``) is the library's third pool then, searched,
     whether or not ``reflib`` is set.  ``nkeep_sdi = nkeep_psfref = 0`` is plain ADI to the
-    bit, and costs plain ADI: the other groups are prepared only when ``nkeep_sdi`` asks."""
+    bit, and costs plain ADI: the other groups are prepared only when ``nkeep_sdi`` asks.
+
+    ``spectrum`` gives the injected sources a spectrum
+    (:meth:`~klip_tpe.reducer.PartitionedReducer.set_injection_spectrum`): a callable
+    ``f(lambda_um)``, a ``(lambda_um, contrast)`` table or ``{partition: factor}``, the relative
+    contrast to the star, so a source of contrast ``c`` goes into each group at ``c`` times
+    the spectrum there over the spectrum at ``spectrum_norm`` (default the representative
+    group; a partition id or a wavelength in metres).  None, the default, injects the same
+    contrast in every group: a source with the star's colours.  ``spectrum_label`` names it in
+    the run's setup file."""
     rep = representative or representative_group(lam_m)
     d = {"hp_nan_aware": True}
     d.update(defaults or {})
@@ -588,6 +598,8 @@ def make_reducer(datasets: Dict[str, Dataset], lam_m: Dict[str, float], fwhm_px:
                       [{"name": n, "lam_mean": lam_m[n] * 1e6, "fwhm_px": fwhm_px[n]} for n in datasets]}
     log(f"  representative group {rep}: {lam_m[rep] * 1e6:.3f} um, fwhm {red.fwhm:.2f} px, "
         f"lambda/D {red.lam_over_d_px:.2f} px (the metric's and the sampler's)")
+    if spectrum is not None:
+        red.set_injection_spectrum(spectrum, norm=spectrum_norm, label=spectrum_label)
     if reflib or sdi:
         nights = {((ds.meta or {}).get("provenance") or {}).get("night") for ds in datasets.values()} - {None}
         if sdi and len(nights) > 1:
@@ -666,7 +678,14 @@ def make_space(reducer: PartitionedReducer, defaults: Optional[Dict[str, Any]] =
     the search's first evaluation is then the plain ADI baseline itself, and its score the one
     every library draw is read against.
     The defaults are the ALES reduction's baseline (:data:`BASELINE`); the NEAR production
-    seed (bin 29, corr_thresh 0.907) is wrong for these data."""
+    seed (bin 29, corr_thresh 0.907) is wrong for these data.
+
+    ``zone_range=(lo, hi)`` and ``search_post_hp=True`` (:func:`klip_tpe.instruments.near.make_space`)
+    search the KLIP zone's reach beyond the annulus (``zone_in``, ``zone_out``, px) and the
+    residuals' second high-pass (``post_hp``).  The ALES paper reduction of MWC 758 fits
+    one 5-27 spaxel zone and derotates the residuals without a second high-pass: in a
+    0.4-0.8" annulus that is ``zone_in`` 6.6, ``zone_out`` 3.8 (the 62-spaxel frames cap the
+    zone at 27 anyway) and ``post_hp`` 0."""
     d = dict(BASELINE)
     d.update(defaults or {})
     kw.setdefault("per_night", False)

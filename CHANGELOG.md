@@ -1,5 +1,47 @@
 # Changelog
 
+## Unreleased — 2026-10-18 (coloured injections; the ALES paper's ADI step in the space)
+
+Tutorial 7's winner suits star-coloured injections and not MWC 758c, a much redder source
+(S/N 1.9 against 3.6-3.7 in the paper's November 14 images), and two steps of the paper's
+reduction were outside the space.
+
+- **`PartitionedReducer.set_injection_spectrum`** (`ales.make_reducer(spectrum=,
+  spectrum_norm=, spectrum_label=)`): the injected sources get a spectrum across the
+  partitions, a function of wavelength, a table or one factor per partition, normalised at
+  the representative partition, another one or a wavelength.  Every injection of the run gets
+  it (search, calibration, validation, KLIP-FM, the SDI pool's borrowed frames); a negative
+  source keeps its contrast.  None, the default, is the flat spectrum, to the bit.  Recorded
+  under `injection_spectrum` in the reducer's description.
+- **`zone_in`, `zone_out`** (KLIPReducer parameters, px, default 0): the KLIP zone reaches
+  beyond the annulus, as the paper's one 5-27 spaxel zone does.  `angsep`'s arc and the
+  bin's PA span stay the annulus' (`KLIPParams.arc_radii`, the SDI pool's `mid_px`).
+  **`post_hp`** (default 1): 0 derotates the KLIP residuals without the second high-pass, as
+  the paper's ADI images are made.  `make_space(zone_range=(lo, hi), search_post_hp=True)`
+  (near, generic and ales) searches them, seeded from `defaults`; without them the space and
+  every reduction are as they were.  The live display labels them `zin`, `zout` and `hp2`.
+- **`scripts/run_mwc758_ales_clike.py`**: tutorial 7's search with c's spectrum (a power law
+  fitted to the c contrasts of the paper's injection tests), these dimensions, the paper's
+  configuration as the seed and square-root-exposure weights; `--nights nov14`, `--sdi`,
+  `--quick`.  `docs/ALES.md` section 8; `tests/test_ales_clike.py`.
+
+## Unreleased — 2026-10-17 (tutorial 7 on the two ALES nights of Wagner et al. 2023)
+
+- **`datasets.fetch("lbti_ales_mwc758")`** is now 2019 Jan 5 and Nov 14, the two ALES nights
+  of Wagner et al. (2023): 583 frames of 1.48 s (71 deg of rotation) and 1594 of 2.46 s
+  (127 deg), 670 MB in 42 files, on the same 20-group grid.  2019 Nov 13, which the paper does
+  not use, is its own data set, **`lbti_ales_mwc758_20191113`** (21 files); merged with the
+  two, `load_release` reads three nights, `n1` to `n3`.  The data sets' `texp_frame` in
+  `datasets.INSTRUMENT` is per night (each meta header's `EXPTIME`, which `load_release`
+  reads).  The January 5 files go into the `tutorial-data` release.
+- **Tutorial 7** searches the paper's two nights, `n1` = Jan 5 and `n2` = Nov 14.
+  `docs/ALES.md` section 7, `tests/test_ales_release.py` and `tests/test_dataset_cache.py`
+  follow.
+- **Live display:** `show="inline"` outside a notebook falls back to a window at the full panel
+  size (shrunk to fit the screen).  It used to keep the scale meant for a notebook cell
+  (tutorial 7 asks for 0.55), which made that fixed-size window too small to read when the
+  tutorial ran as a script.
+
 ## Unreleased — 2026-10-15e (a finished run's winners on other frames, sources added at load, the verify's injections given)
 
 From the NEAR2 session's reply of 2026-10-15 15:30 MST: the checks on the line need

@@ -8,15 +8,16 @@
 # multiplies the partitions. Here two nights of 20 groups make 40, and the search decides which
 # of them to combine.
 #
-# The target is MWC 758, a young star with a two-armed spiral disk, observed on 2019 November
-# 13 and 14. MWC 758c, the protoplanet that Wagner et al. (2023, Nature Astronomy 7, 1208)
-# propose drives the spiral arms, lies outside the southern arm. In their November 14 data it
-# sits at 0.603″, PA 228.5°. It is faint and red: their November 14 spectrum reaches S/N ≈ 3
-# per spectral channel at λ ≥ 3.8 µm. Here it is a known source, kept out of the injections and
-# the noise rings, and a test of what the search finds.
+# The target is MWC 758, a young star with a two-armed spiral disk. MWC 758c, the protoplanet
+# that Wagner et al. (2023, Nature Astronomy 7, 1208) propose drives the spiral arms, lies
+# outside the southern arm. Their ALES data are from two nights, 2019 January 5 and November
+# 14, and this tutorial uses the same two. In the November 14 data c sits at 0.603″, PA 228.5°,
+# and its orbital motion between the nights is well under a spaxel. It is faint and red: their
+# November 14 spectrum reaches S/N ≈ 3 per spectral channel at λ ≥ 3.8 µm. Here it is a known
+# source, kept out of the injections and the noise rings, and a test of what the search finds.
 #
 # `datasets.fetch("lbti_ales_mwc758")` downloads the data set from the klip-tpe GitHub
-# release, 786 MB in 42 files. For each night there is one cube per wavelength group and a
+# release, 670 MB in 42 files. For each night there is one cube per wavelength group and a
 # meta file with the templates, the angles and the tables.
 
 # %%
@@ -44,14 +45,15 @@ inst
 #
 # The two nights were reduced with K. Wagner's IDL ALES pipeline: the frames are registered on
 # the star, their bad spaxels repaired, and only frames with the star at the center kept. Their
-# cube-builder wavelength solutions differ, 100 channels from 2.750 µm on November 13 and 98 from
+# cube-builder wavelength solutions differ, 99 channels from 2.738 µm on January 5 and 98 from
 # 2.789 µm on November 14. The data set therefore puts both nights on one grid of 20 groups,
 # equally spaced in ln λ over 2.90–4.15 µm. Each group's cube is the mean of the channels whose
-# wavelengths fall inside it, 2 channels at the blue end and 6 at the red end. A group is the
-# same band on both nights, while its mean wavelength follows that night's channels.
+# wavelengths fall inside it, 2 or 3 channels at the blue end and 6 at the red end. A group is
+# the same band on both nights, while its mean wavelength follows that night's channels.
 #
-# The frames are 2.46 s each, on 62 × 62 spaxels of an assumed 0.0345″, and they are north up,
-# east left once rotated counter-clockwise by LBT_PARA + 180°. `ales.load_release` reads it all:
+# The frames are 1.48 s each on January 5 and 2.46 s on November 14, on 62 × 62 spaxels of an
+# assumed 0.0345″, and they are north up, east left once rotated counter-clockwise by
+# LBT_PARA + 180°. `ales.load_release` reads it all:
 
 # %%
 dsets, lam, fwhm, table = ales.load_release(files)
@@ -61,8 +63,9 @@ for date in ales.release_nights(files):
           f"LBT_PARA {fr['LBT_PARA'].min():.1f} to {fr['LBT_PARA'].max():.1f} deg")
 
 # %% [markdown]
-# The two nights cover 109° and 127° of rotation. November 13 has three gaps of about 20
-# minutes, and November 14 alternates five minutes on the star with five on the sky. The star's
+# January 5 covers 71° of rotation in 51 minutes around transit, with three gaps of 3 to 7
+# minutes. November 14 covers 127° in 2.8 hours, alternating five minutes on the star with five
+# on the sky, and has 2.7 times the frames and 4.6 times the exposure time. The star's
 # flux per group, measured on each partition's template within 3 spaxels of the star (the
 # template's flux unit), shows the telluric absorption between 3.1 and 3.3 µm:
 
@@ -88,8 +91,8 @@ plt.tight_layout()
 #
 # Each partition is one night and one group, `n1_g00` to `n2_g19`. `make_reducer` builds one
 # KLIP reducer per partition and combines the 40 images with equal weights. The partition at
-# the mean wavelength (3.83 µm) stands for the combination: its FWHM sets the metric's apertures
-# and its template the matched filter.
+# the mean wavelength (`n2_g10`, 3.50 µm) stands for the combination: its FWHM sets the
+# metric's apertures and its template the matched filter.
 #
 # `make_space` gives one block of reduction parameters shared by every partition, and one 0/1
 # flag per partition. The guard bounds how many flags may be off. At 20 the search can drop a
@@ -202,7 +205,7 @@ for ia, (r, ax) in enumerate(zip(results, axes[:, 0])):
     kept = np.array([[1.0 if f"{n}_{g}" in r.partitions else 0.0 for g in groups] for n in ("n1", "n2")])
     print("    " + ", ".join(f"{n}: {int(row.sum())} of {len(groups)} groups kept" for n, row in zip(("n1", "n2"), kept)))
     ax.imshow(kept, cmap="Greys", vmin=-0.3, vmax=1.3, aspect="auto")
-    ax.set_yticks([0, 1], ["Nov 13 (n1)", "Nov 14 (n2)"])
+    ax.set_yticks([0, 1], ["Jan 5 (n1)", "Nov 14 (n2)"])
     ax.set_title(f"annulus {ia + 1} ({band}): partitions the winner keeps (dark)", fontsize=10)
 ax.set_xticks(range(len(groups)), [f"{rows['n1_' + g]['lam_mean']:.2f}" for g in groups], rotation=60, fontsize=8)
 ax.set_xlabel("group mean wavelength (µm)")
@@ -254,11 +257,22 @@ Image(filename=os.path.join(ad, "partition_map.png"), width=900)
 #
 # * **One night.** `ales.load_release(files, nights=["n2"])` loads November 14 alone, as
 #   `n2_g00` to `n2_g19`, and the same search then tunes 20 partitions.
+# * **A third night.** `datasets.fetch("lbti_ales_mwc758_20191113")` adds 2019 November 13
+#   (959 frames of 2.46 s, 109° of rotation), which the paper does not use.
+#   `ales.load_release({**files, **datasets.fetch("lbti_ales_mwc758_20191113")})` loads the
+#   three nights as `n1` (January 5), `n2` (November 13) and `n3` (November 14), 60 partitions.
 # * **Part of the data set.** `datasets.fetch("lbti_ales_mwc758", roles=[...])` downloads only
 #   the roles you name, `meta_<date>` and `gNN_<date>`, and `load_release(files, only=["g15",
 #   ...])` keeps the same groups on every night.
 # * **Weights.** `make_reducer(..., weighting="sqrt_texp")` weights each partition by the square
 #   root of its exposure time, which favors the longer November 14 night.
+# * **A companion's colors.** `make_reducer(..., spectrum=lambda um: (um / 3.8) ** 6.76,
+#   spectrum_norm=3.8e-6)` injects sources with MWC 758c's spectrum, a power law fitted to its
+#   ALES contrasts, in place of the star's. `make_space(..., zone_range=(0, 8),
+#   search_post_hp=True)` adds two steps of the paper's reduction that this space leaves out: a
+#   KLIP zone wider than the annulus and the residuals' second high-pass, which the paper does
+#   not apply. `scripts/run_mwc758_ales_clike.py` runs this search with both, seeded with the
+#   paper's configuration (`docs/ALES.md` section 8).
 # * **SDI.** `make_reducer(..., sdi=True)` adds the other groups' frames, rescaled to each
 #   group's wavelength, as a searched pool (`docs/ALES.md` section 4). It needs one night, since
 #   the pool would otherwise lend one night's frames to the other's groups.

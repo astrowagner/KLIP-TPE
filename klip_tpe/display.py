@@ -93,7 +93,8 @@ SRC_COLOR = "#00e5a0"
 
 #: column-header abbreviations of the per-partition config table (step panel text block)
 COL_ABBREV = {"bin": "bin", "n_ang": "nang", "filter": "filt", "angsep": "asep", "anglemax": "amax",
-              "corr_thresh": "corr", "noise_max": "noise", "coronoise_max": "coro", "k_klip": "k", "k": "k"}
+              "corr_thresh": "corr", "noise_max": "noise", "coronoise_max": "coro", "k_klip": "k", "k": "k",
+              "zone_in": "zin", "zone_out": "zout", "post_hp": "hp2"}
 #: target width (characters) of the text block; wider config tables wrap into column blocks
 TEXT_WIDTH = 72
 
@@ -3420,6 +3421,10 @@ class LiveDisplay(RunCallback):
         self._inline_fallback = mode == "inline" and not _in_notebook()
         if self._inline_fallback:
             mode = "window"
+            # A scale below 1 sized a notebook's output cell (tutorial 7 asks for 0.55).  The
+            # window it falls back to has a fixed size, so that scale left it too small to
+            # read: the window gets the whole panel instead, shrunk to fit the screen as ever.
+            self.window_scale = max(self.window_scale, 1.0)
         self.inline = mode == "inline"
         self.save_png, self.show, self.cmap, self.dpi, self.movie = save_png, bool(mode), cmap, int(dpi), movie
         # before any GUI toolkit starts: on a Wayland desktop the window goes through XWayland,
