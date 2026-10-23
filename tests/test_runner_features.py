@@ -117,6 +117,22 @@ def test_params_table(hooks_run):
     assert k_n1 == results[0].winner_config["per_partition"]["n1"]["k_klip"]
 
 
+def test_params_table_summary_is_the_kept_partitions_median(tmp_path):
+    """The summary row is the median over the partitions the winner keeps, not over all of them,
+    and its values carry 6 significant digits (NEAR2 note of 2026-10-23)."""
+    blk = {"bin": 3.0, "angsep": 0.3404951, "anglemax": 45.0}
+    rows = [{"ann": 1, "inner_px": 8.0, "outer_px": 30.0, "best_SNR": 7.123, "partitions": ["n2", "n3"],
+             "params": {"k_klip": 12, **blk},                     # the median over n1-n3, as winner_config.params
+             "per_partition": {"n1": {"k_klip": 5, **blk}, "n2": {"k_klip": 12, **blk}, "n3": {"k_klip": 13, **blk}}}]
+    txt = stitch_mod.write_params_table(str(tmp_path / "p.txt"), rows)
+    main = [l.split() for l in txt.splitlines() if l.split() and l.split()[0] == "1"][0]
+    assert float(main[3]) == 12.5                                  # k of n2 and n3; n1 is left out
+    assert main[7] == "0.340495" and float(main[8]) == 45.0         # angsep, anglemax
+    assert "the median over the partitions the winner keeps" in txt
+    per = [l.split() for l in txt.splitlines() if l.split()[1:2] in (["n2"], ["n3"])]
+    assert [p[2] for p in per] == ["12", "13"] and per[0][6] == "0.340495"
+
+
 def test_contrast_curve_seam_trim(hooks_run):
     d, runner, results, _, _ = hooks_run
     px = runner.pxscale

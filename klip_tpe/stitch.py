@@ -206,28 +206,53 @@ def _fmt(v, fmt: str, default: str = "nan") -> str:
         return default
 
 
+def _kept_median(r: Dict[str, Any]) -> Dict[str, Any]:
+    """The parameters of a ``write_params_table`` row with each column of :data:`PARAM_COLUMNS`
+    replaced by its median over the per-partition blocks of the partitions the row keeps (all
+    of the blocks when the row names none), where those blocks give it."""
+    p = dict(r.get("params") or {})
+    per = r.get("per_partition") or {}
+    keep = [str(v) for v in (r.get("partitions") or [])]
+    blocks = [pp for pid, pp in per.items() if not keep or str(pid) in keep]
+    for c in PARAM_COLUMNS:
+        vals = []
+        for b in blocks:
+            try:
+                v = float(b.get(c))
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(v):
+                vals.append(v)
+        if vals:
+            p[c] = float(np.median(vals))
+    return p
+
+
 def write_params_table(path: str, rows: Sequence[Dict[str, Any]]) -> str:
-    """``klip_stitched_params.txt``: one row per annulus with the representative
-    (median over partitions) values, then a per-partition block.
+    """``klip_stitched_params.txt``: one row per annulus with the representative values,
+    the median over the partitions the winner keeps of their per-partition blocks (the row's
+    ``params`` where there are none), then the per-partition block.  Values carry 6
+    significant digits, so they can be rounded again without the error of a second rounding.
 
     Each row dict: ``ann, inner_px, outer_px, params (dict), best_SNR, partitions (list),
     per_partition ({pid: params})`` plus optional ``validated``, ``contrast``.
     Returns the text."""
+    def g(v, w):
+        return f"{_fmt(v, '{:.6g}'):>{w}}"
     L = ["# Per-annulus optimal parameters used for klip_stitched.fits",
          f"# klip_tpe {__version__} -- {_dt.datetime.now().isoformat(timespec='seconds')}",
-         "# inner/outer in pixels; representative values = median over the selected partitions.",
+         "# inner/outer in pixels.  Representative values = the median over the partitions the winner keeps, "
+         "6 significant digits.",
          f"{'ann':>4}  {'inner_px':>8}  {'outer_px':>8}  {'k':>6}  {'bin':>7}  {'n_ang':>7}  {'filter':>7}  "
-         f"{'angsep':>7}  {'anglemax':>8}  {'corr':>7}  {'noise':>7}  {'coro':>7}  {'best_SNR':>9}  "
+         f"{'angsep':>9}  {'anglemax':>9}  {'corr':>9}  {'noise':>9}  {'coro':>9}  {'best_SNR':>9}  "
          f"{'valid':>5}  {'contrast':>10}  partitions"]
     for r in rows:
-        p = r.get("params", {})
+        p = _kept_median(r)
         parts = r.get("partitions") or []
         L.append(f"{int(r['ann']):4d}  {float(r['inner_px']):8.2f}  {float(r['outer_px']):8.2f}  "
-                 f"{_fmt(p.get('k_klip'), '{:6.0f}'):>6}  {_fmt(p.get('bin'), '{:7.2f}'):>7}  "
-                 f"{_fmt(p.get('n_ang'), '{:7.2f}'):>7}  {_fmt(p.get('filter'), '{:7.2f}'):>7}  "
-                 f"{_fmt(p.get('angsep'), '{:7.3f}'):>7}  {_fmt(p.get('anglemax'), '{:8.1f}'):>8}  "
-                 f"{_fmt(p.get('corr_thresh'), '{:7.3f}'):>7}  {_fmt(p.get('noise_max'), '{:7.2f}'):>7}  "
-                 f"{_fmt(p.get('coronoise_max'), '{:7.2f}'):>7}  {_fmt(r.get('best_SNR'), '{:9.3f}'):>9}  "
+                 f"{g(p.get('k_klip'), 6)}  {g(p.get('bin'), 7)}  {g(p.get('n_ang'), 7)}  {g(p.get('filter'), 7)}  "
+                 f"{g(p.get('angsep'), 9)}  {g(p.get('anglemax'), 9)}  {g(p.get('corr_thresh'), 9)}  "
+                 f"{g(p.get('noise_max'), 9)}  {g(p.get('coronoise_max'), 9)}  {_fmt(r.get('best_SNR'), '{:9.3f}'):>9}  "
                  f"{int(bool(r.get('validated', True))):5d}  {_fmt(r.get('contrast'), '{:10.3E}'):>10}  "
                  + (",".join(str(v) for v in parts) if parts else "all"))
     if any(r.get("per_partition") for r in rows):
@@ -238,7 +263,7 @@ def write_params_table(path: str, rows: Sequence[Dict[str, Any]]) -> str:
                 if r.get("partitions") and str(pid) not in [str(v) for v in r["partitions"]]:
                     continue
                 L.append(f"{int(r['ann']):4d}  {str(pid):>10}  " + "  ".join(
-                    f"{_fmt(pp.get(c), '{:13.4g}'):>13}" for c in PARAM_COLUMNS))
+                    f"{_fmt(pp.get(c), '{:13.6g}'):>13}" for c in PARAM_COLUMNS))
     text = "\n".join(L) + "\n"
     with open(path, "w") as f:
         f.write(text)

@@ -326,7 +326,7 @@ def write_candidates(path: str, rows: Sequence[Dict[str, Any]], source: str = ""
     L += ["# score = S/N * persistence(nights) * PSF-likeness * consistency(STIM) * persistence(params)",
           "# tier  : A=strong (S/N>=5, >=half nights, PSF-like)  B=marginal  C=likely speckle",
           "# S/N   : matched-filter Mawet (2014) small-sample S/N (Student-t, df=n_ap-2)",
-          "# FAP   : per-resel small-sample-t false-alarm prob, look-elsewhere corrected (x N_resel)", ""]
+          "# FAP   : 1 - (1 - p)^N_resel, p the per-resel small-sample-t false-alarm prob (look-elsewhere corrected)", ""]
     rho_hdr = 'rho"'
     L.append("  " + f"{'rank':>4}{'x':>5}{'y':>5}{rho_hdr:>7}{'PA':>7}{'S/N':>7}{'Nnt':>4}{'pn_md':>7}{'STIM':>7}"
              f"{'sub1':>6}{'sub2':>6}{'PSF':>6}{'FAP':>10}{'score':>8}  tier  flag")
