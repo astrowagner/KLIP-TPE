@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased — 2026-10-23 (the verify's expected S/N, the params table's summary row)
+
+From the NEAR2 session's note of 2026-10-23 on injection-based limits for faint planets.
+
+- **The expected S/N in the verify** (`verify.expected_snr`, `verify_injections(...,
+  clean_stack=)`).  With the clean twin of the injected stack, which the per-annulus and final
+  verify, the verify books and `rereduce` all have, each injection gets `E = D / (s sqrt(1 +
+  1/n))`.  D is the matched-filtered injected minus clean image at the source, its response
+  without the noise at it.  s is the sample standard deviation of the clean image on the
+  source's ring, with the S/N's exclusions, and n the number of its samples.  No injected
+  source reaches the clean ring, however near or bright, so a brighter neighbor whose residual
+  crosses a planet's ring outside the keep-out lowers the planet's measured S/N but not its E.
+  The report gives E for each injection and TABLE 3, TABLE 1 from E, and the verify books a
+  page of limits from it.  The NEAR2 session found that 300 faint planets' own E predict 214.3
+  detections where the verify made 215.  KLIP's response to a bright injection is not linear,
+  so limits from E hold best for injections near the limit.  TABLE 1 stays the headline, as in
+  the IDL.
+- **`klip_stitched_params.txt`'s summary row** is the median over the partitions the winner
+  keeps, as its header said, rather than over all of them (`winner_config.params`).  Its values
+  and those of the per-partition block carry 6 significant digits, so they can be rounded again
+  without the error of a second rounding.
+- **The candidate list's header** gives the look-elsewhere FAP as it is computed, 1 - (1 -
+  p)^N_resel, where it said "x N_resel".  The IDL `near2_candidates` header has the same
+  wording (line 379) over the same formula (line 294).
+
 ## Unreleased — 2026-10-20 (tutorial 7 on November 14)
 
 - **Tutorial 7** searches 2019 November 14 alone, the longer of the paper's two nights: 20
