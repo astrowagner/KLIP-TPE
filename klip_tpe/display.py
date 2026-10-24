@@ -3112,7 +3112,7 @@ def render_verify_books(run_dir: str, ia: int, out_dir: Optional[str] = None,
     setup = run.get("setup") or run.get("checkpoint") or {}
     excl = float(((setup.get("objective") or {}).get("metric") or {}).get("excl_fwhm") or 1.5)
     vkw = dict(known=[tuple(k) for k in (ad.known or ())], angle_convention=ad.angle_convention, excl_fwhm=excl)
-    rows, maps = verify_injections(istack, src, fwhm, px, clean_stack=stack, **vkw)
+    rows, maps = verify_injections(istack, src, fwhm, px, **vkw)
     # ---- page 1: limits vs separation (winner injections) + search-eval curve (all evals)
     ev_rows = []
     for i in range(len(ad.y)):
@@ -3126,9 +3126,7 @@ def render_verify_books(run_dir: str, ia: int, out_dir: Optional[str] = None,
     cols = ["#3b8fd8", "#2e8b57", "#f5a623", "#d0021b", "#9013fe"]
     path1 = os.path.join(out_dir, "verify_limits.pdf")
     with _rc(), PdfPages(path1) as pdf:
-        for label, lim in (("winner injections", maps.get("limits")),
-                           ("winner injections, expected S/N", maps.get("limits_exp")),
-                           ("all search-eval injections", lim_ev)):
+        for label, lim in (("winner injections", maps.get("limits")), ("all search-eval injections", lim_ev)):
             if lim is None:
                 continue
             smp = lim["samples"]
@@ -3161,9 +3159,7 @@ def render_verify_books(run_dir: str, ia: int, out_dir: Optional[str] = None,
         ax = fig.add_subplot(gs[0, 2:4]); draw_image(ax, cmaps["stim"], ad, "night-STIM", cmap="inferno", sources=src, flatten=False)
         ax = fig.add_subplot(gs[0, 4]); ax.axis("off")
         ax.text(0, 1, "\n".join([f"inj{r['index']}: rho={r['rho']:.2f}\"  PA={r['theta']:.0f}  c={r['contrast']:.1E}\n"
-                                 f"   S/N={r['snr']:.2f}  FAP={r['fap']:.1E}"
-                                 + (f"  E={r['snr_exp']:.2f}" if "snr_exp" in r else "")
-                                 + f"\n   STIM={r['stim']:.2f}  STIM-FAP={r['stim_fap']:.1E}"
+                                 f"   S/N={r['snr']:.2f}  FAP={r['fap']:.1E}\n   STIM={r['stim']:.2f}  STIM-FAP={r['stim_fap']:.1E}"
                                  for r in rows]), va="top", fontsize=7, family="monospace", transform=ax.transAxes)
         half = int(round(3.0 * fwhm))
         for m, r in enumerate(rows):

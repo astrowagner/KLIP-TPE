@@ -15,10 +15,7 @@ Two independent "paths" are evaluated for every candidate ``(rho, theta)``:
 When an injected twin of the night stack is given, the same machinery is run
 at the injected positions and the Path-A detection limits
 ``c_lim = c_inj (tau_alpha + tau_{1-beta}) / SNR_inj`` (``near2v_climit``) are
-binned by separation (TABLE 1 / TABLE 2 of the IDL report).  The clean stack then
-also gives each injection its expected S/N (:func:`expected_snr`), the injected
-minus clean signal over the clean ring's noise, and TABLE 3, the limits from it,
-which the IDL report does not have.
+binned by separation (TABLE 1 / TABLE 2 of the IDL report).
 
 Conventions: images are ``(ny, nx)`` numpy arrays indexed ``[y, x]``; the star is
 at ``((nx-1)/2, (ny-1)/2)``; ``theta`` is a position angle East of North with
@@ -60,7 +57,7 @@ from scipy.stats import t as _student_t
 from .metrics import gaussian_kernel, radprof, source_xy, star_center, nanmedian_even
 
 __all__ = ["t_fap", "t_thresh", "contrast_limit", "contrast_limit_image", "mf_convolve",
-           "snr_fap", "expected_snr", "combine_nights", "night_stim", "stim_fap", "bootstrap_nights",
+           "snr_fap", "combine_nights", "night_stim", "stim_fap", "bootstrap_nights",
            "night_subsets", "verify_maps", "verify_candidates", "verify_injections",
            "limit_tables", "write_verify_table", "write_curve_table"]
 
@@ -136,46 +133,6 @@ def mf_convolve(img: np.ndarray, fwhm: float, kernel: Optional[np.ndarray] = Non
     return ndimage.convolve(np.where(np.isfinite(img), img, 0.0), k, mode="nearest")
 
 
-def _peak_near(A: np.ndarray, img: np.ndarray, xs: float, ys: float, srad: float) -> Tuple[int, int, float]:
-    """The pixel with the largest ``A`` on the disc ``dx^2 + dy^2 <= srad^2`` about the rounded
-    ``(xs, ys)`` where ``img`` is finite (verify 131-136): ``(x, y, value)``, the value -1e30
-    when no pixel qualifies (the rounded position is returned then)."""
-    ny, nx = img.shape
-    px0, py0 = int(round(xs)), int(round(ys))
-    px, py, pkv = px0, py0, -1e30
-    isr = int(np.ceil(srad))
-    for dy in range(-isr, isr + 1):
-        for dx in range(-isr, isr + 1):
-            if dx * dx + dy * dy > srad * srad:
-                continue
-            qx, qy = px0 + dx, py0 + dy
-            if 0 <= qx < nx and 0 <= qy < ny and np.isfinite(img[qy, qx]) and A[qy, qx] > pkv:
-                pkv, px, py = float(A[qy, qx]), qx, qy
-    return px, py, pkv
-
-
-def _ring_values(A: np.ndarray, img: np.ndarray, px: int, py: int, r: float, nap: int, exr: float,
-                 exclude_xy: Sequence[Tuple[float, float]] = ()) -> List[float]:
-    """``A`` on the ring of radius ``r`` through ``(px, py)`` (verify 139-148): the samples at
-    ``th0 + q 2 pi / nap``, ``q = 1..nap-1``, rounded to pixels, skipping those within ``exr`` of
-    ``(px, py)`` or of an ``exclude_xy`` position, out of bounds, or where ``img`` is not finite."""
-    ny, nx = img.shape
-    cx, cy = star_center(img.shape)
-    th0 = np.arctan2(py - cy, px - cx)
-    vals: List[float] = []
-    for q in range(1, nap):
-        th = th0 + q * 2 * np.pi / nap
-        xk, yk = int(round(cx + r * np.cos(th))), int(round(cy + r * np.sin(th)))
-        if np.hypot(xk - px, yk - py) < exr:
-            continue
-        if any(np.hypot(xk - ex, yk - ey) < exr for ex, ey in exclude_xy):
-            continue
-        if not (0 <= xk < nx and 0 <= yk < ny) or not np.isfinite(img[yk, xk]):
-            continue
-        vals.append(float(A[yk, xk]))
-    return vals
-
-
 def snr_fap(img: np.ndarray, rho: float, theta: float, pxscale: float, fwhm: float,
             exr: Optional[float] = None, srad: float = 1.5, *,
             exclude_xy: Sequence[Tuple[float, float]] = (), mfmap: Optional[np.ndarray] = None,
@@ -199,19 +156,41 @@ def snr_fap(img: np.ndarray, rho: float, theta: float, pxscale: float, fwhm: flo
     on the early exits (as in the IDL return vector).
     """
     img = np.asarray(img, float)
+    ny, nx = img.shape
     cx, cy = star_center(img.shape)
     if exr is None:
         exr = 1.5 * fwhm
     A = mfmap if (mfmap is not None and np.shape(mfmap) == img.shape) else mf_convolve(img, fwhm)
     xs, ys = source_xy(rho, theta, pxscale, cx, cy, angle_convention)
-    px, py, pkv = _peak_near(A, img, float(xs[0]), float(ys[0]), srad)
+    xs, ys = float(xs[0]), float(ys[0])
+    px0, py0 = int(round(xs)), int(round(ys))
+    px, py, pkv = px0, py0, -1e30
+    isr = int(np.ceil(srad))
+    for dy in range(-isr, isr + 1):
+        for dx in range(-isr, isr + 1):
+            if dx * dx + dy * dy > srad * srad:
+                continue
+            qx, qy = px0 + dx, py0 + dy
+            if 0 <= qx < nx and 0 <= qy < ny and np.isfinite(img[qy, qx]) and A[qy, qx] > pkv:
+                pkv, px, py = float(A[qy, qx]), qx, qy
     peak = pkv if pkv > -1e30 else float("nan")
     r = float(np.hypot(px - cx, py - cy))
     nap = int(np.floor(2 * np.pi * r / fwhm))
     out = {"snr": np.nan, "fap": np.nan, "nap": nap, "peak": peak, "x": px, "y": py, "r": r}
     if r < fwhm or nap < 5:
         return out
-    vals = _ring_values(A, img, px, py, r, nap, exr, exclude_xy)
+    th0 = np.arctan2(py - cy, px - cx)
+    vals: List[float] = []
+    for q in range(1, nap):
+        th = th0 + q * 2 * np.pi / nap
+        xk, yk = int(round(cx + r * np.cos(th))), int(round(cy + r * np.sin(th)))
+        if np.hypot(xk - px, yk - py) < exr:
+            continue
+        if any(np.hypot(xk - ex, yk - ey) < exr for ex, ey in exclude_xy):
+            continue
+        if not (0 <= xk < nx and 0 <= yk < ny) or not np.isfinite(img[yk, xk]):
+            continue
+        vals.append(float(A[yk, xk]))
     nv = len(vals)
     out["nap"] = nv
     if nv < 3:
@@ -222,51 +201,6 @@ def snr_fap(img: np.ndarray, rho: float, theta: float, pxscale: float, fwhm: flo
         return out
     snr = (float(A[py, px]) - float(np.mean(use))) / (sd * np.sqrt(1.0 + 1.0 / nv))
     out.update(snr=float(snr), fap=t_fap(snr, nv), peak=float(A[py, px]))
-    return out
-
-
-def expected_snr(mf_inj: np.ndarray, mf_clean: np.ndarray, clean_img: np.ndarray, rho: float, theta: float,
-                 pxscale: float, fwhm: float, exr: Optional[float] = None, srad: float = 1.5, *,
-                 exclude_xy: Sequence[Tuple[float, float]] = (), angle_convention: str = "pa") -> Dict[str, float]:
-    """The S/N an injected source is expected to have, ``E = D / (s sqrt(1 + 1/n))``.
-
-    ``D`` is the matched-filtered injected minus clean image (``mf_inj - mf_clean``) at its
-    maximum within ``srad`` of the source: the pipeline's response to the source, without the
-    noise at it.  ``s`` is the sample standard deviation of the clean matched-filtered image on
-    the ring through that maximum, with the exclusions of :func:`snr_fap` (the keep-out ``exr``
-    round the peak and round each ``exclude_xy`` position), and ``n`` the number of its
-    samples.  The clean image holds no injected source, so no other source and no residual of
-    one reaches ``s``, however near or bright.  With the detection model ``S/N = E + T``, ``T``
-    Student-t, ``E`` gives the source's chance of detection and, through
-    :func:`contrast_limit`, a limit (NEAR2 note of 2026-10-23).
-
-    Returns ``{'snr_exp', 'd_peak', 'noise', 'nap', 'x', 'y', 'r'}``, ``noise`` being
-    ``s sqrt(1 + 1/n)`` and ``nap`` the samples used.  ``snr_exp`` is NaN where :func:`snr_fap`
-    would give no S/N."""
-    img = np.asarray(clean_img, float)
-    mfc = np.asarray(mf_clean, float)
-    cx, cy = star_center(img.shape)
-    if exr is None:
-        exr = 1.5 * fwhm
-    D = np.asarray(mf_inj, float) - mfc
-    xs, ys = source_xy(rho, theta, pxscale, cx, cy, angle_convention)
-    px, py, dpk = _peak_near(D, img, float(xs[0]), float(ys[0]), srad)
-    r = float(np.hypot(px - cx, py - cy))
-    nap = int(np.floor(2 * np.pi * r / fwhm))
-    out = {"snr_exp": np.nan, "d_peak": dpk if dpk > -1e30 else np.nan, "noise": np.nan, "nap": nap,
-           "x": px, "y": py, "r": r}
-    if r < fwhm or nap < 5 or not dpk > -1e30:
-        return out
-    vals = _ring_values(mfc, img, px, py, r, nap, exr, exclude_xy)
-    nv = len(vals)
-    out["nap"] = nv
-    if nv < 3:
-        return out
-    sd = float(np.std(np.array(vals), ddof=1))
-    if sd <= 0:
-        return out
-    noise = sd * np.sqrt(1.0 + 1.0 / nv)
-    out.update(snr_exp=float(dpk / noise), noise=float(noise))
     return out
 
 
@@ -492,12 +426,10 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
         irows, imaps = verify_injections(inj_stack, sources, fwhm, pxscale, known=known,
                                          weights=w[: np.asarray(inj_stack).shape[0]], drift_px=drift_px,
                                          excl_fwhm=excl_fwhm, angle_convention=angle_convention,
-                                         fap_list=fap_list, tap_list=tap_list, rbin_as=rbin_as,
-                                         clean_stack=stack)
+                                         fap_list=fap_list, tap_list=tap_list, rbin_as=rbin_as)
         rows.extend(irows)
         maps["injected"] = imaps
         maps["limits"] = imaps["limits"]
-        maps["limits_exp"] = imaps.get("limits_exp")
     maps["meta"] = {"nights": ids, "fap_op": fap_op, "drift_px": drift_px, "excl_fwhm": excl_fwhm,
                     "fwhm": fwhm, "pxscale": pxscale, "n_boot": n_boot}
     for r in rows:
@@ -512,8 +444,7 @@ def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, floa
                       weights: Optional[Sequence[float]] = None, drift_px: float = 1.5,
                       excl_fwhm: float = 1.5, angle_convention: str = "pa",
                       fap_list: Sequence[float] = DEFAULT_FAP_LIST, tap_list: Sequence[float] = DEFAULT_TAP_LIST,
-                      rbin_as: Optional[float] = None,
-                      clean_stack: Optional[np.ndarray] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+                      rbin_as: Optional[float] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Injection calibration block (verify 621-735): Path-A S/N / FAP, subset S/N,
     injected-STIM value + annulus FAP per injected source ``(rho, theta,
     contrast)``, then the detection-limit tables from sources with finite
@@ -525,11 +456,7 @@ def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, floa
     source itself, within the same keep-out.  So a source's S/N is what it would
     be injected alone, to the noise.  DEVIATIONS: the IDL (verify 655-656, 660)
     leaves every other source in the ring and the annulus, and keeps no keep-out
-    around the source in the STIM annulus.
-
-    ``clean_stack``, the clean twin of ``inj_stack`` (same slices, same weights), adds each
-    source's expected S/N (:func:`expected_snr`: ``snr_exp``, ``nap_exp``, ``d_peak``,
-    ``noise_clean``) and ``maps['limits_exp']``, the limit tables from it.  Not in the IDL."""
+    around the source in the STIM annulus."""
     inj_stack = np.asarray(inj_stack, float)
     if inj_stack.ndim == 2:
         inj_stack = inj_stack[None]
@@ -540,12 +467,6 @@ def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, floa
     kxy = _known_xy(known, pxscale, cx, cy, angle_convention)
     sxy = _known_xy([(s[0], s[1]) for s in sources], pxscale, cx, cy, angle_convention)
     maps = verify_maps(inj_stack, w, fwhm)
-    cmaps = None
-    if clean_stack is not None:
-        cst = np.asarray(clean_stack, float)
-        cst = cst[None] if cst.ndim == 2 else cst
-        if cst.shape == inj_stack.shape:
-            cmaps = verify_maps(cst, w, fwhm)
     rows: List[Dict[str, Any]] = []
     for m, src in enumerate(sources):
         rho, theta = float(src[0]), float(src[1])
@@ -558,24 +479,16 @@ def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, floa
                 for name in SUBSET_NAMES}
         xs, ys = source_xy(rho, theta, pxscale, cx, cy, angle_convention)
         sval, sfap = stim_fap(maps["stim"], float(xs[0]), float(ys[0]), rho / pxscale, fwhm, exr, exclude_xy=excl)
-        row = {"kind": "injection", "index": m + 1, "rho": rho, "theta": theta, "contrast": con,
-               "x": s["x"], "y": s["y"], "snr": s["snr"], "fap": s["fap"], "nap": s["nap"],
-               "peak": s["peak"], "subsets": ssub, "stim": sval, "stim_fap": sfap}
-        if cmaps is not None:
-            e = expected_snr(maps["mf"]["combined"], cmaps["mf"]["combined"], cmaps["subsets"]["combined"], rho, theta,
-                             pxscale, fwhm, exr, drift_px, exclude_xy=excl, angle_convention=angle_convention)
-            row.update(snr_exp=e["snr_exp"], nap_exp=e["nap"], d_peak=e["d_peak"], noise_clean=e["noise"])
-        rows.append(row)
+        rows.append({"kind": "injection", "index": m + 1, "rho": rho, "theta": theta, "contrast": con,
+                     "x": s["x"], "y": s["y"], "snr": s["snr"], "fap": s["fap"], "nap": s["nap"],
+                     "peak": s["peak"], "subsets": ssub, "stim": sval, "stim_fap": sfap})
     maps["limits"] = limit_tables(rows, fwhm, pxscale, fap_list, tap_list, rbin_as)
-    maps["limits_exp"] = (limit_tables(rows, fwhm, pxscale, fap_list, tap_list, rbin_as, snr_key="snr_exp",
-                                       nap_key="nap_exp") if cmaps is not None else None)
     return rows, maps
 
 
 def limit_tables(inj_rows: Sequence[Dict[str, Any]], fwhm: float, pxscale: float,
                  fap_list: Sequence[float] = DEFAULT_FAP_LIST, tap_list: Sequence[float] = DEFAULT_TAP_LIST,
-                 rbin_as: Optional[float] = None, *, snr_key: str = "snr",
-                 nap_key: str = "nap") -> Optional[Dict[str, Any]]:
+                 rbin_as: Optional[float] = None) -> Optional[Dict[str, Any]]:
     """Binned Path-A detection limits (verify 674-718 / ``near2v_curvetxt`` 447-488).
 
     Injections with finite ``snr > 0`` and ``contrast > 0`` are binned by ``rho``
@@ -584,18 +497,13 @@ def limit_tables(inj_rows: Sequence[Dict[str, Any]], fwhm: float, pxscale: float
     max(round(mean(nap)), 3))``; TABLE 1 ``c@TAP`` = :func:`contrast_limit`
     ``(fap_list[0], tap)`` per ``tap``; TABLE 2 (TAP closest to 0.90) per
     ``fap_list`` entry plus the per-image 10 % column ``aimg = 0.10 / max(mean
-    (nap), 1)``.  Returns ``None`` when no injection qualifies.
-
-    ``snr_key`` and ``nap_key`` name the rows' S/N and sample count: ``'snr_exp'`` and
-    ``'nap_exp'`` give the tables from the expected S/N (:func:`expected_snr`)."""
+    (nap), 1)``.  Returns ``None`` when no injection qualifies."""
     ri, si, ci, napi = [], [], [], []
     for r in inj_rows:
         if r.get("kind", "injection") != "injection":
             continue
-        v = r.get(snr_key)
-        v = float("nan") if v is None else float(v)
-        if np.isfinite(v) and v > 0 and np.isfinite(r.get("contrast", np.nan)) and r["contrast"] > 0:
-            ri.append(r["rho"]); si.append(v); ci.append(r["contrast"]); napi.append(r.get(nap_key, r["nap"]))
+        if np.isfinite(r["snr"]) and r["snr"] > 0 and np.isfinite(r.get("contrast", np.nan)) and r["contrast"] > 0:
+            ri.append(r["rho"]); si.append(r["snr"]); ci.append(r["contrast"]); napi.append(r["nap"])
     if not ri:
         return None
     ri, si, ci, napi = (np.asarray(a, float) for a in (ri, si, ci, napi))
@@ -620,7 +528,7 @@ def limit_tables(inj_rows: Sequence[Dict[str, Any]], fwhm: float, pxscale: float
             "c_img10": contrast_limit(aimg, tap_list[i90], ci[ww], si[ww], napi[ww]),
         })
     return {"rbin_as": rbw, "fap_list": fap_list, "tap_list": tap_list, "i90": i90, "n_inj": int(ri.size),
-            "bins": bins, "samples": {"rho": ri, "snr": si, "contrast": ci, "nap": napi}, "snr_key": snr_key}
+            "bins": bins, "samples": {"rho": ri, "snr": si, "contrast": ci, "nap": napi}}
 
 
 # ----------------------------------------------------------------------------
@@ -648,20 +556,6 @@ def _table_lines(lim: Dict[str, Any], indent: str = "#   ") -> List[str]:
     return out
 
 
-def _table_exp_lines(lim: Dict[str, Any], indent: str = "#   ") -> List[str]:
-    """TABLE 3: TABLE 1 from the injections' expected S/N (``limit_tables(..., snr_key='snr_exp')``)."""
-    fl, tl = lim["fap_list"], lim["tap_list"]
-    out = [f"{indent}TABLE 3 -- contrast at the OPERATING FAP ({fl[0]:8.1E} per resel) vs separation, from the expected S/N E",
-           f"{indent}  rho[\"]  n_inj    E_med   tau " + "".join(f"   c@TAP{int(round(t*100)):02d}" for t in tl)]
-    for b in lim["bins"]:
-        out.append(f"     {b['sep']:5.2f}   {b['n_inj']:4d}   {b['snr_med']:6.2f}  {b['tau']:6.2f}"
-                   + "".join(f"  {c:10.3E}" for c in b["c_tap"]))
-    out.append(f"{indent}(E leaves out the noise at each source and every other source's residual.  The limits scale")
-    out.append(f"{indent} linearly from each injection's contrast, and KLIP's response to a bright source is not")
-    out.append(f"{indent} linear, so they hold best for injections near the limit.)")
-    return out
-
-
 def write_verify_table(path: str, rows: Sequence[Dict[str, Any]], limits: Optional[Dict[str, Any]] = None,
                        header: Optional[Dict[str, Any]] = None) -> str:
     """Write the ``verify_report.txt`` of ``near2_verify`` (verify 574-724) from
@@ -682,7 +576,6 @@ def write_verify_table(path: str, rows: Sequence[Dict[str, Any]], limits: Option
           "# PATH B = night-to-night (STIM + bootstrap-over-nights + subset S/N)", "#"]
     cands = [r for r in rows if r.get("kind", "candidate") == "candidate"]
     injs = [r for r in rows if r.get("kind") == "injection"]
-    has_e = any("snr_exp" in r for r in injs)
     for r in cands:
         s = r["subsets"]
         L.append(f"== candidate {r['index']}  rho={r['rho']:.3f}\"  PA={r['theta']:.1f} deg ==")
@@ -698,17 +591,12 @@ def write_verify_table(path: str, rows: Sequence[Dict[str, Any]], limits: Option
         L.append(f"# ---- injection calibration ({len(injs)} sources) ----")
         L.append(f"#   each source's noise ring leaves out the other sources and the known ones "
                  f"({float(meta.get('excl_fwhm', 1.5)):.1f} FWHM keep-out)")
-        if has_e:
-            L.append("#   E = the expected S/N, the matched-filtered (injected - clean) at the source over the clean "
-                     "image's ring noise (TABLE 3)")
-        L.append("#   columns: rho[\"] PA[deg] contrast  | combined S/N  FAP  | injected-STIM  STIM-FAP"
-                 + ("  | E" if has_e else ""))
+        L.append("#   columns: rho[\"] PA[deg] contrast  | combined S/N  FAP  | injected-STIM  STIM-FAP")
         for r in injs:
             s = r["subsets"]
             cstr = f"{r['contrast']:10.3E}" if np.isfinite(r.get("contrast", np.nan)) and r["contrast"] > 0 else "  (n/a)  "
             L.append(f"   rho={r['rho']:.3f}\" PA={r['theta']:.1f}  c={cstr}  | S/N={_f(r['snr'])}  FAP={_f(r['fap'], '{:10.2E}')}"
-                     f"  | STIM={_f(r['stim'])}  STIM-FAP={_f(r['stim_fap'], '{:10.2E}')}"
-                     + (f"  | E={_f(r.get('snr_exp', np.nan))}" if has_e else ""))
+                     f"  | STIM={_f(r['stim'])}  STIM-FAP={_f(r['stim_fap'], '{:10.2E}')}")
             L.append(f"       subset S/N  comb={_f(s['combined'])}  1st={_f(s['first-half'])}  2nd={_f(s['second-half'])}"
                      f"  even={_f(s['even'])}  odd={_f(s['odd'])}")
         if limits is None:
@@ -719,14 +607,6 @@ def write_verify_table(path: str, rows: Sequence[Dict[str, Any]], limits: Option
                   f"{limits['rbin_as']:.2f}\" bins.",
                   "#   tau = matched-filter S/N needed for that per-resel FAP (small-sample; grows at small rho).", "#"]
             L += _table_lines(limits)
-        if has_e:
-            kw = ({"fap_list": limits["fap_list"], "tap_list": limits["tap_list"], "rbin_as": limits["rbin_as"]}
-                  if limits is not None else {})
-            lim_e = limit_tables(injs, meta.get("fwhm", 1.0), meta.get("pxscale", 1.0), snr_key="snr_exp",
-                                 nap_key="nap_exp", **kw)
-            if lim_e is not None:
-                L.append("#")
-                L += _table_exp_lines(lim_e)
         L.append("#  -> Table 1 c@TAP90 at the operating FAP is the headline 90%-completeness limit per separation.")
     text = "\n".join(L) + "\n"
     with open(path, "w") as f:
