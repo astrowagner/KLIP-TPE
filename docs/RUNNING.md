@@ -283,7 +283,11 @@ reduction per annulus and kind instead of a new search.
   unless `--overwrite` is given.
 * On the run's own frames it verifies a finished run again with the current verify.  Since
   2026-10-20 each injection's noise ring leaves out the other injections, and the report says
-  so above its calibration block.
+  so above its calibration block.  Since 2026-10-24 Path A (the combined S/N and FAP of the
+  candidates and the injections, and the limit tables) is measured on the stitched images,
+  `klip_stitched.fits` and `klip_stitched_inj.fits`, rather than on the mean of the per-night
+  stitches, and the report adds TABLE 3, each injection's contrasts solved on its own image.
+  The candidate list measures its S/N there too.
 * `--known RHO PA` puts a position into the verify as a candidate, a planet added with
   `--inject-sources` say, and keeps it out of the noise apertures.
 

@@ -21,6 +21,11 @@ Deliberate deviations / omissions:
   ``radprof``-flattened image when not supplied (the IDL reads the pre-computed
   ``klip_stitched_snr.fits`` from ``near2m_snrmap``).
 * The detection-map PDF and ``README.txt`` are not produced.
+* The combined S/N, its FAP and the PSF-likeness are measured on the image given,
+  the run's stitch, when one is given (candidates 230 takes the nights' mean).  At an
+  edge between two annuli that mean is not the stitch, where the annuli keep
+  different nights (see :mod:`klip_tpe.verify`).  The per-night S/N, the STIM and
+  the even / odd subsets stay on the nights.
 """
 from __future__ import annotations
 
@@ -100,7 +105,8 @@ def psf_correlation(img: np.ndarray, px: int, py: int, fwhm: float) -> float:
 def candidate_metrics(px: np.ndarray, py: np.ndarray, snr0: np.ndarray, stack: np.ndarray, fwhm: float,
                       pxscale: float, iwa: float, owa: float, *, known: Sequence[Tuple[float, float]] = (),
                       injected: Sequence[Tuple[float, ...]] = (), excl_fwhm: float = 1.5, srad: float = 1.5,
-                      angle_convention: str = "pa", flatten: bool = False) -> List[Dict[str, Any]]:
+                      angle_convention: str = "pa", flatten: bool = False,
+                      image: Optional[np.ndarray] = None) -> List[Dict[str, Any]]:
     """Per-peak metrics from the per-night stack ``(nn, ny, nx)`` (unflattened).
 
     Precomputed once (227-247): ``slices[j] = radprof(stack[j])``, ``comb =
@@ -111,7 +117,11 @@ def candidate_metrics(px: np.ndarray, py: np.ndarray, snr0: np.ndarray, stack: n
     ``pn_min/med/max``; aperture STIM ``mean(av)/std(av)`` over >= 2 finite nights
     (279-284); ``sub1/sub2`` (286-287); ``psf_corr`` (289); combined S/N replaces
     the map value when finite (293); look-elsewhere FAP ``min(1 - (1 - p)^n_resel,
-    1)`` (294); flags ``KNOWN`` / ``INJ`` within ``0.8 fwhm`` (296-306)."""
+    1)`` (294); flags ``KNOWN`` / ``INJ`` within ``0.8 fwhm`` (296-306).
+
+    ``image``, the combined image the run made (its stitch), is what the combined S/N,
+    FAP and PSF-likeness are measured on, ``comb = radprof(image)``.  Without it ``comb``
+    is the nights' mean, as in the IDL."""
     stack = np.asarray(stack, float)
     if stack.ndim == 2:
         stack = stack[None]
@@ -128,7 +138,13 @@ def candidate_metrics(px: np.ndarray, py: np.ndarray, snr0: np.ndarray, stack: n
         z = np.where(fin[sel], stack[sel], 0.0)
         return z.sum(axis=0) / np.maximum(fin[sel].sum(axis=0), 1)
 
-    comb = _flat(_nanmean(slice(None))) if nn > 1 else slices[0]
+    if image is not None:
+        image = np.asarray(image, float)
+        if image.shape != (ny, nx):
+            raise ValueError(f"candidate_metrics: image {image.shape} is not the stack's frame size {(ny, nx)}")
+        comb = _flat(image)
+    else:
+        comb = _flat(_nanmean(slice(None))) if nn > 1 else slices[0]
     if nn >= 2:
         i1, i2 = np.arange(nn) % 2 == 0, np.arange(nn) % 2 == 1
         s1 = _flat(_nanmean(i1)) if i1.any() else comb
@@ -251,8 +267,10 @@ def find_candidates(image: Optional[np.ndarray], stack: np.ndarray, fwhm: float,
     Parameters
     ----------
     image
-        combined (stitched) image used to build the S/N map when ``snrmap`` is
-        not given (``snr_map(radprof(image), fwhm)``); may be ``None`` then.
+        combined (stitched) image: the S/N map's source when ``snrmap`` is not given
+        (``snr_map(radprof(image), fwhm)``), and the image the candidates' combined S/N,
+        FAP and PSF-likeness are measured on (and the verify's Path A).  ``None``: the
+        nights' mean for all of these, as in the IDL.
     stack
         ``(nn, ny, nx)`` per-night images (unflattened), chronological order.
     iwa_px, owa_px
@@ -278,6 +296,7 @@ def find_candidates(image: Optional[np.ndarray], stack: np.ndarray, fwhm: float,
     if stack.ndim == 2:
         stack = stack[None]
     nn, ny, nx = stack.shape
+    given = None if image is None else np.asarray(image, float)
     if snrmap is None:
         if image is None:
             fin = np.isfinite(stack)
@@ -292,17 +311,21 @@ def find_candidates(image: Optional[np.ndarray], stack: np.ndarray, fwhm: float,
     if px.size == 0:
         return []
     rows = candidate_metrics(px, py, ps, stack, fwhm, pxscale, iwa, owa, known=known, injected=injected,
-                             angle_convention=angle_convention, flatten=flatten)
+                             angle_convention=angle_convention, flatten=flatten, image=given)
     rows = score_candidates(rows, nn, persistence_map)
     meta = {"nights": list(range(nn)) if night_ids is None else [str(v) for v in night_ids],
             "snrmin": snrmin, "sep": sep, "iwa": iwa, "owa": owa,
-            "nresel": max(np.pi * (owa ** 2 - iwa ** 2) / fwhm ** 2, 1.0), "fwhm": fwhm, "pxscale": pxscale}
+            "nresel": max(np.pi * (owa ** 2 - iwa ** 2) / fwhm ** 2, 1.0), "fwhm": fwhm, "pxscale": pxscale,
+            "comb": "image" if given is not None else "nights"}
     for r in rows:
         r["meta"] = meta
     if verify_top and verify_top > 0:
         top = rows[: min(len(rows), int(verify_top))]
         kw = dict(known=known, weights=weights, angle_convention=angle_convention)
-        kw.update(verify_kwargs or {})
+        vk = dict(verify_kwargs or {})
+        if given is not None and (vk.get("injected") is None or vk.get("combined_inj") is not None):
+            kw.update(combined=given, path_a="the source image")
+        kw.update(vk)
         vrows = verify_candidates(stack, meta["nights"], [(r["rho"], r["theta"]) for r in top], fwhm, pxscale, **kw)
         vc = [v for v in vrows if v.get("kind") == "candidate"]
         for r, v in zip(top, vc):
@@ -323,6 +346,8 @@ def write_candidates(path: str, rows: Sequence[Dict[str, Any]], source: str = ""
         L.append(f"# detection    : S/N >= {meta['snrmin']:.1f}, >= {meta['sep']:.1f} px apart, "
                  f"IWA {meta['iwa']:.1f} - OWA {meta['owa']:.1f} px")
         L.append(f"# nights       : {','.join(str(v) for v in meta['nights'])}   look-elsewhere N_resel = {meta['nresel']:.1f}")
+        if meta.get("comb") == "image":
+            L.append("# measured on  : S/N, FAP and PSF on the source image, Nnt, pn_md, STIM, sub1 and sub2 on the nights")
     L += ["# score = S/N * persistence(nights) * PSF-likeness * consistency(STIM) * persistence(params)",
           "# tier  : A=strong (S/N>=5, >=half nights, PSF-like)  B=marginal  C=likely speckle",
           "# S/N   : matched-filter Mawet (2014) small-sample S/N (Student-t, df=n_ap-2)",

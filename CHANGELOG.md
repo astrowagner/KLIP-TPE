@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased — 2026-10-24 (the verify on the stitched image, TABLE 3)
+
+From the NEAR2 session's notes of 2026-10-20 (the verify's combined image) and 2026-10-23
+(revised, on limits for faint planets).
+
+- **The final verify measures the stitch itself.**  Path A, the combined S/N and FAP of the
+  candidates and the injections and the limit tables, ran on the equal-weight mean of the
+  per-night stitches (`klip_stitched_nights*.fits.gz`), as the IDL does.  That is not the
+  stitch.  At an edge between two annuli each tile reaches into the other annulus, a night
+  kept by only one of the two holds that annulus' value there at full weight, and the stitch
+  weighs the annuli by their sensitivity, not by night.  In NEAR2's run_20261015_171115, n4,
+  dropped by annulus 2 and kept by annuli 1 and 3, filled 43 % of annulus 2 with those annuli's
+  reductions.  The final verify now measures `klip_stitched.fits` and `klip_stitched_inj.fits`
+  (`verify_candidates(..., combined=, combined_inj=)`), and each annulus' verify and the
+  verify books measure the annulus' combined image.  Path B (STIM, bootstrap, subsets) stays
+  on the per-night images.  The candidate list measures its combined S/N, FAP and PSF-likeness on
+  the stitch too (`find_candidates(image, ...)`), and its header says so.  On one annulus, or
+  where neighboring annuli keep the same nights, nothing changes.
+- **TABLE 3 in the verify report.**  With the clean image beside the injected one, each
+  injection's S/N is solved on clean + a (injected - clean), the image's noise as it is and
+  only the source's response scaled (`verify.solved_contrasts`).  Per bin TABLE 3 gives the
+  mean of the contrasts at which each source reaches tau + tau_(1-TAP) (TABLE 1 solved
+  instead of scaled), the faintest contrast at which 90 % of the bin's sources are detected,
+  and how many are detected at TABLE 1's c@TAP90, both with every source evaluated at that
+  contrast.  Each source's first detected contrast and solved c@TAP90 follow.  TABLE 1 stays
+  the headline, as in the IDL, and the injection lines keep their format.
+
 ## Unreleased — 2026-10-23 (the params table's summary row, the candidate list's header)
 
 From the NEAR2 session's note of 2026-10-23.

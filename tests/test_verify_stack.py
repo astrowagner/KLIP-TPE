@@ -173,6 +173,135 @@ def test_verify_injections_pair_at_one_radius(dx, dy, parity):
     assert np.mean(before_r) < 0.6 and np.mean(stim_before) > 0
 
 
+def test_solved_contrasts_scale_the_source_not_the_noise():
+    """Solved on clean + a (injected - clean), a source's contrasts do not depend on the
+    brightness it was injected at, where the response is linear (here there is no KLIP).
+    The limit scaled from the S/N at the injected contrast does, since it scales the noise at
+    the source too (NEAR2 note of 2026-10-23, revised)."""
+    from klip_tpe.metrics import gaussian_kernel
+    n = 81
+    c = (n - 1) / 2
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        clean = _odd_noise(1, 5, n)[0]
+    k = gaussian_kernel(FWHM)
+    resp = (k * _gauss(k.shape[0], k.shape[1], (k.shape[1] - 1) / 2, (k.shape[0] - 1) / 2, FWHM, 1.0)).sum()
+    yy, xx = np.mgrid[0:n, 0:n]
+    band = (np.abs(np.hypot(xx - c, yy - c) - 15.0) <= FWHM) & np.isfinite(clean)
+    sig = float(np.std(V.mf_convolve(clean, FWHM)[band], ddof=1))
+    rho, pa = 15.0 * PX, 40.0
+    xs, ys = source_xy(rho, pa, PX, c, c)
+    unit = _gauss(n, n, float(xs[0]), float(ys[0]), FWHM, sig / resp)     # matched-filter S/N ~1 per unit
+    clean = clean + 3.0 * unit            # a noise excursion of +3 sigma at the source, in the clean image
+    sc, lin = {}, {}
+    for f in (1.0, 10.0):
+        inj = clean + 7.0 * f * unit
+        con = 1e-5 * f
+        sc[f] = V.solved_contrasts(clean, inj, rho, pa, con, PX, FWHM)
+        s1 = V.snr_fap(inj, rho, pa, PX, FWHM)
+        assert sc[f]["snr1"] == pytest.approx(s1["snr"], rel=1e-9)        # a = 1: the injected image's S/N
+        lin[f] = V.contrast_limit(2.87e-7, 0.90, [con], [s1["snr"]], [s1["nap"]])
+    a, b = sc[1.0], sc[10.0]
+    assert a["c_det"] == pytest.approx(b["c_det"], rel=1e-6)
+    assert all(x == pytest.approx(y, rel=1e-6) for x, y in zip(a["c_tap"], b["c_tap"]))
+    assert a["c_tap"][0] == pytest.approx(a["c_det"], rel=1e-6)          # TAP50's threshold is tau itself
+    assert a["c_det"] < a["c_tap"][1] < a["c_tap"][2] < 1e-4
+    # the scaled limit carries the excursion along with the source: 10x brighter, another limit
+    assert lin[10.0] / lin[1.0] > 1.08
+    # at the solved contrast the source is just detected
+    ad = a["c_det"] / 1e-5
+    up = V.snr_fap(clean + 7.0 * ad * (1 + 1e-6) * unit, rho, pa, PX, FWHM)
+    dn = V.snr_fap(clean + 7.0 * ad * (1 - 1e-4) * unit, rho, pa, PX, FWHM)
+    assert up["fap"] < 2.87e-7 <= dn["fap"]
+    # out of reach and no contrast
+    assert np.isinf(V.solved_contrasts(clean, clean, rho, pa, 1e-5, PX, FWHM)["c_det"])
+    assert np.isnan(V.solved_contrasts(clean, clean + unit, rho, pa, 0.0, PX, FWHM)["c_det"])
+
+
+def test_verify_path_a_on_the_combined_image_given(tmp_path):
+    """Given the image the run made (and its injected twin), Path A measures it, the
+    subsets' combined entry is it, and the other subsets stay on the nights.  Without it the
+    weighted mean of the nights, as before (NEAR2 note of 2026-10-20)."""
+    nn = 4
+    stack = _noise_stack(nn, 21)
+    inj = _planted_stack(nn, 1.0, 200.0, 8.0, seed=21)        # the same noise, plus the source
+    src = [(1.0, 200.0, 1e-4)]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        mean_c, mean_i = np.nanmean(stack, axis=0), np.nanmean(inj, axis=0)
+    extra = 0.7 * _noise_stack(1, 77)[0]                       # the product is not the nights' mean
+    prod_c, prod_i = mean_c + extra, mean_i + extra
+    kw = dict(n_boot=0, return_maps=True)
+    rows, maps = V.verify_candidates(stack, None, [(0.7, 120.0)], FWHM, PX, injected=(inj, src),
+                                     combined=prod_c, combined_inj=prod_i, **kw)
+    rows0, _ = V.verify_candidates(stack, None, [(0.7, 120.0)], FWHM, PX, injected=(inj, src), **kw)
+    cand, injr = rows[0], rows[1]
+    cand0, injr0 = rows0[0], rows0[1]
+    exr = 1.5 * FWHM
+    assert cand["snr"] == pytest.approx(V.snr_fap(prod_c, 0.7, 120.0, PX, FWHM, exr, 1.5)["snr"], rel=1e-12)
+    assert injr["snr"] == pytest.approx(V.snr_fap(prod_i, 1.0, 200.0, PX, FWHM, exr, 1.5)["snr"], rel=1e-12)
+    assert injr0["snr"] == pytest.approx(V.snr_fap(mean_i, 1.0, 200.0, PX, FWHM, exr, 1.5)["snr"], rel=1e-12)
+    assert abs(injr["snr"] - injr0["snr"]) > 0.05
+    assert injr["subsets"]["combined"] == injr["snr"] and cand["subsets"]["combined"] == cand["snr"]
+    for q in V.SUBSET_NAMES[1:]:
+        assert injr["subsets"][q] == injr0["subsets"][q] and cand["subsets"][q] == cand0["subsets"][q]
+    assert injr["stim"] == injr0["stim"] and cand["stim"] == cand0["stim"]
+    # the solved contrasts pair the product with its injected twin
+    sc = V.solved_contrasts(prod_c, prod_i, 1.0, 200.0, 1e-4, PX, FWHM, exr, 1.5)
+    assert injr["c_det"] == pytest.approx(sc["c_det"], rel=1e-12)
+    assert injr["c_tap_solved"] == pytest.approx(sc["c_tap"], rel=1e-12)
+    assert maps["meta"]["path_a"] == "the combined image given"
+    txt = V.write_verify_table(str(tmp_path / "r.txt"), rows, maps["limits"])
+    assert "# PATH A = the combined image given" in txt
+    assert "TABLE 3" in txt and "each source, rho" in txt
+    txt0 = V.write_verify_table(str(tmp_path / "r0.txt"), rows0)
+    assert "# PATH A = the equal-weight mean of the nights" in txt0
+    with pytest.raises(ValueError):
+        V.verify_candidates(stack, None, [(0.7, 120.0)], FWHM, PX, injected=(inj, src), combined=prod_c, n_boot=0)
+    with pytest.raises(ValueError):
+        V.verify_candidates(stack, None, [], FWHM, PX, combined=prod_c[:-1], n_boot=0)
+
+
+def test_table3_counts_and_quantile():
+    """TABLE 3's bins: the mean of the finite solved limits, and the faintest contrast at which
+    90 % of the bin's sources are detected and the count detected at TABLE 1's c@TAP90, both
+    with every source evaluated at that contrast.  Every source with solved contrasts counts,
+    whatever its S/N at the injected contrast."""
+    inf = float("inf")
+    rows, items = [], []
+    for k in range(10):
+        r = {"kind": "injection", "rho": 1.0 + 0.001 * k, "theta": 10.0 * k, "contrast": 1e-5,
+             "snr": 6.0 + 0.1 * k, "nap": 30, "c_det": (k + 1) * 1e-6,
+             "c_tap_solved": [(k + 1) * 1e-6, (k + 2) * 1e-6, (k + 3) * 1e-6]}
+        rows.append(r)
+        items.append((r, (lambda t: (lambda c: c >= t))((k + 1) * 1e-6)))
+    # one source detected only in a window, from 1e-6 to 1.5e-6, and one from 1e-5 on
+    items[0] = (rows[0], lambda c: 1e-6 <= c < 1.5e-6)
+    rows[9].update(c_det=1e-5, c_tap_solved=[inf, inf, inf])
+    items[9] = (rows[9], lambda c: c >= 1e-5)
+    # S/N <= 0 at the injected contrast: not in TABLE 1, in TABLE 3, in a bin of its own
+    r = {"kind": "injection", "rho": 2.0, "theta": 0.0, "contrast": 1e-5, "snr": -0.5, "nap": 60,
+         "c_det": 3e-5, "c_tap_solved": [3e-5, 4e-5, 5e-5]}
+    rows.append(r)
+    items.append((r, lambda c: c >= 3e-5))
+    lim = V.limit_tables(rows, FWHM, PX)
+    assert lim["solved"] is None and len(lim["bins"]) == 1 and lim["bins"][0]["n_inj"] == 10
+    s0, s1 = V._solved_bins(lim, items)
+    assert s0["n"] == 10 and s1["n"] == 1
+    assert s0["c_tap"][1] == pytest.approx(np.mean(np.arange(2, 11)) * 1e-6)      # the inf left out
+    # 9 of 10: the windowed source never counts with the others, so 1e-5, where the last one joins
+    assert s0["c_det_beta"] == pytest.approx(1e-5, rel=1e-8)
+    t1 = lim["bins"][0]["c_tap"][1]
+    assert s0["n_det_t1"] == sum(d(t1) for _, d in items[:10])
+    assert s1["n_det_t1"] is None and s1["c_det_beta"] == pytest.approx(3e-5, rel=1e-8) and s1["sep"] == 2.0
+    items[9] = (rows[9], lambda c: False)                                         # two of ten never with the rest
+    assert np.isinf(V._solved_bins(lim, items)[0]["c_det_beta"])
+    lim["solved"] = [s0, s1]
+    txt = "\n".join(V._table3_lines(lim))
+    assert "TABLE 3" in txt and "c(90%det)" in txt and "inf" in txt and f"{s0['n_det_t1']}/10" in txt
+    assert V._solved_bins(lim, []) is None
+
+
 # ----------------------------------------------------------------------------
 def test_candidates_tier_A_when_present_all_nights(tmp_path):
     nn = 6
@@ -216,6 +345,39 @@ def test_detect_peaks_and_psfcorr():
     assert list(ps) == [6.0, 3.0]
     img = _gauss(N, N, 60, 30, FWHM, 5.0)
     assert C.psf_correlation(img, 60, 30, FWHM) > 0.85   # <1: stamp median- vs template mean-subtracted (IDL)
+
+
+def test_candidates_measure_the_image_given(tmp_path):
+    """Given the run's stitch, a candidate's combined S/N, FAP and PSF-likeness are measured
+    on it, its per-night S/N, STIM and even / odd S/N on the nights.  Without it the nights'
+    mean, as in the IDL."""
+    nn = 4
+    rho, theta = 0.9, 300.0
+    stack = _planted_stack(nn, rho, theta, 8.0, seed=2)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)                  # the masked star: all-NaN pixels
+        img = np.nanmean(stack, axis=0) + 0.6 * _noise_stack(1, 99)[0]
+    cx, cy = star_center((N, N))
+    xs, ys = source_xy(rho, theta, PX, cx, cy)
+    px, py = np.array([int(round(xs[0]))]), np.array([int(round(ys[0]))])
+    r0 = C.candidate_metrics(px, py, np.array([5.0]), stack, FWHM, PX, 6.0, 40.0)[0]
+    r1 = C.candidate_metrics(px, py, np.array([5.0]), stack, FWHM, PX, 6.0, 40.0, image=img)[0]
+    fin = np.isfinite(stack)
+    mean = np.where(fin, stack, 0.0).sum(axis=0) / np.maximum(fin.sum(axis=0), 1)
+    args = (r1["rho"], r1["theta"], PX, FWHM, 1.5 * FWHM, 1.5)
+    assert r1["snr"] == pytest.approx(V.snr_fap(img, *args)["snr"], rel=1e-12)
+    assert r0["snr"] == pytest.approx(V.snr_fap(mean, *args)["snr"], rel=1e-12)
+    assert abs(r1["snr"] - r0["snr"]) > 0.05
+    assert r1["psf_corr"] == pytest.approx(C.psf_correlation(img, int(px[0]), int(py[0]), FWHM), rel=1e-12)
+    for key in ("per_night", "n_nights", "stim", "sub1", "sub2"):
+        assert r1[key] == r0[key]
+    rows = C.find_candidates(img, stack, FWHM, PX, verify_top=1, verify_kwargs={"n_boot": 0})
+    top = rows[0]
+    assert top["meta"]["comb"] == "image"
+    assert top["verify"]["snr"] == pytest.approx(
+        V.snr_fap(img, top["rho"], top["theta"], PX, FWHM, 1.5 * FWHM, 1.5)["snr"], rel=1e-12)
+    assert "S/N, FAP and PSF on the source image" in C.write_candidates(str(tmp_path / "c.txt"), rows)
+    assert C.find_candidates(None, stack, FWHM, PX)[0]["meta"]["comb"] == "nights"
 
 
 # ----------------------------------------------------------------------------

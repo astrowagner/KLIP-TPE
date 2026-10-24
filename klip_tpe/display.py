@@ -3090,7 +3090,9 @@ def render_verify_books(run_dir: str, ia: int, out_dir: Optional[str] = None,
     """IDL ``verify_limits`` / ``verify_subsets_inj`` for one annulus, recomputed from
     the saved per-partition stacks (``best_*_partitions.fits``) and the winner's
     injections: (1) contrast limit vs separation per TAP, colour = FAP; (2) combined
-    clean image + night-STIM map, and the five subset combines around every injection."""
+    clean image + night-STIM map, and the five subset combines around every injection.
+    The combined image is the annulus' own (``best_clean.fits`` / ``best_inj.fits``), as
+    in the annulus' verify report."""
     from matplotlib.backends.backend_pdf import PdfPages
     from .verify import (DEFAULT_FAP_LIST, DEFAULT_TAP_LIST, SUBSET_NAMES, contrast_limit, limit_tables,
                          verify_injections)
@@ -3098,12 +3100,14 @@ def render_verify_books(run_dir: str, ia: int, out_dir: Optional[str] = None,
     ad = annulus_from_run(run_dir, ia, run)
     d = os.path.join(run_dir, f"annulus{ia + 1:02d}")
     out_dir = out_dir or d
+    comb_c = _fits(os.path.join(d, "best_clean.fits"))
+    comb_i = _fits(os.path.join(d, "best_inj.fits"))
     stack = _fits(os.path.join(d, "best_clean_partitions.fits"))
     istack = _fits(os.path.join(d, "best_inj_partitions.fits"))
     if stack is None:
-        stack = _fits(os.path.join(d, "best_clean.fits"))
+        stack = comb_c
     if istack is None:
-        istack = _fits(os.path.join(d, "best_inj.fits"))
+        istack = comb_i
     src = [tuple(map(float, s)) for s in ((ad.winner or {}).get("winner_sources") or [])]
     out: Dict[str, str] = {}
     if istack is None or not src:
@@ -3112,7 +3116,12 @@ def render_verify_books(run_dir: str, ia: int, out_dir: Optional[str] = None,
     setup = run.get("setup") or run.get("checkpoint") or {}
     excl = float(((setup.get("objective") or {}).get("metric") or {}).get("excl_fwhm") or 1.5)
     vkw = dict(known=[tuple(k) for k in (ad.known or ())], angle_convention=ad.angle_convention, excl_fwhm=excl)
-    rows, maps = verify_injections(istack, src, fwhm, px, **vkw)
+    # Path A on the annulus' combined images, when both are there and fit the stacks
+    fr = np.shape(istack)[-2:]
+    own = (comb_c is not None and comb_i is not None and np.ndim(comb_c) == 2 and np.shape(comb_c) == fr
+           and np.shape(comb_i) == fr)
+    rows, maps = verify_injections(istack, src, fwhm, px, combined=comb_i if own else None,
+                                   clean=comb_c if own else None, **vkw)
     # ---- page 1: limits vs separation (winner injections) + search-eval curve (all evals)
     ev_rows = []
     for i in range(len(ad.y)):
@@ -3150,7 +3159,8 @@ def render_verify_books(run_dir: str, ia: int, out_dir: Optional[str] = None,
     out["verify_limits"] = path1
     # ---- page 2: combined clean + night-STIM, subset stamps per injection
     path2 = os.path.join(out_dir, "verify_subsets_inj.pdf")
-    cmaps = verify_injections(np.asarray(stack, float), src, fwhm, px, **vkw)[1] if stack is not None else maps
+    cmaps = (verify_injections(np.asarray(stack, float), src, fwhm, px, combined=comb_c if own else None, **vkw)[1]
+             if stack is not None and np.shape(stack)[-2:] == fr else maps)
     with _rc(), PdfPages(path2) as pdf:
         nsrc = len(rows)
         fig = Figure(figsize=(11, 3.4 + 2.4 * nsrc))

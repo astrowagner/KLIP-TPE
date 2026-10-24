@@ -3510,7 +3510,9 @@ class Runner:
             rows, maps = verify_candidates(stack, ids, list(known), self.fwhm, self.pxscale, known=known,
                                            injected=(istack, src), n_boot=int(self.cfg.verify_n_boot), rng=rng,
                                            weights=ev_c.weights, angle_convention=self.reducer.angle_convention,
-                                           excl_fwhm=self._excl_fwhm(), return_maps=True)
+                                           excl_fwhm=self._excl_fwhm(), return_maps=True,
+                                           combined=ev_c.image, combined_inj=ev_i.image,
+                                           path_a="the annulus' combined image (best_clean.fits, injected best_inj.fits)")
             path = os.path.join(d, "verify_report.txt")
             write_verify_table(path, rows, maps.get("limits"), header={"run": os.path.abspath(self.run_dir)})
             self._durable_later(path)              # the hook's checkpoint records it as done
@@ -3971,9 +3973,10 @@ class Runner:
         return out
 
     def _final_verify(self, stitched: Dict[str, Any], header: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-        """``near2_verify`` on the stitched per-partition cubes (known sources as
-        candidates, all validated injections as the calibration block).  ``header`` adds
-        lines to the report's header."""
+        """``near2_verify`` with the known sources as candidates and all validated injections
+        as the calibration block.  Path A measures the final stitch itself (``klip_stitched.fits``
+        and ``klip_stitched_inj.fits``), Path B the stitched per-partition cubes.  ``header``
+        adds lines to the report's header."""
         from .verify import verify_candidates, write_verify_table
         stack = stitched.get("nights")
         if stack is None:
@@ -3987,11 +3990,20 @@ class Runner:
                 allsrc.extend(r.winner_sources)
         known = [tuple(k) for k in getattr(self.sampler, "known", ()) or ()]
         rng = np.random.default_rng((int(self.cfg.seed or 0) + 31337) % (2 ** 32))
+        injected = None if (istack is None or not allsrc) else (istack, allsrc)
+        # Path A on the image the run made, not on the mean of the per-partition stitches: at an
+        # edge between annuli those differ where the annuli keep different partitions (NEAR2,
+        # 2026-10-20)
+        clean_img, inj_img = stitched.get("clean"), stitched.get("inj")
+        if injected is not None and inj_img is None:
+            clean_img = None
         rows, maps = verify_candidates(stack, stitched.get("night_ids"), known, self.fwhm, self.pxscale, known=known,
-                                       injected=None if (istack is None or not allsrc) else (istack, allsrc),
-                                       n_boot=int(self.cfg.verify_n_boot), rng=rng,
+                                       injected=injected, n_boot=int(self.cfg.verify_n_boot), rng=rng,
                                        angle_convention=self.reducer.angle_convention,
-                                       excl_fwhm=self._excl_fwhm(), return_maps=True)
+                                       excl_fwhm=self._excl_fwhm(), return_maps=True,
+                                       combined=clean_img, combined_inj=None if injected is None else inj_img,
+                                       path_a=None if clean_img is None else
+                                       "the stitched image (klip_stitched.fits, injected klip_stitched_inj.fits)")
         path = os.path.join(self.run_dir, "stitched_verify_report.txt")
         write_verify_table(path, rows, maps.get("limits"), header=dict({"run": os.path.abspath(self.run_dir)},
                                                                        **(header or {})))
