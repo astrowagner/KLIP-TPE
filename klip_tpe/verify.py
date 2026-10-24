@@ -104,11 +104,27 @@ def t_fap(snr: float, n: int) -> float:
 def t_thresh(alpha: float, n: int) -> float:
     """S/N threshold ``tau`` with ``t_fap(tau, n) = alpha`` (``near2v_tthresh``,
     verify 80-91).  ``alpha <= 0 -> 1e30``.  DEVIATION: closed-form
-    ``t.isf`` clipped to the IDL bisection range ``[-50, 50]``."""
+    ``t.isf`` clipped to the IDL bisection range ``[-50, 50]``.
+
+    The decision, :func:`t_fap`, is exact.  So where the exact threshold passes 50 (``n <= 6``
+    at the operating FAP 2.87e-7, where it is 57, 157, 1320 and 1.1e6 for ``n`` = 6 to 3), a
+    source at a limit made with this ``tau`` does not reach the FAP.  The report's TABLE 1 says
+    where, and TABLE 3 takes the exact threshold (:func:`_t_exact`)."""
     if alpha <= 0:
         return 1.0e30
     df = max(int(n) - 2, 1)
     return float(np.clip(_student_t.isf(float(alpha), df), -50.0, 50.0))
+
+
+#: :func:`t_thresh`'s cap, the IDL's bisection range
+TAU_CAP = 50.0
+
+
+def _t_exact(alpha: float, n: int) -> float:
+    """:func:`t_thresh` without the cap: the S/N at which :func:`t_fap` is ``alpha``."""
+    if alpha <= 0:
+        return float("inf")
+    return float(_student_t.isf(float(alpha), max(int(n) - 2, 1)))
 
 
 def contrast_limit(alpha: float, beta: float, ci, si, napi) -> float:
@@ -273,7 +289,8 @@ def _detected(s: float, n: int, fap: float) -> bool:
 
 
 def _reaches(s: float, n: int, fap: float, beta: float) -> bool:
-    return bool(np.isfinite(s) and n >= 3 and s >= t_thresh(fap, n) + t_thresh(1.0 - beta, n))
+    """``s`` reaches ``tau_fap + tau_(1-beta)``, both exact, as :func:`t_fap` decides."""
+    return bool(np.isfinite(s) and n >= 3 and s >= _t_exact(fap, n) + _t_exact(1.0 - beta, n))
 
 
 def solved_contrasts(clean_img: np.ndarray, inj_img: np.ndarray, rho: float, theta: float, contrast: float,
@@ -293,9 +310,9 @@ def solved_contrasts(clean_img: np.ndarray, inj_img: np.ndarray, rho: float, the
 
     Returns ``c_det``, the faintest contrast at which the source is detected at ``fap`` (its
     FAP below ``fap``), and ``c_tap``, for each ``taps`` entry beta the faintest contrast at
-    which its S/N reaches ``tau_fap + tau_(1-beta)``.  That is the single-source limit of
-    :func:`contrast_limit` solved, where :func:`contrast_limit` scales the whole S/N at the
-    injected contrast, noise included.  A contrast is ``inf`` where no ``a`` up to
+    which its S/N reaches ``tau_fap + tau_(1-beta)``, both exact (:func:`t_thresh` caps them
+    at 50).  That is the single-source limit of :func:`contrast_limit` solved, where
+    :func:`contrast_limit` scales the whole S/N at the injected contrast, noise included.  A contrast is ``inf`` where no ``a`` up to
     ``a_range[1]`` gets there, and ``a_range[0] * contrast`` where even that does.  The search
     steps through ``n_grid`` values of ``a`` spaced evenly in log and bisects the first step
     that crosses.  The S/N need not grow with ``a``.  The source's own residual in its ring
@@ -761,6 +778,8 @@ def limit_tables(inj_rows: Sequence[Dict[str, Any]], fwhm: float, pxscale: float
             "c_fap": [contrast_limit(fa, tap_list[i90], ci[ww], si[ww], napi[ww]) for fa in fap_list],
             "c_img10": contrast_limit(aimg, tap_list[i90], ci[ww], si[ww], napi[ww]),
             "ib": bb,
+            # the largest exact tau of the bin's injections (contrast_limit takes each one's own)
+            "tau_exact": max(_t_exact(fap_list[0], max(int(round(v)), 3)) for v in napi[ww]),
         })
     return {"rbin_as": rbw, "fap_list": fap_list, "tap_list": tap_list, "i90": i90, "n_inj": int(ri.size),
             "bins": bins, "samples": {"rho": ri, "snr": si, "contrast": ci, "nap": napi}, "solved": None}
@@ -783,6 +802,14 @@ def _table_lines(lim: Dict[str, Any], indent: str = "#   ") -> List[str]:
     for b in lim["bins"]:
         out.append(f"     {b['sep']:5.2f}   {b['n_inj']:4d}   {b['snr_med']:6.2f}  {b['tau']:6.2f}"
                    + "".join(f"  {c:10.3E}" for c in b["c_tap"]))
+    capped = [b for b in lim["bins"] if b.get("tau_exact", 0.0) > TAU_CAP]
+    if capped:
+        def _tau(v):
+            return f"{v:.0f}" if v < 1e4 else f"{v:.1E}"
+        where = [f"{_tau(b['tau_exact'])} at {b['sep']:.2f}\"" for b in capped]
+        where = where[0] if len(where) == 1 else ", ".join(where[:-1]) + " and " + where[-1]
+        out.append(f"{indent}(tau is capped at {TAU_CAP:.0f}, as in the IDL.  The exact tau is {where}, so a source at")
+        out.append(f"{indent} TABLE 1's c@TAP there does not reach the operating FAP.  TABLE 3 takes the exact tau.)")
     out.append(f"{indent}TABLE 2 -- TAP{int(round(100*tl[i90]))} (~90%) completeness contrast vs separation, by FAP threshold")
     out.append(f"{indent}  rho[\"] " + "".join(f"   {a:8.1E}/rs" for a in fl) + "   10%/img")
     for b in lim["bins"]:
@@ -811,7 +838,8 @@ def _table3_lines(lim: Dict[str, Any], indent: str = "#   ") -> List[str]:
             f"{indent} contrast over the injected one.  The image's noise stays as it is, the noise at the source",
             f"{indent} included, and only the source's response scales, its residual in its own ring included.",
             f"{indent} c@TAP is the bin mean of the contrasts at which each source reaches tau + tau_(1-TAP), TABLE 1",
-            f"{indent} solved instead of scaled.  c({pc}%det) is the faintest contrast at which {pc} % of the bin's",
+            f"{indent} solved instead of scaled, with the exact tau where TABLE 1 caps it at {TAU_CAP:.0f} as the IDL does.",
+            f"{indent} c({pc}%det) is the faintest contrast at which {pc} % of the bin's",
             f"{indent} sources are detected at the operating FAP, and det@T1 counts those detected at TABLE 1's",
             f"{indent} c@TAP{pc}.  inf means no contrast up to 1000 times the injected one gets there.  The scaling",
             f"{indent} takes KLIP's response to a source as linear, so these hold best for injections near the limit.)",

@@ -218,6 +218,25 @@ def test_solved_contrasts_scale_the_source_not_the_noise():
     assert np.isnan(V.solved_contrasts(clean, clean + unit, rho, pa, 0.0, PX, FWHM)["c_det"])
 
 
+def test_tau_cap_named_and_exact_in_table3():
+    """t_thresh caps tau at 50, as the IDL does, while t_fap decides exactly.  TABLE 1 says
+    where the cap binds, and TABLE 3's solved limits take the exact tau (NEAR2 note of
+    2026-10-23, night)."""
+    from scipy.stats import t as student
+    exact6 = float(student.isf(2.87e-7, 4))                             # n = 6 samples
+    assert V.t_thresh(2.87e-7, 6) == 50.0 and exact6 > 56.0
+    assert V._t_exact(2.87e-7, 6) == pytest.approx(exact6)
+    assert V.t_fap(55.0, 6) > 2.87e-7                                    # S/N 55 is no detection at n = 6
+    assert not V._reaches(55.0, 6, 2.87e-7, 0.5) and V._reaches(exact6 + 1e-6, 6, 2.87e-7, 0.5)
+    rows = [{"kind": "injection", "rho": 0.31, "theta": 0.0, "contrast": 1.5e-3, "snr": 9.0, "nap": 4},
+            {"kind": "injection", "rho": 0.77, "theta": 0.0, "contrast": 5e-5, "snr": 7.0, "nap": 12}]
+    lim = V.limit_tables(rows, 6.24, 0.0456)
+    txt = "\n".join(V._table_lines(lim))
+    assert "tau is capped at 50" in txt and f"{student.isf(2.87e-7, 2):.0f} at 0.31" in txt
+    assert lim["bins"][0]["tau"] == 50.0 and lim["bins"][1]["tau_exact"] < 50.0
+    assert "capped" not in "\n".join(V._table_lines(V.limit_tables(rows[1:], 6.24, 0.0456)))
+
+
 def test_verify_path_a_on_the_combined_image_given(tmp_path):
     """Given the image the run made (and its injected twin), Path A measures it, the
     subsets' combined entry is it, and the other subsets stay on the nights.  Without it the

@@ -1,9 +1,9 @@
 # Changelog
 
-## Unreleased — 2026-10-24 (the verify on the stitched image, TABLE 3)
+## Unreleased — 2026-10-24 (the verify on the stitched image, TABLE 3, tau's cap named)
 
 From the NEAR2 session's notes of 2026-10-20 (the verify's combined image) and 2026-10-23
-(revised, on limits for faint planets).
+(revised that evening and at night, on limits for faint planets and at small separations).
 
 - **The final verify measures the stitch itself.**  Path A, the combined S/N and FAP of the
   candidates and the injections and the limit tables, ran on the equal-weight mean of the
@@ -21,11 +21,19 @@ From the NEAR2 session's notes of 2026-10-20 (the verify's combined image) and 2
 - **TABLE 3 in the verify report.**  With the clean image beside the injected one, each
   injection's S/N is solved on clean + a (injected - clean), the image's noise as it is and
   only the source's response scaled (`verify.solved_contrasts`).  Per bin TABLE 3 gives the
-  mean of the contrasts at which each source reaches tau + tau_(1-TAP) (TABLE 1 solved
-  instead of scaled), the faintest contrast at which 90 % of the bin's sources are detected,
-  and how many are detected at TABLE 1's c@TAP90, both with every source evaluated at that
-  contrast.  Each source's first detected contrast and solved c@TAP90 follow.  TABLE 1 stays
-  the headline, as in the IDL, and the injection lines keep their format.
+  mean of the contrasts at which each source reaches tau + tau_(1-TAP), with the exact tau
+  (TABLE 1 solved instead of scaled), the faintest contrast at which 90 % of the bin's
+  sources are detected, and how many are detected at TABLE 1's c@TAP90, both with every
+  source evaluated at that contrast.  Each source's first detected contrast and solved
+  c@TAP90 follow.  TABLE 1 stays the headline, as in the IDL, and the injection lines keep
+  their format.
+- **TABLE 1 says where tau's cap binds.**  `t_thresh` caps tau at 50, as the IDL's bisection
+  does, while `t_fap`, which decides detection, is exact.  With six noise samples or fewer
+  the exact tau at the operating FAP is 57 to 1.1e6, so a source at TABLE 1's c@TAP there
+  does not reach the FAP.  A planet's own residual in its ring also caps its S/N there (6 to
+  14 for NEAR2 inside about 0.56"), so no contrast reaches it.  TABLE 1 keeps the IDL's
+  numbers and names those bins below the table, and TABLE 3 shows `inf` there.
+  `contrast_limit` and `t_thresh` are unchanged.
 
 ## Unreleased — 2026-10-23 (the params table's summary row, the candidate list's header)
 
