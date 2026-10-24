@@ -330,7 +330,8 @@ def make_space(reducer: PartitionedReducer, per_night: bool = True, k_klip_max: 
                width_range: Optional[Tuple[float, float]] = None, search_k: bool = True,
                max_drop: int = 2, bin_range: Optional[Tuple[int, int]] = None,
                zone_range: Optional[Tuple[float, float]] = None, search_post_hp: bool = False,
-               pin: Optional[Dict[str, Any]] = None) -> SearchSpace:
+               pin: Optional[Dict[str, Any]] = None,
+               angsep_range: Optional[Tuple[float, float]] = None) -> SearchSpace:
     """The production search space: 9 parameters per night (+ drop1/drop2).
 
     ``width_range=(w0, w1)`` adds the searched global integer ``width`` dim of the
@@ -352,7 +353,16 @@ def make_space(reducer: PartitionedReducer, per_night: bool = True, k_klip_max: 
 
     ``pin={name: value}`` holds reduction parameters at a value for every evaluation: a
     parameter of the block is taken out of the search, and any other name (``zone_in`` without
-    ``zone_range``, say) is passed to the reducer as given (``SearchSpace.fixed``)."""
+    ``zone_range``, say) is passed to the reducer as given (``SearchSpace.fixed``).
+
+    ``angsep_range=(lo, hi)`` (lambda/D) replaces the 0-3 that ``angsep`` is searched over.  A
+    floor above 0 keeps the search off ``angsep = 0``, which with ``anglemax`` at the PA span is
+    another algorithm: :func:`klip_tpe.klip.klip_annular` then builds one basis per zone from all
+    the frames, each target frame inside its own basis (the IDL's auto-fast rule), where any
+    positive ``angsep`` leaves the target out.  The bound is not a point of measure zero: a
+    proposal past it is clipped onto it, and the reference-count guard projects onto 0 too, so
+    a search lands there often and keeps it when it scores (MWC 758 with ALES: every winner, at
+    the cost of most of the spiral arms' flux).  The default is clipped into the range."""
     d = dict(production_defaults)
     d.update(defaults or {})
     if k_klip_max is None:
@@ -369,7 +379,10 @@ def make_space(reducer: PartitionedReducer, per_night: bool = True, k_klip_max: 
              Param("n_ang", 1, 8, "int", default=d["n_ang"], doc="azimuthal subdivisions"),
              Param("filter", 0, 25, "int", default=d["filter"], doc="high-pass width (px)")]
     if search_angles:
-        block += [Param("angsep", 0.0, 3.0, "float", default=d["angsep"],
+        as_lo, as_hi = (0.0, 3.0) if angsep_range is None else (float(angsep_range[0]), float(angsep_range[1]))
+        if not 0.0 <= as_lo <= as_hi:
+            raise ValueError(f"angsep_range {tuple(angsep_range)}: want 0 <= lo <= hi (lambda/D)")
+        block += [Param("angsep", as_lo, as_hi, "float", default=float(np.clip(float(d["angsep"]), as_lo, as_hi)),
                         doc="min reference separation (lambda/D)")]
         # anglemax caps |dPA| between a target and a reference, and its floor is 20 deg.  A
         # sequence whose own PA span cannot reach 20 therefore has nothing to constrain: every

@@ -36,6 +36,14 @@ class PositionSampler:
     forbidden_pa
         list of ``(centre_deg, half_width_deg)`` PA sectors to avoid (e.g. the
         JWST N/S axis).
+    forbidden_mask
+        boolean image (True = forbidden) in the reduced frame's pixels, the star at its
+        centre: no injection lands on it, or within ``mask_clear_fwhm`` FWHM of it.  For
+        resolved emission no wedge follows (a spiral or ring disk:
+        :func:`~klip_tpe.metrics.disk_mask_from_image`), paired with the same mask as the
+        metric's ``pixel_mask`` (``default_config(disk_mask=...)`` sets both).  Needs
+        ``mask_pxscale`` (arcsec per pixel); ``mask_angle_convention`` is the sources'
+        (the metric's) angle convention.
 
     This one object is used by search, calibration, validation, param_verify and the
     final products alike, so every stage injects with identical geometry.  The
@@ -53,10 +61,36 @@ class PositionSampler:
     forbidden_pa: Sequence[Tuple[float, float]] = ()
     min_mutual_fwhm: float = 2.0
     max_tries: int = 30
+    forbidden_mask: Optional[np.ndarray] = None
+    mask_pxscale: Optional[float] = None
+    mask_clear_fwhm: float = 0.0
+    mask_angle_convention: str = "pa"
+    _mask_dist: Optional[np.ndarray] = field(default=None, init=False, repr=False, compare=False)
 
     def _xy(self, rho, theta):
         phi = np.deg2rad(np.asarray(theta, float) + 90.0)
         return np.asarray(rho, float) * np.cos(phi), np.asarray(rho, float) * np.sin(phi)
+
+    def _on_mask(self, rho, theta) -> bool:
+        """Does any source fall on ``forbidden_mask`` or within ``mask_clear_fwhm`` FWHM of it?"""
+        if self.forbidden_mask is None:
+            return False
+        if not self.mask_pxscale:
+            raise ValueError("forbidden_mask needs mask_pxscale")
+        from scipy import ndimage
+        from .metrics import source_xy, star_center
+        m = np.asarray(self.forbidden_mask, bool)
+        if self._mask_dist is None or self._mask_dist.shape != m.shape:
+            # distance (px) from every pixel to the nearest forbidden one, 0 on the mask
+            self._mask_dist = ndimage.distance_transform_edt(~m) if m.any() else np.full(m.shape, np.inf)
+        cx, cy = star_center(m.shape)
+        xs, ys = source_xy(rho, theta, float(self.mask_pxscale), cx, cy, self.mask_angle_convention)
+        clear = float(self.mask_clear_fwhm) * self.fwhm_as / float(self.mask_pxscale)
+        for x, y in zip(xs, ys):
+            ix, iy = int(round(float(x))), int(round(float(y)))
+            if 0 <= iy < m.shape[0] and 0 <= ix < m.shape[1] and self._mask_dist[iy, ix] <= clear:
+                return True
+        return False
 
     def _bad(self, rho, theta) -> bool:
         exr = self.excl_fwhm * self.fwhm_as
@@ -69,7 +103,7 @@ class PositionSampler:
             d = np.abs((np.asarray(theta) - c + 180.0) % 360.0 - 180.0)
             if np.any(d < hw):
                 return True
-        return False
+        return self._on_mask(rho, theta)
 
     def sample(self, n: int, r_lo: float, r_hi: float, rng: np.random.Generator,
                contrast: float = 0.0) -> List[Source]:
@@ -80,7 +114,10 @@ class PositionSampler:
         span = r_hi - r_lo
         rho = np.zeros(n)
         theta = np.zeros(n)
-        for _ in range(self.max_tries):
+        # a disk mask can forbid most of a ring (two opposite sources must both miss it), so it
+        # gets more anchors to try; without one the draws are exactly what they were
+        tries = self.max_tries if self.forbidden_mask is None else max(int(self.max_tries), 400)
+        for _ in range(tries):
             if self.strategy == "fixed_pa":
                 rho[:] = 0.5 * (r_lo + r_hi)
                 ok = False
@@ -105,8 +142,13 @@ class PositionSampler:
         return [Source(float(r), float(t), float(contrast)) for r, t in zip(rho, theta)]
 
     def describe(self) -> dict:
-        return {"strategy": self.strategy, "min_r_fwhm": self.min_r_fwhm, "excl_fwhm": self.excl_fwhm,
-                "known": [list(k) for k in self.known], "forbidden_pa": [list(f) for f in self.forbidden_pa]}
+        d = {"strategy": self.strategy, "min_r_fwhm": self.min_r_fwhm, "excl_fwhm": self.excl_fwhm,
+             "known": [list(k) for k in self.known], "forbidden_pa": [list(f) for f in self.forbidden_pa]}
+        if self.forbidden_mask is not None:
+            # as the metric's pixel_mask_px: positions drawn off a mask are not those drawn without
+            d.update(forbidden_mask_px=int(np.count_nonzero(self.forbidden_mask)),
+                     mask_clear_fwhm=float(self.mask_clear_fwhm))
+        return d
 
 
 class ReplaySampler:

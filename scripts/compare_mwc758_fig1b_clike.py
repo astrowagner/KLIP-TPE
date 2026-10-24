@@ -4,14 +4,19 @@ published Fig. 1b of Wagner et al. (2023, Nature Astronomy 7, 1208): the paper's
 (the 2022-02-11 run), klip-tpe at the paper's ADI settings on the same band, and the search's validated
 winner, on all its groups and on those at 3.8 um and beyond.
 
-  python3 scripts/compare_mwc758_fig1b_clike.py --run RUN_DIR [--reduced DIR] [--published PNG]
-          [--out DIR] [--workers N]
+  python3 scripts/compare_mwc758_fig1b_clike.py --run RUN_DIR [--kernel-group gNN] [--disk-mask FITS|none]
+          [--reduced DIR] [--published PNG] [--out DIR] [--workers N]
 
 RUN_DIR is a finished scripts/run_mwc758_ales_clike.py run (``--nights nov14``; of a two-night run the
-November 14 groups are taken).  For every image: MWC 758c's S/N as tutorial 7 measures it (the Mawet S/N
-with the n2_g10 template as the matched filter), and where c stands among the 31 empty positions of its
+November 14 groups are taken; of a run with its groups held, ``--fixed-groups``, the one panel of them).  For
+every image: MWC 758c's S/N as the run measures it (the Mawet S/N with the PSF of the run's own matched-filter
+group, n2_g10 unless the run was started with another; ``--kernel-group gNN`` measures with another, and the
+files are then named ``_mfgNN``), and where c stands among the 31 empty positions of its
 ring (every 10 deg, out of the 50 deg wedge round c): z = (c - their mean) / their sd, and how many of them
-reach c.  The panels are shown as Fig. 1b is (a unit-peak Gaussian of FWHM lambda/D at 3.97 um, zero within
+reach c.  A run made with ``--disk-mask`` is measured with its mask (RUN_DIR/disk_mask.fits): out of the
+noise samples, and the ring's positions that fall on it are not counted as empty; ``--disk-mask none`` or
+another file overrides it (files ``_nodm`` / ``_dm``), and the mask's outline is drawn on every panel.  The
+panels are shown as Fig. 1b is (a unit-peak Gaussian of FWHM lambda/D at 3.97 um, zero within
 6 and beyond 22 px, the published colour map), each with its own stretch, -1 to +5 robust sigma of its ring.
 Writes OUT/fig1b_clike.png and OUT/fig1b_clike.json (OUT defaults to RUN_DIR/fig1b_comparison).  Only reads
 RUN_DIR, the paper's products and the release."""
@@ -40,6 +45,11 @@ RHO, PA = 0.603, 228.5
 RED_GROUPS = ["g%02d" % g for g in range(15, 20)]                # 3.79-4.15 um, Fig. 1b's band
 ap = argparse.ArgumentParser()
 ap.add_argument("--run", required=True)
+ap.add_argument("--kernel-group", default=None, metavar="gNN",
+                help="the group whose PSF is the matched filter (default: the run's own, n2_g10 for the runs before "
+                     "--fixed-groups)")
+ap.add_argument("--disk-mask", default=None, metavar="FITS|none",
+                help="the disk mask to measure with (default: the run's own disk_mask.fits, if it has one)")
 ap.add_argument("--reduced", default="/Volumes/RAID36TB/LMIRCam/MWC758_6/reduced")
 ap.add_argument("--published", default=os.path.join(REPO, "tutorials", "runs", "mwc758_paper_setup", "paper_figure",
                                                     "published_fig1_capture.png"))
@@ -57,6 +67,19 @@ kept = list(res["partitions"])
 blk = res["winner_config"]["per_partition"][kept[0]]
 parts = fits.getdata(os.path.join(a.run, "annulus01", "best_clean_partitions.fits"))
 parts = parts[None] if parts.ndim == 2 else parts
+# the matched filter: the run's own group unless --kernel-group says otherwise
+rep_run = str((setup.get("reducer") or {}).get("representative") or "n2_g10")
+kg = (a.kernel_group or rep_run.split("_")[-1]).lower()
+held = (setup.get("space") or {}).get("selection") is None          # --fixed-groups: no group flags
+# the disk mask: the run's own unless --disk-mask says otherwise
+own_mask = os.path.join(a.run, "disk_mask.fits")
+mask_path = (None if str(a.disk_mask).lower() == "none" else a.disk_mask) if a.disk_mask is not None else \
+    (own_mask if os.path.exists(own_mask) else None)
+dmask = None
+if mask_path:
+    dmask = np.squeeze(np.asarray(fits.getdata(mask_path))) != 0
+    if dmask.shape != (62, 62):
+        sys.exit(f"{mask_path}: a {dmask.shape} mask for 62 x 62 frames")
 n2 = [i for i, p in enumerate(kept) if p.startswith("n2_")]
 n2_red = [i for i in n2 if kept[i].split("_")[1] in RED_GROUPS]
 with warnings.catch_warnings():
@@ -68,8 +91,11 @@ with warnings.catch_warnings():
 files = datasets.fetch("lbti_ales_mwc758", quiet=True,
                        roles=[k for k in datasets.DATASETS["lbti_ales_mwc758"] if k.endswith("_20191114")])
 dsets, lam, fwhm, table = ales.load_release(files, nights=["20191114"], labels={"20191114": "n2"},
-                                           only=sorted(set(RED_GROUPS) | {"g10"}), log=lambda s: None)
-red = ales.make_reducer(dsets, lam, fwhm, table=table, max_workers=a.workers, representative="n2_g10", log=lambda s: None)
+                                           only=sorted(set(RED_GROUPS) | {kg}), log=lambda s: None)
+red = ales.make_reducer(dsets, lam, fwhm, table=table, max_workers=a.workers, representative="n2_" + kg,
+                        log=lambda s: None)
+print(f"matched filter: n2_{kg}'s PSF ({lam['n2_' + kg] * 1e6:.3f} um, FWHM {red.fwhm:.2f} px)"
+      + ("" if "n2_" + kg == rep_run else f"; the run searched with {rep_run}'s"))
 set_klip_gram(red, "zone")
 set_zone_center(red, (30.0, 30.0), angles="getzone2015")         # the paper's zones: the 2015 getzone about (sc/2-1, sc/2-1)
 E0, E1 = 0.4 / red.pxscale, 0.8 / red.pxscale
@@ -84,10 +110,16 @@ paper_kt = red.reduce_config(cfg, selected=["n2_" + g for g in RED_GROUPS]).imag
 red.close()
 
 # ---------------------------------------------------------------- c on its ring
-metric = MawetPeakSNR(pxscale=red.pxscale, fwhm=red.fwhm, kernel_fn=red.matched_filter_kernel, declip_nsig=None)
+metric = MawetPeakSNR(pxscale=red.pxscale, fwhm=red.fwhm, kernel_fn=red.matched_filter_kernel, declip_nsig=None,
+                      pixel_mask=dmask)
 ring = MawetPeakSNR(pxscale=red.pxscale, fwhm=red.fwhm, kernel_fn=red.matched_filter_kernel, declip_nsig=None,
-                    known=[(RHO, PA)])
+                    known=[(RHO, PA)], pixel_mask=dmask)
 TH = np.array([t for t in np.arange(0.0, 360.0, 10.0) if abs(((t - PA + 180) % 360) - 180) > 25.0])
+if dmask is not None:
+    # a ring position on the disk is not an empty one
+    _x, _y = source_xy([RHO] * TH.size, TH, red.pxscale, 30.5, 30.5)
+    TH = TH[[not dmask[int(round(y)), int(round(x))] for x, y in zip(_x, _y)]]
+    print(f"disk mask {mask_path}: {int(dmask.sum())} px; {TH.size} ring positions off it")
 
 
 def c_on_ring(img):
@@ -102,8 +134,9 @@ ng = len(n2)
 panels = [("Fig. 1b source: the paper's ASDI,\n3.8-4.14 um (2022-02-11 run)",
            fits.getdata(os.path.join(a.reduced, "MWC758_sdiklip_3.8-4.14.fits")).astype(float)),
           ("klip-tpe at the paper's ADI settings,\n3.8-4.15 um (g15-g19)", paper_kt),
-          (f"the c-tuned winner, its {ng} Nov 14\ngroups ({kept[n2[0]].split('_')[1]}-{kept[n2[-1]].split('_')[1]})", win_all)]
-if win_red is not None:
+          ((f"the c-tuned winner on its\n{ng} groups ({kept[n2[0]].split('_')[1]}-{kept[n2[-1]].split('_')[1]}), held" if held else
+            f"the c-tuned winner, its {ng} Nov 14\ngroups ({kept[n2[0]].split('_')[1]}-{kept[n2[-1]].split('_')[1]})"), win_all)]
+if win_red is not None and len(n2_red) < len(n2):
     panels.append((f"the c-tuned winner, its {len(n2_red)} groups\nat 3.8-4.15 um", win_red))
 stats = {name.replace("\n", " "): c_on_ring(im) for name, im in panels}
 for name, s in stats.items():
@@ -126,13 +159,15 @@ except Exception as exc:                                         # no capture at
 xc, yc = (v[0] for v in source_xy(RHO, PA, red.pxscale, 30.5, 30.5))
 yy, xx = np.mgrid[0:62, 0:62]
 rr = np.hypot(xx - 31.0, yy - 31.0)
-fig, axes = plt.subplots(1, len(panels), figsize=(3.6 * len(panels), 4.3))
+fig, axes = plt.subplots(1, len(panels), figsize=(max(3.6 * len(panels), 13.5), 4.3))   # room for the footers
 for ax, (name, im) in zip(np.atleast_1d(axes), panels):
     sm = M.mask_annulus(M.lod_smooth(np.nan_to_num(im), 3.97), 6, 22)
     v = sm[(rr >= 7) & (rr <= 21)]
     sig = 1.4826 * np.median(np.abs(v - np.median(v)))
     ax.imshow(sm, origin="lower", cmap=cmap, vmin=-1.0 * sig, vmax=5.0 * sig, interpolation="nearest")
     ax.add_patch(Circle((xc, yc), 3.6, fill=False, ec="w", lw=1.0, ls="--"))
+    if dmask is not None:
+        ax.contour(dmask.astype(float), levels=[0.5], colors="cyan", linewidths=0.6)
     s = stats[name.replace("\n", " ")]
     ax.set_title(f"{name}\nc S/N {s['c_snr']:.1f}, z {s['z']:+.1f} on its ring", fontsize=8.5)
     ax.set_xlim(4, 57)
@@ -153,13 +188,19 @@ fig.suptitle("MWC 758, LBTI/ALES 2019-11-14: Fig. 1b's source next to klip-tpe t
              f"(validated S/N {res['winner_score']:.1f} at contrast {res['contrast']:.2g})", fontsize=10)
 fig.text(0.01, 0.015, "winner: " + wtxt + "\n" + geom + ("\ninjections: " + spec["label"] if spec.get("label") else ""),
          fontsize=7)
-fig.text(0.99, 0.015, "north up, east left; lambda/D-smoothed as Fig. 1b; each panel -1 to +5 robust sigma",
+fig.text(0.99, 0.015, "north up, east left; lambda/D-smoothed as Fig. 1b; each panel -1 to +5 robust sigma\n"
+         f"c's S/N with n2_{kg}'s PSF as the matched filter ({lam['n2_' + kg] * 1e6:.2f} um)"
+         + (f"\ndisk mask (cyan) out of the noise: {int(dmask.sum())} px, {os.path.basename(mask_path)}" if dmask is not None else ""),
          fontsize=7, ha="right")
 fig.tight_layout(rect=(0, 0.08, 1, 0.93))
-png = os.path.join(out_dir, "fig1b_clike.png")
+suffix = "" if kg == "g10" else f"_mf{kg}"
+if mask_path != (own_mask if os.path.exists(own_mask) else None):
+    suffix += "_dm" if mask_path else "_nodm"
+png = os.path.join(out_dir, f"fig1b_clike{suffix}.png")
 fig.savefig(png, dpi=150, facecolor="white")
 json.dump({"run": os.path.abspath(a.run), "winner": {k: blk.get(k) for k in keep}, "winner_score": res["winner_score"],
            "contrast": res["contrast"], "partitions": kept, "injection_spectrum": spec.get("label"),
-           "paper_settings": PAPER, "winner_geometry": geom, "panels": stats}, open(os.path.join(out_dir, "fig1b_clike.json"), "w"), indent=1,
-          default=float)
+           "paper_settings": PAPER, "winner_geometry": geom, "matched_filter": "n2_" + kg,
+           "disk_mask": mask_path, "disk_mask_px": None if dmask is None else int(dmask.sum()), "panels": stats},
+          open(os.path.join(out_dir, f"fig1b_clike{suffix}.json"), "w"), indent=1, default=float)
 print("wrote", png)

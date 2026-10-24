@@ -792,7 +792,9 @@ def default_config(reducer: PartitionedReducer, clean_subtract: bool = True, kno
     FWHM and matched filter, and the one sampler.  ``known`` keeps the companions out of the
     noise rings and the injections away from them; ``forbidden_pa`` keeps the injections out
     of PA wedges (a companion at ``(RHO, PA)``: ``known=[(RHO, PA)], forbidden_pa=[(PA, 25.0)]``,
-    so no source lands within 25 deg of it in azimuth).
+    so no source lands within 25 deg of it in azimuth).  ``disk_mask`` (True = disk, the
+    reduced frame's shape; :func:`klip_tpe.metrics.disk_mask_from_image`) keeps a disk of any
+    shape out of the noise and the injections off it (see :func:`generic.default_config`).
 
     The metric's de-spiking is off here (``declip_nsig=None``, which ``metric_kw`` may set
     back).  It replaces a pixel that stands more than 6 robust sigma above its 3 x 3 median

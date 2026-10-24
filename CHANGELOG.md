@@ -1,5 +1,98 @@
 # Changelog
 
+## Unreleased — 2026-10-24 (angsep off the auto-fast corner)
+
+Every c-tuned MWC 758 winner so far has `angsep` 0 and `anglemax` 127 deg, the night's PA span:
+the corner where `klip_annular` takes the auto-fast shortcut, one basis per zone from all the
+frames with each target frame inside its own (the IDL's rule, `reduce_near_2.pro` L1839-1845),
+where any positive `angsep` leaves the target out.  The corner is not of measure zero:
+`Param.sanitize` clips a proposal past the bound onto it, and the reference-count guard
+projects onto 0 as well, so in the 4e-5 run 74 % of the TPE's proposals and 93 % of the local
+search's had `angsep` exactly 0.  It costs the disk.  The 4e-5 winner keeps 0.18 of the paper's
+arm flux; the same configuration at `angsep` 0.01 keeps 0.55 (at 1e-6 the same, and with
+`anglemax` 120, where the shortcut stands down, 0.53), and c comes out at S/N 2.9 against 2.4.
+
+- **`near.make_space(..., angsep_range=(lo, hi))`** (and through it `generic.make_space` and
+  `ales.make_space`): `angsep` searched over lo-hi lambda/D instead of 0-3, its default clipped
+  into the range.  A floor above 0 keeps every evaluation on the per-target path.
+- **`scripts/run_mwc758_ales_clike.py --angsep-min 0.01`** (the paper's value),
+  **`--n-remeasure N`**, the injection draws averaged per evaluation (3, as before, by default),
+  and **`--k-max K`**, the most KL modes searched (`make_space(k_klip_max=)`; 100 here by
+  default).  Off the corner the objective still trades the disk for point-source S/N along k:
+  at the paper's step with the 4e-5 winner's frame cuts the arm flux goes from 1.01 at 15 modes
+  to 0.66 at 18 and 0.38 at 25, while with the winner's 13-px box the injections' S/N gains
+  22 % from 15 to 18 modes (`_sync/check_objective_floor.py`).  The
+  run directory is tagged `_asA`, `_nrmN` and `_kmaxK`, a run is not resumed with another
+  floor, count or cap, and `clike_summary.json` records all three.
+
+## Unreleased — 2026-10-23 (injections at a chosen separation)
+
+- **`RunConfig.inject_rho`** (arcsec): every injection of every stage (search, k-scan re-score,
+  calibration, validation, param_verify) at that one separation, in place of the band the
+  annulus gives.  Two sources are still 180 deg apart, and the sampler's floor still applies.
+  A radius outside an annulus the run scores is refused.  None, the default, keeps the band;
+  checkpoints written before the field resume with None.
+- **`scripts/run_mwc758_ales_clike.py --inject-rho 0.6`**: the injections at c's own
+  separation (0.603") instead of the 0.4-0.8" annulus' area-weighted mid radius, 0.632".  The
+  annulus, its zone and its scoring are unchanged.  The run directory is tagged `_rinjR`, and a
+  run is not resumed with its injections elsewhere.  The disk mask covers 8% of the noise band
+  at 0.6", against 2% at 0.632".
+
+## Unreleased — 2026-10-23 (a disk of any shape out of the noise and the injections)
+
+The MWC 758 winners leave the disk's spiral arms all but gone, so the c-tuned run gets a way to
+block the disk.  `pa_wedge_mask` and `forbidden_pa` covered a disk seen near edge-on; arms and
+rings follow no wedge.
+
+- **`metrics.disk_mask_from_image(img, fwhm_px, nsig=2, r_range=, min_beams=2, grow_fwhm=1,
+  smooth_fwhm=1, protect=[(rho, pa)], pxscale=)`**: True on the bright extended structure of an
+  image of the disk.  The image is smoothed by a FWHM and cut at `nsig` robust sigma; pieces
+  under `min_beams` beams are dropped and the rest grown by `grow_fwhm` FWHM, the matched
+  filter's reach; protected positions (a companion) stay clear.
+- **`disk_mask_from_image(..., nsig_neg=, neg_reach_fwhm=2)`** adds the disk's ADI negatives:
+  the troughs `nsig_neg` robust sigma deep, in pieces of at least `min_beams` beams, that come
+  within `neg_reach_fwhm` FWHM of the bright structure; a trough nowhere near the disk stays.
+  `make_disk_mask.py --neg-nsig S [--neg-reach-fwhm 2]`.  On MWC 758 at 2 sigma the mask grows
+  from 391 to 592 px, and from 7.5 to 9.2% of the noise band at 0.6".
+- **`PositionSampler(forbidden_mask=, mask_pxscale=, mask_clear_fwhm=0)`**: no injection on the
+  mask, or within `mask_clear_fwhm` FWHM of it.  With a mask the sampler tries up to 400
+  anchors, since two opposite sources must both miss it; without one the draws are what they
+  were.  `describe()` adds `forbidden_mask_px` only when a mask is set.
+- **`default_config(..., disk_mask=, disk_mask_clear_fwhm=0)`** (generic, ales): one mask for
+  both halves, OR-ed into the metric's `pixel_mask` and given to the sampler.
+- **`scripts/make_disk_mask.py IMAGE --fwhm PX --out MASK.fits`**: the mask from any FITS image,
+  its parameters and the image's SHA-1 in the header, and a preview.
+- **`scripts/run_mwc758_ales_clike.py --disk-mask MASK.fits`**: the run scored with the disk
+  masked.  A copy goes into the run directory, c's S/N at the end is measured with it, the run
+  directory is tagged `_disk`, and a run is not resumed with another mask or without one.
+  **`compare_mwc758_fig1b_clike.py`** measures a masked run with its own mask (`--disk-mask
+  FITS|none` overrides), drops the ring positions on the mask from the empty ones, and draws
+  the mask on every panel.
+- On MWC 758 the arms lie inside 0.6": a mask of them (arms above 2 sigma in the paper's ADI
+  image, grown a FWHM) covers about 2% of the noise band at 0.632", where the runs inject.
+- `docs/ALES.md` section 9; `tests/test_disk_mask.py`.
+
+## Unreleased — 2026-10-21 (the c-tuned run's groups: how many may drop, or held)
+
+- **`scripts/run_mwc758_ales_clike.py --max-excluded N`**: how many groups the search may switch
+  off, half of them by default (10 of November 14's 20) as before.  The paper's ADI band,
+  3.4-4.15 µm (g09-g19), is within that bound and its Fig. 1b, 3.8-4.15 µm (g15-g19), is not;
+  `--max-excluded 15` reaches it.  A bound other than the default tags the run directory
+  `_maxexN`, and a run is not resumed with another bound.
+- **`--fixed-groups LO-HI`** of the same script holds the combination at those groups for every
+  evaluation (`15-19`, the 3.8-4.15 µm of Fig. 1b): only they are loaded, the space has no group
+  flags and the guard no group bound.  The matched filter, with the FWHM and lambda/D of the
+  metric, the sampler and the guards, is then the band's middle group's (g17, 3.97 µm, for
+  15-19), since g10 lies outside the band; **`--kernel-group gNN`** picks another.  Run directory
+  tags `_gLO-HI` and `_mfgNN`; a run is not resumed with other groups or another matched filter.
+- **`--max-contrast C`** of the same script (in since 6c9813e, not logged then): a cap on the
+  injected contrast through the calibration and every re-calibration
+  (`CalibrationConfig.ceiling`); with c's spectrum it is the contrast at 3.8 µm.  The cap tags
+  the run directory `_cmaxC`, and a run is not resumed with another cap.
+- **`scripts/compare_mwc758_fig1b_clike.py --kernel-group gNN`**: every panel's c S/N and ring
+  with that group's PSF as the matched filter, by default the run's own; the files are then
+  `fig1b_clike_mfgNN.*`.  A run with its groups held gets one winner panel.
+
 ## Unreleased — 2026-10-24 (the verify on the stitched image, TABLE 3, tau's cap named)
 
 From the NEAR2 session's notes of 2026-10-20 (the verify's combined image) and 2026-10-23

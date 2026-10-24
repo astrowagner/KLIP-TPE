@@ -279,6 +279,33 @@ def test_pin_holds_reduction_parameters_out_of_the_search():
     assert sp2.decode(sp2.default_vector()).params["zone_in"] == 1.0
 
 
+def test_angsep_range_keeps_the_search_off_the_auto_fast_corner():
+    from klip_tpe.klip import KLIPParams, klip_annular
+    red, _ = _reducer()
+    plain = ales.make_space(red, defaults={"angsep": 0.0})
+    sp = ales.make_space(red, defaults={"angsep": 0.0}, angsep_range=(0.01, 3.0))
+    assert sp.names == plain.names
+    i = sp.index("angsep")
+    assert (plain.params[i].lo, sp.params[i].lo, sp.params[i].hi) == (0.0, 0.01, 3.0)
+    # the default is clipped into the range, and a proposal past the floor (or the reference-count
+    # guard's 0) onto it, as the runner sanitizes after the guard
+    assert sp.decode(sp.default_vector()).params["angsep"] == pytest.approx(0.01)
+    x = sp.default_vector()
+    x[i] = -0.5
+    a_plain, a_floor = plain.sanitize(x)[i], sp.sanitize(x)[i]
+    assert a_plain == 0.0 and a_floor == pytest.approx(0.01)
+    # 0 with no anglemax window is the shared basis that holds every frame; the floor is per-target KLIP
+    rng = np.random.default_rng(0)
+    cube, ang = rng.standard_normal((12, 21, 21)), np.linspace(0.0, 40.0, 12)
+    for v, fast in [(a_plain, True), (a_floor, False)]:
+        _, info = klip_annular(cube, ang, KLIPParams(k_klip=3, inrad=3.0, outrad=9.0, angsep=v, anglemax=360.0,
+                                                     n_min_ref=2), 2.0)
+        assert info["auto_fast"] is fast and info["fast"] is fast
+    for bad in [(-0.1, 3.0), (2.0, 1.0)]:
+        with pytest.raises(ValueError, match="angsep_range"):
+            ales.make_space(red, angsep_range=bad)
+
+
 def test_getzone2015_zones_are_the_paper_reductions_pixels():
     """The 2015 getzone (MWC758_ALES reduce_ales_mwc758_2.pro): dist_circle and angmask about (sc/2 - 1,
     sc/2 - 1) in single precision, ang = atan2 + pi, zone jj = [jj, jj + 1] * 360 / n_ang deg, both ends
