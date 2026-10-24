@@ -25,7 +25,7 @@ from scipy import ndimage
 __all__ = ["radprof", "declip", "gaussian_kernel", "source_xy", "mawet_peak_snr",
            "injection_difference_snr", "aperture_mawet_snr", "clip0", "MawetPeakSNR",
            "InjectionDifferenceSNR", "Objective", "Source", "nanmedian_even", "pa_wedge_mask", "line_mask",
-           "why_failed", "WHY_GUARD", "WHY_RING", "WHY_NOISE"]
+           "disk_mask_from_image", "why_failed", "WHY_GUARD", "WHY_RING", "WHY_NOISE"]
 
 
 def line_mask(shape: Tuple[int, int], lines: Sequence[Tuple[float, float]], angle_convention: str = "pa",
@@ -89,6 +89,97 @@ def pa_wedge_mask(shape: Tuple[int, int], bands: Sequence[Tuple[float, float]],
     if r_range is not None:
         rr = np.hypot(dx, dy)
         out &= (rr >= float(r_range[0])) & (rr <= float(r_range[1]))
+    return out
+
+
+def disk_mask_from_image(img: np.ndarray, fwhm_px: float, *, nsig: float = 2.0,
+                         r_range: Optional[Tuple[float, float]] = None, min_beams: float = 2.0,
+                         grow_fwhm: float = 1.0, smooth_fwhm: float = 1.0,
+                         protect: Sequence[Tuple[float, float]] = (), protect_fwhm: float = 1.5,
+                         pxscale: Optional[float] = None, angle_convention: str = "pa",
+                         nsig_neg: Optional[float] = None, neg_reach_fwhm: float = 2.0) -> np.ndarray:
+    """Boolean mask (True = exclude) of the bright extended structure of ``img`` -- a disk
+    whose shape no wedge or strip follows, spiral arms or a ring -- for the metric's
+    ``pixel_mask`` and the sampler's ``forbidden_mask`` together
+    (:func:`klip_tpe.instruments.generic.default_config`'s ``disk_mask``).
+
+    ``img`` is smoothed with a Gaussian of ``smooth_fwhm`` x ``fwhm_px`` FWHM (NaN-aware),
+    referred to its median and robust sigma (1.4826 MAD) over ``r_range`` (px from the star
+    at the frame centre; default all finite pixels) and cut at ``nsig``.  Pieces smaller than
+    ``min_beams`` beams (pi (fwhm/2)^2 px each) are dropped -- an isolated speckle is not a
+    disk -- and the rest grown by ``grow_fwhm`` FWHM, since the metric samples the
+    matched-filtered image, which carries the disk about a FWHM beyond its edge.  The mask is
+    then limited to ``r_range``, and the positions in ``protect`` (``[(rho_arcsec, pa_deg)]``,
+    which needs ``pxscale``) are cleared within ``protect_fwhm`` FWHM: a companion on the disk
+    stays measurable, and its own ``known`` exclusion keeps it out of the noise anyway.
+
+    ``nsig_neg`` adds the disk's ADI negatives, the troughs self-subtraction digs beside
+    extended emission: pixels ``nsig_neg`` robust sigma below the median, in pieces of at least
+    ``min_beams`` beams that come within ``neg_reach_fwhm`` FWHM of the bright structure kept
+    (a trough nowhere near the disk is a speckle's, and stays).  They are the disk's footprint
+    in an ADI image as much as its emission is, so they are grown, limited and protected with
+    it.  None, the default: the bright structure only.
+
+    The caution of :func:`pa_wedge_mask` applies with more force: this masks whatever is
+    bright, and a bright speckle group masked along with the disk biases the noise estimate
+    down.  Build it from an image of the disk made before the search (a disk-preserving
+    reduction, another epoch or instrument), never from a search's own winner, and look at
+    it."""
+    img = np.asarray(img, float)
+    ny, nx = img.shape
+    cx, cy = star_center(img.shape)
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    rr = np.hypot(xx - cx, yy - cy)
+    fin = np.isfinite(img)
+    fwhm_px = float(fwhm_px)
+    sg = max(float(smooth_fwhm), 0.0) * fwhm_px / 2.3548
+    if sg > 0:
+        num = ndimage.gaussian_filter(np.where(fin, img, 0.0), sg)
+        den = ndimage.gaussian_filter(fin.astype(float), sg)
+        sm = np.full(img.shape, np.nan)
+        good = fin & (den > 0.2)
+        sm[good] = num[good] / den[good]
+    else:
+        sm = np.where(fin, img, np.nan)
+    inr = np.ones(img.shape, bool) if r_range is None else (rr >= float(r_range[0])) & (rr <= float(r_range[1]))
+    ok = inr & np.isfinite(sm)
+    out = np.zeros(img.shape, bool)
+    if ok.sum() < 10:
+        return out
+    med = float(np.median(sm[ok]))
+    sig = 1.4826 * float(np.median(np.abs(sm[ok] - med)))
+    if not sig > 0:
+        return out
+    beam = np.pi * (fwhm_px / 2.0) ** 2
+
+    def big(m: np.ndarray) -> np.ndarray:
+        """``m`` without its pieces under ``min_beams`` beams"""
+        if not m.any() or min_beams <= 0:
+            return m
+        lab, n = ndimage.label(m)
+        sizes = np.asarray(ndimage.sum(m, lab, index=np.arange(1, n + 1)), float)
+        small = 1 + np.flatnonzero(sizes < float(min_beams) * beam)
+        return m & ~np.isin(lab, small) if small.size else m
+
+    out = big(ok & (sm - med > float(nsig) * sig))
+    if nsig_neg is not None and out.any():
+        neg = big(ok & (sm - med < -float(nsig_neg) * sig))
+        if neg.any():
+            near = ndimage.distance_transform_edt(~out) <= float(neg_reach_fwhm) * fwhm_px
+            lab, _ = ndimage.label(neg)
+            touch = np.unique(lab[neg & near])
+            touch = touch[touch > 0]
+            if touch.size:
+                out = out | np.isin(lab, touch)
+    if out.any() and grow_fwhm > 0:
+        out = ndimage.distance_transform_edt(~out) <= float(grow_fwhm) * fwhm_px
+    out &= inr
+    if len(protect):
+        if pxscale is None:
+            raise ValueError("protect needs pxscale")
+        px, py = source_xy([p[0] for p in protect], [p[1] for p in protect], float(pxscale), cx, cy, angle_convention)
+        for x0, y0 in zip(px, py):
+            out &= np.hypot(xx - x0, yy - y0) > float(protect_fwhm) * fwhm_px
     return out
 
 

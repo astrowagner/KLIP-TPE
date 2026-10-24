@@ -382,7 +382,8 @@ def make_guard(reducer: PartitionedReducer, n_min_ref: int = 10, ref_frac: float
 
 
 def default_config(reducer: PartitionedReducer, clean_subtract: bool = True, known=(),
-                   metric: str = "mawet", forbidden_pa=(), **metric_kw):
+                   metric: str = "mawet", forbidden_pa=(), disk_mask=None, disk_mask_clear_fwhm: float = 0.0,
+                   **metric_kw):
     """Detection objective + position sampler.
 
     ``metric='mawet'`` (default) is the matched-filter Mawet S/N with the injection PSF as
@@ -399,8 +400,20 @@ def default_config(reducer: PartitionedReducer, clean_subtract: bool = True, kno
     which reaches the metric through ``metric_kw``.  Doing only one of the two is worse than
     doing neither: injections avoiding a disk that still inflates the ring sigma are scored
     against a noise level nothing is measuring them at.
+
+    ``disk_mask`` (boolean image, True = disk, the reduced frame's shape) does both halves for
+    a disk of any shape (:func:`klip_tpe.metrics.disk_mask_from_image` builds one): it joins
+    the metric's ``pixel_mask`` (OR-ed with one given) and becomes the sampler's
+    ``forbidden_mask``, so no injection lands on it, or within ``disk_mask_clear_fwhm`` FWHM.
     """
     kind = str(metric).lower()
+    dm = None
+    if disk_mask is not None:
+        dm = np.asarray(disk_mask, bool)
+        pm = metric_kw.get("pixel_mask")
+        if pm is not None and np.shape(pm) != dm.shape:
+            raise ValueError(f"pixel_mask {np.shape(pm)} and disk_mask {dm.shape} differ in shape")
+        metric_kw["pixel_mask"] = dm if pm is None else (np.asarray(pm, bool) | dm)
     kw = dict(pxscale=reducer.pxscale, fwhm=reducer.fwhm, kernel_fn=reducer.matched_filter_kernel,
               known=list(known), **metric_kw)
     if kind in ("fmmf", "fm", "forward"):
@@ -412,5 +425,8 @@ def default_config(reducer: PartitionedReducer, clean_subtract: bool = True, kno
         raise ValueError(f"unknown metric {metric!r} (expected 'mawet' or 'fmmf')")
     objective = Objective(m, clean_subtract=clean_subtract)
     sampler = PositionSampler(fwhm_as=reducer.fwhm * reducer.pxscale, known=list(known),
-                              forbidden_pa=[tuple(b) for b in forbidden_pa])
+                              forbidden_pa=[tuple(b) for b in forbidden_pa], forbidden_mask=dm,
+                              mask_pxscale=reducer.pxscale if dm is not None else None,
+                              mask_clear_fwhm=float(disk_mask_clear_fwhm),
+                              mask_angle_convention=str(getattr(m, "angle_convention", "pa")))
     return objective, sampler

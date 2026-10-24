@@ -613,6 +613,27 @@ def test_runner_band_two_source_area_midpoint():
     assert hi > lo
 
 
+def test_inject_rho_puts_every_injection_at_one_radius(tmp_path):
+    """``RunConfig.inject_rho`` overrides the band for any source count, every stage asks
+    ``_band``, and a radius outside the annulus is refused rather than injected there."""
+    red, space, obj, samp, cfg = build_synthetic_run(ann_edges=[8, 30], n_iter=4, n_init=2, n_sources=2)
+    rho = 12.0 * red.pxscale                                   # not the area mid radius (22.0 px)
+    for n in (2, 3):
+        red, space, obj, samp, cfg = build_synthetic_run(ann_edges=[8, 30], n_iter=4, n_init=2, n_sources=n,
+                                                         inject_rho=rho)
+        r = Runner(red, space, obj, samp, cfg, str(tmp_path / f"n{n}"), log=QUIET)
+        lo, hi = r._band(0)
+        assert np.isclose(lo, rho) and np.isclose(hi, rho)
+        src = r.sampler.sample(r._nsrc(0), lo, hi, np.random.default_rng(0), 1e-3)
+        assert all(np.isclose(s.rho, rho) for s in src)
+    red, space, obj, samp, cfg = build_synthetic_run(ann_edges=[8, 30], n_iter=4, n_init=2, n_sources=2,
+                                                     inject_rho=40.0 * red.pxscale)
+    r = Runner(red, space, obj, samp, cfg, str(tmp_path / "out"), log=QUIET)
+    with pytest.raises(ValueError):
+        r._band(0)
+    assert RunConfig.from_dict({k: v for k, v in cfg.to_dict().items() if k != "inject_rho"}).inject_rho is None
+
+
 def test_opt_width_stops_when_remaining_ring_below_w_lo():
     red, space, obj, samp, cfg = build_synthetic_run(ann_edges=[8], n_iter=3, n_init=2, opt_width=True,
                                                      width_range=(12, 20), r_cap=30, save_fits=False,

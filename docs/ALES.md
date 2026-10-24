@@ -339,4 +339,76 @@ channels rather than on each channel, and the paper's ASDI images follow the ADI
 separate SDI step, where `sdi=True` is one KLIP step with an SDI pool (section 4).
 `scripts/run_mwc758_ales_clike.py` is tutorial 7's search with c's spectrum and that
 configuration as its seed.  By default it holds the paper's geometry (`--geometry paper`);
-`--geometry searched` searches `zone_in`, `zone_out` and `n_ang` instead.
+`--geometry searched` searches `zone_in`, `zone_out` and `n_ang` instead.  Its two sources go at the 0.4-0.8"
+annulus' area-weighted mid radius, 0.632"; `--inject-rho 0.6` (`RunConfig.inject_rho`) puts
+every injection of every stage at c's own separation instead, with the annulus as it was.
+
+## 9. A disk of any shape out of the noise and the injections
+
+A disk at a known position angle, seen near edge-on, is kept out of the metric's noise samples
+by `pixel_mask` (`metrics.pa_wedge_mask`) and out of the injections by `forbidden_pa`.  Spiral
+arms or a ring follow no wedge.  `metrics.disk_mask_from_image` masks the bright extended
+structure of an image of the disk, and `default_config(..., disk_mask=mask)` hands that one
+mask to both halves: it joins the metric's `pixel_mask` and becomes the sampler's
+`forbidden_mask`, so no injection lands on it (`disk_mask_clear_fwhm` keeps them further off).
+
+```python
+from klip_tpe.metrics import disk_mask_from_image
+mask = disk_mask_from_image(disk_img, fwhm_px=2.8, nsig=2.0, r_range=(6, 26),
+                            protect=[(0.603, 228.5)], pxscale=red.pxscale)   # c stays unmasked
+objective, sampler = ales.default_config(red, known=[(0.603, 228.5)], disk_mask=mask)
+```
+
+The image is smoothed by a FWHM, cut at `nsig` robust sigma, pieces under `min_beams` beams are
+dropped, and the rest is grown by `grow_fwhm` FWHM, because the metric samples the
+matched-filtered image, which carries the disk about a FWHM past its edge.  `nsig_neg` adds the
+disk's ADI negatives, the self-subtraction troughs beside its emission: pieces `nsig_neg` robust
+sigma below the median that come within `neg_reach_fwhm` FWHM of the bright structure
+(`make_disk_mask.py --neg-nsig 2`).
+`scripts/make_disk_mask.py IMAGE --fwhm PX --out MASK.fits` builds one from any FITS image and
+draws it for a look, and `run_mwc758_ales_clike.py --disk-mask MASK.fits` runs with it.  The
+setup file records the masked pixel counts (`objective.metric.pixel_mask_px`,
+`sampler.forbidden_mask_px`).
+
+Build the mask from an image of the disk made before the search (a disk-preserving reduction,
+another epoch or instrument), never from a search's winner, and look at it: it masks whatever
+is bright, and a bright speckle group masked with the disk biases the noise estimate down.  It
+also only matters where the disk crosses the injections' ring.  On MWC 758 the arms lie inside
+0.6", and a mask of them covers about 2% of the noise band at 0.632", where the 0.4-0.8" runs
+inject.
+
+## 10. angsep = 0 is another algorithm, and k trades the disk for point sources
+
+`angsep` (lambda/D of arc at the annulus) is the least rotation between a target frame and its
+references, and any positive value leaves the target out of its own basis.  `angsep = 0` with
+`anglemax` at the sequence's PA span does not: `klip.klip_annular` then takes the IDL's auto-fast
+shortcut (`reduce_near_2.pro`) and builds one basis per zone from all the frames, each target
+frame inside its own.  A spiral arm, which rotates along itself and so barely moves from frame
+to frame, goes into that basis and is subtracted with the star.
+
+A search finds the corner.  `Param.sanitize` clips a proposal past a bound onto it and the
+reference-count guard projects onto `angsep = 0`, so the bound carries real probability, and
+the objective scores the corner well.  Every c-tuned MWC 758 winner sat there.  On Nov 14,
+g15-g19, with c's spectrum, the injections at 0.6" and the arms-and-negatives mask (8 paired
+draws; arm flux = the mean over the arms of the image smoothed by lambda/D, over the same for
+the paper's ADI step; c's S/N with the disk masked):
+
+| configuration                              | injections' S/N at 2e-5 | at 4e-5 | arm flux | c's S/N |
+|--------------------------------------------|------:|------:|-----:|-----:|
+| the paper's ADI step                       | 1.14 | 2.24 | 1.00 | 2.48 |
+| the paper's with the 4e-5 winner's frame cuts | 1.64 | 3.03 | 1.01 | 3.63 |
+| the 4e-5 winner (angsep 0, 18 modes, 13-px box) | 2.63 | 4.73 | 0.18 | 2.37 |
+| the winner at angsep 0.01                  | 2.01 | 3.75 | 0.55 | 2.92 |
+| the winner at angsep 0.01 with 15 modes    | 1.65 | 3.07 | 0.97 | 3.36 |
+
+Off the corner, k makes the same trade: at the paper's step with those frame cuts the arm flux
+is 1.01 at 15 modes, 0.84 at 16, 0.66 at 18, 0.57 at 20 and 0.38 at 25, while the injections
+gain 22 % from 15 to 18 modes.  (Below 15 modes the arm flux rises past the paper's, 1.7 at
+12 and 4.1 at 10, with starlight the basis no longer removes.)  The injections sit off the
+disk and are scored as point sources, so the arms' loss never reaches the objective, and c
+gains from neither trade (though its S/N moves by about this much with any one setting, as
+the empty positions of its ring do).  Halving the contrast leaves the ranking as it is.
+
+`make_space(..., angsep_range=(0.01, 3.0), k_klip_max=15)` keeps the search on the disk's side
+of both (`run_mwc758_ales_clike.py --angsep-min 0.01 --k-max 15`).  For a disk, look at its
+arms against k in a reduction you trust before choosing the cap.

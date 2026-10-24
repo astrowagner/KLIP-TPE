@@ -247,6 +247,13 @@ class RunConfig:
     n_remeasure: int = 1
     inject_inset_fwhm: float = 1.0        # injection band inset from the annulus edges
     pair_area_midpoint: bool = True       # 2 sources -> both at sqrt((r_in^2+r_out^2)/2), 180 deg apart (IDL 2026-09-05)
+    #: Every injection of every stage (search, k-scan re-score, calibration, validation,
+    #: param_verify) at this one separation, arcsec, instead of the band the annulus gives
+    #: (``pair_area_midpoint``, ``inject_inset_fwhm``): a companion's own radius, say, so the
+    #: search is scored where it matters.  Two sources are still 180 deg apart; the sampler's
+    #: floor (``min_r_fwhm``) still applies; it must lie in every annulus the run scores.
+    #: None (the default): the band, as before.
+    inject_rho: Optional[float] = None
     #: Freeze the search's injected sources -- radii AND azimuths -- for a whole annulus, so
     #: every configuration is scored on one speckle realisation.  OFF by default, because it
     #: is NOT what ``optimize_near_2_tpe`` does and it defeats something the IDL designed in
@@ -903,6 +910,12 @@ class Runner:
         """:meth:`_band` for an explicit source count, so the packing check can ask what a
         candidate ``n`` would place without calling back into :meth:`_nsrc`."""
         a_in, a_out = self._zone(ia, cfg)
+        if self.cfg.inject_rho is not None:
+            r = float(self.cfg.inject_rho)
+            if not a_in * self.pxscale <= r <= a_out * self.pxscale:
+                raise ValueError(f"RunConfig.inject_rho {r:.3f}\" lies outside annulus {ia + 1}, "
+                                 f"{a_in * self.pxscale:.3f}-{a_out * self.pxscale:.3f}\"")
+            return r, r
         if self.cfg.opt_width:
             rmid = 0.5 * (a_in + a_out)
             return rmid * self.pxscale, rmid * self.pxscale
