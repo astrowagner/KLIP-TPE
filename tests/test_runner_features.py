@@ -216,6 +216,43 @@ def test_verify_param_verify_candidates_hooks(hooks_run):
     assert a == b
 
 
+def test_final_verify_measures_the_stitched_images(hooks_run):
+    """The final verify's Path A is the stitch itself: each injection's reported S/N is the
+    verify's S/N on klip_stitched_inj.fits, with the other injections out of its ring.  The
+    annulus reports measure the annulus' combined image, and the candidate list the stitch
+    (NEAR2 note of 2026-10-20)."""
+    from klip_tpe import verify as V
+    from klip_tpe.metrics import source_xy
+    d, runner, results, logs, events = hooks_run
+    rep = open(os.path.join(d, "stitched_verify_report.txt")).read()
+    assert "# PATH A = the stitched image (klip_stitched.fits, injected klip_stitched_inj.fits)" in rep
+    assert "TABLE 3" in rep and "each source, rho" in rep
+    inj = fits.getdata(os.path.join(d, "klip_stitched_inj.fits")).astype(float)
+    fin = json.load(open(os.path.join(d, "final_results.json")))
+    src = [tuple(float(v) for v in s) for a in fin["annuli"] for s in a["winner_sources"]]
+    known = [tuple(k) for k in getattr(runner.sampler, "known", ()) or ()]
+    conv = runner.reducer.angle_convention
+    cy, cx = (inj.shape[0] - 1) / 2, (inj.shape[1] - 1) / 2
+
+    def xy(lst):
+        if not lst:
+            return []
+        x, y = source_xy([s[0] for s in lst], [s[1] for s in lst], runner.pxscale, cx, cy, conv)
+        return list(zip(x, y))
+    sxy, kxy = xy(src), xy(known)
+    got = [float(l.split("S/N=")[1].split()[0]) for l in rep.splitlines() if l.startswith("   rho=")]
+    assert len(got) == len(src) == 9
+    exr = runner._excl_fwhm() * runner.fwhm
+    for m, s in enumerate(src):
+        want = V.snr_fap(inj, s[0], s[1], runner.pxscale, runner.fwhm, exr, 1.5,
+                         exclude_xy=kxy + sxy[:m] + sxy[m + 1:], angle_convention=conv)["snr"]
+        assert got[m] == pytest.approx(want, abs=0.006)
+    for ia in (1, 2):
+        ann = open(os.path.join(d, f"annulus{ia:02d}", "verify_report.txt")).read()
+        assert "# PATH A = the annulus' combined image" in ann and "TABLE 3" in ann
+    assert "S/N, FAP and PSF on the source image" in open(os.path.join(d, "cand", "candidates.txt")).read()
+
+
 def test_hooks_are_robust_to_failures(tmp_path):
     red, space, obj, samp, cfg = _small(ann_edges=[8, 30], n_iter=6, verify=True, candidates=True, param_verify=True)
     logs = []

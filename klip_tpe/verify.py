@@ -15,7 +15,16 @@ Two independent "paths" are evaluated for every candidate ``(rho, theta)``:
 When an injected twin of the night stack is given, the same machinery is run
 at the injected positions and the Path-A detection limits
 ``c_lim = c_inj (tau_alpha + tau_{1-beta}) / SNR_inj`` (``near2v_climit``) are
-binned by separation (TABLE 1 / TABLE 2 of the IDL report).
+binned by separation (TABLE 1 / TABLE 2 of the IDL report).  With the clean
+image beside the injected one, each injection's S/N is also solved on ``clean +
+a (injected - clean)`` for the contrasts at which it reaches the thresholds
+(:func:`solved_contrasts`), and TABLE 3 gives the limits and detected counts from
+those, which the IDL report does not have.
+
+The combined image of Path A can be given (``combined`` / ``combined_inj`` of
+:func:`verify_candidates`).  The runner gives the image the run made, an annulus'
+combined image or the final stitch, so the verify measures the product itself.
+Without it Path A uses the weighted mean of the nights, as the IDL does.
 
 Conventions: images are ``(ny, nx)`` numpy arrays indexed ``[y, x]``; the star is
 at ``((nx-1)/2, (ny-1)/2)``; ``theta`` is a position angle East of North with
@@ -42,6 +51,16 @@ Deliberate deviations from the IDL (each also flagged at the call site):
   injections at one radius, 180 deg apart (the two-source layout of
   ``near2m_randpos``), otherwise put a ring sample on, or two beside, the other
   source.
+* The driver measures Path A on ``near2v_combine`` of the per-night stitched
+  images (verify 545-552, 588), which is not the run's stitched image.  At an edge
+  between two annuli each tile reaches into the other annulus, a night kept by
+  only one of the two holds that annulus' value there at full weight, and the
+  stitch weighs the two annuli by their sensitivity, not by night.  A night
+  dropped by a quiet annulus and kept by a noisy neighbor brings the neighbor's
+  noise into the quiet annulus' edge (NEAR2 run_20261015_171115, annulus 2).  The
+  runner gives the image it made as ``combined`` (and ``combined_inj``), and Path A
+  runs there.  Path B (STIM, bootstrap, subsets) stays on the per-night images, and
+  the ``combined`` subset is Path A's image.
 * ``median`` of the per-bin S/N uses ``numpy.median`` (mean of the two middle
   values) rather than IDL's upper-middle default.
 """
@@ -57,7 +76,7 @@ from scipy.stats import t as _student_t
 from .metrics import gaussian_kernel, radprof, source_xy, star_center, nanmedian_even
 
 __all__ = ["t_fap", "t_thresh", "contrast_limit", "contrast_limit_image", "mf_convolve",
-           "snr_fap", "combine_nights", "night_stim", "stim_fap", "bootstrap_nights",
+           "snr_fap", "solved_contrasts", "combine_nights", "night_stim", "stim_fap", "bootstrap_nights",
            "night_subsets", "verify_maps", "verify_candidates", "verify_injections",
            "limit_tables", "write_verify_table", "write_curve_table"]
 
@@ -204,6 +223,161 @@ def snr_fap(img: np.ndarray, rho: float, theta: float, pxscale: float, fwhm: flo
     return out
 
 
+class _ScaledImage:
+    """The S/N of injected sources on ``clean + a (inj - clean)``, with the clean image's noise as
+    it is and the sources' response scaled by ``a``.  Pixels not finite in both images are left
+    out of both.  The matched filter is linear, so ``mf(clean + a D) = mf(clean) + a mf(D)``."""
+
+    def __init__(self, clean_img: np.ndarray, inj_img: np.ndarray, fwhm: float):
+        cl, ij = np.asarray(clean_img, float), np.asarray(inj_img, float)
+        if cl.shape != ij.shape:
+            raise ValueError(f"clean image {cl.shape} and injected image {ij.shape} differ in shape")
+        both = np.isfinite(cl) & np.isfinite(ij)
+        self.img0 = np.where(both, cl, np.nan)
+        self.mf0 = mf_convolve(self.img0, fwhm)
+        self.mf1 = mf_convolve(np.where(both, ij - cl, np.nan), fwhm)
+
+    def snr(self, a: float, rho: float, theta: float, pxscale: float, fwhm: float, exr: float, srad: float,
+            exclude_xy: Sequence[Tuple[float, float]] = (), angle_convention: str = "pa") -> Tuple[float, int]:
+        s = snr_fap(self.img0, rho, theta, pxscale, fwhm, exr, srad, exclude_xy=exclude_xy,
+                    mfmap=self.mf0 + a * self.mf1, angle_convention=angle_convention)
+        return float(s["snr"]), int(s["nap"])
+
+
+def _first_crossing(cond, lo: float, hi: float, n_grid: int) -> float:
+    """The smallest ``x`` in ``[lo, hi]`` at which ``cond(x)`` holds, from ``n_grid`` values spaced
+    evenly in log and a bisection of the first step that crosses.  ``inf`` when none holds, ``lo``
+    when ``cond(lo)`` does."""
+    grid = np.geomspace(float(lo), float(hi), int(n_grid))
+    prev = None
+    for x in grid:
+        if cond(float(x)):
+            if prev is None:
+                return float(x)
+            a, b = prev, float(x)
+            for _ in range(64):
+                if b / a - 1.0 < 1e-9:
+                    break
+                mid = float(np.sqrt(a * b))
+                if cond(mid):
+                    b = mid
+                else:
+                    a = mid
+            return b
+        prev = float(x)
+    return float("inf")
+
+
+def _detected(s: float, n: int, fap: float) -> bool:
+    return bool(np.isfinite(s) and n >= 3 and t_fap(s, n) < fap)
+
+
+def _reaches(s: float, n: int, fap: float, beta: float) -> bool:
+    return bool(np.isfinite(s) and n >= 3 and s >= t_thresh(fap, n) + t_thresh(1.0 - beta, n))
+
+
+def solved_contrasts(clean_img: np.ndarray, inj_img: np.ndarray, rho: float, theta: float, contrast: float,
+                     pxscale: float, fwhm: float, exr: Optional[float] = None, srad: float = 1.5, *,
+                     exclude_xy: Sequence[Tuple[float, float]] = (), fap: float = DEFAULT_FAP_LIST[0],
+                     taps: Sequence[float] = DEFAULT_TAP_LIST, angle_convention: str = "pa",
+                     a_range: Tuple[float, float] = (1e-3, 1e3), n_grid: int = 121,
+                     _scaled: Optional["_ScaledImage"] = None) -> Dict[str, Any]:
+    """The contrasts at which an injected source reaches the verify's thresholds, solved on
+    its own image.
+
+    The source's S/N at contrast ``a * contrast`` is :func:`snr_fap` on ``clean + a (inj -
+    clean)`` with the exclusions given.  The image's noise stays as it is, the noise at the
+    source's position included, and only the source's response scales with ``a``, its
+    residual in its own noise ring included.  At ``a = 1`` it is the injected image's own S/N
+    (``snr1``).  Pixels not finite in both images are left out of both.
+
+    Returns ``c_det``, the faintest contrast at which the source is detected at ``fap`` (its
+    FAP below ``fap``), and ``c_tap``, for each ``taps`` entry beta the faintest contrast at
+    which its S/N reaches ``tau_fap + tau_(1-beta)``.  That is the single-source limit of
+    :func:`contrast_limit` solved, where :func:`contrast_limit` scales the whole S/N at the
+    injected contrast, noise included.  A contrast is ``inf`` where no ``a`` up to
+    ``a_range[1]`` gets there, and ``a_range[0] * contrast`` where even that does.  The search
+    steps through ``n_grid`` values of ``a`` spaced evenly in log and bisects the first step
+    that crosses.  The S/N need not grow with ``a``.  The source's own residual in its ring
+    grows with it, and the peak search can move to a pixel at another radius, whose ring
+    differs.  So the faintest contrast that gets there is not always one above which the source
+    stays there.  KLIP's response to a bright source is not linear either, so the contrasts
+    hold best for an injection near them (NEAR2 note of 2026-10-23, revised)."""
+    out: Dict[str, Any] = {"c_det": float("nan"), "c_tap": [float("nan")] * len(taps), "snr1": float("nan"),
+                           "nap1": 0}
+    c0 = float(contrast)
+    if not (np.isfinite(c0) and c0 > 0):
+        return out
+    if exr is None:
+        exr = 1.5 * fwhm
+    sc = _scaled if _scaled is not None else _ScaledImage(clean_img, inj_img, fwhm)
+    args = (rho, theta, pxscale, fwhm, exr, srad, exclude_xy, angle_convention)
+    lo, hi = float(a_range[0]), float(a_range[1])
+    a_det = _first_crossing(lambda a: _detected(*sc.snr(a, *args), fap), lo, hi, n_grid)
+    a_tap = [_first_crossing(lambda a, b=float(b): _reaches(*sc.snr(a, *args), fap, b), lo, hi, n_grid)
+             for b in taps]
+    s1, n1 = sc.snr(1.0, *args)
+    out.update(c_det=c0 * a_det, c_tap=[c0 * a for a in a_tap], snr1=s1, nap1=n1)
+    return out
+
+
+def _solved_bins(lim: Dict[str, Any], items: Sequence[Tuple[Dict[str, Any], Any]], n_grid_decade: int = 20,
+                 a_range: Tuple[float, float] = (1e-3, 1e3)) -> Optional[List[Dict[str, Any]]]:
+    """TABLE 3 in the bins of TABLE 1 (``lim``, from :func:`limit_tables`), and in bins of the same
+    width beyond them.  ``items`` are ``(row, detected_at)`` per injection with solved contrasts,
+    ``detected_at(c)`` telling whether the source is detected at contrast ``c`` (its S/N on its own
+    image, scaled to ``c``).  With beta = ``tap_list[i90]``, each bin gives the following.
+
+    * ``n``, its sources.
+    * ``c_tap``, the mean of the rows' finite ``c_tap_solved``.
+    * ``c_det_beta``, the faintest contrast at which at least ``ceil(beta n)`` of the bin's
+      sources are detected, all of them at that contrast.
+    * ``n_det_t1``, the sources detected at TABLE 1's ``c@TAP`` for beta in the same bin
+      (``None`` where TABLE 1 has no such bin).
+    * ``rows``, ``(rho, theta, contrast, c_det, c@TAP for beta)`` per source."""
+    if not items:
+        return None
+    rbw, i90 = lim["rbin_as"], lim["i90"]
+    smp = lim["samples"]["rho"]
+    rmin, rmax = float(np.min(smp)), float(np.max(smp))
+    nb = max(int(np.ceil((rmax - rmin) / rbw)), 1) if rmax > rmin else 1
+    beta = float(lim["tap_list"][i90])
+    t1 = {b["ib"]: b for b in lim["bins"]}
+
+    def bin_of(rho: float) -> int:
+        raw = int(np.floor((rho - rmin) / rbw))
+        if rmin <= rho <= rmax:
+            return min(raw, nb - 1) if nb > 1 else 0
+        return raw
+
+    groups: Dict[int, List[Tuple[Dict[str, Any], Any]]] = {}
+    for row, det in items:
+        groups.setdefault(bin_of(float(row["rho"])), []).append((row, det))
+    out = []
+    for bb in sorted(groups):
+        grp = groups[bb]
+        n = len(grp)
+        c_tap = []
+        for t in range(len(lim["tap_list"])):
+            v = np.array([float(r["c_tap_solved"][t]) for r, _ in grp], float)
+            v = v[np.isfinite(v)]
+            c_tap.append(float(np.mean(v)) if v.size else float("inf"))
+        need = max(int(np.ceil(beta * n - 1e-9)), 1)
+        cs = [float(r["contrast"]) for r, _ in grp]
+        lo, hi = min(cs) * float(a_range[0]), max(cs) * float(a_range[1])
+        ngrid = int(np.ceil(np.log10(hi / lo) * n_grid_decade)) + 1
+        c_beta = _first_crossing(lambda c: sum(bool(d(c)) for _, d in grp) >= need, lo, hi, ngrid)
+        ref = t1.get(bb)
+        n_det = None
+        if ref is not None and np.isfinite(ref["c_tap"][i90]) and ref["c_tap"][i90] > 0:
+            n_det = int(sum(bool(d(float(ref["c_tap"][i90]))) for _, d in grp))
+        out.append({"sep": float(np.mean([r["rho"] for r, _ in grp])), "n": n, "c_tap": c_tap,
+                    "c_det_beta": c_beta, "n_det_t1": n_det, "ib": bb,
+                    "rows": [(float(r["rho"]), float(r["theta"]), float(r["contrast"]), float(r["c_det"]),
+                              float(r["c_tap_solved"][i90])) for r, _ in grp]})
+    return out
+
+
 # ----------------------------------------------------------------------------
 # C.1.5 - C.1.7  night combine, night-STIM, bootstrap
 # ----------------------------------------------------------------------------
@@ -312,19 +486,29 @@ def night_subsets(nn: int) -> Dict[str, np.ndarray]:
 
 
 def verify_maps(stack: np.ndarray, weights: Optional[np.ndarray] = None, fwhm: Optional[float] = None,
-                flatten: bool = False) -> Dict[str, Any]:
+                flatten: bool = False, *, combined: Optional[np.ndarray] = None) -> Dict[str, Any]:
     """Subset images (weighted combines, verify 545-552), the night-STIM map (555)
     and, when ``fwhm`` is given, the matched-filter map of every subset.  Empty
     subsets (nn = 1) give all-NaN images.
 
     ``flatten`` applies :func:`radprof` to each combine, as the IDL does; off by
-    default so the subsets match what the run scored."""
+    default so the subsets match what the run scored.  ``combined``, an image of the
+    stack's frame size, replaces the combine of all nights (the run's own combined
+    image, which Path A measures)."""
     stack = np.asarray(stack, float)
     nn = stack.shape[0]
     w = np.ones(nn) if weights is None else np.asarray(weights, float)
     subs = night_subsets(nn)
+    if combined is not None:
+        combined = np.asarray(combined, float)
+        if combined.shape != stack.shape[1:]:
+            raise ValueError(f"verify_maps: combined image {combined.shape} is not the stack's frame size "
+                             f"{stack.shape[1:]}")
     imgs: Dict[str, np.ndarray] = {}
     for name, idx in subs.items():
+        if name == "combined" and combined is not None:
+            imgs[name] = radprof(combined) if flatten else combined
+            continue
         if not idx.size:
             imgs[name] = np.full(stack.shape[1:], np.nan)
             continue
@@ -350,7 +534,9 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
                       rng: Optional[np.random.Generator] = None, weights: Optional[Sequence[float]] = None,
                       excl_fwhm: float = 1.5, fap_list: Sequence[float] = DEFAULT_FAP_LIST,
                       tap_list: Sequence[float] = DEFAULT_TAP_LIST, rbin_as: Optional[float] = None,
-                      angle_convention: str = "pa", return_maps: bool = False) -> List[Dict[str, Any]]:
+                      angle_convention: str = "pa", return_maps: bool = False,
+                      combined: Optional[np.ndarray] = None, combined_inj: Optional[np.ndarray] = None,
+                      path_a: Optional[str] = None) -> List[Dict[str, Any]]:
     """Verify candidates on a per-night image stack (``near2_verify``, verify 493-746).
 
     Parameters
@@ -370,12 +556,19 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
         optional ``(inj_stack, sources)`` with ``sources = [(rho, theta,
         contrast), ...]``: the injected twin of ``stack`` used for the
         calibration block and the detection-limit tables.  Each source's noise
-        is measured without the other sources (:func:`verify_injections`).
+        is measured without the other sources (:func:`verify_injections`), and
+        each source's contrasts are solved on its own image
+        (:func:`solved_contrasts`, TABLE 3).
     weights
         per-night weights (IDL: ``sqrt(texp)``); default equal.
     rng
         ``numpy.random.Generator`` for the bootstrap (IDL ``seed=42``);
         ``n_boot=0`` skips it (``/lite``).
+    combined, combined_inj
+        the image Path A measures and its injected twin, for the image the run made
+        from these nights (an annulus' combined image, the final stitch).  By default
+        the weighted mean of the nights, as the IDL does.  With ``injected``, give
+        both or neither.  ``path_a`` names the image in the report.
 
     Returns a list of dicts, one per candidate (``kind='candidate'``) followed
     by one per injected source (``kind='injection'``) when ``injected`` is given.
@@ -395,8 +588,14 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
     if rng is None:
         rng = np.random.default_rng(42)
     kxy = _known_xy(known, pxscale, cx, cy, angle_convention)
+    if injected is not None and (combined is None) != (combined_inj is None):
+        raise ValueError("verify_candidates: give combined and combined_inj together, so the injections are "
+                         "measured on the injected twin of the image the candidates are measured on")
+    if path_a is None:
+        path_a = ("the combined image given" if combined is not None else
+                  "the equal-weight mean of the nights" if weights is None else "the weighted mean of the nights")
 
-    maps = verify_maps(stack, w, fwhm)
+    maps = verify_maps(stack, w, fwhm, combined=combined)
     stim = maps["stim"]
     rows: List[Dict[str, Any]] = []
     for c, (rho, theta) in enumerate(candidates):
@@ -423,15 +622,22 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
     maps["limits"] = None
     if injected is not None:
         inj_stack, sources = injected
+        inj_stack = np.asarray(inj_stack, float)
+        if inj_stack.ndim == 2:
+            inj_stack = inj_stack[None]
+        # the clean twin of the injections' Path-A image, for the solved contrasts: the image
+        # given, or the clean nights combined as the injected ones are
+        clean = maps["subsets"]["combined"] if (combined is not None or inj_stack.shape == stack.shape) else None
         irows, imaps = verify_injections(inj_stack, sources, fwhm, pxscale, known=known,
-                                         weights=w[: np.asarray(inj_stack).shape[0]], drift_px=drift_px,
+                                         weights=w[: inj_stack.shape[0]], drift_px=drift_px,
                                          excl_fwhm=excl_fwhm, angle_convention=angle_convention,
-                                         fap_list=fap_list, tap_list=tap_list, rbin_as=rbin_as)
+                                         fap_list=fap_list, tap_list=tap_list, rbin_as=rbin_as,
+                                         combined=combined_inj, clean=clean)
         rows.extend(irows)
         maps["injected"] = imaps
         maps["limits"] = imaps["limits"]
     maps["meta"] = {"nights": ids, "fap_op": fap_op, "drift_px": drift_px, "excl_fwhm": excl_fwhm,
-                    "fwhm": fwhm, "pxscale": pxscale, "n_boot": n_boot}
+                    "fwhm": fwhm, "pxscale": pxscale, "n_boot": n_boot, "path_a": path_a}
     for r in rows:
         r.setdefault("meta", maps["meta"])
     if return_maps:
@@ -444,7 +650,8 @@ def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, floa
                       weights: Optional[Sequence[float]] = None, drift_px: float = 1.5,
                       excl_fwhm: float = 1.5, angle_convention: str = "pa",
                       fap_list: Sequence[float] = DEFAULT_FAP_LIST, tap_list: Sequence[float] = DEFAULT_TAP_LIST,
-                      rbin_as: Optional[float] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+                      rbin_as: Optional[float] = None, combined: Optional[np.ndarray] = None,
+                      clean: Optional[np.ndarray] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Injection calibration block (verify 621-735): Path-A S/N / FAP, subset S/N,
     injected-STIM value + annulus FAP per injected source ``(rho, theta,
     contrast)``, then the detection-limit tables from sources with finite
@@ -456,7 +663,13 @@ def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, floa
     source itself, within the same keep-out.  So a source's S/N is what it would
     be injected alone, to the noise.  DEVIATIONS: the IDL (verify 655-656, 660)
     leaves every other source in the ring and the annulus, and keeps no keep-out
-    around the source in the STIM annulus."""
+    around the source in the STIM annulus.
+
+    ``combined`` is the injected image Path A measures (by default the weighted mean of
+    the nights).  ``clean``, the clean twin of that image, adds each source's contrasts
+    solved on its own image (:func:`solved_contrasts`), ``c_det`` and ``c_tap_solved`` (one
+    per ``tap_list`` entry, at ``fap_list[0]``), and TABLE 3 as ``maps['limits']['solved']``
+    (:func:`_solved_bins`).  Not in the IDL."""
     inj_stack = np.asarray(inj_stack, float)
     if inj_stack.ndim == 2:
         inj_stack = inj_stack[None]
@@ -466,7 +679,15 @@ def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, floa
     exr = excl_fwhm * fwhm
     kxy = _known_xy(known, pxscale, cx, cy, angle_convention)
     sxy = _known_xy([(s[0], s[1]) for s in sources], pxscale, cx, cy, angle_convention)
-    maps = verify_maps(inj_stack, w, fwhm)
+    maps = verify_maps(inj_stack, w, fwhm, combined=combined)
+    scaled = None
+    if clean is not None:
+        clean = np.asarray(clean, float)
+        if clean.shape != (ny, nx):
+            raise ValueError(f"verify_injections: clean image {clean.shape} is not the frame size {(ny, nx)}")
+        scaled = _ScaledImage(clean, maps["subsets"]["combined"], fwhm)
+    fap0 = float(list(fap_list)[0])
+    items: List[Tuple[Dict[str, Any], Any]] = []
     rows: List[Dict[str, Any]] = []
     for m, src in enumerate(sources):
         rho, theta = float(src[0]), float(src[1])
@@ -479,10 +700,20 @@ def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, floa
                 for name in SUBSET_NAMES}
         xs, ys = source_xy(rho, theta, pxscale, cx, cy, angle_convention)
         sval, sfap = stim_fap(maps["stim"], float(xs[0]), float(ys[0]), rho / pxscale, fwhm, exr, exclude_xy=excl)
-        rows.append({"kind": "injection", "index": m + 1, "rho": rho, "theta": theta, "contrast": con,
-                     "x": s["x"], "y": s["y"], "snr": s["snr"], "fap": s["fap"], "nap": s["nap"],
-                     "peak": s["peak"], "subsets": ssub, "stim": sval, "stim_fap": sfap})
+        row = {"kind": "injection", "index": m + 1, "rho": rho, "theta": theta, "contrast": con,
+               "x": s["x"], "y": s["y"], "snr": s["snr"], "fap": s["fap"], "nap": s["nap"],
+               "peak": s["peak"], "subsets": ssub, "stim": sval, "stim_fap": sfap}
+        if scaled is not None and np.isfinite(con) and con > 0:
+            sol = solved_contrasts(clean, maps["subsets"]["combined"], rho, theta, con, pxscale, fwhm, exr, drift_px,
+                                   exclude_xy=excl, fap=fap0, taps=list(tap_list), angle_convention=angle_convention,
+                                   _scaled=scaled)
+            row.update(c_det=sol["c_det"], c_tap_solved=list(sol["c_tap"]))
+            args = (rho, theta, pxscale, fwhm, exr, drift_px, excl, angle_convention)
+            items.append((row, lambda c, con=con, args=args: _detected(*scaled.snr(c / con, *args), fap0)))
+        rows.append(row)
     maps["limits"] = limit_tables(rows, fwhm, pxscale, fap_list, tap_list, rbin_as)
+    if maps["limits"] is not None and items:
+        maps["limits"]["solved"] = _solved_bins(maps["limits"], items)
     return rows, maps
 
 
@@ -497,7 +728,10 @@ def limit_tables(inj_rows: Sequence[Dict[str, Any]], fwhm: float, pxscale: float
     max(round(mean(nap)), 3))``; TABLE 1 ``c@TAP`` = :func:`contrast_limit`
     ``(fap_list[0], tap)`` per ``tap``; TABLE 2 (TAP closest to 0.90) per
     ``fap_list`` entry plus the per-image 10 % column ``aimg = 0.10 / max(mean
-    (nap), 1)``.  Returns ``None`` when no injection qualifies."""
+    (nap), 1)``.  Returns ``None`` when no injection qualifies.
+
+    ``solved`` is None here.  :func:`verify_injections` fills it, TABLE 3, when it has
+    the clean twin of the injected image (:func:`_solved_bins`)."""
     ri, si, ci, napi = [], [], [], []
     for r in inj_rows:
         if r.get("kind", "injection") != "injection":
@@ -526,9 +760,10 @@ def limit_tables(inj_rows: Sequence[Dict[str, Any]], fwhm: float, pxscale: float
             "c_tap": [contrast_limit(fap_list[0], tp, ci[ww], si[ww], napi[ww]) for tp in tap_list],
             "c_fap": [contrast_limit(fa, tap_list[i90], ci[ww], si[ww], napi[ww]) for fa in fap_list],
             "c_img10": contrast_limit(aimg, tap_list[i90], ci[ww], si[ww], napi[ww]),
+            "ib": bb,
         })
     return {"rbin_as": rbw, "fap_list": fap_list, "tap_list": tap_list, "i90": i90, "n_inj": int(ri.size),
-            "bins": bins, "samples": {"rho": ri, "snr": si, "contrast": ci, "nap": napi}}
+            "bins": bins, "samples": {"rho": ri, "snr": si, "contrast": ci, "nap": napi}, "solved": None}
 
 
 # ----------------------------------------------------------------------------
@@ -556,6 +791,37 @@ def _table_lines(lim: Dict[str, Any], indent: str = "#   ") -> List[str]:
     return out
 
 
+def _e(v: float) -> str:
+    v = float(v)
+    return f"{v:10.3E}" if np.isfinite(v) else f"{'inf' if np.isinf(v) else 'nan':>10}"
+
+
+def _table3_lines(lim: Dict[str, Any], indent: str = "#   ") -> List[str]:
+    """TABLE 3 of the report, from ``lim['solved']`` (:func:`limit_tables`)."""
+    fl, tl, i90 = lim["fap_list"], lim["tap_list"], lim["i90"]
+    pc = int(round(100 * tl[i90]))
+    out = [f"{indent}TABLE 3 -- solved on clean + a (injected - clean), at the OPERATING FAP ({fl[0]:8.1E} per resel)",
+           f"{indent}  rho[\"]  n_inj" + "".join(f"   c@TAP{int(round(t*100)):02d}" for t in tl)
+           + f"   c({pc}%det)  det@T1"]
+    for b in lim["solved"]:
+        nd = "-" if b["n_det_t1"] is None else f"{b['n_det_t1']}/{b['n']}"
+        out.append(f"     {b['sep']:5.2f}   {b['n']:4d}" + "".join(f"  {_e(c)}" for c in b["c_tap"])
+                   + f"  {_e(b['c_det_beta'])}  {nd:>6}")
+    out += [f"{indent}(Each source's S/N is TABLE 1's S/N, measured on clean + a (injected - clean), a being the",
+            f"{indent} contrast over the injected one.  The image's noise stays as it is, the noise at the source",
+            f"{indent} included, and only the source's response scales, its residual in its own ring included.",
+            f"{indent} c@TAP is the bin mean of the contrasts at which each source reaches tau + tau_(1-TAP), TABLE 1",
+            f"{indent} solved instead of scaled.  c({pc}%det) is the faintest contrast at which {pc} % of the bin's",
+            f"{indent} sources are detected at the operating FAP, and det@T1 counts those detected at TABLE 1's",
+            f"{indent} c@TAP{pc}.  inf means no contrast up to 1000 times the injected one gets there.  The scaling",
+            f"{indent} takes KLIP's response to a source as linear, so these hold best for injections near the limit.)",
+            f"{indent}each source, rho[\"]  PA[deg]  contrast  detected from  c@TAP{pc}"]
+    for b in lim["solved"]:
+        for rho, th, c, cd, ct in b["rows"]:
+            out.append(f"{indent}  {rho:7.3f}  {th:7.1f}  {_e(c)}  {_e(cd)}  {_e(ct)}")
+    return out
+
+
 def write_verify_table(path: str, rows: Sequence[Dict[str, Any]], limits: Optional[Dict[str, Any]] = None,
                        header: Optional[Dict[str, Any]] = None) -> str:
     """Write the ``verify_report.txt`` of ``near2_verify`` (verify 574-724) from
@@ -572,8 +838,8 @@ def write_verify_table(path: str, rows: Sequence[Dict[str, Any]], limits: Option
         L.append(f"# run: {meta['run']}")
     L.append(f"# nights: {','.join(str(v) for v in meta.get('nights', []))}")
     L.append(f"# operating FAP threshold: {fap_op:10.2E}   drift tol: {meta.get('drift_px', 1.5):.1f} px")
-    L += ["#", "# PATH A = final combined image (Mawet small-sample t-FAP)",
-          "# PATH B = night-to-night (STIM + bootstrap-over-nights + subset S/N)", "#"]
+    L += ["#", f"# PATH A = {meta.get('path_a', 'the combined image')} (Mawet small-sample t-FAP)",
+          "# PATH B = night-to-night (STIM + bootstrap-over-nights + subset S/N, whose comb is the PATH A image)", "#"]
     cands = [r for r in rows if r.get("kind", "candidate") == "candidate"]
     injs = [r for r in rows if r.get("kind") == "injection"]
     for r in cands:
@@ -607,6 +873,9 @@ def write_verify_table(path: str, rows: Sequence[Dict[str, Any]], limits: Option
                   f"{limits['rbin_as']:.2f}\" bins.",
                   "#   tau = matched-filter S/N needed for that per-resel FAP (small-sample; grows at small rho).", "#"]
             L += _table_lines(limits)
+            if limits.get("solved"):
+                L.append("#")
+                L += _table3_lines(limits)
         L.append("#  -> Table 1 c@TAP90 at the operating FAP is the headline 90%-completeness limit per separation.")
     text = "\n".join(L) + "\n"
     with open(path, "w") as f:
