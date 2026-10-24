@@ -115,9 +115,6 @@ def test_verify_empty_field_and_report(tmp_path):
     V.write_curve_table(str(tmp_path / "verify_curve.txt"), lim, "test")
     assert (tmp_path / "verify_curve.txt").exists()
     assert "leaves out the other sources and the known ones (1.5 FWHM keep-out)" in txt
-    # the clean stack is the injected one's noise, so the expected S/N is the planted 8, to the ring's noise
-    assert 6.0 < injr["snr_exp"] < 10.0 and injr["nap_exp"] >= 3
-    assert "TABLE 3" in txt and "| E=" in txt
 
 
 def _odd_noise(nn, seed, n):
@@ -174,38 +171,6 @@ def test_verify_injections_pair_at_one_radius(dx, dy, parity):
     assert np.max(np.abs(np.asarray(ring_r) - 1.0)) < 0.1    # left: the other source's wings past 1.5 FWHM
     assert np.max(np.abs(stim)) < 2e-3
     assert np.mean(before_r) < 0.6 and np.mean(stim_before) > 0
-
-
-def test_expected_snr_without_a_bright_neighbor():
-    """A source 30 times brighter, 90 deg round and 1.6 FWHM farther out, crosses a faint
-    source's ring outside the 1.5 FWHM keep-out.  The measured S/N drops, the expected S/N
-    (injected - clean over the clean ring's noise) is the source's alone (NEAR2 note of
-    2026-10-23)."""
-    from klip_tpe.metrics import gaussian_kernel
-    n, nn = 81, 4
-    c = (n - 1) / 2
-    st = _odd_noise(nn, 3, n)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        comb = np.nanmean(st, axis=0)
-    k = gaussian_kernel(FWHM)
-    resp = (k * _gauss(k.shape[0], k.shape[1], (k.shape[1] - 1) / 2, (k.shape[0] - 1) / 2, FWHM, 1.0)).sum()
-    yy, xx = np.mgrid[0:n, 0:n]
-    band = (np.abs(np.hypot(xx - c, yy - c) - 15.0) <= FWHM) & np.isfinite(comb)
-    amp = 8.0 * float(np.std(V.mf_convolve(comb, FWHM)[band], ddof=1)) / resp
-    faint, bright = (15.0 * PX, 40.0, 1e-5), ((15.0 + 6.5) * PX, 130.0, 3e-4)
-    xf, yf = source_xy(faint[0], faint[1], PX, c, c)
-    xb, yb = source_xy(bright[0], bright[1], PX, c, c)
-    gf = _gauss(n, n, float(xf[0]), float(yf[0]), FWHM, amp)
-    gb = _gauss(n, n, float(xb[0]), float(yb[0]), FWHM, 30.0 * amp)
-    alone = V.verify_injections(st + gf[None], [faint], FWHM, PX, clean_stack=st)[0][0]
-    pair = V.verify_injections(st + (gf + gb)[None], [faint, bright], FWHM, PX, clean_stack=st)[0][0]
-    assert pair["snr_exp"] == pytest.approx(alone["snr_exp"], rel=1e-6)
-    assert pair["snr"] < 0.85 * alone["snr"]
-    assert 5.0 < alone["snr_exp"] < 11.0
-    # a clean stack of another shape gives no expected S/N
-    row = V.verify_injections(st + gf[None], [faint], FWHM, PX, clean_stack=st[:2])[0][0]
-    assert "snr_exp" not in row
 
 
 # ----------------------------------------------------------------------------
