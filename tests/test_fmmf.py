@@ -192,7 +192,12 @@ def test_runner_requests_the_fm_pass_for_an_fmmf_objective(tmp_path):
     assert rec.score is None or np.isfinite(rec.score)
     assert inj_ev.fm_image is not None and np.isfinite(inj_ev.fm_image).any()
     assert metric.stats["fm"] > 0, "the forward-modelled templates were never used"
-    assert rec.partition_snr and any(v is not None for v in rec.partition_snr.values())
+    # the search scores the combined image only (2026-10-25); each partition's own S/N,
+    # with its own forward model, is still there for a script that asks
+    assert rec.partition_snr == {}
+    per = runner._score_stack(inj_ev.stack, inj_ev.partitions, [Source(*s) for s in rec.sources],
+                              getattr(inj_ev, "fm_stack", None))
+    assert per and any(v is not None for v in per.values())
 
 
 def test_numerical_forward_model_when_the_backend_has_no_klip_fm(tmp_path):

@@ -75,7 +75,9 @@ aggregate (`Test SNR = median`, `Best median S/N orig / corr`).
 
 The green header line announces phase changes: `NEW BEST`, `VALIDATION cand c/n trial t/n
 median so far …`, `annulus done — VALIDATED winner`.  During validation the Test cells show
-the validation trials.  Before the search, the calibration trials are shown
+the validation trials.  A trial gets a panel when the render thread is free and goes without
+one at once when it is busy, so validation never waits for the display.  Before the search,
+the calibration trials are shown
 (`steps/calib_annNN_trialNNNN.png`), preceded by the launch movie when `aliens=True`.
 
 ## Products of a run directory
@@ -105,7 +107,7 @@ run_dir/
     contrast_curve.txt                          5-sigma contrast vs separation (+ KLIP-FM section)
     corner.pdf, landscapes.pdf                  sampled parameter space (scatter corner; TPE good/bad densities)
     parhist.pdf, edf.png, kbook.pdf             parameter histories, score EDF per phase, k requested vs used
-    partition_map.png                           inclusion matrix, per-partition S/N, night effect
+    partition_map.png                           inclusion matrix, night effect, score vs number of nights
     importance.pdf, paracoord.pdf, rank.pdf, slice.pdf   which parameters matter (eta^2, parallel coordinates, rank plane, slices)
     products.pdf                                winner images, S/N maps, stitches (p.1), per-partition winners (p.2-3)
     verify_limits.pdf, verify_subsets_inj.pdf, verify_report.txt, verify_curve.txt   the verification stack (--verify)

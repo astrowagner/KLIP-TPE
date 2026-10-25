@@ -375,7 +375,8 @@ def plot_partition_snr(run_dir: str, annulus: int = 0, save: bool = True) -> Fig
             v = np.where(inc, v, np.nan)
             ax.plot(n, v, "o-", ms=3, lw=0.8, color=cmap(k % 10), label=f"partition {pid} (n={int(inc.sum())} incl.)")
         if not pids:
-            ax.text(0.5, 0.5, "no per-partition scores in results.jsonl\n(single-partition reducer?)",
+            ax.text(0.5, 0.5, "no per-partition scores in results.jsonl\n(a single partition, or a run made "
+                              "since 2026-10-25:\nthe search scores the combined image only)",
                     ha="center", va="center", transform=ax.transAxes)
         ax.set_xlabel("evaluation")
         ax.set_ylabel(f"raw per-partition score\n{_metric_name(run).replace(' (clean-subtracted)', '')}")

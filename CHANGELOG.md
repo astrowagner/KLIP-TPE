@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased — 2026-10-25 (the main thread: no per-night S/N in the search, no wait in validation)
+
+From the NEAR2 session's note of 2026-10-25 on run_20261024_153342 (seven annuli of 10,000
+evaluations, 21.3 h on patrick, 5 draws, batch 4).  The main thread set the search's pace there,
+0.6-0.75 s per evaluation in five of six annuli, with the farm 55-70 % busy.  It set
+validation's pace too.
+
+- **The search measures the combined image only.**  Each draw of each trial scored the
+  combined images, injected and clean (the score), and then every selected night's own image
+  for `EvalRecord.partition_snr`.  That was 25-30 S/N measurements per 5-draw trial beside the
+  10 that make the score, and the record kept only the last draw's.  Nothing in the search read
+  them.  Kevin decided that only the combined S/N matters.  New records carry
+  `partition_snr = {}`, as failed ones did, so `results.jsonl` keeps its fields and old runs
+  read as before.  `Runner._score_stack` stays for scripts, and `klip-tpe plots`' per-partition
+  figure and the classic panel's per-partition curve say the values were not computed.
+- **Validation does not wait for the display.**  A validation trial that found the render
+  thread busy waited out the search's 0.25 s grace on the main thread before going without a
+  panel.  A validation panel takes several times longer to draw than a trial takes to score, so
+  nearly every trial waited, about 5 of each annulus' 12-14 min in the NEAR2 run.
+  `LiveDisplay.VALIDATION_GRACE` (0) skips such a panel at once, and the annulus' data is built
+  once per validation instead of per trial (77 ms at 10,000 evaluations).  The suite holds
+  both graces open (`tests/conftest.py`), and `tests/test_display_lag.py` runs validation with
+  the production values.
+- **Measured** on a NEAR2-shaped synthetic run in the sandbox (six nights of 150 px frames at a
+  tenth of NEAR2's frame counts, NEAR's loader, space, guard and objective, 5 draws, batch 4,
+  100 trials, validation 3 x 8, 2 cores).  The main thread's CPU per search trial went from
+  825 to 222 ms, a trial was scored 0.34 s after its last reduction was back instead of
+  1.24 s, and validation's display work per trial went from 0.27 s to 0.6 ms.  The records
+  are the same apart from their times and `partition_snr`, and so are the validation table,
+  the stitches and `final_results.json` (its paths aside).  On 2 cores the workers set the pace, so the run took
+  564 s against 592 s.  On patrick the farm has room, and the note expects the search to run
+  at the farm's pace, 1.3-1.6x faster in such annuli.
+
 ## Unreleased — 2026-10-24 (frames left out of a NEAR night at load)
 
 From the NEAR2 session's note of 2026-10-23, revised at night (its section 5, n4's frame 551).
