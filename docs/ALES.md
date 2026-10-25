@@ -410,5 +410,12 @@ gains from neither trade (though its S/N moves by about this much with any one s
 the empty positions of its ring do).  Halving the contrast leaves the ranking as it is.
 
 `make_space(..., angsep_range=(0.01, 3.0), k_klip_max=15)` keeps the search on the disk's side
-of both (`run_mwc758_ales_clike.py --angsep-min 0.01 --k-max 15`).  For a disk, look at its
-arms against k in a reduction you trust before choosing the cap.
+of both (`run_mwc758_ales_clike.py --angsep-min 0.01 --k-max 15`).  It does not keep the disk.
+With both closed, at 2e-5, the search took a third route: a noise cut at 1.12 times the mean,
+which drops a third of the frames, most of them from the start and the end of the sequence, and
+leaves 0.41 of the arm flux (14 modes, a 17-px box, the residual high-pass on).  At that
+winner's other settings the arm flux is 1.09 with no cuts, 0.84 with the cut at 1.66, 0.71 at
+1.4 and 0.41 at 1.12, and the injections' S/N at 2e-5 is 1.15, 1.60, 1.59 and 2.06 (the paper's
+step 1.14): the cut is the whole of the gain.  A cap per route does not end:
+an objective that scores point sources alone trades the disk for them wherever it can, so a
+search for a planet in a disk has to score the disk too.
