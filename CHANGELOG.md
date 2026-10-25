@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased — 2026-10-24 (frames left out of a NEAR night at load)
+
+From the NEAR2 session's note of 2026-10-23, revised at night (its section 5, n4's frame 551).
+
+- **`--drop-frames NIGHT:INDEX[,INDEX...]`** (near, on `near`, `resume`, `extend`,
+  `fit-chain`, `rereduce`, `replay` and `compare`), **`near.load_night(drop_frames=[551])`**
+  and **`near.make_reducer(drop_frames={"n4": [551]})`**: frames left out of a night at load,
+  by their index in the night's cube counted from 0, before the frame tags, the frame cut, the
+  binning, the injections and KLIP-FM see them.  `texp` scales with the frames kept, and the
+  files are not changed.  n4's last frame, 551, has its parallactic angle recorded as 12.07 deg
+  where its neighbors are at 24.1 deg (its header's angle at the end of the exposure is 0), and
+  a frame-tag correlation of 0.16 against a median of 0.995.  The frame cut keeps it wherever a
+  configuration sets the correlation threshold below 0.16, as run_20261015_171115's n4 blocks
+  in annuli 1, 3 and 5 do, and wherever the cut would leave fewer than bin x k frames.  In
+  those three blocks, on n4 alone, dropping it changes the clean residual by 3, 31 and 23 % of
+  the annulus' RMS.  In annulus 3 it raises the S/N of six planets injected one at a time at
+  every position, by 2 to 15 %, with frame 25 held out of both reductions (the coronoise cut
+  compares each frame with the mean, which frame 551 pulls down).  Where the cut removes the
+  frame already, a rereduce of a test run on nights 4 and 6 with `--drop-frames n4:551` gives
+  the same products, to the bit.  An index past the cube, a night not loaded and a list that
+  leaves no frame are refused.  generic, nomic and ales refuse the option.
+- **The run's record.**  The list goes into the reducer's `data_edits` as `dropped_frames`,
+  and so into `RunConfig.data_edits`, the checkpoint and `describe()`.  `resume`, `extend` and
+  `fit-chain` take it from the checkpoint when it is not typed and refuse a typed list that
+  differs, and the `Runner` refuses a resume whose reducer drops other frames.  `rereduce`
+  takes a typed list in place of the run's (`none` for none) and writes `NDROPFR`, the number
+  of frames dropped, into its FITS headers.
+
 ## Unreleased — 2026-10-24 (angsep off the auto-fast corner)
 
 Every c-tuned MWC 758 winner so far has `angsep` 0 and `anglemax` 127 deg, the night's PA span:

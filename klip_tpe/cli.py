@@ -35,10 +35,14 @@ def _near_objects(a, log=print):
     root = a.root[0] if isinstance(a.root, (list, tuple)) else a.root
     from .parallel import resolve_workers
     a.workers = resolve_workers(a.workers)
-    red = near.make_reducer(root, a.nights, frames=frames, use_library=not a.no_library,
-                            weighting=a.weighting, max_workers=a.workers, pool=a.pool, fast=a.fast, log=log,
-                            n_min_ref=a.n_min_ref, backend=getattr(a, "backend", "klip"),
-                            cube_name=getattr(a, "cube_name", None) or None)
+    try:
+        red = near.make_reducer(root, a.nights, frames=frames, use_library=not a.no_library,
+                                weighting=a.weighting, max_workers=a.workers, pool=a.pool, fast=a.fast, log=log,
+                                n_min_ref=a.n_min_ref, backend=getattr(a, "backend", "klip"),
+                                cube_name=getattr(a, "cube_name", None) or None,
+                                drop_frames=_drop_frames(a) or None)
+    except near.DropFramesError as exc:
+        raise SystemExit(f"--drop-frames: {exc}")
     _subtract(red, a, log)
     _set_threads_per_job(red, a)
     _set_klip_gram(red, a, log)
@@ -187,6 +191,56 @@ def _no_cube_name(a, what: str) -> None:
                          f"another way")
 
 
+def _parse_drop_frames(values) -> dict:
+    """``--drop-frames NIGHT:INDEX[,INDEX...]`` values (the option may repeat) as ``{"n4": [551],
+    ...}``.  ``n4:551`` and ``4:551`` both name frame 551 of night 4, counted from 0 in the
+    night's cube.  ``none`` alone is the empty list, which drops nothing."""
+    out = {}
+    nones = []
+    for v in ([values] if isinstance(values, str) else (values or [])):
+        s = str(v).strip()
+        if s.lower() == "none":
+            nones.append(s)
+            continue
+        night, sep, rest = s.partition(":")
+        lab = night.strip().lower()
+        lab = lab[1:] if lab.startswith("n") else lab
+        if not sep or not lab.isdigit():
+            raise SystemExit(f"--drop-frames {s}: give the night, a colon and the frames' indices, "
+                             f"NIGHT:INDEX[,INDEX...], e.g. n4:551")
+        try:
+            idx = [int(x) for x in rest.split(",") if x.strip()]
+        except ValueError:
+            raise SystemExit(f"--drop-frames {s}: the frames are given by their indices, whole numbers, "
+                             f"e.g. n4:551,552")
+        if not idx:
+            raise SystemExit(f"--drop-frames {s}: no frame index after the colon")
+        if any(i < 0 for i in idx):
+            raise SystemExit(f"--drop-frames {s}: the indices count from 0 in the night's cube")
+        out.setdefault(f"n{int(lab)}", set()).update(idx)
+    if nones and out:
+        raise SystemExit("--drop-frames none drops nothing, and cannot go with a list of frames")
+    return {k: sorted(out[k]) for k in sorted(out, key=lambda x: int(x[1:]))}
+
+
+def _drop_frames(a):
+    """``--drop-frames`` on this command line, or the run's list restored in its place
+    (:func:`_data_edits_for_run`), as ``{"n4": [551], ...}``.  None when the option is not given."""
+    vals = getattr(a, "drop_frames", None)
+    return None if not vals else _parse_drop_frames(vals)
+
+
+def _drop_argv(d) -> list:
+    """A ``dropped_frames`` record as ``--drop-frames`` values, ``["n4:551", ...]``."""
+    from .runner import _dropped
+    return [f"{k}:{','.join(str(i) for i in v)}" for k, v in _dropped(d).items()]
+
+
+def _no_drop_frames(a, what: str) -> None:
+    if _drop_frames(a):
+        raise SystemExit(f"--drop-frames leaves frames out of a NEAR night at load, and {what} does not take it")
+
+
 def _forbidden(a):
     return [tuple(b) for b in (getattr(a, "forbidden_pa", None) or [])]
 
@@ -207,8 +261,8 @@ def _line_mask(red, a, log=print):
 
 
 def _data_edits_for_run(a) -> None:
-    """``--cube-name``, ``--subtract-sources`` and ``--inject-sources`` on a run directory that
-    holds a checkpoint.
+    """``--cube-name``, ``--drop-frames``, ``--subtract-sources`` and ``--inject-sources`` on a
+    run directory that holds a checkpoint.
 
     A run's evaluations were made on particular frames, so a later command on it reduces the
     same ones.  What the checkpoint recorded (``RunConfig.data_edits``) is used when an option
@@ -235,6 +289,19 @@ def _data_edits_for_run(a) -> None:
     elif was_cube:
         a.cube_name = was_cube
         print(f"  --cube-name {was_cube}, as {name} was started (its checkpoint)")
+    from .runner import _dropped, _dropped_text
+    was_drop = _dropped(rec.get("dropped_frames"))
+    if "drop_frames" in given:
+        now = _parse_drop_frames(a.drop_frames)
+        if now != was_drop:
+            raise SystemExit(f"{name} was made with {_dropped_text(was_drop)}, and this command asks for "
+                             f"{_dropped_text(now)} (--drop-frames {' '.join(a.drop_frames)}).  A resume cannot "
+                             f"change the frames its evaluations were made on: leave the option out (the "
+                             f"checkpoint's list is used), or start a new run directory.")
+    else:
+        a.drop_frames = _drop_argv(was_drop) or None
+        if a.drop_frames:
+            print(f"  --drop-frames {' '.join(a.drop_frames)}, as {name} was started (its checkpoint)")
     was = [[float(v) for v in s] for s in (rec.get("subtracted_sources") or [])]
     typed_src, typed_line = "subtract_sources" in given, "subtract_line" in given
     if typed_src and not typed_line:
@@ -271,8 +338,8 @@ def _data_edits_for_rereduce(a) -> None:
     line types, and for each option it leaves out, what the run was made on (its checkpoint).
 
     A typed ``--subtract-sources`` or ``--subtract-line`` replaces the run's subtraction as a
-    whole, and a typed ``--inject-sources`` its added sources.  Nothing is refused, since the
-    run is only read."""
+    whole, a typed ``--inject-sources`` its added sources, and a typed ``--drop-frames`` its
+    dropped frames (``none`` for none).  Nothing is refused, since the run is only read."""
     run_dir = getattr(a, "run_dir", None)
     rec = {}
     if run_dir and os.path.isdir(str(run_dir)):
@@ -287,6 +354,10 @@ def _data_edits_for_rereduce(a) -> None:
         a.cube_name = rec.get("cube_name") or None
         if a.cube_name:
             print(f"  --cube-name {a.cube_name}, as {name} was made (its checkpoint)")
+    if "drop_frames" not in given:
+        a.drop_frames = _drop_argv(rec.get("dropped_frames")) or None
+        if a.drop_frames:
+            print(f"  --drop-frames {' '.join(a.drop_frames)}, as {name} was made (its checkpoint)")
     if not ({"subtract_sources", "subtract_line"} & given):
         a.subtract_sources = a.subtract_line = None
         was = [[float(v) for v in s] for s in (rec.get("subtracted_sources") or [])]
@@ -392,6 +463,7 @@ def _generic_objects(a, log=print):
                                max_workers=a.workers, pool=a.pool, fast=a.fast, n_min_ref=a.n_min_ref,
                                backend=getattr(a, "backend", "klip"), log=log)
     _no_cube_name(a, "--instrument generic")
+    _no_drop_frames(a, "--instrument generic")
     _subtract(red, a, log)
     _set_threads_per_job(red, a)
     _set_klip_gram(red, a, log)
@@ -446,6 +518,7 @@ def _nomic_objects(a, log=print):
                              fwhm_px=a.fwhm_px, diam_m=a.diam, psf=(a.psf[0] if a.psf else "airy"), r_ee_px=a.r_ee,
                              backend=getattr(a, "backend", "klip"))
     _no_cube_name(a, "--instrument nomic")
+    _no_drop_frames(a, "--instrument nomic")
     _subtract(red, a, log)
     _set_threads_per_job(red, a)
     _set_klip_gram(red, a, log)
@@ -504,6 +577,7 @@ def _ales_objects(a, log=print):
                             sdi=bool(getattr(a, "ales_sdi", False)), sdi_cap=int(getattr(a, "ales_sdi_cap", 100) or 100),
                             sdi_lenders=getattr(a, "ales_sdi_lenders", "all") or "all", log=log)
     _no_cube_name(a, "--instrument ales")
+    _no_drop_frames(a, "--instrument ales")
     _subtract(red, a, log)
     _set_threads_per_job(red, a)
     _set_klip_gram(red, a, log)
@@ -671,6 +745,12 @@ def _add_near_args(p):
                    help="near: the cube read in each night's directory (default AB_cube_skysub_cen_clean.fits, "
                         "or AB_cube_crop150.fits where only that is there), e.g. a reduction's "
                         "AB_cube_skysub_cen_clean_abline.fits. Recorded in the run's checkpoint, and kept on "
+                        "resume and extend when not typed")
+    p.add_argument("--drop-frames", action="append", default=None, metavar="NIGHT:INDEX[,INDEX...]",
+                   help="near: frames left out of a night at load, before the frame tags, the frame cut, binning "
+                        "and the injections see them: the night (n4 or 4), a colon and the frames' indices in the "
+                        "night's cube, counted from 0, e.g. n4:551. It may repeat, and 'none' drops nothing (on "
+                        "rereduce, in place of the run's list). Recorded in the run's checkpoint, and kept on "
                         "resume and extend when not typed")
     p.add_argument("--subtract-sources", default=None, metavar="FILE",
                    help="point sources taken out of every frame once, at load: one per line, rho (arcsec), PA "
@@ -1049,7 +1129,7 @@ def _fill_from_registry(a, argv=None) -> None:
               "ales_tag_r_in", "ales_cache", "ales_selection", "ales_reflib", "ales_ref_bin",
               "ales_reflib_science", "ales_sdi", "ales_sdi_cap", "ales_sdi_lenders", "bin_min", "bin_max",
               "ales_dataset", "ales_nights", "cube_name", "subtract_sources", "subtract_line", "inject_sources",
-              "mask_line"):
+              "mask_line", "drop_frames"):
         if k in given:                     # the user said so on this command line
             continue
         v = getattr(prev, k, None)

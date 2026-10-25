@@ -60,11 +60,76 @@ def _readsav(path: str) -> Dict[str, Any]:
     return readsav(path)
 
 
+class DropFramesError(ValueError):
+    """A ``drop_frames`` list that cannot be applied: a night not loaded, an index past the
+    night's cube, or every frame of a night."""
+
+
+def _drop_spec(drop: Optional[Dict[Any, Sequence[int]]]) -> Dict[str, List[int]]:
+    """``drop_frames`` as ``{"n4": [551], ...}``, in night order.  ``4``, ``"4"`` and ``"n4"``
+    all name night 4.  Each night's indices are sorted and unique, and a night with none is
+    left out."""
+    out: Dict[str, set] = {}
+    for k, v in (drop or {}).items():
+        s = str(k).strip().lower()
+        s = s[1:] if s.startswith("n") else s
+        if not s.isdigit():
+            raise DropFramesError(f"{k!r} is not a night (n4, or 4)")
+        idx = set()
+        for i in ([v] if isinstance(v, (int, np.integer)) else (v or ())):
+            if float(i) != int(i):
+                raise DropFramesError(f"n{int(s)} lists {i!r}, and a frame index is a whole number")
+            if int(i) < 0:
+                raise DropFramesError(f"n{int(s)} lists {int(i)}, and the indices count from 0 in the night's cube")
+            idx.add(int(i))
+        if idx:
+            out.setdefault(f"n{int(s)}", set()).update(idx)
+    return {k: sorted(out[k]) for k in sorted(out, key=lambda x: int(x[1:]))}
+
+
+def _frame_plan(n: int, frames: Optional[slice], drop: Optional[Sequence[int]], night: str):
+    """Which of a night's ``n`` frames to load: the ``frames`` slice of them, less the indices
+    in ``drop`` (counted from 0 in the whole cube).  Returns the indices kept, the mask of the
+    dropped ones over the slice (None when none is dropped) and the dropped indices.  An index
+    past the cube is refused, and so is a list that would leave no frame.  An index the slice
+    leaves out anyway (``--max-frames``) drops nothing."""
+    idx = np.arange(n)[slice(0, n) if frames is None else frames]
+    want = sorted({int(i) for i in (drop or ())})
+    if not want:
+        return idx, None, []
+    bad = [i for i in want if not 0 <= i < n]
+    if bad:
+        raise DropFramesError(f"{night}: frame{'s' if len(bad) > 1 else ''} {' '.join(str(i) for i in bad)} "
+                              f"{'are' if len(bad) > 1 else 'is'} not in the night's cube, which holds frames "
+                              f"0-{n - 1}")
+    hit = np.isin(idx, want)
+    if hit.all():
+        raise DropFramesError(f"{night}: dropping frame{'s' if len(want) > 1 else ''} "
+                              f"{' '.join(str(i) for i in want)} would leave no frame")
+    if not hit.any():
+        return idx, None, []
+    return idx[~hit], hit, [int(i) for i in idx[hit]]
+
+
+def _pick(values, sl, hit: Optional[np.ndarray]) -> np.ndarray:
+    """A per-frame array, sliced as the cube is and less the dropped frames.  An array whose
+    length does not match the slice is left as it is, and the length checks downstream say so."""
+    a = np.asarray(values, float)[sl]
+    return a if hit is None or a.shape[0] != hit.shape[0] else a[~hit]
+
+
 def load_night(root: str, seq: int, crop_half: int = NEAR.shsize, frames: Optional[slice] = None,
-               cube_name: Optional[str] = None) -> Dataset:
+               cube_name: Optional[str] = None, drop_frames: Optional[Sequence[int]] = None) -> Dataset:
     """Load one night as a cropped :class:`Dataset` (float32).  ``frames`` may
     subsample the sequence for quick tests.  ``cube_name`` defaults to the full
-    cleaned cube, falling back to ``AB_cube_crop150.fits`` (a pre-cropped copy)."""
+    cleaned cube, falling back to ``AB_cube_crop150.fits`` (a pre-cropped copy).
+
+    ``drop_frames``: frames left out, by their index in the night's cube counted from 0, e.g.
+    ``[551]`` for n4's last frame, whose parallactic angle is wrong.  They go before anything
+    else sees them: the angles, the frame tags, and so the frame cut, the binning, the
+    injections and KLIP-FM.  ``texp`` scales with the frames kept.  ``meta["frame_index"]``
+    holds each loaded frame's index in the cube and ``meta["dropped_frames"]`` the indices
+    dropped.  The reference star's cube is not touched."""
     from astropy.io import fits
     d = os.path.join(root, f"n{seq}")
     if cube_name is None:
@@ -75,24 +140,26 @@ def load_night(root: str, seq: int, crop_half: int = NEAR.shsize, frames: Option
         data = h[0].data
         n = data.shape[0]
         sl = slice(0, n) if frames is None else frames
+        keep, hit, dropped = _frame_plan(n, sl, drop_frames, f"n{seq}")
         ny, nx = data.shape[1], data.shape[2]
         cy0, cx0 = ny // 2, nx // 2
         y0, y1 = cy0 - crop_half, cy0 + crop_half
         x0, x1 = cx0 - crop_half, cx0 + crop_half
-        cube = np.ascontiguousarray(data[sl, y0:y1, x0:x1]).astype(np.float32)
-    angles = np.asarray(_readsav(os.path.join(d, "AB_parang_clean.sav"))["angles"], float)[sl]
+        # the kept frames only, so a dropped frame is never read
+        cube = np.ascontiguousarray(data[sl if hit is None else keep, y0:y1, x0:x1]).astype(np.float32)
+    angles = _pick(_readsav(os.path.join(d, "AB_parang_clean.sav"))["angles"], sl, hit)
     tags = None
     tf = os.path.join(d, "AB_frametags.sav")
     if os.path.exists(tf):
         t = _readsav(tf)
-        tags = {k: np.asarray(t[k], float)[sl] for k in ("corrs", "noises", "coronoise") if k in t}
+        tags = {k: _pick(t[k], sl, hit) for k in ("corrs", "noises", "coronoise") if k in t}
         if tags.get("corrs") is None or tags["corrs"].size != cube.shape[0]:
             tags = None
     texp = 0.0
     xf = os.path.join(d, "texp.sav")
     if os.path.exists(xf):
         texp = float(np.asarray(_readsav(xf)["texp"]).ravel()[0])
-        if frames is not None:
+        if cube.shape[0] != n:
             texp *= cube.shape[0] / max(n, 1)
     psf = None
     pf = os.path.join(d, "PSF_ACenB.fits")
@@ -111,7 +178,8 @@ def load_night(root: str, seq: int, crop_half: int = NEAR.shsize, frames: Option
                                                    rx0 - crop_half:rx0 + crop_half]).astype(np.float32)
     return Dataset(cube, angles, tags, texp=texp, name=f"n{seq}",
                    meta={"psf_template": psf, "crop_half": crop_half, "nframes_total": n, "root": root,
-                         "ref_file": rf if ref_cube is not None else None},
+                         "ref_file": rf if ref_cube is not None else None,
+                         "frame_index": keep, "dropped_frames": dropped},
                    ref_cube=ref_cube)
 
 
@@ -248,7 +316,8 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
                  do_destripe: bool = False, mask_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
                  backend: str = "klip", cube_name: Optional[str] = None,
                  subtract_sources: Optional[Sequence[Any]] = None,
-                 inject_sources: Optional[Sequence[Any]] = None) -> PartitionedReducer:
+                 inject_sources: Optional[Sequence[Any]] = None,
+                 drop_frames: Optional[Dict[Any, Sequence[int]]] = None) -> PartitionedReducer:
     """Build the per-night :class:`PartitionedReducer` for the NEAR campaign.
     ``backend``: ``'klip'`` (built-in) | ``'pyklip'`` | ``'vip'`` PSF subtraction.
     ``use_rdi``/``rdi_mode`` use ``n<seq>/AB_cube_refstar_clean.fits`` when present
@@ -258,8 +327,21 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
     ``subtract_sources``: point sources ``(rho_arcsec, pa_deg, contrast)`` taken out of every
     night's frames once, at load (:meth:`~klip_tpe.reducer.KLIPReducer.subtract_sources`),
     with each night's own injection model.  ``inject_sources``: point sources added the same
-    way, after the subtraction (:meth:`~klip_tpe.reducer.KLIPReducer.inject_sources`).  All
-    three go into the reducer's ``data_edits``."""
+    way, after the subtraction (:meth:`~klip_tpe.reducer.KLIPReducer.inject_sources`).
+    ``drop_frames``: frames left out of a night at load, ``{"n4": [551]}``, by their index in
+    the night's cube counted from 0 (:func:`load_night`), before the subtraction and anything
+    else.  Each night named has to be among ``nights``.  All four go into the reducer's
+    ``data_edits``."""
+    drop = _drop_spec(drop_frames)
+    labels = [f"n{int(seq)}" for seq in nights]
+    extra = [k for k in drop if k not in labels]
+    if extra:
+        raise DropFramesError(f"{' '.join(extra)} {'are' if len(extra) > 1 else 'is'} not among the nights loaded "
+                              f"({' '.join(labels)})")
+    pre = [k for k in drop if datasets and int(k[1:]) in datasets]
+    if pre:
+        raise DropFramesError(f"frames are dropped at load, and the dataset given for {' '.join(pre)} is loaded "
+                              f"already: load it with load_night(..., drop_frames=...)")
     lib = None
     if use_library:
         try:
@@ -269,7 +351,8 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
     reducers = {}
     for seq in nights:
         ds = datasets[seq] if datasets and seq in datasets else load_night(root, seq, frames=frames,
-                                                                             cube_name=cube_name)
+                                                                             cube_name=cube_name,
+                                                                             drop_frames=drop.get(f"n{seq}"))
         psf = ds.meta.get("psf_template")
         fu = template_flux_unit(psf) if psf is not None else 1.0
         thru = lib.throughput if lib is not None else analytic_throughput
@@ -288,6 +371,16 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
         nref = 0 if ds.ref_cube is None else int(ds.ref_cube.shape[0])
         log(f"  loaded n{seq}: {ds.nframes} frames, PA span {ds.angles.min():.1f}..{ds.angles.max():.1f} deg, "
             f"texp {ds.texp:.0f} s, tags {'yes' if ds.tags else 'no'}, ref-star frames {nref}")
+        if f"n{seq}" in drop:
+            gone = list(ds.meta.get("dropped_frames") or [])
+            past = [i for i in drop[f"n{seq}"] if i not in gone]
+            if gone:
+                log(f"    n{seq}: frame{'s' if len(gone) > 1 else ''} {' '.join(str(i) for i in gone)} left out at "
+                    f"load (drop_frames), {ds.nframes} of {ds.meta.get('nframes_total', '?')} kept")
+            if past:
+                log(f"    n{seq}: frame{'s' if len(past) > 1 else ''} {' '.join(str(i) for i in past)} "
+                    f"{'lie' if len(past) > 1 else 'lies'} past the frames loaded (--max-frames), nothing to drop "
+                    f"there")
     pr = PartitionedReducer(reducers, weighting=weighting, max_workers=max_workers, pool=pool, log=log)
     pr.name = "near"
     if cube_name:
@@ -295,6 +388,11 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
         for r in reducers.values():
             r.data_edits = dict(getattr(r, "data_edits", None) or {}, cube_name=str(cube_name))
         log(f"  cube: {cube_name} in every night's directory")
+    if drop:
+        pr.data_edits = dict(getattr(pr, "data_edits", None) or {}, dropped_frames={k: list(v) for k, v in drop.items()})
+        for k, r in reducers.items():
+            if k in drop:
+                r.data_edits = dict(getattr(r, "data_edits", None) or {}, dropped_frames={k: list(drop[k])})
     if subtract_sources:
         src = list(subtract_sources)
         n = pr.subtract_sources(src)

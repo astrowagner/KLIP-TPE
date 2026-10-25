@@ -339,12 +339,15 @@ class RunConfig:
     #: exclusions still apply, to the residual.  Empty (the default) changes nothing.
     subtract_known: List[Tuple[float, float, float]] = field(default_factory=list)
     #: What the frames are, when they are not the instrument's default: ``cube_name`` (the
-    #: cube file read for each night) and ``subtracted_sources`` (``[[rho, pa, contrast],
-    #: ...]`` taken out of every frame once, at load, :meth:`KLIPReducer.subtract_sources`),
-    #: as the reducer reports them in its ``data_edits``.  A new run records them here, so
-    #: the checkpoint holds them, and a resume refuses a reducer whose frames differ.  The
-    #: command line fills the reducer from here on ``klip-tpe resume`` and ``extend`` when
-    #: ``--cube-name`` / ``--subtract-sources`` are not typed.  Empty: the default frames.
+    #: cube file read for each night), ``dropped_frames`` (``{"n4": [551], ...}``, frames left
+    #: out of a night at load, by their index in its cube), ``subtracted_sources`` (``[[rho,
+    #: pa, contrast], ...]`` taken out of every frame once, at load,
+    #: :meth:`KLIPReducer.subtract_sources`) and ``injected_sources`` (added the same way), as
+    #: the reducer reports them in its ``data_edits``.  A new run records them here, so the
+    #: checkpoint holds them, and a resume refuses a reducer whose frames differ.  The command
+    #: line fills the reducer from here on ``klip-tpe resume`` and ``extend`` when
+    #: ``--cube-name`` / ``--drop-frames`` / ``--subtract-sources`` / ``--inject-sources`` are
+    #: not typed.  Empty: the default frames.
     data_edits: Dict[str, Any] = field(default_factory=dict)
 
     def per_annulus(self, val, ia: int) -> int:
@@ -679,14 +682,33 @@ class RunCallback:
     def on_finish(self, runner) -> None: ...
 
 
+def _dropped(d: Optional[Dict[str, Any]]) -> Dict[str, List[int]]:
+    """A ``dropped_frames`` record, ``{"n4": [551], ...}``, with each partition's indices sorted
+    and unique, partitions with none left out, in natural order (n4 before n10)."""
+    out = {str(k): sorted({int(i) for i in (v or [])}) for k, v in dict(d or {}).items()}
+    return {k: out[k] for k in sorted(out, key=lambda x: (len(x), x)) if out[k]}
+
+
+def _dropped_text(d: Dict[str, List[int]]) -> str:
+    """``{"n4": [551]}`` as ``n4 frame 551 dropped``."""
+    d = _dropped(d)
+    if not d:
+        return "no frames dropped"
+    return ", ".join(f"{k} frame{'s' if len(v) > 1 else ''} {' '.join(str(i) for i in v)}"
+                     for k, v in d.items()) + " dropped"
+
+
 def _core_edits(d: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """The part of a ``data_edits`` record that says what the frames are, for comparison:
-    the cube name and the sources subtracted and added (a file name is only where they came
-    from)."""
+    the cube name, the frames dropped and the sources subtracted and added (a file name is
+    only where they came from)."""
     d = dict(d or {})
     out: Dict[str, Any] = {}
     if d.get("cube_name"):
         out["cube_name"] = str(d["cube_name"])
+    drop = _dropped(d.get("dropped_frames"))
+    if drop:
+        out["dropped_frames"] = drop
     for key in ("subtracted_sources", "injected_sources"):
         src = [[float(v) for v in s] for s in (d.get(key) or [])]
         if src:
@@ -700,6 +722,8 @@ def _describe_edits(d: Dict[str, Any]) -> str:
     bits = []
     if d.get("cube_name"):
         bits.append(f"cube {d['cube_name']}")
+    if d.get("dropped_frames"):
+        bits.append(_dropped_text(d["dropped_frames"]))
     for key, what in (("subtracted_sources", "subtracted"), ("injected_sources", "added")):
         src = d.get(key) or []
         if src:
@@ -4123,10 +4147,12 @@ class Runner:
         mod = [replace(r, winner_sources=[s.as_tuple() for s in listed[r.annulus]]) for r in results]
         keep = (self.run_dir, self._ann_images, self.results)
         nsub, nadd = len(edits.get("subtracted_sources") or []), len(edits.get("injected_sources") or [])
+        ndrop = sum(len(v) for v in _dropped(edits.get("dropped_frames")).values())
         try:
             self.run_dir, self._ann_images, self.results = out_dir, new, list(mod)
             stitched = self._final_stitch(mod, weights=weights, extra_header={
-                "REREDUCE": 1, "FROMRUN": os.path.basename(src_run)[:60], "NSUBSRC": nsub, "NADDSRC": nadd})
+                "REREDUCE": 1, "FROMRUN": os.path.basename(src_run)[:60], "NSUBSRC": nsub, "NADDSRC": nadd,
+                "NDROPFR": ndrop})
             ver = None
             if verify and stitched is not None:
                 ver = self._final_verify(stitched, header={
@@ -4394,7 +4420,8 @@ class Runner:
             if want and want != have:
                 raise ValueError(f"RunConfig.data_edits asks for {_describe_edits(want)}, and the reducer holds "
                                  f"{_describe_edits(have)}: build the reducer with them "
-                                 f"(near.make_reducer(cube_name=..., subtract_sources=..., inject_sources=...), or "
+                                 f"(near.make_reducer(cube_name=..., drop_frames=..., subtract_sources=..., "
+                                 f"inject_sources=...), or "
                                  f"reducer.subtract_sources(...) and reducer.inject_sources(...))")
             if have:
                 self.cfg.data_edits = dict(getattr(self.reducer, "data_edits", None) or {})
@@ -4404,9 +4431,9 @@ class Runner:
             raise ValueError(f"this run's evaluations were made on {_describe_edits(want)}, and the reducer here "
                              f"holds {_describe_edits(have)}.  A resume cannot change the frames.  Build the "
                              f"reducer as the run was started (klip-tpe resume and extend read --cube-name, "
-                             f"--subtract-sources and --inject-sources from the checkpoint when they are not "
-                             f"typed), or start a new run directory.  klip-tpe rereduce reduces a finished run's "
-                             f"winners on other frames.")
+                             f"--drop-frames, --subtract-sources and --inject-sources from the checkpoint when "
+                             f"they are not typed), or start a new run directory.  klip-tpe rereduce reduces a "
+                             f"finished run's winners on other frames.")
 
     def _auto_resume(self) -> None:
         """Continue a check-pointed run in this directory, unless told not to.
