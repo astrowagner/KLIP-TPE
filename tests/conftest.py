@@ -80,7 +80,8 @@ def _never_skip_panels():
     panel is written -- the progress movie and the resumed history both depend on it -- and
     a synthetic run evaluates far faster than it draws, so without this the gate would fire
     and those assertions would be measuring thread scheduling.  ``tests/test_display_lag.py``
-    sets its own grace per instance, which still wins over this.
+    sets its own grace per instance, which still wins over this.  Validation's grace
+    (``VALIDATION_GRACE``, none in production) is held open the same way.
 
     Session-scoped on purpose: some of those runs are built by *module*-scoped fixtures,
     which are set up before any function-scoped fixture gets a chance to patch anything.
@@ -88,5 +89,6 @@ def _never_skip_panels():
     from klip_tpe.display import LiveDisplay
     mp = pytest.MonkeyPatch()
     mp.setattr(LiveDisplay, "RENDER_GRACE", 600.0)
+    mp.setattr(LiveDisplay, "VALIDATION_GRACE", 600.0)
     yield
     mp.undo()

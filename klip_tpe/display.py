@@ -1225,6 +1225,10 @@ def panel_partition_snr(ax, ad: AnnulusData):
         v = np.where(inc[:, j], M[:, j], np.nan)
         if np.isfinite(v).any():
             ax.plot(ev, v, "o-", ms=2.5, lw=0.7, color=cmap(j % 10), label=str(pid))
+    if not np.isfinite(M).any():
+        # runs made since 2026-10-25 score the combined image only (EvalRecord.partition_snr)
+        ax.text(0.5, 0.5, "per-partition S/N not computed", ha="center", va="center", transform=ax.transAxes,
+                fontsize=7, color="#666666")
     ax.set_xlabel("evaluation")
     ax.set_ylabel("raw S/N")
     ax.set_xlim(0.5, max(n, 1) + 0.5)
@@ -3726,10 +3730,15 @@ class LiveDisplay(RunCallback):
 
     #: how long to let the render thread finish before giving up on this evaluation's panel
     RENDER_GRACE = 0.25
+    #: the same for a validation trial: none.  A validation panel takes several times longer
+    #: to draw than a trial takes to score, so the thread is busy at nearly every trial, and
+    #: the search's grace made nearly every trial wait it out on the main thread: about
+    #: 0.25 s of a NEAR2 trial's 0.52-0.68 s, 5 min of each annulus' validation.
+    VALIDATION_GRACE = 0.0
     _skipped_panels = 0
     _skip_warned = False
 
-    def _render_room(self) -> bool:
+    def _render_room(self, grace: Optional[float] = None) -> bool:
         """True when a panel can be drawn now without putting one behind another.
 
         The window is a live view, so its lag must be bounded by how long *one* panel takes
@@ -3747,9 +3756,10 @@ class LiveDisplay(RunCallback):
         history both read.  So a busy render thread is given a short grace period -- long
         enough that a fast panel simply finishes and nothing is skipped at all -- and this
         evaluation goes without a panel only if the thread is still busy afterwards.
+        ``grace``: that period in seconds, :attr:`RENDER_GRACE` by default.
         """
         from .parallel import run_idle_hooks
-        deadline = time.time() + self.RENDER_GRACE
+        deadline = time.time() + (self.RENDER_GRACE if grace is None else float(grace))
         while True:
             # getattr: the gate runs on the first evaluation, before any render pool exists
             if not any(not f.done() for f, _ in (getattr(self, "_renders", None) or ())):
@@ -4402,13 +4412,15 @@ class LiveDisplay(RunCallback):
         takes to run, the window fell minutes behind (3.7 min on that run), the annulus
         then sat in ``_wait_renders`` until the backlog had drained, and the annulus books
         were written while queued panels were still drawing.  A trial is drawn when the
-        render thread is free and skipped when it is not; the annulus-done frame that
-        follows is drawn regardless, so the result never goes without its panel."""
-        ad = self._guard(runner, "validation data", self._data, runner)
+        render thread is free and skipped at once when it is not (:attr:`VALIDATION_GRACE`).
+        The annulus-done frame that follows is drawn regardless, so the result never goes
+        without its panel.  The annulus' data is built once per validation
+        (:meth:`_validation_data`)."""
+        ad = self._validation_data(runner)
         if ad is None or ad.n == 0:
             return
         self._eta_mark(runner, "val")                # every trial, drawn or not: it is the ETA's clock
-        if not self._render_room():
+        if not self._render_room(self.VALIDATION_GRACE):
             self._skip_panel()
             return
         et = getattr(self, "_eval_times", [])[-50:]
@@ -4457,7 +4469,22 @@ class LiveDisplay(RunCallback):
         self._submit_render(png, _job)
         self._show_latest()
 
+    def _validation_data(self, runner) -> Optional[AnnulusData]:
+        """The annulus' data for the validation panels, built once per validation.  Validation
+        adds no evaluations, and rebuilding the data from every record cost each trial 77 ms
+        on the main thread at 10,000 evaluations (NEAR2), or a read of ``results.jsonl`` in a
+        run resumed during its validation.  A new annulus or a new record builds it again."""
+        hist = getattr(runner, "history", None)
+        key = (int(getattr(runner, "ia", -1)), len(self._records), 0 if hist is None else len(hist))
+        hit = getattr(self, "_val_data", None)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        ad = self._guard(runner, "validation data", self._data, runner)
+        self._val_data = None if ad is None else (key, ad)
+        return ad
+
     def on_validation(self, runner, table: List[Dict[str, Any]], winner: Dict[str, Any]) -> None:
+        self._val_data = None                      # the trials' copy, not needed past them
         ad = self._guard(runner, "validation data", self._data, runner)
         if ad is None:
             return

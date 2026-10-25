@@ -391,6 +391,10 @@ class EvalRecord:
     per_source: List[Optional[float]]
     raw_per_source: List[Optional[float]]
     clean_per_source: Optional[List[Optional[float]]]
+    #: each selected partition's own raw S/N.  Empty since 2026-10-25: the search scores the
+    #: combined image only, and measuring every night's image of every draw as well took two
+    #: thirds of the main thread's time per trial (NEAR2, 5 draws, 6 nights).  Records
+    #: written before keep their values, and the readers take either.
     partition_snr: Dict[str, Optional[float]]
     k_used: Optional[Any]
     contrast: float
@@ -1318,6 +1322,8 @@ class Runner:
 
     def _score_stack(self, stack: Optional[np.ndarray], parts, sources,
                      fm_stack: Optional[np.ndarray] = None) -> Dict[str, Optional[float]]:
+        """Each partition's own raw S/N, ``score_raw`` on its image.  The search has not called
+        it since 2026-10-25 (:attr:`EvalRecord.partition_snr`), and it stays for scripts."""
         out: Dict[str, Optional[float]] = {}
         if stack is None:
             return out
@@ -1667,8 +1673,7 @@ class Runner:
             raw_per_source=[] if failed else [None if not np.isfinite(v) else float(v) for v in sr.raw_per_source],
             clean_per_source=None if (failed or sr.clean_per_source is None)
             else [None if not np.isfinite(v) else float(v) for v in sr.clean_per_source],
-            partition_snr={} if failed else self._score_stack(inj.stack, inj.partitions, sources,
-                                                             getattr(inj, "fm_stack", None)),
+            partition_snr={},          # the combined score only (EvalRecord.partition_snr)
             k_used=k_used, contrast=contrast, wall_s=time.time() - t0, meta=meta,
             reduce_s=None if t_reduced is None else float(t_reduced - t0))
         return rec

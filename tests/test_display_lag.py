@@ -161,6 +161,7 @@ def test_validation_trials_go_through_the_same_gate(tmp_path, monkeypatch):
     d = LiveDisplay(str(tmp_path), show=False, save_png=True, movie=False, log=lambda m: None)
     d._render_pool()
     d.RENDER_GRACE = 0.01
+    d.VALIDATION_GRACE = 0.0                 # production's (conftest.py holds it open for the suite)
     d._data = lambda runner: _annulus(n=50, npart=1)
     runner = types.SimpleNamespace(ia=0, cfg=None, results=[], wall0=time.time(), wall_prev=0.0)
 
@@ -187,6 +188,45 @@ def test_validation_trials_go_through_the_same_gate(tmp_path, monkeypatch):
     assert d._skipped_panels == 48
     assert (d._step, d._paths) == (step0, paths0), "a skipped validation panel was promised a file"
     assert len(drawn) == 1
+
+
+def test_validation_does_not_wait_for_the_render_thread(tmp_path, monkeypatch):
+    """With the production settings a validation trial that finds the render thread busy goes
+    without a panel at once.  It used to wait out the search's grace first, 0.25 s on the main
+    thread, at nearly every trial of a NEAR2 run: a validation panel takes several times
+    longer to draw than a trial takes to score.  The suite holds both graces open
+    (conftest.py), which is why no other test could see it.  The annulus' data is built once
+    per validation, not per trial."""
+    import inspect
+    assert "VALIDATION_GRACE = 0.0" in inspect.getsource(LiveDisplay), "validation waits again in production"
+    monkeypatch.setattr(LiveDisplay, "RENDER_GRACE", 0.25)
+    monkeypatch.setattr(LiveDisplay, "VALIDATION_GRACE", 0.0)
+    monkeypatch.setattr(D, "render_step", lambda *a, **k: None)
+    d = LiveDisplay(str(tmp_path), show=False, save_png=True, movie=False, log=lambda m: None)
+    d._render_pool()
+    built = []
+
+    def data(runner):
+        built.append(runner.ia)
+        return _annulus(n=50, npart=1)
+    d._data = data
+    runner = types.SimpleNamespace(ia=0, cfg=None, results=[], wall0=time.time(), wall_prev=0.0)
+    gate = threading.Event()
+    d._submit_render(None, lambda: gate.wait(10))
+    t0 = time.time()
+    for ci in range(3):
+        for t in range(10):
+            d.on_validation_trial(runner, 0, ci, 3, 10 + ci, t, 10, None, None, [], None, [None] * 10)
+    took = time.time() - t0
+    gate.set()
+    d._wait_renders()
+    assert d._skipped_panels == 30
+    assert took < 1.5, f"30 declined trials took {took:.2f} s: validation waited for the render thread"
+    assert built == [0], f"the annulus' data was built {len(built)} times in one validation"
+    # the next annulus builds its own
+    runner.ia = 1
+    d.on_validation_trial(runner, 1, 0, 1, 3, 0, 1, None, None, [], None, [None])
+    assert built == [0, 1]
 
 
 def test_the_window_keeps_its_turn_while_the_gate_waits(tmp_path):

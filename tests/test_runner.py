@@ -70,10 +70,11 @@ def test_full_run_products(base_run):
     assert len(last) >= 14 and last[0]["phase"] == "seed" and last[-1]["index"] == 13
     assert {r["phase"] for r in recs} >= {"seed", "warmup"}
     assert {r["phase"] for r in recs} & {"tpe", "local", "explore"}
-    # every record carries decoded config, sources and per-partition S/N
+    # every record carries decoded config and sources.  The per-partition S/N is empty: the
+    # search scores the combined image only (2026-10-25)
     r0 = last[-1]
     assert set(r0["config"]) == {"params", "per_partition", "selected", "x"}
-    assert len(r0["sources"]) == 6 and set(r0["partition_snr"]) <= {"n1", "n2"}   # outer 2.25" -> 6 sources
+    assert len(r0["sources"]) == 6 and r0["partition_snr"] == {}                  # outer 2.25" -> 6 sources
     assert len([r for r in recs if r["annulus"] == 0][-1]["sources"]) == 3          # outer 1.5" -> 3
     assert r0["contrast"] == pytest.approx(results[1].contrast)
     assert isinstance(r0["k_used"], dict)
