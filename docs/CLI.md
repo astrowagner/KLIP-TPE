@@ -46,9 +46,11 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--no-clean-subtract] [--ladder-pair]
                         [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                         [--bin-min N] [--bin-max N] [--known RHO PA]
-                        [--cube-name NAME] [--subtract-sources FILE]
-                        [--subtract-line FILE] [--inject-sources FILE]
-                        [--metric {mawet,fmmf}] [--run-dir RUN_DIR]
+                        [--cube-name NAME]
+                        [--drop-frames NIGHT:INDEX[,INDEX...]]
+                        [--subtract-sources FILE] [--subtract-line FILE]
+                        [--inject-sources FILE] [--metric {mawet,fmmf}]
+                        [--run-dir RUN_DIR]
                         [--ann-edges ANN_EDGES [ANN_EDGES ...]]
                         [--n-iter N_ITER [N_ITER ...]]
                         [--n-init N_INIT [N_INIT ...]]
@@ -143,6 +145,15 @@ options:
                         AB_cube_skysub_cen_clean_abline.fits. Recorded in the
                         run's checkpoint, and kept on resume and extend when
                         not typed
+  --drop-frames NIGHT:INDEX[,INDEX...]
+                        near: frames left out of a night at load, before the
+                        frame tags, the frame cut, binning and the injections
+                        see them: the night (n4 or 4), a colon and the frames'
+                        indices in the night's cube, counted from 0, e.g.
+                        n4:551; may repeat. 'none' drops nothing (on rereduce,
+                        in place of the run's list). Recorded in the run's
+                        checkpoint, and kept on resume and extend when not
+                        typed
   --subtract-sources FILE
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
@@ -456,9 +467,10 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--no-clean-subtract] [--ladder-pair]
                      [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                      [--bin-min N] [--bin-max N] [--known RHO PA]
-                     [--cube-name NAME] [--subtract-sources FILE]
-                     [--subtract-line FILE] [--inject-sources FILE]
-                     [--metric {mawet,fmmf}] [--run-dir RUN_DIR]
+                     [--cube-name NAME] [--drop-frames NIGHT:INDEX[,INDEX...]]
+                     [--subtract-sources FILE] [--subtract-line FILE]
+                     [--inject-sources FILE] [--metric {mawet,fmmf}]
+                     [--run-dir RUN_DIR]
                      [--ann-edges ANN_EDGES [ANN_EDGES ...]]
                      [--n-iter N_ITER [N_ITER ...]]
                      [--n-init N_INIT [N_INIT ...]] [--mode {tpe,random,grid}]
@@ -550,6 +562,15 @@ options:
                         AB_cube_skysub_cen_clean_abline.fits. Recorded in the
                         run's checkpoint, and kept on resume and extend when
                         not typed
+  --drop-frames NIGHT:INDEX[,INDEX...]
+                        near: frames left out of a night at load, before the
+                        frame tags, the frame cut, binning and the injections
+                        see them: the night (n4 or 4), a colon and the frames'
+                        indices in the night's cube, counted from 0, e.g.
+                        n4:551; may repeat. 'none' drops nothing (on rereduce,
+                        in place of the run's list). Recorded in the run's
+                        checkpoint, and kept on resume and extend when not
+                        typed
   --subtract-sources FILE
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
@@ -863,12 +884,13 @@ usage: klip-tpe resume [-h] [--instrument {near,nomic,generic,ales}]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                        [--bin-min N] [--bin-max N] [--known RHO PA]
-                       [--cube-name NAME] [--subtract-sources FILE]
-                       [--subtract-line FILE] [--inject-sources FILE]
-                       [--metric {mawet,fmmf}] [--run-dir RUN_DIR] [--display]
-                       [--no-display] [--display-every DISPLAY_EVERY]
-                       [--pdf-every PDF_EVERY] [--movie-every MOVIE_EVERY]
-                       [--show [SHOW]] [--aliens]
+                       [--cube-name NAME]
+                       [--drop-frames NIGHT:INDEX[,INDEX...]]
+                       [--subtract-sources FILE] [--subtract-line FILE]
+                       [--inject-sources FILE] [--metric {mawet,fmmf}]
+                       [--run-dir RUN_DIR] [--display] [--no-display]
+                       [--display-every DISPLAY_EVERY] [--pdf-every PDF_EVERY]
+                       [--movie-every MOVIE_EVERY] [--show [SHOW]] [--aliens]
                        [--window-scale WINDOW_SCALE]
 
 options:
@@ -936,6 +958,15 @@ options:
                         AB_cube_skysub_cen_clean_abline.fits. Recorded in the
                         run's checkpoint, and kept on resume and extend when
                         not typed
+  --drop-frames NIGHT:INDEX[,INDEX...]
+                        near: frames left out of a night at load, before the
+                        frame tags, the frame cut, binning and the injections
+                        see them: the night (n4 or 4), a colon and the frames'
+                        indices in the night's cube, counted from 0, e.g.
+                        n4:551; may repeat. 'none' drops nothing (on rereduce,
+                        in place of the run's list). Recorded in the run's
+                        checkpoint, and kept on resume and extend when not
+                        typed
   --subtract-sources FILE
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
@@ -1152,10 +1183,11 @@ usage: klip-tpe extend [-h] [--instrument {near,nomic,generic,ales}]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                        [--bin-min N] [--bin-max N] [--known RHO PA]
-                       [--cube-name NAME] [--subtract-sources FILE]
-                       [--subtract-line FILE] [--inject-sources FILE]
-                       [--metric {mawet,fmmf}] --run-dir RUN_DIR --n-iter
-                       N_ITER [N_ITER ...]
+                       [--cube-name NAME]
+                       [--drop-frames NIGHT:INDEX[,INDEX...]]
+                       [--subtract-sources FILE] [--subtract-line FILE]
+                       [--inject-sources FILE] [--metric {mawet,fmmf}]
+                       --run-dir RUN_DIR --n-iter N_ITER [N_ITER ...]
 
 options:
   -h, --help            show this help message and exit
@@ -1222,6 +1254,15 @@ options:
                         AB_cube_skysub_cen_clean_abline.fits. Recorded in the
                         run's checkpoint, and kept on resume and extend when
                         not typed
+  --drop-frames NIGHT:INDEX[,INDEX...]
+                        near: frames left out of a night at load, before the
+                        frame tags, the frame cut, binning and the injections
+                        see them: the night (n4 or 4), a colon and the frames'
+                        indices in the night's cube, counted from 0, e.g.
+                        n4:551; may repeat. 'none' drops nothing (on rereduce,
+                        in place of the run's list). Recorded in the run's
+                        checkpoint, and kept on resume and extend when not
+                        typed
   --subtract-sources FILE
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
@@ -1435,14 +1476,15 @@ usage: klip-tpe fit-chain [-h] [--instrument {near,nomic,generic,ales}]
                           [--no-clean-subtract] [--ladder-pair]
                           [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                           [--bin-min N] [--bin-max N] [--known RHO PA]
-                          [--cube-name NAME] [--subtract-sources FILE]
-                          [--subtract-line FILE] [--inject-sources FILE]
-                          [--metric {mawet,fmmf}] [--run-dir RUN_DIR]
-                          [--chain FILE] [--line-nodes FILE] [--per-night]
-                          [--line-pa PA] [--halfwidth PX]
-                          [--rho-range RMIN RMAX] [--mask RHO PA RADIUS]
-                          [--mask-candidates TIERS] [--no-mask-known]
-                          [--out DIR]
+                          [--cube-name NAME]
+                          [--drop-frames NIGHT:INDEX[,INDEX...]]
+                          [--subtract-sources FILE] [--subtract-line FILE]
+                          [--inject-sources FILE] [--metric {mawet,fmmf}]
+                          [--run-dir RUN_DIR] [--chain FILE]
+                          [--line-nodes FILE] [--per-night] [--line-pa PA]
+                          [--halfwidth PX] [--rho-range RMIN RMAX]
+                          [--mask RHO PA RADIUS] [--mask-candidates TIERS]
+                          [--no-mask-known] [--out DIR]
 
 options:
   -h, --help            show this help message and exit
@@ -1509,6 +1551,15 @@ options:
                         AB_cube_skysub_cen_clean_abline.fits. Recorded in the
                         run's checkpoint, and kept on resume and extend when
                         not typed
+  --drop-frames NIGHT:INDEX[,INDEX...]
+                        near: frames left out of a night at load, before the
+                        frame tags, the frame cut, binning and the injections
+                        see them: the night (n4 or 4), a colon and the frames'
+                        indices in the night's cube, counted from 0, e.g.
+                        n4:551; may repeat. 'none' drops nothing (on rereduce,
+                        in place of the run's list). Recorded in the run's
+                        checkpoint, and kept on resume and extend when not
+                        typed
   --subtract-sources FILE
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
@@ -1747,11 +1798,12 @@ usage: klip-tpe rereduce [-h] [--instrument {near,nomic,generic,ales}]
                          [--no-clean-subtract] [--ladder-pair]
                          [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                          [--bin-min N] [--bin-max N] [--known RHO PA]
-                         [--cube-name NAME] [--subtract-sources FILE]
-                         [--subtract-line FILE] [--inject-sources FILE]
-                         [--metric {mawet,fmmf}] [--run-dir RUN_DIR]
-                         [--verify-sources FILE] [--no-verify] [--out DIR]
-                         [--overwrite]
+                         [--cube-name NAME]
+                         [--drop-frames NIGHT:INDEX[,INDEX...]]
+                         [--subtract-sources FILE] [--subtract-line FILE]
+                         [--inject-sources FILE] [--metric {mawet,fmmf}]
+                         [--run-dir RUN_DIR] [--verify-sources FILE]
+                         [--no-verify] [--out DIR] [--overwrite]
 
 options:
   -h, --help            show this help message and exit
@@ -1818,6 +1870,15 @@ options:
                         AB_cube_skysub_cen_clean_abline.fits. Recorded in the
                         run's checkpoint, and kept on resume and extend when
                         not typed
+  --drop-frames NIGHT:INDEX[,INDEX...]
+                        near: frames left out of a night at load, before the
+                        frame tags, the frame cut, binning and the injections
+                        see them: the night (n4 or 4), a colon and the frames'
+                        indices in the night's cube, counted from 0, e.g.
+                        n4:551; may repeat. 'none' drops nothing (on rereduce,
+                        in place of the run's list). Recorded in the run's
+                        checkpoint, and kept on resume and extend when not
+                        typed
   --subtract-sources FILE
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
@@ -2064,11 +2125,12 @@ usage: klip-tpe replay [-h] [--instrument {near,nomic,generic,ales}]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                        [--bin-min N] [--bin-max N] [--known RHO PA]
-                       [--cube-name NAME] [--subtract-sources FILE]
-                       [--subtract-line FILE] [--inject-sources FILE]
-                       [--metric {mawet,fmmf}] --idl-log IDL_LOG
-                       [--run-dir RUN_DIR] [--n N] [--repeat REPEAT]
-                       [--contrast CONTRAST]
+                       [--cube-name NAME]
+                       [--drop-frames NIGHT:INDEX[,INDEX...]]
+                       [--subtract-sources FILE] [--subtract-line FILE]
+                       [--inject-sources FILE] [--metric {mawet,fmmf}]
+                       --idl-log IDL_LOG [--run-dir RUN_DIR] [--n N]
+                       [--repeat REPEAT] [--contrast CONTRAST]
                        [--ann-edges ANN_EDGES [ANN_EDGES ...]] [--k-max K_MAX]
                        [--anglemax-hi ANGLEMAX_HI] [--seed SEED]
 
@@ -2137,6 +2199,15 @@ options:
                         AB_cube_skysub_cen_clean_abline.fits. Recorded in the
                         run's checkpoint, and kept on resume and extend when
                         not typed
+  --drop-frames NIGHT:INDEX[,INDEX...]
+                        near: frames left out of a night at load, before the
+                        frame tags, the frame cut, binning and the injections
+                        see them: the night (n4 or 4), a colon and the frames'
+                        indices in the night's cube, counted from 0, e.g.
+                        n4:551; may repeat. 'none' drops nothing (on rereduce,
+                        in place of the run's list). Recorded in the run's
+                        checkpoint, and kept on resume and extend when not
+                        typed
   --subtract-sources FILE
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
@@ -2354,10 +2425,11 @@ usage: klip-tpe compare [-h] [--instrument {near,nomic,generic,ales}]
                         [--no-clean-subtract] [--ladder-pair]
                         [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                         [--bin-min N] [--bin-max N] [--known RHO PA]
-                        [--cube-name NAME] [--subtract-sources FILE]
-                        [--subtract-line FILE] [--inject-sources FILE]
-                        [--metric {mawet,fmmf}] --idl-run IDL_RUN --out OUT
-                        [--annulus ANNULUS]
+                        [--cube-name NAME]
+                        [--drop-frames NIGHT:INDEX[,INDEX...]]
+                        [--subtract-sources FILE] [--subtract-line FILE]
+                        [--inject-sources FILE] [--metric {mawet,fmmf}]
+                        --idl-run IDL_RUN --out OUT [--annulus ANNULUS]
                         [--ann-edges ANN_EDGES [ANN_EDGES ...]]
                         [--contrast CONTRAST] [--contrast-from-idl]
                         [--max-new MAX_NEW] [--stride STRIDE]
@@ -2432,6 +2504,15 @@ options:
                         AB_cube_skysub_cen_clean_abline.fits. Recorded in the
                         run's checkpoint, and kept on resume and extend when
                         not typed
+  --drop-frames NIGHT:INDEX[,INDEX...]
+                        near: frames left out of a night at load, before the
+                        frame tags, the frame cut, binning and the injections
+                        see them: the night (n4 or 4), a colon and the frames'
+                        indices in the night's cube, counted from 0, e.g.
+                        n4:551; may repeat. 'none' drops nothing (on rereduce,
+                        in place of the run's list). Recorded in the run's
+                        checkpoint, and kept on resume and extend when not
+                        typed
   --subtract-sources FILE
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,

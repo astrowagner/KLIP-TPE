@@ -153,12 +153,22 @@ stopped run from that point on and writes the switch, with its time, into `klip_
 in the run directory, so every later resume keeps it.  `--klip-gram target` switches it back.
 The log says when a run uses `zone`.
 
-## Edited frames (`--cube-name`, `--subtract-sources`, `--inject-sources`)
+## Edited frames (`--cube-name`, `--drop-frames`, `--subtract-sources`, `--inject-sources`)
 
 These options change the frames a run reduces, and the run keeps them.
 
 * `--cube-name NAME` reads another cube in each night's directory, such as a reduction's
   line-subtracted `AB_cube_skysub_cen_clean_abline.fits`.
+* `--drop-frames NIGHT:INDEX[,INDEX...]` leaves frames out of a NEAR night at load, by their
+  index in the night's cube counted from 0.  The option may repeat.  `--drop-frames n4:551`
+  drops n4's last frame, whose parallactic angle is recorded as 12.07 deg where its neighbors
+  are at 24.1 deg.  The frames go before anything else sees them, so the frame tags, the frame
+  cut, the binning, the injections and KLIP-FM all work on the frames kept, and `texp` scales
+  with them.  The files in the night's directory are not changed.  An index past the cube is
+  refused, and so are a night the run does not load and a list that leaves no frame.  An index
+  past `--max-frames` drops nothing, and the log says so.  The frame cut does not do this job.
+  A configuration can set its correlation threshold below the frame's, and the cut stands
+  down when it would leave fewer than bin x k frames.
 * `--subtract-sources FILE` takes point sources out of every frame once, at load.  The file
   has one source per line: rho (arcsec), PA (deg) and contrast, with `#` comments.  Columns
   after the third are ignored.  The contrasts are the sources' own, as they are in the data,
@@ -190,7 +200,8 @@ the checkpoint).  `klip-tpe resume` and `extend` read them from the checkpoint w
 options are not typed, and refuse a typed value that differs, since a resume cannot change the
 frames its evaluations were made on.  A script that resumes a run with a reducer whose frames
 differ gets the same refusal from the `Runner`.  From Python the options are
-`near.make_reducer(..., cube_name=..., subtract_sources=..., inject_sources=...)`, or
+`near.make_reducer(..., cube_name=..., drop_frames={"n4": [551]}, subtract_sources=...,
+inject_sources=...)`, or
 `reducer.subtract_sources(...)` and `reducer.inject_sources(...)` on any KLIP reducer before
 its worker processes start.  `klip-tpe rereduce` (below) reduces a finished run's winners on
 other frames without a new search.
@@ -265,10 +276,12 @@ changes from night to night.
 
 `klip-tpe rereduce --run-dir RUN` reduces each annulus' winning configuration again and
 writes the final products beside the run, in `<run>_rereduce/` (or `--out`).  The frames are
-what the command line types (`--cube-name`, `--subtract-sources`, `--subtract-line`,
-`--inject-sources`), and for each option it leaves out, what the run was made on.  A typed
-subtraction replaces the run's as a whole.  So a line subtracted, or planets added, cost one
-reduction per annulus and kind instead of a new search.
+what the command line types (`--cube-name`, `--drop-frames`, `--subtract-sources`,
+`--subtract-line`, `--inject-sources`), and for each option it leaves out, what the run was
+made on.  A typed subtraction replaces the run's as a whole, and so does a typed
+`--drop-frames` list.  `--drop-frames none` reduces every frame of a run that dropped some.
+So a line subtracted, planets added, or a bad frame left out cost one reduction per annulus
+and kind instead of a new search.
 
 * Each winner is reduced clean, and with the injections of the final verify's calibration
   block: by default the winner's own validation injections, as in the run.  `--verify-sources
