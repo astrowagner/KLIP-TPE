@@ -199,16 +199,20 @@ def _pool(n_part, workers, **kw):
 
 def test_the_pool_is_sized_by_the_thread_budget():
     """NEAR2's six nights got 12 processes whatever --workers said: 96 or 192 only raised
-    the threads per job, and per-job scaling is flat past about 4."""
+    the threads per job, and per-job scaling is flat past about 4.  Since 2026-10-27 the
+    default is 2 threads per job (on patrick 48 x 2 at a budget of 96 beat 48 x 4 at 192 by
+    1.25x)."""
     got = {w: (r.n_procs(), r.job_threads(), r.job_slots()) for w in (50, 96, 192)
            for r in [_pool(6, w)]}
-    assert got == {50: (12, 4, 12), 96: (24, 4, 24), 192: (48, 4, 48)}
+    assert got == {50: (25, 2, 25), 96: (48, 2, 48), 192: (96, 2, 96)}
+    r = _pool(6, 96, threads_per_job=4)
+    assert (r.n_procs(), r.job_threads()) == (24, 4)
     r = _pool(6, 192, threads_per_job=8)
     assert (r.n_procs(), r.job_threads()) == (24, 8)
     r = _pool(6, 8)                                 # never fewer than the 2 x partitions it had
     assert (r.n_procs(), r.job_threads()) == (8, 1)
     assert _pool(6, 1).job_slots() == 1
-    assert _pool(6, 96).describe()["threads_per_job"] == 4
+    assert _pool(6, 96).describe()["threads_per_job"] == 2
 
 
 def test_the_thread_fallback_keeps_its_budget_rule():

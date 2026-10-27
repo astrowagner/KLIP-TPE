@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased — 2026-10-27 (the worker farm: a thread per physical core, 2 per job, the budget held)
+
+From the GPU session's farm benchmark on patrick of 2026-10-26.  It replayed 200 recorded
+evaluations of run_20261024_153342's annulus 5 through `PartitionedReducer.reduce_config` as
+the pipelined search sends them, 6 min per layout on an idle machine (96 cores, 192 hardware
+threads).  A six-night reduction took 0.267 s at the production layout (`--workers 192
+--threads-per-job 4`, 48 processes of 4 threads), 0.213 s at 96 / 2 (48 processes of 2,
+1.25x), 0.221 s at 128 / 2, 0.230 s at 96 / 1 and 0.245 s at 192 / 2.  The second hardware
+thread of a core added nothing, and 24 x 8 lost (0.79x).
+
+- **`--workers auto` is one thread per physical core** (`parallel.physical_cores`: each
+  allowed CPU's siblings in sysfs on Linux, `sysctl hw.physicalcpu` on macOS, else the logical
+  count).  `--workers all` (or `logical`, `max`) is every logical CPU, what `auto` was, and
+  `-k` is `auto` less k.  On a machine without SMT nothing changes.
+- **`--threads-per-job` is 2 by default** (4 before), on the command line and in
+  `PartitionedReducer`.  With the new `auto` that is the layout patrick ran fastest, 48 x 2,
+  now held to its budget of 96 (below).
+- **The jobs running together never use more threads than the budget.**  The by-cost plan
+  gives a long job up to 4x the base and a short one 1, and the long jobs run longest, so the
+  jobs in flight held more than the budget: a load average of 234 on 192 CPUs at a base of 4,
+  134 on a budget of 96 at a base of 2.  `ProcessPool` now cuts a job's threads, when it sends
+  it, to what the running jobs leave, keeping one for each idle worker
+  (`PartitionedReducer.cap_threads`, True, a switch for measuring the two).  A pinned
+  `--workers 8` now uses at most 8 threads.  The images do not depend on the thread count
+  (`tests/test_job_threads.py`), so none of this changes a result.
+
 ## Unreleased — 2026-10-25 (the main thread: no per-night S/N in the search, no wait in validation)
 
 From the NEAR2 session's note of 2026-10-25 on run_20261024_153342 (seven annuli of 10,000

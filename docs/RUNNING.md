@@ -63,9 +63,12 @@ cell that shows the newest step panel and the log tail, and a resume cell.
 
 ## Cores
 
-`--workers auto` uses every core the process can see (the default, `max_workers="auto"` in
-the API).  `--workers 8` pins the budget and `--workers -2` leaves two cores free.  The budget
-is spent like IDL's bridges.  After the nights are loaded the reducer forks
+`--workers auto` (the default, `max_workers="auto"` in the API) gives the run one thread per
+physical core the process can use.  On patrick (96 cores, 192 logical CPUs) a farm benchmark of
+NEAR2's nights reduced them 1.25x faster with 48 jobs of 2 threads at a budget of 96 than with
+48 jobs of 4 at 192, so the second hardware thread of a core (SMT) adds nothing on this code.  `--workers all`
+uses every logical CPU, as `auto` did before 2026-10-27.  `--workers 8` pins the budget and
+`--workers -2` leaves two cores free.  The budget is spent like IDL's bridges.  After the nights are loaded the reducer forks
 `workers / threads-per-job` worker processes, and never fewer than `min(workers, 2 × nights)`.
 They share the loaded cubes copy-on-write, and only requests and the small result images
 cross between processes.  A partition job runs its injection, its per-target KLIP work, its
@@ -73,10 +76,11 @@ high-pass, binning, derotation and combination on its own threads, and injects o
 its frame selection keeps.  Everything before KLIP goes one bin group at a time: a group's kept
 frames are copied out of the night, given their sources, high-passed and averaged while they
 are in the processor's cache, so a job reads its kept frames from memory once and writes only
-the binned cube.  `--threads-per-job` (4 by default)
-sets the average.  A job expected to take long, a big night at a small bin, gets more threads,
-up to four times as many, and a light one gets one.  A free worker takes the waiting job
-expected to take longest.  The images do not depend on the thread count or the order.  BLAS
+the binned cube.  `--threads-per-job` (2 by default, 4 before
+2026-10-27) sets the average.  A job expected to take long, a big night at a small bin, gets
+more threads, up to four times as many, and a light one gets one.  The jobs running together
+never use more threads than the budget.  The pool cuts a job's count, when it sends it, to what
+the running jobs leave.  A free worker takes the waiting job expected to take longest.  The images do not depend on the thread count or the order.  BLAS
 is pinned to one thread per worker thread.  `--pool threads` keeps everything in one process.
 It is slower, since Python's GIL limits the thread version to roughly one to two cores' worth
 of work.
@@ -94,12 +98,11 @@ Every draw's positions are drawn first, in the order a one-at-a-time loop draws 
 schedule changes when a reduction finishes, not what it returns, so a run writes the records a
 one-at-a-time loop writes, and a resumed run continues exactly where it stopped.
 
-A trial of N nights at `--n-remeasure 3` is 4N partition jobs, so for six nights
-`--workers 96` (24 processes of 4 threads) runs a trial in one round.  The startup log prints
-the plan:
+A trial of N nights at `--n-remeasure 5` is 6N partition jobs.  On patrick `--workers auto` is
+96, and the default 2 threads per job make 48 processes.  The startup log prints the plan:
 
 ```
-parallel: 96 workers on 192 cores: 24 worker processes x 4 thread(s) per job (1 to 16 by the job's expected cost, longest first), 6 partitions per reduction, so 4 reduction(s) at full width at once; pool = processes
+parallel: 96 workers on 96 cores (192 logical CPUs): 48 worker processes x 2 thread(s) per job (1 to 8 by the job's expected cost, longest first, at most 96 in flight), 6 partitions per reduction, so 8 reduction(s) at full width at once; pool = processes
 ```
 
 `--batch B` keeps B trials in flight (default 1).  As soon as the oldest trial is in, the next

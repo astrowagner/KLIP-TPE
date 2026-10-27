@@ -100,15 +100,21 @@ options:
                         (default), pyKLIP or VIP (must be installed)
   --max-frames MAX_FRAMES
                         use only the first N frames per night (tests)
-  --workers WORKERS     worker budget: 'auto' (default) = all cores, an
-                        integer pins it, -k = all but k
+  --workers WORKERS     worker budget, the threads the jobs running together
+                        may use: 'auto' (default) = one per physical core,
+                        'all' = every logical CPU (hardware threads included;
+                        'auto' before 2026-10-27), an integer pins it, -k =
+                        'auto' less k
   --pool {auto,processes,threads}
                         how the budget is spent: forked worker processes
                         (default; the IDL bridges) or threads
   --threads-per-job THREADS_PER_JOB
-                        threads per partition job (default 4). The pool gets
-                        workers / threads-per-job processes, never fewer than
-                        min(workers, 2 x partitions)
+                        threads per partition job on average (default 2, 4
+                        before 2026-10-27). The pool gets workers / threads-
+                        per-job processes, never fewer than min(workers, 2 x
+                        partitions). A job expected to take long gets up to 4x
+                        as many, and the jobs running together never use more
+                        than --workers
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -150,10 +156,10 @@ options:
                         frame tags, the frame cut, binning and the injections
                         see them: the night (n4 or 4), a colon and the frames'
                         indices in the night's cube, counted from 0, e.g.
-                        n4:551; may repeat. 'none' drops nothing (on rereduce,
-                        in place of the run's list). Recorded in the run's
-                        checkpoint, and kept on resume and extend when not
-                        typed
+                        n4:551. It may repeat, and 'none' drops nothing (on
+                        rereduce, in place of the run's list). Recorded in the
+                        run's checkpoint, and kept on resume and extend when
+                        not typed
   --subtract-sources FILE
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
@@ -517,15 +523,21 @@ options:
                         (default), pyKLIP or VIP (must be installed)
   --max-frames MAX_FRAMES
                         use only the first N frames per night (tests)
-  --workers WORKERS     worker budget: 'auto' (default) = all cores, an
-                        integer pins it, -k = all but k
+  --workers WORKERS     worker budget, the threads the jobs running together
+                        may use: 'auto' (default) = one per physical core,
+                        'all' = every logical CPU (hardware threads included;
+                        'auto' before 2026-10-27), an integer pins it, -k =
+                        'auto' less k
   --pool {auto,processes,threads}
                         how the budget is spent: forked worker processes
                         (default; the IDL bridges) or threads
   --threads-per-job THREADS_PER_JOB
-                        threads per partition job (default 4). The pool gets
-                        workers / threads-per-job processes, never fewer than
-                        min(workers, 2 x partitions)
+                        threads per partition job on average (default 2, 4
+                        before 2026-10-27). The pool gets workers / threads-
+                        per-job processes, never fewer than min(workers, 2 x
+                        partitions). A job expected to take long gets up to 4x
+                        as many, and the jobs running together never use more
+                        than --workers
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -567,10 +579,10 @@ options:
                         frame tags, the frame cut, binning and the injections
                         see them: the night (n4 or 4), a colon and the frames'
                         indices in the night's cube, counted from 0, e.g.
-                        n4:551; may repeat. 'none' drops nothing (on rereduce,
-                        in place of the run's list). Recorded in the run's
-                        checkpoint, and kept on resume and extend when not
-                        typed
+                        n4:551. It may repeat, and 'none' drops nothing (on
+                        rereduce, in place of the run's list). Recorded in the
+                        run's checkpoint, and kept on resume and extend when
+                        not typed
   --subtract-sources FILE
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
@@ -913,15 +925,21 @@ options:
                         (default), pyKLIP or VIP (must be installed)
   --max-frames MAX_FRAMES
                         use only the first N frames per night (tests)
-  --workers WORKERS     worker budget: 'auto' (default) = all cores, an
-                        integer pins it, -k = all but k
+  --workers WORKERS     worker budget, the threads the jobs running together
+                        may use: 'auto' (default) = one per physical core,
+                        'all' = every logical CPU (hardware threads included;
+                        'auto' before 2026-10-27), an integer pins it, -k =
+                        'auto' less k
   --pool {auto,processes,threads}
                         how the budget is spent: forked worker processes
                         (default; the IDL bridges) or threads
   --threads-per-job THREADS_PER_JOB
-                        threads per partition job (default 4). The pool gets
-                        workers / threads-per-job processes, never fewer than
-                        min(workers, 2 x partitions)
+                        threads per partition job on average (default 2, 4
+                        before 2026-10-27). The pool gets workers / threads-
+                        per-job processes, never fewer than min(workers, 2 x
+                        partitions). A job expected to take long gets up to 4x
+                        as many, and the jobs running together never use more
+                        than --workers
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -963,10 +981,10 @@ options:
                         frame tags, the frame cut, binning and the injections
                         see them: the night (n4 or 4), a colon and the frames'
                         indices in the night's cube, counted from 0, e.g.
-                        n4:551; may repeat. 'none' drops nothing (on rereduce,
-                        in place of the run's list). Recorded in the run's
-                        checkpoint, and kept on resume and extend when not
-                        typed
+                        n4:551. It may repeat, and 'none' drops nothing (on
+                        rereduce, in place of the run's list). Recorded in the
+                        run's checkpoint, and kept on resume and extend when
+                        not typed
   --subtract-sources FILE
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
@@ -1209,15 +1227,21 @@ options:
                         (default), pyKLIP or VIP (must be installed)
   --max-frames MAX_FRAMES
                         use only the first N frames per night (tests)
-  --workers WORKERS     worker budget: 'auto' (default) = all cores, an
-                        integer pins it, -k = all but k
+  --workers WORKERS     worker budget, the threads the jobs running together
+                        may use: 'auto' (default) = one per physical core,
+                        'all' = every logical CPU (hardware threads included;
+                        'auto' before 2026-10-27), an integer pins it, -k =
+                        'auto' less k
   --pool {auto,processes,threads}
                         how the budget is spent: forked worker processes
                         (default; the IDL bridges) or threads
   --threads-per-job THREADS_PER_JOB
-                        threads per partition job (default 4). The pool gets
-                        workers / threads-per-job processes, never fewer than
-                        min(workers, 2 x partitions)
+                        threads per partition job on average (default 2, 4
+                        before 2026-10-27). The pool gets workers / threads-
+                        per-job processes, never fewer than min(workers, 2 x
+                        partitions). A job expected to take long gets up to 4x
+                        as many, and the jobs running together never use more
+                        than --workers
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -1259,10 +1283,10 @@ options:
                         frame tags, the frame cut, binning and the injections
                         see them: the night (n4 or 4), a colon and the frames'
                         indices in the night's cube, counted from 0, e.g.
-                        n4:551; may repeat. 'none' drops nothing (on rereduce,
-                        in place of the run's list). Recorded in the run's
-                        checkpoint, and kept on resume and extend when not
-                        typed
+                        n4:551. It may repeat, and 'none' drops nothing (on
+                        rereduce, in place of the run's list). Recorded in the
+                        run's checkpoint, and kept on resume and extend when
+                        not typed
   --subtract-sources FILE
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
@@ -1506,15 +1530,21 @@ options:
                         (default), pyKLIP or VIP (must be installed)
   --max-frames MAX_FRAMES
                         use only the first N frames per night (tests)
-  --workers WORKERS     worker budget: 'auto' (default) = all cores, an
-                        integer pins it, -k = all but k
+  --workers WORKERS     worker budget, the threads the jobs running together
+                        may use: 'auto' (default) = one per physical core,
+                        'all' = every logical CPU (hardware threads included;
+                        'auto' before 2026-10-27), an integer pins it, -k =
+                        'auto' less k
   --pool {auto,processes,threads}
                         how the budget is spent: forked worker processes
                         (default; the IDL bridges) or threads
   --threads-per-job THREADS_PER_JOB
-                        threads per partition job (default 4). The pool gets
-                        workers / threads-per-job processes, never fewer than
-                        min(workers, 2 x partitions)
+                        threads per partition job on average (default 2, 4
+                        before 2026-10-27). The pool gets workers / threads-
+                        per-job processes, never fewer than min(workers, 2 x
+                        partitions). A job expected to take long gets up to 4x
+                        as many, and the jobs running together never use more
+                        than --workers
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -1556,10 +1586,10 @@ options:
                         frame tags, the frame cut, binning and the injections
                         see them: the night (n4 or 4), a colon and the frames'
                         indices in the night's cube, counted from 0, e.g.
-                        n4:551; may repeat. 'none' drops nothing (on rereduce,
-                        in place of the run's list). Recorded in the run's
-                        checkpoint, and kept on resume and extend when not
-                        typed
+                        n4:551. It may repeat, and 'none' drops nothing (on
+                        rereduce, in place of the run's list). Recorded in the
+                        run's checkpoint, and kept on resume and extend when
+                        not typed
   --subtract-sources FILE
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
@@ -1825,15 +1855,21 @@ options:
                         (default), pyKLIP or VIP (must be installed)
   --max-frames MAX_FRAMES
                         use only the first N frames per night (tests)
-  --workers WORKERS     worker budget: 'auto' (default) = all cores, an
-                        integer pins it, -k = all but k
+  --workers WORKERS     worker budget, the threads the jobs running together
+                        may use: 'auto' (default) = one per physical core,
+                        'all' = every logical CPU (hardware threads included;
+                        'auto' before 2026-10-27), an integer pins it, -k =
+                        'auto' less k
   --pool {auto,processes,threads}
                         how the budget is spent: forked worker processes
                         (default; the IDL bridges) or threads
   --threads-per-job THREADS_PER_JOB
-                        threads per partition job (default 4). The pool gets
-                        workers / threads-per-job processes, never fewer than
-                        min(workers, 2 x partitions)
+                        threads per partition job on average (default 2, 4
+                        before 2026-10-27). The pool gets workers / threads-
+                        per-job processes, never fewer than min(workers, 2 x
+                        partitions). A job expected to take long gets up to 4x
+                        as many, and the jobs running together never use more
+                        than --workers
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -1875,10 +1911,10 @@ options:
                         frame tags, the frame cut, binning and the injections
                         see them: the night (n4 or 4), a colon and the frames'
                         indices in the night's cube, counted from 0, e.g.
-                        n4:551; may repeat. 'none' drops nothing (on rereduce,
-                        in place of the run's list). Recorded in the run's
-                        checkpoint, and kept on resume and extend when not
-                        typed
+                        n4:551. It may repeat, and 'none' drops nothing (on
+                        rereduce, in place of the run's list). Recorded in the
+                        run's checkpoint, and kept on resume and extend when
+                        not typed
   --subtract-sources FILE
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
@@ -2154,15 +2190,21 @@ options:
                         (default), pyKLIP or VIP (must be installed)
   --max-frames MAX_FRAMES
                         use only the first N frames per night (tests)
-  --workers WORKERS     worker budget: 'auto' (default) = all cores, an
-                        integer pins it, -k = all but k
+  --workers WORKERS     worker budget, the threads the jobs running together
+                        may use: 'auto' (default) = one per physical core,
+                        'all' = every logical CPU (hardware threads included;
+                        'auto' before 2026-10-27), an integer pins it, -k =
+                        'auto' less k
   --pool {auto,processes,threads}
                         how the budget is spent: forked worker processes
                         (default; the IDL bridges) or threads
   --threads-per-job THREADS_PER_JOB
-                        threads per partition job (default 4). The pool gets
-                        workers / threads-per-job processes, never fewer than
-                        min(workers, 2 x partitions)
+                        threads per partition job on average (default 2, 4
+                        before 2026-10-27). The pool gets workers / threads-
+                        per-job processes, never fewer than min(workers, 2 x
+                        partitions). A job expected to take long gets up to 4x
+                        as many, and the jobs running together never use more
+                        than --workers
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -2204,10 +2246,10 @@ options:
                         frame tags, the frame cut, binning and the injections
                         see them: the night (n4 or 4), a colon and the frames'
                         indices in the night's cube, counted from 0, e.g.
-                        n4:551; may repeat. 'none' drops nothing (on rereduce,
-                        in place of the run's list). Recorded in the run's
-                        checkpoint, and kept on resume and extend when not
-                        typed
+                        n4:551. It may repeat, and 'none' drops nothing (on
+                        rereduce, in place of the run's list). Recorded in the
+                        run's checkpoint, and kept on resume and extend when
+                        not typed
   --subtract-sources FILE
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
@@ -2459,15 +2501,21 @@ options:
                         (default), pyKLIP or VIP (must be installed)
   --max-frames MAX_FRAMES
                         use only the first N frames per night (tests)
-  --workers WORKERS     worker budget: 'auto' (default) = all cores, an
-                        integer pins it, -k = all but k
+  --workers WORKERS     worker budget, the threads the jobs running together
+                        may use: 'auto' (default) = one per physical core,
+                        'all' = every logical CPU (hardware threads included;
+                        'auto' before 2026-10-27), an integer pins it, -k =
+                        'auto' less k
   --pool {auto,processes,threads}
                         how the budget is spent: forked worker processes
                         (default; the IDL bridges) or threads
   --threads-per-job THREADS_PER_JOB
-                        threads per partition job (default 4). The pool gets
-                        workers / threads-per-job processes, never fewer than
-                        min(workers, 2 x partitions)
+                        threads per partition job on average (default 2, 4
+                        before 2026-10-27). The pool gets workers / threads-
+                        per-job processes, never fewer than min(workers, 2 x
+                        partitions). A job expected to take long gets up to 4x
+                        as many, and the jobs running together never use more
+                        than --workers
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -2509,10 +2557,10 @@ options:
                         frame tags, the frame cut, binning and the injections
                         see them: the night (n4 or 4), a colon and the frames'
                         indices in the night's cube, counted from 0, e.g.
-                        n4:551; may repeat. 'none' drops nothing (on rereduce,
-                        in place of the run's list). Recorded in the run's
-                        checkpoint, and kept on resume and extend when not
-                        typed
+                        n4:551. It may repeat, and 'none' drops nothing (on
+                        rereduce, in place of the run's list). Recorded in the
+                        run's checkpoint, and kept on resume and extend when
+                        not typed
   --subtract-sources FILE
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
