@@ -8,7 +8,8 @@
 #   display products and the progress movie.
 #
 # Products land in  $ROOT/comb/opt/run_YYYYMMDD_HHMMSS/  (IDL layout) unless RUN_DIR is set.
-# Every core is used by default (WORKERS=auto); WORKERS=8 pins it, WORKERS=-2 leaves two free.
+# One worker per physical core by default (WORKERS=auto), WORKERS=all for every logical CPU,
+# WORKERS=8 pins it, WORKERS=-2 leaves two cores free.
 # SHOW=1 opens the live window, ALIENS=1 adds the launch movie, SMOKE=1 runs the short end-to-end test.
 # Interrupted?  klip-tpe resume        (no arguments: the run's own record has the rest)
 # What is running? klip-tpe runs       A window that cannot freeze:  klip-tpe view

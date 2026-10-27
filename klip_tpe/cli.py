@@ -63,7 +63,7 @@ def _near_objects(a, log=print):
 def _set_threads_per_job(red, a) -> None:
     """``--threads-per-job``, before the worker pool starts (it sizes the pool)."""
     if hasattr(red, "threads_per_job"):
-        red.threads_per_job = max(int(getattr(a, "threads_per_job", 4) or 4), 1)
+        red.threads_per_job = max(int(getattr(a, "threads_per_job", 2) or 2), 1)
 
 
 def _set_klip_gram(red, a, log=print) -> None:
@@ -711,12 +711,16 @@ def _add_near_args(p):
     g.add_argument("--group-smooth", type=float, default=100.0, help="smoothing kernel (frames) of the auto split")
     p.add_argument("--max-frames", type=int, default=None, help="use only the first N frames per night (tests)")
     p.add_argument("--workers", default="auto",
-                   help="worker budget: 'auto' (default) = all cores, an integer pins it, -k = all but k")
+                   help="worker budget, the threads the jobs running together may use: 'auto' (default) = one per "
+                        "physical core, 'all' = every logical CPU (hardware threads included; 'auto' before "
+                        "2026-10-27), an integer pins it, -k = 'auto' less k")
     p.add_argument("--pool", default="auto", choices=["auto", "processes", "threads"],
                    help="how the budget is spent: forked worker processes (default; the IDL bridges) or threads")
-    p.add_argument("--threads-per-job", type=int, default=4,
-                   help="threads per partition job (default 4). The pool gets workers / threads-per-job "
-                        "processes, never fewer than min(workers, 2 x partitions)")
+    p.add_argument("--threads-per-job", type=int, default=2,
+                   help="threads per partition job on average (default 2, 4 before 2026-10-27). The pool gets "
+                        "workers / threads-per-job processes, never fewer than min(workers, 2 x partitions). A job "
+                        "expected to take long gets up to 4x as many, and the jobs running together never use more "
+                        "than --workers")
     p.add_argument("--weighting", default="equal", choices=["equal", "sqrt_texp"])
     p.add_argument("--fast", action="store_true", help="single-basis KLIP (angsep/anglemax not searched)")
     p.add_argument("--klip-gram", default="target", choices=["target", "zone"],

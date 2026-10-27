@@ -4,10 +4,11 @@ klip-tpe parallelises with threads (numpy's SVD / matmul release the GIL): the
 :class:`~klip_tpe.reducer.PartitionedReducer` maps partitions onto one pool, the KLIP
 engine maps the per-target basis builds of one partition onto a second pool, and the
 runner reduces the injected and the clean cube concurrently.  ``workers`` is the
-budget for all of that: ``"auto"`` / ``None`` / ``0`` = every core the machine offers
-(``os.sched_getaffinity`` where available, else ``os.cpu_count``); an integer pins it.
-With more than one worker the BLAS thread pools are pinned to one thread inside the
-KLIP loops (threadpoolctl, when installed) so the threads do not fight over cores.
+budget for all of that: ``"auto"`` / ``None`` / ``0`` = one per physical core the process
+may run on (:func:`physical_cores`), ``"all"`` = every logical CPU, hardware threads
+included (:func:`cpu_count`); an integer pins it.  With more than one worker the BLAS thread
+pools are pinned to one thread inside the KLIP loops (threadpoolctl, when installed) so the
+threads do not fight over cores.
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ import atexit
 import concurrent.futures as cf
 import contextlib
 import os
+import sys
 import threading
 import time
 from typing import Any, Dict, Optional, Tuple, Union
@@ -25,26 +27,98 @@ WorkerSpec = Union[int, str, None]
 
 
 def cpu_count() -> int:
-    """Cores available to this process."""
+    """Logical CPUs available to this process, hardware threads (SMT) included."""
     try:
         return max(len(os.sched_getaffinity(0)), 1)
     except Exception:
         return max(os.cpu_count() or 1, 1)
 
 
+def _cpulist(text: str) -> Optional[frozenset]:
+    """A sysfs CPU list (``0,96`` or ``0-3,8``) as a set, None when it does not parse."""
+    out = set()
+    try:
+        for part in text.strip().split(","):
+            if not part:
+                continue
+            lo, _, hi = part.partition("-")
+            out.update(range(int(lo), int(hi or lo) + 1))
+    except ValueError:
+        return None
+    return frozenset(out) or None
+
+
+_physical: Optional[int] = None
+
+
+def physical_cores(sysfs: str = "/sys/devices/system/cpu") -> int:
+    """Physical cores available to this process: the CPUs it may run on (:func:`cpu_count`)
+    with each core's hardware threads counted once.  Linux reads each allowed CPU's
+    siblings in sysfs (``topology/core_cpus_list``, or ``thread_siblings_list`` on older
+    kernels), macOS asks ``sysctl hw.physicalcpu``.  Where neither answers, the logical
+    count.
+
+    The default worker budget since 2026-10-27.  On patrick (96 cores, 192 hardware threads)
+    a farm benchmark of NEAR2's annulus 5 ran 1.25x faster with 48 jobs of 2 threads at a
+    budget of 96 than with 48 jobs of 4 at 192.  The second thread of a core added nothing on
+    this code and cost cache and memory bandwidth."""
+    global _physical
+    if _physical is not None and sysfs == "/sys/devices/system/cpu":
+        return _physical
+    n_log = cpu_count()
+    found = None
+    try:
+        cpus = sorted(os.sched_getaffinity(0))
+    except Exception:
+        cpus = None
+    if cpus and os.path.isdir(sysfs):
+        cores = set()
+        for c in cpus:
+            sib = None
+            for name in ("core_cpus_list", "thread_siblings_list"):
+                try:
+                    with open(os.path.join(sysfs, f"cpu{c}", "topology", name)) as f:
+                        sib = _cpulist(f.read())
+                except OSError:
+                    continue
+                if sib is not None:
+                    break
+            if sib is None:
+                cores = None
+                break
+            cores.add(sib)
+        if cores:
+            found = len(cores)
+    if found is None and sys.platform == "darwin":
+        try:
+            import subprocess
+            out = subprocess.run(["sysctl", "-n", "hw.physicalcpu"], capture_output=True, text=True, timeout=5)
+            found = int(out.stdout.strip()) or None
+        except Exception:
+            found = None
+    n = max(min(found or n_log, n_log), 1)
+    if sysfs == "/sys/devices/system/cpu":
+        _physical = n
+    return n
+
+
 def resolve_workers(spec: WorkerSpec = "auto") -> int:
-    """``'auto'`` / ``None`` / ``0`` / ``'max'`` -> :func:`cpu_count`; ``-k`` -> all but k;
-    an integer -> that many (at least 1)."""
+    """The worker budget, the threads the run's jobs may use together.  ``'auto'`` / ``None``
+    / ``0`` -> :func:`physical_cores`; ``'all'`` / ``'logical'`` / ``'max'`` -> every logical
+    CPU (:func:`cpu_count`, what ``'auto'`` meant before 2026-10-27); ``-k`` -> ``'auto'``
+    less k; an integer -> that many (at least 1)."""
     if spec is None:
-        return cpu_count()
+        return physical_cores()
     if isinstance(spec, str):
         s = spec.strip().lower()
-        if s in ("", "auto", "max", "all"):
+        if s in ("", "auto"):
+            return physical_cores()
+        if s in ("all", "logical", "max"):
             return cpu_count()
         spec = int(s)
     n = int(spec)
     if n <= 0:
-        return max(cpu_count() + n, 1)
+        return max(physical_cores() + n, 1)
     return n
 
 
@@ -183,19 +257,29 @@ def mem_available() -> Optional[int]:
     return None
 
 
+def _cores_text() -> str:
+    """``96 cores (192 logical CPUs)``, or ``2 cores`` where each core has one thread."""
+    phys, log = physical_cores(), cpu_count()
+    return f"{phys} cores ({log} logical CPUs)" if log != phys else f"{phys} cores"
+
+
 def describe(workers: int, n_partitions: int, procs: Optional[int] = None,
-             per_job: Optional[int] = None, cap: Optional[int] = None) -> str:
+             per_job: Optional[int] = None, cap: Optional[int] = None, budget: Optional[int] = None) -> str:
     """The run log's line about the worker budget.  ``procs`` / ``per_job``: the worker
     processes and threads per job (the thread-pool fallback passes None); ``cap``: the
-    most threads a job expected to be long can get."""
+    most threads a job expected to be long can get; ``budget``: the most the running jobs
+    use together, when the pool holds them to it."""
     if procs is None:
         conc = 2 if workers >= 2 else 1
         per = max(workers // max(conc * n_partitions, 1), 1) if per_job is None else per_job
-        return (f"{workers} workers on {cpu_count()} cores: injected + clean reductions "
+        return (f"{workers} workers on {_cores_text()}: injected + clean reductions "
                 f"{'concurrent' if conc == 2 else 'sequential'}, {min(workers, conc * n_partitions)} partition "
                 f"jobs in parallel, {per} target thread(s) per partition job")
-    scaled = f" (1 to {cap} by the job's expected cost, longest first)" if cap and cap > 1 else ""
-    return (f"{workers} workers on {cpu_count()} cores: {procs} worker processes x {per_job} thread(s) per "
+    scaled = ""
+    if cap and cap > 1:
+        held = f", at most {budget} in flight" if budget else ""
+        scaled = f" (1 to {cap} by the job's expected cost, longest first{held})"
+    return (f"{workers} workers on {_cores_text()}: {procs} worker processes x {per_job} thread(s) per "
             f"job{scaled}, {n_partitions} partitions per reduction, so "
             f"{max(procs // max(n_partitions, 1), 1)} reduction(s) at full width at once")
 
@@ -291,10 +375,17 @@ class ProcessPool:
     requests and the (small) results cross the pipes.  Falls back to ``None`` (caller
     uses threads) when forking is unavailable."""
 
-    def __init__(self, reducers: dict, n: int, log=None):
+    def __init__(self, reducers: dict, n: int, log=None, budget: Optional[int] = None):
         self.n = int(n)
         self.log = log or (lambda s: None)
         self.reducers = reducers
+        #: the threads the running jobs may use together, or None for no limit.  A job is
+        #: sent with its request's ``threads`` cut to what the running jobs leave, keeping one
+        #: for each idle worker, so the jobs in flight never use more than this (at least one
+        #: thread a job, so never less than ``n``).  The images do not depend on the count.
+        self.budget = None if budget is None else max(int(budget), self.n)
+        self._threads: dict = {}           # job id -> the threads it was sent with
+        self._threads_running = 0
         ctx = _mp.get_context("fork") if "fork" in _mp.get_all_start_methods() else None
         if ctx is None or self.n < 1:
             raise RuntimeError("fork start method not available")
@@ -390,11 +481,42 @@ class ProcessPool:
     def _dispatch(self) -> None:
         """Send waiting jobs, smallest key first, until every worker has one (call with
         the lock held).  Only as many jobs as workers are ever in the queue, so the order
-        is decided here, when a worker comes free, not when a job was submitted."""
+        is decided here, when a worker comes free, not when a job was submitted, and so is
+        a job's share of the thread budget (:meth:`_fit`)."""
         while self._waiting and self._busy < self.n:
             _, jid, pid, req = heapq.heappop(self._waiting)
-            self.inq.put((jid, pid, req))
+            self.inq.put((jid, pid, self._fit(jid, req)))
             self._busy += 1
+
+    def _fit(self, jid: int, req):
+        """``req`` with its ``threads`` cut to the budget's room (call with the lock held):
+        the budget less the running jobs' threads and one for each worker still idle after
+        this one.  That keeps the threads in flight within the budget at every moment, while
+        every worker can still take a job.  Without a budget, or a request without
+        ``threads``, it goes as it is.
+
+        The by-cost plan (:meth:`klip_tpe.reducer.PartitionedReducer._plan`) gives a long
+        job up to 4x the base and a short one 1, so over the jobs submitted the mean is near
+        the base.  The jobs running at a given moment are not that mean: the long ones run
+        longest, so they and their threads fill the pool.  On patrick, 48 jobs at a base of 4
+        ran at a load average of 234 on 192 CPUs, and at a base of 2 at 134 on a budget of
+        96."""
+        t = getattr(req, "threads", None)
+        if self.budget is None or t is None:
+            return req
+        room = self.budget - self._threads_running - (self.n - self._busy - 1)
+        got = max(1, min(int(t), room))
+        self._threads[jid] = got
+        self._threads_running += got
+        if got == int(t):
+            return req
+        import copy
+        import dataclasses
+        if dataclasses.is_dataclass(req):
+            return dataclasses.replace(req, threads=got)
+        req = copy.copy(req)
+        req.threads = got
+        return req
 
     def _collect(self) -> None:
         """The collector thread: every result off the queue to its job's future, and every
@@ -423,6 +545,7 @@ class ProcessPool:
                 with self._lock:
                     f = self._futures.pop(jid, None)
                     self._busy = max(self._busy - 1, 0)
+                    self._threads_running -= self._threads.pop(jid, 0)
                     self._dispatch()
                 if f is not None and not f.done():
                     if isinstance(res, BaseException):
@@ -437,6 +560,7 @@ class ProcessPool:
         with self._lock:
             futs, self._futures = self._futures, {}
             self._waiting = []
+            self._threads, self._threads_running = {}, 0
         for f in futs.values():
             if not f.done():
                 f.set_exception(make_exc(len(futs)))

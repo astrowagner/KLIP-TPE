@@ -1475,11 +1475,15 @@ class PartitionedReducer(Reducer):
         the thread budget.  >1 dispatches partition jobs to forked worker processes (or
         a thread pool, when forking is unavailable).
     threads_per_job
-        threads each partition job uses for its per-target work.  The process pool gets
-        ``max_workers // threads_per_job`` processes, and never fewer than the
-        ``min(max_workers, 2 x partitions)`` it had before, so the runner can keep as many
-        reductions in flight as the budget can serve (a trial's clean and all its draws,
-        several validation trials).  Per-job scaling is flat past about 4 threads.
+        threads each partition job uses for its per-target work, on average (2 by default
+        since 2026-10-27, 4 before).  The process pool gets ``max_workers //
+        threads_per_job`` processes, and never fewer than the ``min(max_workers, 2 x
+        partitions)`` it had before, so the runner can keep as many reductions in flight as
+        the budget can serve (a trial's clean and all its draws, several validation trials).
+        A job expected to take long gets up to four times as many (:meth:`_plan`), and the
+        jobs running together never use more than ``max_workers`` (:attr:`cap_threads`).
+        On patrick, 48 jobs of 2 threads at a budget of 96 reduced NEAR2's nights 1.25x
+        faster than 48 jobs of 4 at 192.
     representative
         the partition whose pixel scale, FWHM, lambda/D and matched-filter kernel stand for
         the combined image (the metric and the sampler read them from here).  Default: the
@@ -1490,7 +1494,11 @@ class PartitionedReducer(Reducer):
 
     name = "partitioned"
     # class defaults, so an instance made without __init__ still works; __init__ sets its own
-    threads_per_job = 4
+    threads_per_job = 2
+    #: hold the threads of the jobs running together to ``max_workers``
+    #: (:meth:`klip_tpe.parallel.ProcessPool._fit`).  False lets the by-cost plan run over it,
+    #: as before 2026-10-27, a switch for measuring the two
+    cap_threads = True
     _threads_fallback = False
     _start_lock = threading.Lock()
     _recent_costs = None
@@ -1501,7 +1509,7 @@ class PartitionedReducer(Reducer):
     injection_spectrum_info: Optional[Dict[str, Any]] = None
 
     def __init__(self, reducers: Dict[Any, Reducer], weighting: str = "equal", max_workers=1,
-                 pool: str = "auto", log=None, threads_per_job: int = 4, representative: Any = None):
+                 pool: str = "auto", log=None, threads_per_job: int = 2, representative: Any = None):
         if not reducers:
             raise ValueError("need at least one partition")
         if representative is not None and representative not in reducers:
@@ -1510,7 +1518,7 @@ class PartitionedReducer(Reducer):
         self.reducers = dict(reducers)
         self.weighting = weighting
         self.max_workers = resolve_workers(max_workers)
-        self.threads_per_job = max(int(threads_per_job or 4), 1)
+        self.threads_per_job = max(int(threads_per_job or 2), 1)
         self.pool_kind = pool            # auto | processes | threads
         self._log = log or (lambda s: None)
         self._procs = None
@@ -1699,7 +1707,8 @@ class PartitionedReducer(Reducer):
             costed = bool(procs) and all(getattr(type(r), "cost_estimate", Reducer.cost_estimate)
                                          is not Reducer.cost_estimate for r in self.reducers.values())
             cap = min(4 * per, int(self.max_workers)) if costed else None
-            self._log(f"  parallel: {describe(self.max_workers, len(self.reducers), procs, per, cap)}"
+            held = getattr(self._procs, "budget", None) if kind == "processes" else None
+            self._log(f"  parallel: {describe(self.max_workers, len(self.reducers), procs, per, cap, held)}"
                       f"; pool = {kind}")
             if kind == "threads" and self.pool_kind in ("auto", "processes"):
                 self._log("    threads share the GIL, so expect several times less throughput than "
@@ -1718,7 +1727,8 @@ class PartitionedReducer(Reducer):
         if self.pool_kind in ("auto", "processes") and not self._threads_fallback:
             try:
                 from .parallel import ProcessPool
-                self._procs = ProcessPool(self.reducers, self.n_procs(), log=self._log)
+                self._procs = ProcessPool(self.reducers, self.n_procs(), log=self._log,
+                                          budget=int(self.max_workers) if self.cap_threads else None)
                 return "processes"
             except Exception as exc:
                 self._log(f"  parallel: worker processes unavailable ({exc!r}); using threads")
@@ -1905,7 +1915,9 @@ class PartitionedReducer(Reducer):
         Threads scale with the job's expected cost against the mean of the latest jobs,
         rounded to a power of two between 1 and ``4 x base``: a big night at a small bin gets
         many, a light job one, and over many jobs the mean stays near ``base``
-        (``--threads-per-job``).  The images do not depend on the thread count."""
+        (``--threads-per-job``).  The worker pool cuts a job's count when it is sent, so the
+        jobs running together stay within ``max_workers`` (:attr:`cap_threads`).  The images
+        do not depend on the thread count."""
         costs = []
         for r, req in jobs:
             f = getattr(r, "cost_estimate", None)

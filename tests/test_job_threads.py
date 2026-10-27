@@ -10,7 +10,9 @@ What must hold:
 * a rotation of a finite frame skips the validity pass and changes nothing;
 * the cost estimate grows with the work, and a job's threads with its cost, from 1 to
   ``4 x --threads-per-job``, a power of two;
-* a free worker takes the waiting job with the smallest key.
+* a free worker takes the waiting job with the smallest key;
+* the jobs running together never use more threads than the budget (``--workers``), from
+  the GPU session's farm benchmark on patrick of 2026-10-26.
 """
 from __future__ import annotations
 
@@ -203,3 +205,69 @@ def test_a_worker_forked_after_the_parent_used_its_thread_pools_still_runs():
         assert out["r"] == [140]
     finally:
         pool.close()
+
+
+class _Held:
+    """A partition that sleeps and reports the threads it was sent with and when it ran."""
+
+    def reduce(self, req):
+        t0 = time.time()
+        time.sleep(req.params["s"])
+        return int(req.threads), t0, time.time()
+
+
+def _most_at_once(got):
+    """The most threads held by jobs running at the same moment, from their intervals."""
+    ev = sorted([(t0, t) for t, t0, _ in got] + [(t1, -t) for t, _, t1 in got])
+    run = most = 0
+    for _, d in ev:                                # an end and a start at one instant: the end first
+        run += d
+        most = max(most, run)
+    return most
+
+
+def test_the_jobs_in_flight_never_use_more_threads_than_the_budget():
+    """The by-cost plan gives a long job up to 4x the base and a short one 1, and the long
+    ones run longest, so the jobs running at a moment held more threads than the budget: on
+    patrick a load average of 234 on 192 CPUs at a base of 4, and 134 on a budget of 96 at
+    a base of 2.  The pool now cuts a job's threads, when it sends it, to what the running
+    jobs leave, keeping one for each idle worker.  A worker never waits for threads, every
+    job gets at least one, and none more than it asked for."""
+    planned = [8, 8, 1, 4, 2, 8, 1, 1, 4, 2, 8, 1, 6, 3]
+    reqs = [("a", ReductionRequest({"s": 0.12 + 0.04 * (i % 3)}, None, threads=t)) for i, t in enumerate(planned)]
+    pool = ProcessPool({"a": _Held()}, 4, budget=6)
+    try:
+        got = pool.map(reqs)
+    finally:
+        pool.close()
+    threads = [g[0] for g in got]
+    assert all(1 <= t <= p for t, p in zip(threads, planned)), list(zip(threads, planned))
+    assert _most_at_once(got) <= 6, f"{_most_at_once(got)} threads in flight on a budget of 6"
+    assert [q.threads for _, q in reqs] == planned, "the caller's requests were changed"
+    assert threads[0] == 3, "the first job, sent with 3 workers idle, leaves them one thread each"
+    # without a budget the plan goes as it is
+    pool = ProcessPool({"a": _Held()}, 4)
+    try:
+        assert [g[0] for g in pool.map(reqs[:6])] == planned[:6]
+    finally:
+        pool.close()
+
+
+def test_a_partitioned_reducer_holds_its_pool_to_the_budget():
+    reds = {"n1": _reducer(nframes=30, seed=1), "n2": _reducer(nframes=60, seed=2)}
+    pr = PartitionedReducer(reds, max_workers=6, threads_per_job=2)
+    said = []
+    pr._log = said.append
+    try:
+        assert pr.start_workers() == "processes"
+        assert pr._procs.budget == 6
+        assert "at most 6 in flight" in "\n".join(said)
+    finally:
+        pr.close()
+    pr = PartitionedReducer(reds, max_workers=6, threads_per_job=2)
+    pr.cap_threads = False                          # the plan as it was before 2026-10-27
+    try:
+        pr.start_workers()
+        assert pr._procs.budget is None
+    finally:
+        pr.close()

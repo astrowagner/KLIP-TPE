@@ -169,8 +169,8 @@ klip-tpe render   --run-dir <dir> [--every N]                                   
 Common search arguments: `--ann-edges r0 r1 [r2 ...]` (px), `--n-iter`, `--n-init` (per
 annulus), `--n-top/--n-valid` (validation), `--use-contrast` (forced injection contrast,
 0 = calibrate), `--k-max`, `--global-block` (one block for all partitions), `--no-selection`,
-`--max-drop`, `--workers auto|N` (every core by default; forked workers share the loaded
-data), `--backend klip|pyklip|vip`, `--show [window|inline|auto]`, `--display-every`,
+`--max-drop`, `--workers auto|all|N` (one per physical core by default, `all` for every logical
+CPU, forked workers sharing the loaded data), `--backend klip|pyklip|vip`, `--show [window|inline|auto]`, `--display-every`,
 `--movie-every`, `--verify --param-verify --candidates` (post-search stack).  `docs/CLI.md`
 lists all of them.
 
