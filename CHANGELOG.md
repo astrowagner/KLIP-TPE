@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased — 2026-10-28 (distinct reductions in validation, the winner on fresh draws)
+
+From the GPU session's note of 2026-10-28.  It re-validated every annulus of NEAR2's
+run_20261024_153342 and run_20261027_222223 on 200 common draws per configuration, with a port
+that reproduces klip-tpe's validation trials to 6e-6.
+
+- **The candidates are distinct reductions** (`ValidationConfig.dedup = "image"`,
+  `--validation-dedup`).  The 25 candidates of an annulus were 7 to 20 distinct reductions.  The
+  copies were apart from an earlier candidate only in parameters the reduction never reads (a
+  deselected night's, frame cuts with no frame between them, an even high-pass width, which
+  `klip.highpass` runs as the next odd one).  74 of run_20261027_222223's 175 validation slots
+  re-scored a reduction already in the list, and the election among copies went by draw noise.
+  Validation now makes each configuration's clean image first (its first reduction anyway) and
+  skips one equal to an earlier candidate's, bit for bit, for the next in the search's order,
+  `dedup_depth x n_top` deep.  That costs one clean reduction per copy and takes no draw.
+  `winner.json` lists the copies as `validation_duplicates`.  `"vector"` compares the vectors
+  only, as the IDL does.
+- **The winner's validated score is its median on fresh draws** (`ValidationConfig.n_rescore`,
+  `--n-rescore`, `n_valid` by default).  The election takes the largest of the candidates'
+  medians, so the elected one is high on its own draws.  Against the 200 common draws the
+  winners were high by 0.22 S/N on average in run_20261027_222223 (up to 0.43) and by up to 0.94
+  in run_20261024_153342, while the candidates not elected were unbiased (+0.005).  After the
+  election the winner is reduced on `n_rescore` fresh injection sets.  Their median is
+  `winner_score` (`best_SNR`, the per-annulus SNR line, `bench_summary.txt`), the trial nearest
+  it is the committed one (the products, the final verify's injections), and their per-source
+  S/N give the contrast curve.  The election's median stays as `election_score`, the trials as
+  `rescore_trials`.  The draws come from a generator seeded from the run's, which stays where it
+  stood, so everything after is what it would have been.  A lone candidate (`n_top=1`, or one
+  median among failures) is not re-scored, since its draws were not selected on, so its run
+  gives what it gave before.  `--n-rescore 0` reports the election's median, as the IDL does.
+- A run saved before 2026-10-28 resumes with the vectors and the election's median, so its
+  annuli stay alike.  `--from-idl-setup` (`idl_compare.matched_run_config`) mirrors the IDL's
+  validation too, unless `--validation-dedup` or `--n-rescore` is given.  The validation panel
+  draws the fresh median as a star and gives both.
+
 ## Unreleased — 2026-10-28 (the thread cap off by default)
 
 From the GPU session's A/B of 9097654 on patrick (2026-10-27), with the same farm benchmark of

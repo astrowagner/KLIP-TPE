@@ -140,6 +140,24 @@ class ValidationConfig:
     n_valid: int = 8
     distinct_tol: float = 1e-4
     commit: str = "median_trial"
+    #: how two candidates count as the same.  With ``"image"`` a configuration whose clean
+    #: reduction equals an earlier candidate's, bit for bit, is skipped for the next in the
+    #: search's order.  Parameters that cannot change the reduction (a deselected night's,
+    #: frame cuts with no frame between them, an even high-pass width, which runs as the next
+    #: odd one) made two parameter vectors distinct.  In NEAR2's run_20261027_222223 the 25
+    #: candidates of an annulus were 7 to 20 distinct reductions.  ``"vector"`` compares the
+    #: parameter vectors only (``distinct_tol``), as the IDL does and as runs saved before
+    #: 2026-10-28 resume.
+    dedup: str = "image"
+    #: how deep in the search's order ``"image"`` looks, in units of ``n_top``
+    dedup_depth: int = 8
+    #: fresh trials for the elected winner, whose median is then its validated score.  The
+    #: election picks the largest of noisy medians, so the elected one is high on its own
+    #: draws (in NEAR2 by 0.22 S/N on average, up to 0.94).  The median of fresh draws is not.
+    #: The election's median stays as ``AnnulusResult.election_score``.  A lone candidate's
+    #: median was not selected on, and it stands.  None means ``n_valid``.  0 reports the
+    #: election's median, as the IDL does and as runs saved before 2026-10-28 resume.
+    n_rescore: Optional[int] = None
 
 
 @dataclass
@@ -371,7 +389,12 @@ class RunConfig:
         # and one saved before batch_mode evaluated its batches whole
         d.setdefault("batch_mode", "sync")
         d["calibration"] = _from_dict_filtered(CalibrationConfig, d.get("calibration", {}))
-        d["validation"] = _from_dict_filtered(ValidationConfig, d.get("validation", {}))
+        # one saved before 2026-10-28 compared candidates by their vectors and reported the
+        # election's median: it goes on that way, so its annuli stay alike
+        v = dict(d.get("validation") or {})
+        v.setdefault("dedup", "vector")
+        v.setdefault("n_rescore", 0)
+        d["validation"] = _from_dict_filtered(ValidationConfig, v)
         return _from_dict_filtered(cls, d)
 
 
@@ -434,6 +457,19 @@ class AnnulusResult:
     fm_curve: Optional[Dict[str, List[float]]] = None                                # KLIP-FM cross-check (A §9.1)
     per_source: Optional[List[Optional[float]]] = None                               # raw per-source S/N, committed trial
     k_default: Optional[int] = None                                                  # calibration's default-config k
+    #: the elected candidate's median on the election's own draws, when ``winner_score`` is
+    #: its median on fresh draws (``ValidationConfig.n_rescore``), else None.  The election
+    #: picks the largest of noisy medians, so this one is high.
+    election_score: Optional[float] = None
+    #: the fresh trials' scores behind ``winner_score``, their injections (as the
+    #: ``trial_sources`` of ``validation.json``) and the committed one, whose sources are
+    #: ``winner_sources``
+    rescore_trials: Optional[List[Optional[float]]] = None
+    rescore_sources: Optional[List[List[List[float]]]] = None
+    rescore_committed: Optional[int] = None
+    #: ``[[eval, same_as_eval], ...]`` (0-based): configurations the validation skipped because
+    #: their clean reduction equals an earlier candidate's (``ValidationConfig.dedup``)
+    validation_duplicates: List[List[int]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return json.loads(json.dumps(asdict(self), default=_json_default))
@@ -686,6 +722,25 @@ class RunCallback:
     def on_finish(self, runner) -> None: ...
 
 
+def _same_reduction(a, b) -> bool:
+    """Two reductions (:class:`~klip_tpe.reducer.EvalImages`) that are the same, bit for bit:
+    the combined image and, where both have one, the per-partition stack.  A reduction is a
+    pure function of its configuration and the data, on any number of threads, so a
+    configuration that differs only in parameters the reduction never reads gives exactly
+    this, and one that differs in anything it reads does not."""
+    ia, ib = getattr(a, "image", None), getattr(b, "image", None)
+    if ia is None or ib is None or np.shape(ia) != np.shape(ib):
+        return False
+    if list(getattr(a, "partitions", None) or []) != list(getattr(b, "partitions", None) or []):
+        return False
+    if not np.array_equal(np.asarray(ia), np.asarray(ib), equal_nan=True):
+        return False
+    sa, sb = getattr(a, "stack", None), getattr(b, "stack", None)
+    if sa is not None and sb is not None:
+        return np.shape(sa) == np.shape(sb) and bool(np.array_equal(np.asarray(sa), np.asarray(sb), equal_nan=True))
+    return True
+
+
 def _dropped(d: Optional[Dict[str, Any]]) -> Dict[str, List[int]]:
     """A ``dropped_frames`` record, ``{"n4": [551], ...}``, with each partition's indices sorted
     and unique, partitions with none left out, in natural order (n4 before n10)."""
@@ -801,6 +856,7 @@ class Runner:
         self._resume_pending = None        # ... and those a checkpoint had in flight
         self._vt_on_disk: Dict[Tuple[int, int], Optional[Dict[str, int]]] = {}   # validation trial records written
         self._ann_images: Dict[int, Dict[str, Any]] = {}       # per-annulus winner images (memory cache)
+        self._val_dups: Dict[int, List[List[int]]] = {}         # per annulus: [eval, same_as_eval] skipped
         self._ann_histories: Dict[int, History] = {}           # completed annuli's histories
         self._pv_results: Dict[int, Dict[str, Any]] = {}       # param_verify outputs per annulus
         self._hooks_done: Dict[int, List[str]] = {}             # post-annulus hooks completed (checkpointed)
@@ -2642,19 +2698,17 @@ class Runner:
     # ------------------------------------------------------------- validation
     def validate(self, ia: int) -> Tuple[List[Dict[str, Any]], int, Dict[str, Any]]:
         """Re-score the top ``n_top`` distinct configs on ``n_valid`` fresh injection
-        sets with the RAW metric; elect the winner on the validated median."""
+        sets with the RAW metric, elect the winner on the validated median, then score the
+        winner on ``n_rescore`` fresh draws for its reported median (:meth:`_rescore_winner`)
+        when two or more candidates had one.  Distinct means distinct reductions
+        (:meth:`_validation_candidates`)."""
         vc = self.cfg.validation
         self.hb.stage(f"annulus {ia + 1} validation", annulus=ia)
         # The search's state, written now rather than held by the routine throttle: the
         # trial records carry the RNG from here on, and they pair with this history.
         self.checkpoint()
-        order = self.history.order()
-        cands: List[int] = []
-        for e in order:
-            if all(self.space.distinct(self.history.X[e], self.history.X[c], vc.distinct_tol) for c in cands):
-                cands.append(int(e))
-            if len(cands) >= vc.n_top:
-                break
+        cands, cleans, dups = self._validation_candidates(ia, vc)
+        self._val_dups[int(ia)] = [list(map(int, d)) for d in dups]
         table: List[Dict[str, Any]] = []
         vbest, vwin = -np.inf, -1
         winner: Dict[str, Any] = {}
@@ -2688,6 +2742,8 @@ class Runner:
                 trials, trial_imgs, trial_src, trial_ps = part["trials"], part["trial_imgs"], part["trial_src"], part["trial_ps"]
                 samples_r, samples_s = part["samples_r"], part["samples_s"]
                 self.log(f"  validation cand {ci+1}/{len(cands)}: resuming after trial {len(trials)}/{vc.n_valid}")
+            elif cleans[ci] is not None:   # reduced when the candidates were picked
+                clean = cleans[ci]
             else:
                 calls.append(lambda cfg=cfg, ci=ci: self._reduce(cfg, None, tag=f"a{ia+1}_val{ci}_clean"))
             # Every remaining trial's positions first, in order, by the same generator calls
@@ -2701,7 +2757,7 @@ class Runner:
                 plan.append((t, src, self.rng.bit_generator.state))
                 calls.append(lambda cfg=cfg, ci=ci, t=t, src=src: self._reduce(cfg, src, tag=f"a{ia+1}_val{ci}_t{t}"))
             with contextlib.closing(self._run_ordered(calls, self._reduction_window(len(cfg.selected)))) as stream:
-                if part is None:
+                if part is None and clean is None:
                     _, res = next(stream)
                     if isinstance(res, BaseException):
                         self.log(f"  validation clean reduction failed: {res!r}")
@@ -2781,7 +2837,170 @@ class Runner:
                 os.remove(self._val_trials_pkl(ia, ci))
             except OSError:
                 pass
+        # An election among two or more medians picks the largest, so the winner is scored again
+        # on fresh draws.  A lone candidate's median was not selected on: its draws are fresh.
+        n_re = vc.n_valid if vc.n_rescore is None else int(vc.n_rescore)
+        n_med = sum(1 for row in table if row.get("validated_score") is not None)
+        if vwin >= 0 and n_re > 0 and n_med > 1:
+            winner = self._rescore_winner(ia, winner, n_re)
         return table, vwin, winner
+
+    def _validation_candidates(self, ia: int, vc: "ValidationConfig"):
+        """The configurations validation re-scores, best search score first: ``(cands, cleans,
+        dups)``, with each candidate's clean reduction (None where none was made) and
+        ``[[eval, same_as_eval], ...]`` for the configurations skipped as copies.
+
+        Two candidates must be ``distinct_tol`` apart as parameter vectors.  With
+        ``vc.dedup == "image"`` they must also reduce differently: each configuration's clean
+        image is made (the candidate's first reduction anyway), and one equal to an earlier
+        candidate's, bit for bit, is skipped for the next in the order.  Parameters that cannot
+        change a reduction set two vectors apart without changing what they reduce: a
+        deselected night's, frame cuts with no frame between them, an even high-pass width
+        (``klip.highpass`` runs it as the next odd one), k past the modes a target has.  Once
+        the search has settled on the live parameters it samples those freely, so its top
+        holds copies.  In NEAR2's run_20261027_222223 the 25 candidates of an annulus were 7
+        to 20 distinct reductions, 74 of the run's 175 validation slots re-scored a reduction
+        already in the list, and the election among copies was decided by draw noise.  The
+        cost is one clean reduction per copy, and no draw is taken, so the run's generator
+        stands where it did.  The look goes ``vc.dedup_depth x n_top`` deep."""
+        order = [int(e) for e in self.history.order()]
+        X = self.history.X
+
+        def far(e: int, others: Sequence[int]) -> bool:
+            return all(self.space.distinct(X[e], X[c], vc.distinct_tol) for c in others)
+
+        if str(vc.dedup).lower() != "image":
+            cands: List[int] = []
+            for e in order:
+                if far(e, cands):
+                    cands.append(e)
+                if len(cands) >= vc.n_top:
+                    break
+            return cands, [None] * len(cands), []
+        pool = order[:max(int(vc.dedup_depth or 1), 1) * max(int(vc.n_top), 1)]
+        cands, cleans, dups = [], [], []
+        pos = examined = 0
+        self.hb.stage(f"annulus {ia + 1} validation: distinct candidates", write=False, annulus=ia)
+        while len(cands) < vc.n_top and pos < len(pool):
+            batch: List[int] = []
+            while pos < len(pool) and len(batch) < vc.n_top - len(cands):
+                e = pool[pos]
+                pos += 1
+                if far(e, cands + batch):
+                    batch.append(e)
+            if not batch:
+                break
+            cfgs = [self._apply_k_flag(self.space.decode(X[e]), self.history.flags[e].get("k")) for e in batch]
+            calls = [lambda cfg=cfg, e=e: self._reduce(cfg, None, tag=f"a{ia+1}_valpick_e{e+1}_clean")
+                     for e, cfg in zip(batch, cfgs)]
+            window = self._reduction_window(max(len(c.selected) for c in cfgs))
+            with contextlib.closing(self._run_ordered(calls, window)) as stream:
+                got = [res for _, res in stream]
+            examined += len(batch)
+            for e, res in zip(batch, got):
+                if isinstance(res, BaseException):
+                    self.log(f"  validation: the clean reduction of eval {e + 1} failed ({res!r}), so it is "
+                             f"validated without the comparison")
+                    res = None
+                same = None if res is None else next(
+                    (c for c, cl in zip(cands, cleans) if cl is not None and _same_reduction(cl, res)), None)
+                if same is not None:
+                    dups.append([e, same])
+                    continue
+                cands.append(e)
+                cleans.append(res)
+                if len(cands) >= vc.n_top:
+                    break
+        if dups:
+            self.log(f"  validation: {len(dups)} of the {examined} configurations examined reduce as an earlier "
+                     f"candidate does (parameters that do not change the reduction), so {len(cands)} distinct "
+                     f"reductions are validated")
+        if len(cands) < vc.n_top:
+            self.log(f"  validation: {len(cands)} distinct reduction(s) among the first {len(pool)} of the search's "
+                     f"order")
+        return cands, cleans, dups
+
+    def _side_rng(self, *tag) -> np.random.Generator:
+        """A generator for draws that must leave the run's own where it stands, seeded from that
+        one's state and ``tag``.  A resumed run, whose generator is restored, draws the same,
+        and every later draw of the run is the one it would have been without these."""
+        import hashlib
+        st = json.dumps(self.rng.bit_generator.state, sort_keys=True,
+                        default=lambda o: o.tolist() if hasattr(o, "tolist") else str(o))
+        h = hashlib.sha256((st + "|" + "|".join(str(t) for t in tag)).encode()).digest()
+        return np.random.default_rng(np.frombuffer(h, dtype=np.uint32))
+
+    def _rescore_winner(self, ia: int, winner: Dict[str, Any], n: int) -> Dict[str, Any]:
+        """The elected candidate on ``n`` fresh draws, whose median becomes its validated score.
+
+        The election takes the largest of the candidates' medians, and a median of ``n_valid``
+        draws scatters by a few tenths of S/N about its configuration's own, while the top
+        candidates' own medians lie within a few tenths of each other.  So the largest is
+        largely the luckiest, and the winner's median on the draws it was elected on is high:
+        by 0.22 S/N on average over the seven annuli of NEAR2's run_20261027_222223 and up to
+        0.94 in run_20261024_153342, against 200 common draws on the GPU (the medians of the
+        candidates not elected were unbiased, +0.005).  Fresh draws are not selected on.  Their
+        median is ``winner_score``, the trial nearest it is the committed one (the products,
+        the verify's injections) and their per-source S/N give the contrast curve.  The
+        election's median stays as ``election_score``.  The draws come from :meth:`_side_rng`,
+        so the run's generator stands where it did.  No trial scored: the election's median
+        stands."""
+        cfg: Config = winner["config"]
+        clean = winner.get("clean")
+        rng = self._side_rng("rescore", ia, int(winner.get("eval_index", -1)))
+        sampler = getattr(self.sampler, "base", None) or self.sampler     # a replaying run draws fresh here too
+        plan = []
+        for _ in range(int(n)):
+            rlo, rhi = self._band(ia, cfg)
+            plan.append(sampler.sample(self._nsrc(ia), rlo, rhi, rng, self.contrast))
+        calls: List[Callable[[], Any]] = []
+        if clean is None:
+            calls.append(lambda: self._reduce(cfg, None, tag=f"a{ia+1}_valwin_clean"))
+        calls += [lambda t=t, src=src: self._reduce(cfg, src, tag=f"a{ia+1}_valwin_t{t}") for t, src in enumerate(plan)]
+        trials: List[float] = []
+        imgs: List[Any] = []
+        ps: List[List[Optional[float]]] = []
+        samples_r: List[float] = []
+        samples_s: List[float] = []
+        self.hb.stage(f"annulus {ia + 1} validation: the winner on {n} fresh draws", write=False, annulus=ia)
+        with contextlib.closing(self._run_ordered(calls, self._reduction_window(len(cfg.selected)))) as stream:
+            if clean is None:
+                _, res = next(stream)
+                clean = None if isinstance(res, BaseException) else res
+            for src in plan:
+                _, res = next(stream)
+                try:
+                    if isinstance(res, BaseException):
+                        raise res
+                    r = self.objective.score_raw(res.image, src, None if clean is None else clean.image,
+                                                 **self._fm_for(res, clean))
+                    trials.append(float(r.score))
+                    imgs.append(res)
+                    ps.append([None if not np.isfinite(v) else float(v) for v in r.per_source])
+                    for s_, v in zip(src, r.per_source):
+                        samples_r.append(s_.rho)
+                        samples_s.append(v)
+                except Exception as exc:          # noqa: BLE001
+                    self.log(f"  validation: a fresh trial of the winner failed: {exc!r}")
+                    trials.append(np.nan)
+                    imgs.append(None)
+                    ps.append([])
+        vs = np.array(trials, float)
+        med = nanmedian_even(vs) if vs.size else np.nan
+        old = float(winner["score"])
+        if not np.isfinite(med):
+            self.log(f"  validation: no fresh trial of the winner scored, so its election median {old:.3f} stands")
+            return winner
+        fin = np.flatnonzero(np.isfinite(vs))
+        commit = int(fin[np.argmin(np.abs(vs[fin] - med))])
+        self.log(f"  validation: the winner (eval {int(winner.get('eval_index', -1)) + 1}) on {len(plan)} fresh "
+                 f"draws: median {med:.3f} (elected at {old:.3f} on its own draws)")
+        return dict(winner, election_score=old, score=float(med),
+                    rescore_trials=[None if not np.isfinite(v) else float(v) for v in vs],
+                    rescore_sources=[[list(s_.as_tuple()) for s_ in src] for src in plan], rescore_committed=commit,
+                    inj=imgs[commit], sources=list(plan[commit]), per_source=list(ps[commit]),
+                    samples_r=samples_r, samples_s=samples_s,
+                    clean=clean if clean is not None else winner.get("clean"))
 
     # validation resume helpers -------------------------------------------------
     def _val_pkl(self, ia: int, ci: int) -> str:
@@ -3348,7 +3567,11 @@ class Runner:
             n_evaluations=len(self.history), winner_sources=[s.as_tuple() for s in sources],
             partitions=[str(s) for s in cfg.selected], k_used=k_used, fm_curve=fm_curve,
             per_source=[None if (v is None or not np.isfinite(v)) else float(v) for v in (winner.get("per_source") or [])],
-            k_default=winner.get("k_default"))
+            k_default=winner.get("k_default"),
+            election_score=None if winner.get("election_score") is None else float(winner["election_score"]),
+            rescore_trials=winner.get("rescore_trials"), rescore_sources=winner.get("rescore_sources"),
+            rescore_committed=winner.get("rescore_committed"),
+            validation_duplicates=list(self._val_dups.get(int(ia), [])))
         # the products above and this record are what a resume reads back for a finished
         # annulus (_winner_from_disk, _annulus_images): on disk before the checkpoint that
         # marks the annulus done
@@ -3359,7 +3582,8 @@ class Runner:
                                    extra={"validated": int(validated), "search_score": f"{bs:.3f}"},
                                    weights=None if ev_c is None else getattr(ev_c, "weights", None))
         self.log(f"  annulus {ia+1} winner: eval {res.winner_index+1}, "
-                 f"{'validated' if validated else 'search'} score {res.winner_score:.3f}")
+                 f"{'validated' if validated else 'search'} score {res.winner_score:.3f}"
+                 + (f" on fresh draws (elected at {res.election_score:.3f})" if res.election_score is not None else ""))
         return res
 
     def _annulus_images(self, ia: int) -> Optional[Dict[str, Any]]:

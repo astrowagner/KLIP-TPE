@@ -945,6 +945,11 @@ def cmd_near(a):
         # mirror an IDL run: nights, annulus, budget, contrast, validation and TPE settings
         from .idl_compare import matched_run_config
         cfg, info = matched_run_config(a.from_idl_setup, seed=a.seed, **_protocol_config(a))
+        # the IDL's validation rules unless asked otherwise
+        if getattr(a, "n_rescore", None) is not None:
+            cfg.validation.n_rescore = int(a.n_rescore)
+        if getattr(a, "validation_dedup", None):
+            cfg.validation.dedup = a.validation_dedup
         if info["nights"] and a.nights == [1, 2, 3, 4, 5, 6]:
             a.nights = info["nights"]
         print(f"matched IDL setup {a.from_idl_setup}: nights {a.nights}, ann_edges {cfg.ann_edges}, "
@@ -963,7 +968,9 @@ def cmd_near(a):
     cfg = RunConfig(ann_edges=edges, n_iter=a.n_iter, n_init=a.n_init, search_mode=a.mode,
                     seed=a.seed, contrast0=a.contrast0, blocks=a.blocks, bench_tag=a.tag,
                     calibration=CalibrationConfig(forced=a.use_contrast, ceiling=a.cmax_cal),
-                    validation=ValidationConfig(n_top=a.n_top, n_valid=a.n_valid),
+                    validation=ValidationConfig(n_top=a.n_top, n_valid=a.n_valid,
+                                                n_rescore=getattr(a, "n_rescore", None),
+                                                dedup=getattr(a, "validation_dedup", None) or "image"),
                     **_protocol_config(a))
     r = Runner(red, space, objective, sampler, cfg, a.run_dir, throughput_fn=thr, callbacks=_callbacks(a))
     r.run()
@@ -1384,6 +1391,15 @@ def _add_run_args(p):
     p.add_argument("--k-max", type=int, default=None)
     p.add_argument("--n-top", type=int, default=3)
     p.add_argument("--n-valid", type=int, default=8)
+    p.add_argument("--n-rescore", type=int, default=None, metavar="N",
+                   help="fresh trials for the elected winner, whose median is then its validated score "
+                        "(default --n-valid, 0 with --from-idl-setup). The election picks the largest of noisy "
+                        "medians, so the winner's median on its own draws is high. A lone candidate is not "
+                        "re-scored. 0 reports the election's median, as the IDL does")
+    p.add_argument("--validation-dedup", default=None, choices=["image", "vector"],
+                   help="how validation candidates must differ. With image (the default) a configuration whose "
+                        "clean image equals an earlier candidate's is skipped for the next. With vector (the "
+                        "default with --from-idl-setup) only the parameter vectors must differ, as in the IDL")
     p.add_argument("--global-block", action="store_true", help="one parameter block for all nights")
     p.add_argument("--no-framesel", action="store_true")
     p.add_argument("--no-selection", action="store_true", help="no drop1/drop2 night-selection dims")

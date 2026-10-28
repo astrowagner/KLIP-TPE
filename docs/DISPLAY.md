@@ -149,8 +149,20 @@ ones the live display skipped, into `steps_rebuilt/` with its own movie.
 * **search score** (`results.txt`, the convergence trace) — the clean-subtracted median
   S/N of the injections of that evaluation.  Optimistically biased: the optimizer picks
   the lucky draws.
-* **validated score** (`winner.json: winner_score`, `validation_panel.png`) — the median
-  over `n_valid` fresh injection sets of the winner.  This is the number to report.
+* **validated score** (`winner.json: winner_score`, the star in `validation_panel.png`) — the
+  winner's median over `n_rescore` (by default `n_valid`) injection sets drawn after the
+  election.  This is the number to report.  The election takes the largest of the candidates'
+  medians, each on its own `n_valid` draws, so the elected median is high on those draws, by
+  0.22 S/N on average over the annuli of NEAR2's run_20261027_222223 and up to 0.94 in an
+  earlier seed.  It stays in `winner.json` as `election_score`.  A lone candidate's median was
+  not selected on and stands as it is.  `--n-rescore 0` reports the election's median instead,
+  as the IDL does.
+* **candidates** — validation re-scores the top `n_top` distinct reductions.  A configuration
+  whose clean reduction equals an earlier candidate's, bit for bit, differs only in parameters
+  the reduction never reads (a deselected night's, an even high-pass width, frame cuts with no
+  frame between them), and is skipped for the next in the search's order.  `winner.json` lists
+  the skipped ones as `validation_duplicates`.  `--validation-dedup vector` compares the
+  parameter vectors only, as the IDL does.
 * **contrast curve** — 5σ, from the injections' recovered throughput at the calibrated
   contrast; the KLIP-FM section is an independent forward-model estimate on the built-in
   engine.
