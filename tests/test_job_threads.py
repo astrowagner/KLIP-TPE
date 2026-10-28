@@ -11,8 +11,8 @@ What must hold:
 * the cost estimate grows with the work, and a job's threads with its cost, from 1 to
   ``4 x --threads-per-job``, a power of two;
 * a free worker takes the waiting job with the smallest key;
-* the jobs running together never use more threads than the budget (``--workers``), from
-  the GPU session's farm benchmark on patrick of 2026-10-26.
+* asked to, the pool holds the jobs running together to the budget (``--workers``), and by
+  default it does not: on patrick that cut ran 1.65x slower (the GPU session, 2026-10-27).
 """
 from __future__ import annotations
 
@@ -253,21 +253,28 @@ def test_the_jobs_in_flight_never_use_more_threads_than_the_budget():
         pool.close()
 
 
-def test_a_partitioned_reducer_holds_its_pool_to_the_budget():
+def test_a_partitioned_reducer_leaves_its_pool_uncut_unless_asked():
+    """The cut is off by default since 2026-10-28.  On patrick it took a six-night reduction
+    from 0.205 s to 0.339 s: with 48 workers and a budget of 96 the heavy nights ran on one
+    thread each, and every trial waited on them.  ``cap_threads = True`` turns it on."""
+    assert PartitionedReducer.cap_threads is False
     reds = {"n1": _reducer(nframes=30, seed=1), "n2": _reducer(nframes=60, seed=2)}
     pr = PartitionedReducer(reds, max_workers=6, threads_per_job=2)
     said = []
     pr._log = said.append
     try:
         assert pr.start_workers() == "processes"
-        assert pr._procs.budget == 6
-        assert "at most 6 in flight" in "\n".join(said)
+        assert pr._procs.budget is None
+        assert "in flight" not in "\n".join(said)
     finally:
         pr.close()
     pr = PartitionedReducer(reds, max_workers=6, threads_per_job=2)
-    pr.cap_threads = False                          # the plan as it was before 2026-10-27
+    pr.cap_threads = True
+    said = []
+    pr._log = said.append
     try:
         pr.start_workers()
-        assert pr._procs.budget is None
+        assert pr._procs.budget == 6
+        assert "at most 6 in flight" in "\n".join(said)
     finally:
         pr.close()

@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased — 2026-10-28 (the thread cap off by default)
+
+From the GPU session's A/B of 9097654 on patrick (2026-10-27), with the same farm benchmark of
+NEAR2's annulus 5 as before.
+
+- **`PartitionedReducer.cap_threads` is False.**  Holding the jobs running together to the
+  budget took a six-night reduction from 0.205 s to 0.339 s at 96 / 2 / batch 4, 1.65x slower
+  and slower than the old 192 / 4 layout (0.267 s).  At 128 and 192 workers it was as bad
+  (0.347 and 0.355 s), so the loss is the policy, not the budget.  With 48 workers and a budget
+  of 96, `ProcessPool._fit` kept a thread for each idle worker, so the few jobs sent first took
+  8 threads and nearly every later one, the heavy nights included, ran on 1.  Each trial then
+  waited on one-thread stragglers, and the pool sat 25 % busy at a load average of 39.
+  Uncapped, the plan's jobs hold a load average of 133 on the budget of 96, which patrick's 192
+  logical CPUs absorb, and that is the fastest layout measured there.  `cap_threads = True`
+  turns the cut on again, for measuring a bound.  A pinned `--workers N` can again be exceeded
+  for a while by the jobs a long reduction is given.
+- `--workers auto` = physical cores and `--threads-per-job 2` stay: uncapped, 96 / 2 ran at
+  0.205 s, the best of the thirteen layouts measured over two days.
+
 ## Unreleased — 2026-10-27 (the worker farm: a thread per physical core, 2 per job, the budget held)
 
 From the GPU session's farm benchmark on patrick of 2026-10-26.  It replayed 200 recorded

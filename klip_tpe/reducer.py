@@ -1480,10 +1480,10 @@ class PartitionedReducer(Reducer):
         threads_per_job`` processes, and never fewer than the ``min(max_workers, 2 x
         partitions)`` it had before, so the runner can keep as many reductions in flight as
         the budget can serve (a trial's clean and all its draws, several validation trials).
-        A job expected to take long gets up to four times as many (:meth:`_plan`), and the
-        jobs running together never use more than ``max_workers`` (:attr:`cap_threads`).
-        On patrick, 48 jobs of 2 threads at a budget of 96 reduced NEAR2's nights 1.25x
-        faster than 48 jobs of 4 at 192.
+        A job expected to take long gets up to four times as many (:meth:`_plan`), so the
+        jobs running together can hold more than ``max_workers`` for a while
+        (:attr:`cap_threads`).  On patrick, 48 jobs of 2 threads at a budget of 96 reduced
+        NEAR2's nights 1.25x faster than 48 jobs of 4 at 192.
     representative
         the partition whose pixel scale, FWHM, lambda/D and matched-filter kernel stand for
         the combined image (the metric and the sampler read them from here).  Default: the
@@ -1496,9 +1496,14 @@ class PartitionedReducer(Reducer):
     # class defaults, so an instance made without __init__ still works; __init__ sets its own
     threads_per_job = 2
     #: hold the threads of the jobs running together to ``max_workers``
-    #: (:meth:`klip_tpe.parallel.ProcessPool._fit`).  False lets the by-cost plan run over it,
-    #: as before 2026-10-27, a switch for measuring the two
-    cap_threads = True
+    #: (:meth:`klip_tpe.parallel.ProcessPool._fit`).  Off: on patrick (96 / 2 / batch 4,
+    #: NEAR2's annulus 5) it took a six-night reduction from 0.205 s to 0.339 s, 1.65x
+    #: slower.  With 48 slots and a budget of 96, the few jobs sent first took 8 threads each
+    #: and nearly every later one, the heavy nights included, ran on 1, so each trial waited on
+    #: one-thread stragglers and the pool sat 25 % busy.  The plan's own excess (a load average
+    #: of 133 on 96 cores) is absorbed by the 192 logical CPUs and is the fastest layout
+    #: measured.  True turns the cut on, for measuring a bound.
+    cap_threads = False
     _threads_fallback = False
     _start_lock = threading.Lock()
     _recent_costs = None
@@ -1915,9 +1920,9 @@ class PartitionedReducer(Reducer):
         Threads scale with the job's expected cost against the mean of the latest jobs,
         rounded to a power of two between 1 and ``4 x base``: a big night at a small bin gets
         many, a light job one, and over many jobs the mean stays near ``base``
-        (``--threads-per-job``).  The worker pool cuts a job's count when it is sent, so the
-        jobs running together stay within ``max_workers`` (:attr:`cap_threads`).  The images
-        do not depend on the thread count."""
+        (``--threads-per-job``).  The jobs running at a moment can hold more than
+        ``max_workers``, since the long ones run longest.  :attr:`cap_threads` would cut them
+        at dispatch, and is off.  The images do not depend on the thread count."""
         costs = []
         for r, req in jobs:
             f = getattr(r, "cost_estimate", None)
