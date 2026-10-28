@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — 2026-10-28 (a final round of validation on common draws)
+
+From the addendum to the GPU session's note of 2026-10-28.  On its 200 common draws the
+validation list of NEAR2's run_20261027_222223 held a better reduction than the elected one in
+four of seven annuli, by 1 to 3 % (by 12.6 % in an annulus of run_20261024_153342), each time
+outside the bootstrap's 16–84 % interval.
+
+- **A final round** (`ValidationConfig.n_final`, `n_final_draws`, `--n-final K`,
+  `--n-final-draws M`, off by default).  The K candidates with the largest validated medians
+  are scored on M common draws, the same injections for each, and the largest median there is
+  elected, the better first-round median on a tie.  The first round's medians are each on draws
+  of their own and scatter by a few tenths of S/N, about as far as the top candidates lie
+  apart.  The candidates' scores correlate at 0.92 to 1.00 across draws, so on common draws
+  their differences scatter far less.  The GPU session suggests 5 × 200, about 1,000 more
+  reductions an annulus, which roughly doubles a NEAR2 validation on patrick.
+- The round's draws come from a generator seeded from the run's, which stays where it stood.
+  The first round, the search after it and a resume are what they were, and a resumed run makes
+  the same round again.  The winner is then scored on fresh draws (`n_rescore`), and
+  `election_score` is its median in the round.
+- `winner.json: final_round` keeps the entrants' medians and trials, `validation_final.json`
+  the draws as well.  The validation panel draws the round's medians as diamonds.
+- README and docs/BUDGET.md now describe the winner's fresh draws of 7a5bc15.
+
 ## Unreleased — 2026-10-28 (distinct reductions in validation, the winner on fresh draws)
 
 From the GPU session's note of 2026-10-28.  It re-validated every annulus of NEAR2's

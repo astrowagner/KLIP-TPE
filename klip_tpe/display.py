@@ -89,6 +89,7 @@ KNOWN_COLOR = "#FF2D95"         # real companions the objective was told about (
 #: inferno (black -> purple -> orange -> yellow) a cyan reads as a dimmer green.  A known
 #: companion must never be mistaken for an injection, so it gets the one hue nothing else uses.
 CUR_COLOR = "#7f7f7f"
+FINAL_COLOR = "#CC79A7"         # validation's final round (medians on common draws)
 SRC_COLOR = "#00e5a0"
 
 #: column-header abbreviations of the per-partition config table (step panel text block)
@@ -2036,12 +2037,15 @@ def render_calibration(ad: AnnulusData, info: Dict[str, Any], out: str, clean: O
 def render_validation(ad: AnnulusData, table: List[Dict[str, Any]], out: str, inj: Optional[np.ndarray] = None,
                       clean: Optional[np.ndarray] = None, sources=None, cmap: str = "inferno",
                       winner_eval: Optional[int] = None, per_source=None, fm: Optional[np.ndarray] = None,
-                      fresh: Optional[Tuple[float, float, int]] = None) -> str:
+                      fresh: Optional[Tuple[float, float, int]] = None,
+                      final: Optional[Dict[str, Any]] = None) -> str:
     """Validation panel: per candidate the search score (hollow) vs the validated
     median (filled) with the trial spread; committed winner thumbnails (the injected
     one labelled with the committed trial's raw per-source S/N) and, when the KLIP-FM
     cross-check ran, the forward-model response image.  ``fresh = (median, election median,
-    n)``: the winner's median on ``n`` fresh draws, its validated score, drawn as a star."""
+    n)``: the winner's median on ``n`` fresh draws, its validated score, drawn as a star.
+    ``final``: the final round's record (``AnnulusResult.final_round``), its medians on
+    common draws drawn as diamonds."""
     with _rc():
         fig = Figure(figsize=(12.0, 5.6))
         FigureCanvasAgg(fig)
@@ -2069,6 +2073,12 @@ def render_validation(ad: AnnulusData, table: List[Dict[str, Any]], out: str, in
             if is_win and fresh is not None and fresh[0] is not None and np.isfinite(fresh[0]):
                 ax.scatter([ci - 0.12], [fresh[0]], marker="*", s=140, color=VALID_COLOR, edgecolor="black", lw=0.8,
                            zorder=6, label=f"winner on {int(fresh[2])} fresh draws")
+        f_rows = [r for r in ((final or {}).get("rows") or []) if r.get("final_score") is not None]
+        for j, fr in enumerate(f_rows):
+            ax.scatter([int(fr["candidate"]) - 0.24], [float(fr["final_score"])], marker="D", s=34, color=FINAL_COLOR,
+                       edgecolor="black" if int(fr["candidate"]) == int(final.get("winner_candidate", -1)) else "none",
+                       lw=0.9, zorder=5,
+                       label=f"final round: median on {int(final.get('n_draws', 0))} common draws" if j == 0 else None)
         ax.set_xticks(range(len(table)))
         ax.set_xticklabels([f"cand {c + 1}\neval {int(r.get('eval_index', -1)) + 1}"
                             + ("\n(winner)" if winner_eval is not None and int(r.get("eval_index", -1)) == winner_eval else "")
@@ -2084,8 +2094,16 @@ def render_validation(ad: AnnulusData, table: List[Dict[str, Any]], out: str, in
             lines.append(f"{ci + 1:>4d}  {int(row.get('eval_index', -1)) + 1:>4d}   {_fnum(row.get('search_score')):>6s}   "
                          f"{_fnum(row.get('validated_score')):>6s}   [{tr}]")
         lines.append("")
-        lines.append("winner = argmax validated median; the search")
-        lines.append("maximum is optimistic (best of noisy draws).")
+        if f_rows:
+            lines.append("winner = argmax median on the final round's")
+            lines.append("common draws.  The search maximum is optimistic.")
+            lines.append(f"final round: the best {len(f_rows)} on {int(final.get('n_draws', 0))} common draws,")
+            lines.append(f"cand {int(final.get('winner_candidate', -1)) + 1} elected"
+                         + ("" if int(final.get("winner_candidate", -1)) == int(final.get("first_round_winner", -1))
+                            else f" (first round: cand {int(final.get('first_round_winner', -1)) + 1})"))
+        else:
+            lines.append("winner = argmax validated median; the search")
+            lines.append("maximum is optimistic (best of noisy draws).")
         if fresh is not None and fresh[0] is not None and np.isfinite(fresh[0]):
             lines.append(f"winner on {int(fresh[2])} fresh draws: {_fnum(fresh[0])}")
             lines.append(f"(elected at {_fnum(fresh[1])}, the largest of the")
@@ -4507,7 +4525,8 @@ class LiveDisplay(RunCallback):
             fresh = (float(winner["score"]), float(winner["election_score"]), len(winner.get("rescore_trials") or []))
         self._val_args = dict(inj=None if inj is None else inj.image, clean=None if clean is None else clean.image,
                               sources=src, winner_eval=winner.get("eval_index"),
-                              per_source=winner.get("per_source") or None, fresh=fresh)
+                              per_source=winner.get("per_source") or None, fresh=fresh,
+                              final=winner.get("final_round"))
         self._guard(runner, "validation panel", render_validation, ad, table,
                     os.path.join(self._ann_dir(runner.ia), "validation_panel.png"), cmap=self.cmap, **self._val_args)
 
