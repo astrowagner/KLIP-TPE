@@ -172,10 +172,14 @@ def test_validation_winner_fields(fm_run):
     assert winner["k_default"] == r.k_default == runner._k_default
     assert len(winner["per_source"]) == len(winner["sources"]) == len(r.winner_sources) > 0
     assert r.per_source == winner["per_source"]
-    # committed trial: the per-source median equals the committed trial's raw score
-    row = [t for t in table if t["eval_index"] == winner["eval_index"]][0]
-    commit = row["committed_trial"]
-    assert np.isclose(np.median(winner["per_source"]), row["trials"][commit])
+    # committed trial: the per-source median equals the committed trial's raw score.  With two
+    # candidates the winner is scored again on fresh draws, and the committed trial is the
+    # fresh one nearest their median
+    assert winner.get("rescore_trials") is not None, "an election among two medians: the winner is re-scored"
+    commit = winner["rescore_committed"]
+    assert r.rescore_committed == commit and r.rescore_trials == winner["rescore_trials"]
+    assert [list(s) for s in r.winner_sources] == winner["rescore_sources"][commit] == r.rescore_sources[commit]
+    assert np.isclose(np.median(winner["per_source"]), winner["rescore_trials"][commit])
     w = json.load(open(os.path.join(d, "annulus01", "winner.json")))
     assert w["per_source"] == r.per_source and w["k_default"] == r.k_default
     # EvalRecord.meta carries the reducer's angle convention

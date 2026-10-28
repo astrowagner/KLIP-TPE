@@ -58,10 +58,11 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--seed SEED] [--contrast0 CONTRAST0]
                         [--use-contrast USE_CONTRAST [USE_CONTRAST ...]]
                         [--cmax-cal CMAX_CAL] [--k-max K_MAX] [--n-top N_TOP]
-                        [--n-valid N_VALID] [--global-block] [--no-framesel]
-                        [--no-selection] [--max-drop MAX_DROP] [--tag TAG]
-                        [--from-idl-setup RUN_SETUP_TXT] [--opt-width]
-                        [--width-range W0 W1] [--r-cap R_CAP]
+                        [--n-valid N_VALID] [--n-rescore N]
+                        [--validation-dedup {image,vector}] [--global-block]
+                        [--no-framesel] [--no-selection] [--max-drop MAX_DROP]
+                        [--tag TAG] [--from-idl-setup RUN_SETUP_TXT]
+                        [--opt-width] [--width-range W0 W1] [--r-cap R_CAP]
                         [--k-mode {search,scan_rescore,scan}]
                         [--k-scan-max K_SCAN_MAX]
                         [--stitch-every STITCH_EVERY] [--verify] [--no-verify]
@@ -208,6 +209,18 @@ options:
   --k-max K_MAX
   --n-top N_TOP
   --n-valid N_VALID
+  --n-rescore N         fresh trials for the elected winner, whose median is
+                        then its validated score (default --n-valid, 0 with
+                        --from-idl-setup). The election picks the largest of
+                        noisy medians, so the winner's median on its own draws
+                        is high. A lone candidate is not re-scored. 0 reports
+                        the election's median, as the IDL does
+  --validation-dedup {image,vector}
+                        how validation candidates must differ. With image (the
+                        default) a configuration whose clean image equals an
+                        earlier candidate's is skipped for the next. With
+                        vector (the default with --from-idl-setup) only the
+                        parameter vectors must differ, as in the IDL
   --global-block        one parameter block for all nights
   --no-framesel
   --no-selection        no drop1/drop2 night-selection dims
@@ -482,10 +495,11 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--blocks BLOCKS] [--seed SEED] [--contrast0 CONTRAST0]
                      [--use-contrast USE_CONTRAST [USE_CONTRAST ...]]
                      [--cmax-cal CMAX_CAL] [--k-max K_MAX] [--n-top N_TOP]
-                     [--n-valid N_VALID] [--global-block] [--no-framesel]
-                     [--no-selection] [--max-drop MAX_DROP] [--tag TAG]
-                     [--from-idl-setup RUN_SETUP_TXT] [--opt-width]
-                     [--width-range W0 W1] [--r-cap R_CAP]
+                     [--n-valid N_VALID] [--n-rescore N]
+                     [--validation-dedup {image,vector}] [--global-block]
+                     [--no-framesel] [--no-selection] [--max-drop MAX_DROP]
+                     [--tag TAG] [--from-idl-setup RUN_SETUP_TXT]
+                     [--opt-width] [--width-range W0 W1] [--r-cap R_CAP]
                      [--k-mode {search,scan_rescore,scan}]
                      [--k-scan-max K_SCAN_MAX] [--stitch-every STITCH_EVERY]
                      [--verify] [--no-verify] [--verify-n-boot VERIFY_N_BOOT]
@@ -630,6 +644,18 @@ options:
   --k-max K_MAX
   --n-top N_TOP
   --n-valid N_VALID
+  --n-rescore N         fresh trials for the elected winner, whose median is
+                        then its validated score (default --n-valid, 0 with
+                        --from-idl-setup). The election picks the largest of
+                        noisy medians, so the winner's median on its own draws
+                        is high. A lone candidate is not re-scored. 0 reports
+                        the election's median, as the IDL does
+  --validation-dedup {image,vector}
+                        how validation candidates must differ. With image (the
+                        default) a configuration whose clean image equals an
+                        earlier candidate's is skipped for the next. With
+                        vector (the default with --from-idl-setup) only the
+                        parameter vectors must differ, as in the IDL
   --global-block        one parameter block for all nights
   --no-framesel
   --no-selection        no drop1/drop2 night-selection dims

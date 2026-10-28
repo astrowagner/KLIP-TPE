@@ -116,14 +116,16 @@ def test_validation_table_and_winner_election(base_run):
             assert len(row["trials"]) == 2                          # n_valid
             assert row["validated_score"] == pytest.approx(np.median(row["trials"]))
             assert 0 <= row["committed_trial"] < 2
-        # winner = argmax validated score, its score is the validated one, not the search one
+        # winner = argmax validated score.  Its reported score is its median on fresh draws
+        # (n_rescore = n_valid), the election's median is election_score, not the search one
         best = max(table, key=lambda row: row["validated_score"])
         assert r.validated
         assert r.winner_index == best["eval_index"]
-        assert r.winner_score == pytest.approx(best["validated_score"])
+        assert r.election_score == pytest.approx(best["validated_score"])
+        assert len(r.rescore_trials) == 2 and r.winner_score == pytest.approx(np.median(r.rescore_trials))
         assert np.allclose(r.winner_x, best["x"])
         assert r.winner_score != pytest.approx(r.search_best_score)  # search maxima are optimistic
-        assert len(r.validation_samples["r_as"]) == 2 * [3, 6][ia]   # n_valid * n_sources
+        assert len(r.validation_samples["r_as"]) == 2 * [3, 6][ia]   # n_rescore * n_sources, the fresh draws
 
 
 def test_validation_elects_lower_search_score_when_it_validates_better(tmp_path):

@@ -507,6 +507,7 @@ def test_idl_compare_tooling(tmp_path):
     mcfg, info = matched_run_config(str(idl / "run_setup.txt"), seed=7)
     assert mcfg.ann_edges == [8.0, 30.0] and mcfg.n_iter == 6 and mcfg.n_init == 3
     assert mcfg.validation.n_valid == 2 and mcfg.calibration.forced == [0.02] and mcfg.blocks == "univariate"
+    assert mcfg.validation.dedup == "vector" and mcfg.validation.n_rescore == 0, "the IDL's validation rules"
     assert info["nights"] == [1, 2] and info["idl_seed"] == 4242
 
     cfg = RunConfig(ann_edges=[8, 30], n_iter=1, n_init=1, seed=1, save_fits=False, fm_curve=False,

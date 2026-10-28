@@ -2035,11 +2035,13 @@ def render_calibration(ad: AnnulusData, info: Dict[str, Any], out: str, clean: O
 
 def render_validation(ad: AnnulusData, table: List[Dict[str, Any]], out: str, inj: Optional[np.ndarray] = None,
                       clean: Optional[np.ndarray] = None, sources=None, cmap: str = "inferno",
-                      winner_eval: Optional[int] = None, per_source=None, fm: Optional[np.ndarray] = None) -> str:
+                      winner_eval: Optional[int] = None, per_source=None, fm: Optional[np.ndarray] = None,
+                      fresh: Optional[Tuple[float, float, int]] = None) -> str:
     """Validation panel: per candidate the search score (hollow) vs the validated
     median (filled) with the trial spread; committed winner thumbnails (the injected
     one labelled with the committed trial's raw per-source S/N) and, when the KLIP-FM
-    cross-check ran, the forward-model response image."""
+    cross-check ran, the forward-model response image.  ``fresh = (median, election median,
+    n)``: the winner's median on ``n`` fresh draws, its validated score, drawn as a star."""
     with _rc():
         fig = Figure(figsize=(12.0, 5.6))
         FigureCanvasAgg(fig)
@@ -2064,6 +2066,9 @@ def render_validation(ad: AnnulusData, table: List[Dict[str, Any]], out: str, in
                 ax.annotate("", xy=(ci, v), xytext=(ci, s), arrowprops=dict(arrowstyle="->", color="#777777", lw=0.7))
             else:
                 ax.scatter([ci], [s], marker="x", color="#d62728", s=40, zorder=5)
+            if is_win and fresh is not None and fresh[0] is not None and np.isfinite(fresh[0]):
+                ax.scatter([ci - 0.12], [fresh[0]], marker="*", s=140, color=VALID_COLOR, edgecolor="black", lw=0.8,
+                           zorder=6, label=f"winner on {int(fresh[2])} fresh draws")
         ax.set_xticks(range(len(table)))
         ax.set_xticklabels([f"cand {c + 1}\neval {int(r.get('eval_index', -1)) + 1}"
                             + ("\n(winner)" if winner_eval is not None and int(r.get("eval_index", -1)) == winner_eval else "")
@@ -2081,6 +2086,10 @@ def render_validation(ad: AnnulusData, table: List[Dict[str, Any]], out: str, in
         lines.append("")
         lines.append("winner = argmax validated median; the search")
         lines.append("maximum is optimistic (best of noisy draws).")
+        if fresh is not None and fresh[0] is not None and np.isfinite(fresh[0]):
+            lines.append(f"winner on {int(fresh[2])} fresh draws: {_fnum(fresh[0])}")
+            lines.append(f"(elected at {_fnum(fresh[1])}, the largest of the")
+            lines.append("medians, so high on its own draws)")
         panel_text(ax2, lines, fontsize=7)
         draw_image(fig.add_subplot(gs[0, 2]), inj, ad, "winner: committed injected trial (raw S/N)", cmap,
                    sources=sources, labels=per_source, note=None if inj is not None else "no committed image")
@@ -2852,7 +2861,9 @@ def _step_text(ad: AnnulusData, i: int, bi: int, elapsed_s: float, eta_s: float,
     ]
     if ad.winner is not None:
         w = ad.winner
+        el = w.get("election_score")
         lines.append(f"validated  {_fnum(float(w['winner_score']))} @ eval {int(w['winner_index']) + 1}"
+                     + (f" (fresh draws, elected at {_fnum(float(el))})" if el is not None else "")
                      if w.get("validated") else "validated  -- (not validated)")
     else:
         lines.append("validated  -- (after search)")
@@ -4491,9 +4502,12 @@ class LiveDisplay(RunCallback):
         inj = winner.get("inj")
         clean = winner.get("clean")
         src = [s.as_tuple() if hasattr(s, "as_tuple") else tuple(s) for s in winner.get("sources", [])]
+        fresh = None
+        if winner.get("election_score") is not None:
+            fresh = (float(winner["score"]), float(winner["election_score"]), len(winner.get("rescore_trials") or []))
         self._val_args = dict(inj=None if inj is None else inj.image, clean=None if clean is None else clean.image,
                               sources=src, winner_eval=winner.get("eval_index"),
-                              per_source=winner.get("per_source") or None)
+                              per_source=winner.get("per_source") or None, fresh=fresh)
         self._guard(runner, "validation panel", render_validation, ad, table,
                     os.path.join(self._ann_dir(runner.ia), "validation_panel.png"), cmap=self.cmap, **self._val_args)
 

@@ -324,7 +324,8 @@ def matched_run_config(run_setup_path: str, seed: Optional[int] = None, **overri
               blocks={0: "univariate", 1: "partitions", 2: "full"}.get(tpe_mv, "univariate"),
               pbest=float(pbest), p_local=float(p_local), n_elite=int(n_elite),
               gamma=float(gamma), ncand=int(ncand), explore_frac=float(explore),
-              validation=ValidationConfig(n_top=int(n_top), n_valid=int(n_valid)),
+              # the IDL's validation: candidates apart as vectors, the election's median reported
+              validation=ValidationConfig(n_top=int(n_top), n_valid=int(n_valid), dedup="vector", n_rescore=0),
               calibration=CalibrationConfig(forced=[v if v > 0 else 0.0 for v in uc[:max(len(edges) - 1, 1)]] if uc and any(v > 0 for v in uc) else None,
                                             ceiling=cmax[0] if cmax else None),
               bench_tag=f"match_{os.path.basename(os.path.dirname(os.path.abspath(run_setup_path)))}",
