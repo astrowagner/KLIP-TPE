@@ -113,8 +113,7 @@ options:
                         before 2026-10-27). The pool gets workers / threads-
                         per-job processes, never fewer than min(workers, 2 x
                         partitions). A job expected to take long gets up to 4x
-                        as many, and the jobs running together never use more
-                        than --workers
+                        as many and a light one 1
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -536,8 +535,7 @@ options:
                         before 2026-10-27). The pool gets workers / threads-
                         per-job processes, never fewer than min(workers, 2 x
                         partitions). A job expected to take long gets up to 4x
-                        as many, and the jobs running together never use more
-                        than --workers
+                        as many and a light one 1
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -938,8 +936,7 @@ options:
                         before 2026-10-27). The pool gets workers / threads-
                         per-job processes, never fewer than min(workers, 2 x
                         partitions). A job expected to take long gets up to 4x
-                        as many, and the jobs running together never use more
-                        than --workers
+                        as many and a light one 1
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -1240,8 +1237,7 @@ options:
                         before 2026-10-27). The pool gets workers / threads-
                         per-job processes, never fewer than min(workers, 2 x
                         partitions). A job expected to take long gets up to 4x
-                        as many, and the jobs running together never use more
-                        than --workers
+                        as many and a light one 1
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -1543,8 +1539,7 @@ options:
                         before 2026-10-27). The pool gets workers / threads-
                         per-job processes, never fewer than min(workers, 2 x
                         partitions). A job expected to take long gets up to 4x
-                        as many, and the jobs running together never use more
-                        than --workers
+                        as many and a light one 1
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -1868,8 +1863,7 @@ options:
                         before 2026-10-27). The pool gets workers / threads-
                         per-job processes, never fewer than min(workers, 2 x
                         partitions). A job expected to take long gets up to 4x
-                        as many, and the jobs running together never use more
-                        than --workers
+                        as many and a light one 1
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -2203,8 +2197,7 @@ options:
                         before 2026-10-27). The pool gets workers / threads-
                         per-job processes, never fewer than min(workers, 2 x
                         partitions). A job expected to take long gets up to 4x
-                        as many, and the jobs running together never use more
-                        than --workers
+                        as many and a light one 1
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -2514,8 +2507,7 @@ options:
                         before 2026-10-27). The pool gets workers / threads-
                         per-job processes, never fewer than min(workers, 2 x
                         partitions). A job expected to take long gets up to 4x
-                        as many, and the jobs running together never use more
-                        than --workers
+                        as many and a light one 1
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}

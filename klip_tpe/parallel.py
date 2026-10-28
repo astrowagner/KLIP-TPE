@@ -379,10 +379,12 @@ class ProcessPool:
         self.n = int(n)
         self.log = log or (lambda s: None)
         self.reducers = reducers
-        #: the threads the running jobs may use together, or None for no limit.  A job is
-        #: sent with its request's ``threads`` cut to what the running jobs leave, keeping one
-        #: for each idle worker, so the jobs in flight never use more than this (at least one
-        #: thread a job, so never less than ``n``).  The images do not depend on the count.
+        #: the threads the running jobs may use together, or None for no limit (the default,
+        #: and what :class:`~klip_tpe.reducer.PartitionedReducer` passes, see its
+        #: ``cap_threads``).  A job is sent with its request's ``threads`` cut to what the
+        #: running jobs leave, keeping one for each idle worker, so the jobs in flight never use
+        #: more than this (at least one thread a job, so never less than ``n``).  The images do
+        #: not depend on the count.
         self.budget = None if budget is None else max(int(budget), self.n)
         self._threads: dict = {}           # job id -> the threads it was sent with
         self._threads_running = 0
@@ -500,7 +502,12 @@ class ProcessPool:
         the base.  The jobs running at a given moment are not that mean: the long ones run
         longest, so they and their threads fill the pool.  On patrick, 48 jobs at a base of 4
         ran at a load average of 234 on 192 CPUs, and at a base of 2 at 134 on a budget of
-        96."""
+        96.
+
+        The cut is not used by default.  Measured on patrick it starved the heavy jobs: with a
+        budget of 96 for 48 workers, the reserve for the idle workers leaves room for only a
+        few jobs above one thread, so the heavy nights ran on 1 and every trial waited on them
+        (0.339 s a reduction against 0.205 s uncut, the pool 25 % busy)."""
         t = getattr(req, "threads", None)
         if self.budget is None or t is None:
             return req

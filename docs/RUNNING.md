@@ -78,9 +78,12 @@ frames are copied out of the night, given their sources, high-passed and average
 are in the processor's cache, so a job reads its kept frames from memory once and writes only
 the binned cube.  `--threads-per-job` (2 by default, 4 before
 2026-10-27) sets the average.  A job expected to take long, a big night at a small bin, gets
-more threads, up to four times as many, and a light one gets one.  The jobs running together
-never use more threads than the budget.  The pool cuts a job's count, when it sends it, to what
-the running jobs leave.  A free worker takes the waiting job expected to take longest.  The images do not depend on the thread count or the order.  BLAS
+more threads, up to four times as many, and a light one gets one.  The long jobs run longest,
+so the jobs running at a moment hold more threads than the budget, a load average of 133 on
+patrick's budget of 96.  Its 192 logical CPUs absorb that, and it is the fastest layout
+measured there.  Holding the jobs to the budget (`PartitionedReducer.cap_threads`) ran 1.65x slower,
+since the heavy nights then ran on one thread each.  A free worker takes the waiting job
+expected to take longest.  The images do not depend on the thread count or the order.  BLAS
 is pinned to one thread per worker thread.  `--pool threads` keeps everything in one process.
 It is slower, since Python's GIL limits the thread version to roughly one to two cores' worth
 of work.
@@ -102,7 +105,7 @@ A trial of N nights at `--n-remeasure 5` is 6N partition jobs.  On patrick `--wo
 96, and the default 2 threads per job make 48 processes.  The startup log prints the plan:
 
 ```
-parallel: 96 workers on 96 cores (192 logical CPUs): 48 worker processes x 2 thread(s) per job (1 to 8 by the job's expected cost, longest first, at most 96 in flight), 6 partitions per reduction, so 8 reduction(s) at full width at once; pool = processes
+parallel: 96 workers on 96 cores (192 logical CPUs): 48 worker processes x 2 thread(s) per job (1 to 8 by the job's expected cost, longest first), 6 partitions per reduction, so 8 reduction(s) at full width at once; pool = processes
 ```
 
 `--batch B` keeps B trials in flight (default 1).  As soon as the oldest trial is in, the next

@@ -719,8 +719,7 @@ def _add_near_args(p):
     p.add_argument("--threads-per-job", type=int, default=2,
                    help="threads per partition job on average (default 2, 4 before 2026-10-27). The pool gets "
                         "workers / threads-per-job processes, never fewer than min(workers, 2 x partitions). A job "
-                        "expected to take long gets up to 4x as many, and the jobs running together never use more "
-                        "than --workers")
+                        "expected to take long gets up to 4x as many and a light one 1")
     p.add_argument("--weighting", default="equal", choices=["equal", "sqrt_texp"])
     p.add_argument("--fast", action="store_true", help="single-basis KLIP (angsep/anglemax not searched)")
     p.add_argument("--klip-gram", default="target", choices=["target", "zone"],
