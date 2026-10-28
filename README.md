@@ -103,9 +103,11 @@ data.
    matched-filter Mawet S/N (small-sample corrected, clean-subtracted) and updates the
    density model.  Multi-partition data get one parameter block per partition plus
    `drop1/drop2` selection slots; feasibility guards keep every proposal reducible.
-3. **Validate.**  The top-`n_top` search configurations are re-scored on `n_valid` fresh
-   injection sets; the winner is the best *validation* median.  Search scores are
-   upward-biased and are never reported.
+3. **Validate.**  The top-`n_top` search configurations that reduce differently are
+   re-scored on `n_valid` fresh injection sets each, and the best *validation* median wins.
+   The best of several noisy medians is itself high, so the winner is scored once more on
+   fresh sets, and that median is reported.  Search scores are upward-biased and are never
+   reported.  `--n-final` adds a final round on common draws for a sharper election.
 4. **Products.**  Winner images and S/N maps, injection-calibrated 5σ contrast curve with a
    KLIP forward-model cross-check, sensitivity-weighted stitch over annuli, parameter
    importance, corner and landscape books, verification and blind candidate search —

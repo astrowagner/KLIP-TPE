@@ -158,6 +158,16 @@ class ValidationConfig:
     #: median was not selected on, and it stands.  None means ``n_valid``.  0 reports the
     #: election's median, as the IDL does and as runs saved before 2026-10-28 resume.
     n_rescore: Optional[int] = None
+    #: a final round for a sharper election.  The ``n_final`` candidates with the largest
+    #: medians are scored on ``n_final_draws`` common draws, the same injections for each, and
+    #: the largest median there is elected.  With 0 or 1 the first round elects.  The first
+    #: round's medians are each on their own ``n_valid`` draws and scatter by a few tenths of
+    #: S/N, about as far as the top candidates lie apart.  On common draws the candidates'
+    #: scores move together, so their differences scatter far less.  In NEAR2's
+    #: run_20261027_222223 the list held a better reduction than the elected one in four of
+    #: seven annuli, by 1 to 3 %.
+    n_final: int = 0
+    n_final_draws: int = 200
 
 
 @dataclass
@@ -470,6 +480,10 @@ class AnnulusResult:
     #: ``[[eval, same_as_eval], ...]`` (0-based): configurations the validation skipped because
     #: their clean reduction equals an earlier candidate's (``ValidationConfig.dedup``)
     validation_duplicates: List[List[int]] = field(default_factory=list)
+    #: the final round (``ValidationConfig.n_final``): ``n_draws`` and per entrant its
+    #: ``candidate``, ``eval_index``, first-round ``validated_score``, ``final_score`` and
+    #: ``trials``, with ``winner_candidate``.  ``validation_final.json`` adds the draws.
+    final_round: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return json.loads(json.dumps(asdict(self), default=_json_default))
@@ -2712,6 +2726,14 @@ class Runner:
         table: List[Dict[str, Any]] = []
         vbest, vwin = -np.inf, -1
         winner: Dict[str, Any] = {}
+        n_final = int(vc.n_final or 0)
+        entrants: List[Tuple[float, int, Dict[str, Any]]] = []     # the final round's: (median, ci, cand)
+
+        def enter(vscore: float, ci: int, cand: Dict[str, Any]) -> None:
+            if n_final > 1 and np.isfinite(vscore):
+                entrants.append((float(vscore), int(ci), cand))
+                entrants.sort(key=lambda t: (-t[0], t[1]))
+                del entrants[n_final:]
         # --- per-candidate resume: candidates already validated in an interrupted pass are
         #     reloaded (row from validation.json, images from val_candNN.pkl) instead of
         #     re-reduced.  Each finished candidate also refreshes checkpoint.json (RNG state),
@@ -2727,9 +2749,11 @@ class Runner:
                 table.append(row)
                 vscore = row["validated_score"] if row["validated_score"] is not None else np.nan
                 self.log(f"  validation cand {ci+1}/{len(cands)} (eval {e+1}) -> validated {vscore:.3f}  [resumed]")
+                full = dict(cand, x=np.asarray(row["x"], float), config=cfg)
                 if np.isfinite(vscore) and vscore > vbest:
                     vbest, vwin = vscore, ci
-                    winner = dict(cand, x=np.asarray(row["x"], float), config=cfg)
+                    winner = full
+                enter(vscore, ci, full)
                 continue
             trials, trial_imgs, trial_src, trial_ps, samples_r, samples_s = [], [], [], [], [], []
             vwhy: Dict[int, str] = {}           # trial -> why it has no score (this session's trials)
@@ -2825,9 +2849,11 @@ class Runner:
                     "per_source": list(trial_ps[commit]) if commit >= 0 else [],
                     "k_default": int(self._k_default) if self._k_default is not None else None,
                     "samples_r": list(samples_r), "samples_s": list(samples_s)}
+            full = dict(cand, x=x.copy(), config=cfg)
             if np.isfinite(vscore) and vscore > vbest:
                 vbest, vwin = vscore, ci
-                winner = dict(cand, x=x.copy(), config=cfg)
+                winner = full
+            enter(vscore, ci, full)
             # durable before the checkpoint that pairs with it (_save_validation_partial)
             _atomic_write(os.path.join(self._ann_dir(ia), "validation.json"),
                           json.dumps(table, indent=1, default=_json_default))
@@ -2837,6 +2863,8 @@ class Runner:
                 os.remove(self._val_trials_pkl(ia, ci))
             except OSError:
                 pass
+        if len(entrants) > 1 and int(vc.n_final_draws or 0) > 0:
+            winner, vwin = self._final_round(ia, entrants, int(vc.n_final_draws), winner, vwin)
         # An election among two or more medians picks the largest, so the winner is scored again
         # on fresh draws.  A lone candidate's median was not selected on: its draws are fresh.
         n_re = vc.n_valid if vc.n_rescore is None else int(vc.n_rescore)
@@ -2919,6 +2947,91 @@ class Runner:
             self.log(f"  validation: {len(cands)} distinct reduction(s) among the first {len(pool)} of the search's "
                      f"order")
         return cands, cleans, dups
+
+    def _final_round(self, ia: int, entrants: List[Tuple[float, int, Dict[str, Any]]], n_draws: int,
+                     winner: Dict[str, Any], vwin: int) -> Tuple[Dict[str, Any], int]:
+        """The election again among ``entrants``, the first round's best ``(median, ci, cand)``,
+        on ``n_draws`` common draws.  Draw ``t`` injects the same sources into every entrant.
+
+        A hard draw is hard for every configuration (the GPU session found the candidates'
+        scores correlated at 0.92 to 1.00 across draws), so on common draws the differences
+        between their medians scatter far less than between medians on draws of their own.
+        The largest median here is elected, the better first-round median on a tie.  The
+        draws come from :meth:`_side_rng`, so the run's generator stands where it did, and a
+        resumed run, whose first round is reloaded, makes the same round again.  Returns the
+        winner, with ``score`` its median here and ``final_round`` the round's record, and its
+        first-round index.  When no trial scores, the first round's winner stands."""
+        sampler = getattr(self.sampler, "base", None) or self.sampler     # a replaying run draws fresh here too
+        n_src = self._nsrc(ia)
+        plans: List[List[List[Source]]] = []
+        calls: List[Callable[[], Any]] = []
+        what: List[Tuple[int, Optional[int]]] = []
+        cleans: List[Any] = []
+        for k, (_, ci, cand) in enumerate(entrants):
+            cfg = cand["config"]
+            rlo, rhi = self._band(ia, cfg)
+            # one generator per draw, made afresh for each entrant: the same sources wherever the
+            # entrants' injection bands agree (they differ only under opt_width)
+            srcs = [list(sampler.sample(n_src, rlo, rhi, self._side_rng("final", ia, t), self.contrast))
+                    for t in range(n_draws)]
+            plans.append(srcs)
+            cleans.append(cand.get("clean"))
+            if cleans[k] is None:
+                calls.append(lambda cfg=cfg, ci=ci: self._reduce(cfg, None, tag=f"a{ia+1}_valfin{ci}_clean"))
+                what.append((k, None))
+            for t, src in enumerate(srcs):
+                calls.append(lambda cfg=cfg, ci=ci, t=t, src=src: self._reduce(cfg, src, tag=f"a{ia+1}_valfin{ci}_t{t}"))
+                what.append((k, t))
+        scores = np.full((len(entrants), n_draws), np.nan)
+        window = self._reduction_window(min(len(c["config"].selected) for _, _, c in entrants))
+        self.hb.stage(f"annulus {ia + 1} validation: the best {len(entrants)} on {n_draws} common draws",
+                      write=False, annulus=ia)
+        with contextlib.closing(self._run_ordered(calls, window)) as stream:
+            for (k, t), (_, res) in zip(what, stream):
+                if t is None:
+                    if isinstance(res, BaseException):
+                        self.log(f"  validation final round: a clean reduction failed: {res!r}")
+                    else:
+                        cleans[k] = res
+                    continue
+                try:
+                    if isinstance(res, BaseException):
+                        raise res
+                    clean = cleans[k]
+                    r = self.objective.score_raw(res.image, plans[k][t], None if clean is None else clean.image,
+                                                 **self._fm_for(res, clean))
+                    scores[k, t] = float(r.score)
+                except Exception as exc:          # noqa: BLE001
+                    self.log(f"  validation final round: a trial failed: {exc!r}")
+                if t == n_draws - 1:
+                    vs1, ci, cand = entrants[k]
+                    self.log(f"  validation final round {k + 1}/{len(entrants)} (cand {ci + 1}, eval "
+                             f"{int(cand['eval_index']) + 1}, first round {vs1:.3f}) -> "
+                             f"{nanmedian_even(scores[k]):.3f} on {n_draws} common draws")
+        meds = [nanmedian_even(row) for row in scores]
+        rows = [{"candidate": int(ci), "eval_index": int(cand["eval_index"]), "validated_score": float(vs1),
+                 "final_score": None if not np.isfinite(m) else float(m),
+                 "trials": [None if not np.isfinite(v) else float(v) for v in sc]}
+                for (vs1, ci, cand), m, sc in zip(entrants, meds, scores)]
+        fin = [k for k, m in enumerate(meds) if np.isfinite(m)]
+        if not fin:
+            self.log("  validation final round: no trial scored, so the first round's winner stands")
+            return winner, vwin
+        kb = max(fin, key=lambda k: (meds[k], -k))
+        vs1, ci, cand = entrants[kb]
+        info = {"n_draws": int(n_draws), "rows": rows, "winner_candidate": int(ci), "first_round_winner": int(vwin)}
+        _atomic_write(os.path.join(self._ann_dir(ia), "validation_final.json"),
+                      json.dumps(dict(info, trial_sources=[[[list(s_.as_tuple()) for s_ in src] for src in srcs]
+                                                           for srcs in plans]), indent=1, default=_json_default))
+        e1 = int(entrants[0][2]["eval_index"])
+        self.log(f"  validation final round: eval {int(cand['eval_index']) + 1} elected at {meds[kb]:.3f} on "
+                 f"{n_draws} common draws"
+                 + ("" if int(ci) == int(vwin) else
+                    f" (the first round's largest median was eval {e1 + 1}'s, {entrants[0][0]:.3f})"))
+        new = dict(cand, score=float(meds[kb]), final_round=info)
+        if new.get("clean") is None and cleans[kb] is not None:
+            new["clean"] = cleans[kb]
+        return new, int(ci)
 
     def _side_rng(self, *tag) -> np.random.Generator:
         """A generator for draws that must leave the run's own where it stands, seeded from that
@@ -3571,7 +3684,7 @@ class Runner:
             election_score=None if winner.get("election_score") is None else float(winner["election_score"]),
             rescore_trials=winner.get("rescore_trials"), rescore_sources=winner.get("rescore_sources"),
             rescore_committed=winner.get("rescore_committed"),
-            validation_duplicates=list(self._val_dups.get(int(ia), [])))
+            validation_duplicates=list(self._val_dups.get(int(ia), [])), final_round=winner.get("final_round"))
         # the products above and this record are what a resume reads back for a finished
         # annulus (_winner_from_disk, _annulus_images): on disk before the checkpoint that
         # marks the annulus done

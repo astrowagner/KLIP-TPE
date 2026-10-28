@@ -104,9 +104,12 @@ small space.
 
 ## Validation — `n_top` and `n_valid`
 
-Validation exists to fix exactly the bias above: it re-scores the top `n_top` distinct
-configurations on `n_valid` fresh injection sets each and reports the median.  **This is the
-number to quote.**  Skipping it (`n_top = 1`) means publishing the +1.5.
+Validation exists to fix exactly the bias above.  It re-scores the top `n_top` distinct
+reductions on `n_valid` fresh injection sets each and elects the one with the best median.  The
+elected median is the largest of several noisy ones and so is high itself, by 0.22 S/N on
+average in a NEAR2 seed, so the winner is scored once more on `n_rescore` (by default
+`n_valid`) fresh sets and that median is reported.  **This is the number to quote.**  Skipping
+it (`n_top = 1`) means publishing the +1.5.
 
 By the time a search has produced eight good candidates they are nearly tied: across twelve
 runs the median true gap between the best and the second-best candidate is **0.22 S/N**,
@@ -140,8 +143,8 @@ default and the sensible stopping point.
 
 (The last row is 100 % by construction — the pool was eight.)  Validating two candidates
 catches it 42 % of the time; six catches 67 %.  Since a validation trial is one reduction, the
-whole validation stage at `n_top = 6, n_valid = 8` is 48 reductions — a few percent of a
-300-evaluation search.  There is no reason to be stingy here.
+whole validation stage at `n_top = 6, n_valid = 8` is 48 reductions and 8 for the winner's
+fresh draws — a few percent of a 300-evaluation search.  There is no reason to be stingy here.
 
 **Rule of thumb: `n_top = 6, n_valid = 8`.**
 

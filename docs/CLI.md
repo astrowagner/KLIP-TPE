@@ -59,10 +59,11 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--use-contrast USE_CONTRAST [USE_CONTRAST ...]]
                         [--cmax-cal CMAX_CAL] [--k-max K_MAX] [--n-top N_TOP]
                         [--n-valid N_VALID] [--n-rescore N]
-                        [--validation-dedup {image,vector}] [--global-block]
-                        [--no-framesel] [--no-selection] [--max-drop MAX_DROP]
-                        [--tag TAG] [--from-idl-setup RUN_SETUP_TXT]
-                        [--opt-width] [--width-range W0 W1] [--r-cap R_CAP]
+                        [--validation-dedup {image,vector}] [--n-final K]
+                        [--n-final-draws M] [--global-block] [--no-framesel]
+                        [--no-selection] [--max-drop MAX_DROP] [--tag TAG]
+                        [--from-idl-setup RUN_SETUP_TXT] [--opt-width]
+                        [--width-range W0 W1] [--r-cap R_CAP]
                         [--k-mode {search,scan_rescore,scan}]
                         [--k-scan-max K_SCAN_MAX]
                         [--stitch-every STITCH_EVERY] [--verify] [--no-verify]
@@ -221,6 +222,15 @@ options:
                         earlier candidate's is skipped for the next. With
                         vector (the default with --from-idl-setup) only the
                         parameter vectors must differ, as in the IDL
+  --n-final K           a final round for a sharper election (default 0, off).
+                        The K candidates with the largest validated medians
+                        are scored on --n-final-draws common draws, the same
+                        injections for each, and the largest median there is
+                        elected. On common draws the candidates' scores move
+                        together, so their medians' differences scatter far
+                        less than on draws of their own. The run's own random
+                        draws are untouched
+  --n-final-draws M     common draws of the final round (default 200)
   --global-block        one parameter block for all nights
   --no-framesel
   --no-selection        no drop1/drop2 night-selection dims
@@ -496,10 +506,11 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--use-contrast USE_CONTRAST [USE_CONTRAST ...]]
                      [--cmax-cal CMAX_CAL] [--k-max K_MAX] [--n-top N_TOP]
                      [--n-valid N_VALID] [--n-rescore N]
-                     [--validation-dedup {image,vector}] [--global-block]
-                     [--no-framesel] [--no-selection] [--max-drop MAX_DROP]
-                     [--tag TAG] [--from-idl-setup RUN_SETUP_TXT]
-                     [--opt-width] [--width-range W0 W1] [--r-cap R_CAP]
+                     [--validation-dedup {image,vector}] [--n-final K]
+                     [--n-final-draws M] [--global-block] [--no-framesel]
+                     [--no-selection] [--max-drop MAX_DROP] [--tag TAG]
+                     [--from-idl-setup RUN_SETUP_TXT] [--opt-width]
+                     [--width-range W0 W1] [--r-cap R_CAP]
                      [--k-mode {search,scan_rescore,scan}]
                      [--k-scan-max K_SCAN_MAX] [--stitch-every STITCH_EVERY]
                      [--verify] [--no-verify] [--verify-n-boot VERIFY_N_BOOT]
@@ -656,6 +667,15 @@ options:
                         earlier candidate's is skipped for the next. With
                         vector (the default with --from-idl-setup) only the
                         parameter vectors must differ, as in the IDL
+  --n-final K           a final round for a sharper election (default 0, off).
+                        The K candidates with the largest validated medians
+                        are scored on --n-final-draws common draws, the same
+                        injections for each, and the largest median there is
+                        elected. On common draws the candidates' scores move
+                        together, so their medians' differences scatter far
+                        less than on draws of their own. The run's own random
+                        draws are untouched
+  --n-final-draws M     common draws of the final round (default 200)
   --global-block        one parameter block for all nights
   --no-framesel
   --no-selection        no drop1/drop2 night-selection dims

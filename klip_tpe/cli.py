@@ -950,6 +950,8 @@ def cmd_near(a):
             cfg.validation.n_rescore = int(a.n_rescore)
         if getattr(a, "validation_dedup", None):
             cfg.validation.dedup = a.validation_dedup
+        if getattr(a, "n_final", 0):
+            cfg.validation.n_final, cfg.validation.n_final_draws = int(a.n_final), int(a.n_final_draws)
         if info["nights"] and a.nights == [1, 2, 3, 4, 5, 6]:
             a.nights = info["nights"]
         print(f"matched IDL setup {a.from_idl_setup}: nights {a.nights}, ann_edges {cfg.ann_edges}, "
@@ -970,7 +972,9 @@ def cmd_near(a):
                     calibration=CalibrationConfig(forced=a.use_contrast, ceiling=a.cmax_cal),
                     validation=ValidationConfig(n_top=a.n_top, n_valid=a.n_valid,
                                                 n_rescore=getattr(a, "n_rescore", None),
-                                                dedup=getattr(a, "validation_dedup", None) or "image"),
+                                                dedup=getattr(a, "validation_dedup", None) or "image",
+                                                n_final=int(getattr(a, "n_final", 0) or 0),
+                                                n_final_draws=int(getattr(a, "n_final_draws", 200) or 200)),
                     **_protocol_config(a))
     r = Runner(red, space, objective, sampler, cfg, a.run_dir, throughput_fn=thr, callbacks=_callbacks(a))
     r.run()
@@ -1400,6 +1404,14 @@ def _add_run_args(p):
                    help="how validation candidates must differ. With image (the default) a configuration whose "
                         "clean image equals an earlier candidate's is skipped for the next. With vector (the "
                         "default with --from-idl-setup) only the parameter vectors must differ, as in the IDL")
+    p.add_argument("--n-final", type=int, default=0, metavar="K",
+                   help="a final round for a sharper election (default 0, off). The K candidates with the largest "
+                        "validated medians are scored on --n-final-draws common draws, the same injections for "
+                        "each, and the largest median there is elected. On common draws the candidates' scores "
+                        "move together, so their medians' differences scatter far less than on draws of their "
+                        "own. The run's own random draws are untouched")
+    p.add_argument("--n-final-draws", type=int, default=200, metavar="M",
+                   help="common draws of the final round (default 200)")
     p.add_argument("--global-block", action="store_true", help="one parameter block for all nights")
     p.add_argument("--no-framesel", action="store_true")
     p.add_argument("--no-selection", action="store_true", help="no drop1/drop2 night-selection dims")

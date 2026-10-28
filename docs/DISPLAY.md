@@ -163,6 +163,13 @@ ones the live display skipped, into `steps_rebuilt/` with its own movie.
   frame between them), and is skipped for the next in the search's order.  `winner.json` lists
   the skipped ones as `validation_duplicates`.  `--validation-dedup vector` compares the
   parameter vectors only, as the IDL does.
+* **final round** (`--n-final K`, off by default, the diamonds in `validation_panel.png`) —
+  the K candidates with the largest validated medians on `--n-final-draws` common draws, the
+  same injections for each, and the largest median there elected.  Each first-round median is
+  on draws of its own and scatters by a few tenths of S/N, about as far as the top candidates
+  lie apart.  On common draws a hard draw is hard for every candidate, so the differences
+  scatter far less.  `winner.json: final_round` and `validation_final.json` keep the round.
+  The winner's validated score is still its median on fresh draws.
 * **contrast curve** — 5σ, from the injections' recovered throughput at the calibrated
   contrast; the KLIP-FM section is an independent forward-model estimate on the built-in
   engine.

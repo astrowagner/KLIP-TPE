@@ -96,7 +96,8 @@ in order:
 * Validation reduces a candidate's clean image and its trials several at a time, enough to
   fill the pool, and reports the trials in order.  The candidates' clean images come first, a
   batch at a time, so a copy of an earlier candidate is skipped before its trials go out.  The
-  elected winner's fresh draws go out together after the election.
+  final round's trials (`--n-final`) and the elected winner's fresh draws go out together after
+  the first round.
 * param_verify, the calibration remeasurements and the k-scan pair work the same way.
 
 Every draw's positions are drawn first, in the order a one-at-a-time loop draws them.  The
