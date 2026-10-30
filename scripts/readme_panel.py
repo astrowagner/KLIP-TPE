@@ -4,12 +4,15 @@
     python3 scripts/readme_panel.py                       # 3,000 evaluations, about an hour on the Mac Pro
     python3 scripts/readme_panel.py --n-iter 5000         # longer
     python3 scripts/readme_panel.py --contrast 0          # tutorial 02's calibrated contrast
+    python3 scripts/readme_panel.py --angsep 0 3          # tutorial 02's angsep range
     python3 scripts/readme_panel.py --no-show             # no window, panels still written
 
 Tutorial 02 (VLT/SPHERE IRDIS K1+K2, 30-70 px, HD 95086 b passed as known) stops at 300
 evaluations, where the running mean is still climbing.  This is the same search with the same
 seed, data and settings, and a budget long enough to show the climb and the plateau after it.
-The warm-up is 200 evaluations.
+The warm-up is 200 evaluations, and ``angsep`` is searched over 0.1-2.0 lambda/D (``--angsep``)
+instead of 0-3.  The floor keeps the search off ``angsep = 0``, where, with ``anglemax`` at the
+PA span, the KLIP engine builds one basis per zone from all the frames, the target included.
 
 The injections are at a fixed contrast of 3e-6 (``--contrast``).  Tutorial 02 calibrates it so
 that the default configuration scores S/N 5, which gives 4.8e-6 here, and at that level the
@@ -48,6 +51,8 @@ def main(argv=None) -> int:
     p.add_argument("--n-iter", type=int, default=3000, help="evaluations (default 3000)")
     p.add_argument("--n-init", type=int, default=200, help="warm-up evaluations (default 200)")
     p.add_argument("--seed", type=int, default=3, help="tutorial 02's seed (default 3)")
+    p.add_argument("--angsep", type=float, nargs=2, default=(0.1, 2.0), metavar=("LO", "HI"),
+                   help="angsep search range in lambda/D (default 0.1 2.0)")
     p.add_argument("--contrast", type=float, default=3e-6,
                    help="fixed injection contrast (default 3e-6), or 0 to calibrate it as tutorial 02 does")
     p.add_argument("--run-dir", default=os.path.expanduser("~/klip_tpe_runs/hd95086"),
@@ -69,7 +74,7 @@ def main(argv=None) -> int:
         lam[band] = inst["lam_m"] if band == "K1" else inst["lam_m_K2"]
     red = generic.make_reducer(dsets, pxscale=inst["pxscale"], lam_m=lam, diam_m=inst["diam_m"],
                                star_flux=star_flux, max_workers=a.workers)
-    space = generic.make_space(red, k_klip_max=30)
+    space = generic.make_space(red, k_klip_max=30, angsep_range=tuple(a.angsep))
     space.project = generic.make_guard(red, k_max=30)
     objective, sampler = generic.default_config(red, known=[(0.62, 145.0)])
     sampler.excl_fwhm = 6.0                                  # injections >= 6 FWHM from HD 95086 b
