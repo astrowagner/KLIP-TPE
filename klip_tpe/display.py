@@ -2501,8 +2501,11 @@ def panel_snrhist_h(ax, ad: AnnulusData, yr):
 
 
 def panel_contrast_idl(ax, curves, contrast: float, placeholder: Optional[str] = None):
-    """IDL ``near2m_cpanel``: SNR=5 contrast (fg, solid) with the KLIP-FM cross-check dashed green."""
-    ax.set_title("SNR=5 contrast (inj-calibrated)", fontsize=7.5)
+    """IDL ``near2m_cpanel``: SNR=5 contrast (fg, solid) with the KLIP-FM cross-check dashed green.
+    A curve with ``p16`` / ``p84`` (the injection grid's spread over position angle) gets its
+    band, shaded."""
+    grid = any(lab.startswith("injection grid") for lab, cc, _ in curves if cc)
+    ax.set_title("SNR=5 contrast (injection grid)" if grid else "SNR=5 contrast (inj-calibrated)", fontsize=7.5)
     any_c = False
     for lab, cc, st in curves:
         if not cc:
@@ -2512,7 +2515,14 @@ def panel_contrast_idl(ax, curves, contrast: float, placeholder: Optional[str] =
         if r.size and np.isfinite(c).any() and (c[np.isfinite(c)] > 0).any():
             fm = "KLIP-FM" in lab
             this = lab.startswith("this eval") or lab.startswith("eval ")
-            ax.plot(r, np.where(c > 0, c, np.nan), color="#3cb44b" if fm else ("#8a8a8a" if this else _fg()),
+            col = "#3cb44b" if fm else ("#8a8a8a" if this else _fg())
+            if cc.get("p16") is not None and cc.get("p84") is not None and len(cc["p16"]) == r.size:
+                lo = np.array([np.nan if v is None else v for v in cc["p16"]], float)
+                hi = np.array([np.nan if v is None else v for v in cc["p84"]], float)
+                ok = np.isfinite(lo) & np.isfinite(hi) & (lo > 0) & (hi > 0)
+                if ok.sum() >= 2:
+                    ax.fill_between(r[ok], lo[ok], hi[ok], color=col, alpha=0.22, lw=0)
+            ax.plot(r, np.where(c > 0, c, np.nan), color=col,
                     ls="--" if (fm or this) else "-", lw=1.3 if fm else (0.9 if this else 1.5))
             any_c = True
     if any_c:
@@ -2523,6 +2533,10 @@ def panel_contrast_idl(ax, curves, contrast: float, placeholder: Optional[str] =
             ax.text(0.98, 0.04, "green dashed = KLIP-FM", transform=ax.transAxes, ha="right", color="#3cb44b", fontsize=6.5)
         if any(lab.startswith(("this eval", "eval ")) for lab, cc, _ in curves if cc):
             ax.text(0.98, 0.12, "gray dashed = this eval", transform=ax.transAxes, ha="right", color="#8a8a8a", fontsize=6.5)
+        if grid:
+            # top right: the curves fall with separation, so that corner stays clear
+            ax.text(0.98, 0.92, "solid = injection grid (median, 16-84 % band over PA)",
+                    transform=ax.transAxes, ha="right", va="top", color=_fg(), fontsize=6.5)
     else:
         msg = placeholder or "after first best..."
         ax.text(0.5, 0.5, msg, ha="center", va="center", transform=ax.transAxes, fontsize=6.5, color="#888888", wrap=True)
@@ -3327,7 +3341,7 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
         b_inj, b_clean = _fits(os.path.join(d, "best_inj.fits")), _fits(os.path.join(d, "best_clean.fits"))
         b_fm = _fits(os.path.join(d, "best_fm.fits"))
         note = "winner FITS (rebuilt)" if b_inj is not None else "no images in log"
-        wcurve = (full.winner or {}).get("contrast_curve")
+        wcurve = (full.winner or {}).get("grid_curve") or (full.winner or {}).get("contrast_curve")
         fmcurve = (full.winner or {}).get("fm_curve")
         for i in range(full.n):
             if i % max(every, 1) and i != full.n - 1:
@@ -3350,7 +3364,9 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
                 if lc:
                     curves.append((f"eval {i + 1} preview", lc, {}))
             if wcurve and i == full.n - 1:
-                curves.append(("validated winner (annulus)", wcurve, {"color": VALID_COLOR, "lw": 1.6}))
+                lab = ("injection grid (annulus)" if (full.winner or {}).get("grid_curve")
+                       else "validated winner (annulus)")
+                curves.append((lab, wcurve, {"color": VALID_COLOR, "lw": 1.6}))
                 if fmcurve:
                     curves.append(("KLIP-FM cross-check", fmcurve, {"color": FM_COLOR, "lw": 1.2}))
             p = os.path.join(out_dir, f"step{step:04d}.png")
@@ -3969,12 +3985,16 @@ class LiveDisplay(RunCallback):
         fm_prev = (self._best_images(runner).get("fm") or {}).get("curve") if not done else None
         if fm_prev:
             out.append(("KLIP-FM preview (best eval)", fm_prev, {"color": FM_COLOR, "lw": 1.0, "ls": "--"}))
-        # validated winners of EVERY finished annulus stay on the panel (IDL's cumulative curve)
+        # validated winners of EVERY finished annulus stay on the panel (IDL's cumulative curve):
+        # the injection grid's curve where the run made one (one injection per reduction, the
+        # median over position angle with its 16-84 % band), else the validation samples' fit
         for r in runner.results:
             if r is None:
                 continue
             tag = f" annulus {r.annulus + 1}" if r.annulus != ad.annulus else ""
-            if r.contrast_curve:
+            if getattr(r, "grid_curve", None):
+                out.append((f"injection grid (median over PA){tag}", r.grid_curve, {"color": VALID_COLOR, "lw": 1.6}))
+            elif r.contrast_curve:
                 out.append((f"validated winner (injection-calibrated){tag}", r.contrast_curve,
                             {"color": VALID_COLOR, "lw": 1.6}))
             if getattr(r, "fm_curve", None):

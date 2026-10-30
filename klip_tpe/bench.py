@@ -482,6 +482,7 @@ def make_synthetic_bench(n_partitions: int = 3, size: int = 80, ann_edges: Seque
     from .metrics import MawetPeakSNR, Objective
     from .positions import PositionSampler
     from .reducer import PartitionedReducer
+    from .contrast_grid import ContrastGridConfig
     from .runner import CalibrationConfig, RunConfig, ValidationConfig
     from .space import Param, SearchSpace, kgrid
     from .synthetic import make_synthetic_partitions
@@ -503,7 +504,8 @@ def make_synthetic_bench(n_partitions: int = 3, size: int = 80, ann_edges: Seque
                         link_params=link, grid_axes=[f"bin_{pids[0]}", f"filter_{pids[0]}", f"k_klip_{pids[0]}"],
                         calibration=CalibrationConfig(n_remeasure=2, forced=None if forced is None else [forced],
                                                       recal_budget=0 if forced is not None else 1),
-                        validation=ValidationConfig(n_top=n_top, n_valid=n_valid), save_fits=False)
+                        validation=ValidationConfig(n_top=n_top, n_valid=n_valid), save_fits=False,
+                        contrast_grid=ContrastGridConfig(mode="off"))     # a benchmark compares searches
         return Runner(red, sp, obj, samp, cfg, run_dir, log=log)
 
     contrast = forced_contrast

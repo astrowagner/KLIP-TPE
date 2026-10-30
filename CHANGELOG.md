@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased — 2026-10-30 (the contrast curve from an injection grid, one source at a time)
+
+The protocol of Kevin Wagner's IDL contrast generators (`contrastcurve_*.pro`), after
+validation at each annulus's winning configuration (`RunConfig.contrast_grid`,
+`klip_tpe.contrast_grid`).
+
+- **One injected source per reduction**, so no injection biases another's signal or noise, at
+  12 position angles (`--cg-pa`) on separations a FWHM apart (`--cg-step`), the annulus less a
+  FWHM at each edge.  `--contrast-grid random` draws `--cg-samples` positions instead, from a
+  generator of their own.
+- **Each position iterated on its own contrast** until its S/N is within 10 % (`--cg-precision`)
+  of 5 (`--cg-target`), by the IDL's rule: `c * 5 / snr`, ten times `c` for a source not seen.
+  From the sixth reduction on, a position at or above the target is accepted at its last
+  contrast.  From the eighth, one still short of 90 % of it is dropped as blocked.  The first
+  guesses come from the KLIP-FM curve, so on HD 95086 a position takes about two reductions.
+- **The S/N** is the run's matched-filter Mawet S/N, or the IDL's aperture photometry
+  (`--cg-snr aperture`, `metrics.aperture_mawet_snr`).
+- **The noise rings** leave out the injected source, the known companions and their ADI
+  sidelobes.  A sidelobe is the arc the field rotation sweeps, `+/- min(PA span, anglemax)`,
+  never less than 2 FWHM of arc, the IDL's two apertures each side (`--cg-sidelobe`,
+  `--cg-sidelobe-fwhm`).  No test
+  position goes on a companion's sidelobes.  `mawet_peak_snr` and `aperture_mawet_snr` take the
+  arcs as `excl_arcs`.
+- **The curve** is the median over position angle at each separation, with the 16th and 84th
+  percentiles (`AnnulusResult.grid_curve`).  The final frame draws it with its band beside the
+  KLIP-FM curve, in place of the fit to the validation injections.  It leads the run-level
+  `contrast_curve.txt` and has a section in each annulus's.  `contrast_grid.json` keeps every
+  position's trials and `contrast_grid.txt` the curve.
+- On by default.  A run saved before it resumes without it, the benchmark harness leaves it
+  off, and the test suite turns it off unless a test asks for it.  The grid draws nothing from
+  the run's generator.
+
 ## Unreleased — 2026-10-30 (known companions out of the live contrast preview)
 
 - The live contrast preview (this evaluation's curve and the best evaluation's) leaves known

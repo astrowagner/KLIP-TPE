@@ -60,10 +60,15 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--cmax-cal CMAX_CAL] [--k-max K_MAX] [--n-top N_TOP]
                         [--n-valid N_VALID] [--n-rescore N]
                         [--validation-dedup {image,vector}] [--n-final K]
-                        [--n-final-draws M] [--global-block] [--no-framesel]
-                        [--no-selection] [--max-drop MAX_DROP] [--tag TAG]
-                        [--from-idl-setup RUN_SETUP_TXT] [--opt-width]
-                        [--width-range W0 W1] [--r-cap R_CAP]
+                        [--n-final-draws M]
+                        [--contrast-grid {grid,random,off}] [--cg-pa N]
+                        [--cg-samples N] [--cg-step FWHM] [--cg-target SNR]
+                        [--cg-precision F] [--cg-snr {matched,aperture}]
+                        [--cg-sidelobe {rotation,fixed}]
+                        [--cg-sidelobe-fwhm FWHM] [--global-block]
+                        [--no-framesel] [--no-selection] [--max-drop MAX_DROP]
+                        [--tag TAG] [--from-idl-setup RUN_SETUP_TXT]
+                        [--opt-width] [--width-range W0 W1] [--r-cap R_CAP]
                         [--k-mode {search,scan_rescore,scan}]
                         [--k-scan-max K_SCAN_MAX]
                         [--stitch-every STITCH_EVERY] [--verify] [--no-verify]
@@ -231,6 +236,32 @@ options:
                         less than on draws of their own. The run's own random
                         draws are untouched
   --n-final-draws M     common draws of the final round (default 200)
+  --contrast-grid {grid,random,off}
+                        the contrast curve after validation (default grid).
+                        One injected source per reduction at the winner
+                        config, on a grid of separations and position angles
+                        (grid) or at random positions (random), each iterated
+                        on its contrast to the target S/N. The noise rings
+                        leave out the source, the known companions and their
+                        ADI sidelobes. off skips it
+  --cg-pa N             position angles per separation (default 12)
+  --cg-samples N        positions with --contrast-grid random (default 96)
+  --cg-step FWHM        separation step of the grid in FWHM (default 1)
+  --cg-target SNR       target S/N of the grid (default 5)
+  --cg-precision F      how close to the target a position must come, as a
+                        fraction of it (default 0.1)
+  --cg-snr {matched,aperture}
+                        the grid's S/N: the run's matched-filter Mawet S/N
+                        (matched, the default) or the aperture photometry of
+                        the IDL contrast generators (aperture)
+  --cg-sidelobe {rotation,fixed}
+                        a source's ADI sidelobes: the arc the field rotation
+                        sweeps, capped by anglemax and never under --cg-
+                        sidelobe-fwhm of arc (rotation, the default), or that
+                        width alone (fixed)
+  --cg-sidelobe-fwhm FWHM
+                        the sidelobes' least half-width, in FWHM of arc
+                        (default 2)
   --global-block        one parameter block for all nights
   --no-framesel
   --no-selection        no drop1/drop2 night-selection dims
@@ -507,10 +538,15 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--cmax-cal CMAX_CAL] [--k-max K_MAX] [--n-top N_TOP]
                      [--n-valid N_VALID] [--n-rescore N]
                      [--validation-dedup {image,vector}] [--n-final K]
-                     [--n-final-draws M] [--global-block] [--no-framesel]
-                     [--no-selection] [--max-drop MAX_DROP] [--tag TAG]
-                     [--from-idl-setup RUN_SETUP_TXT] [--opt-width]
-                     [--width-range W0 W1] [--r-cap R_CAP]
+                     [--n-final-draws M] [--contrast-grid {grid,random,off}]
+                     [--cg-pa N] [--cg-samples N] [--cg-step FWHM]
+                     [--cg-target SNR] [--cg-precision F]
+                     [--cg-snr {matched,aperture}]
+                     [--cg-sidelobe {rotation,fixed}]
+                     [--cg-sidelobe-fwhm FWHM] [--global-block]
+                     [--no-framesel] [--no-selection] [--max-drop MAX_DROP]
+                     [--tag TAG] [--from-idl-setup RUN_SETUP_TXT]
+                     [--opt-width] [--width-range W0 W1] [--r-cap R_CAP]
                      [--k-mode {search,scan_rescore,scan}]
                      [--k-scan-max K_SCAN_MAX] [--stitch-every STITCH_EVERY]
                      [--verify] [--no-verify] [--verify-n-boot VERIFY_N_BOOT]
@@ -676,6 +712,32 @@ options:
                         less than on draws of their own. The run's own random
                         draws are untouched
   --n-final-draws M     common draws of the final round (default 200)
+  --contrast-grid {grid,random,off}
+                        the contrast curve after validation (default grid).
+                        One injected source per reduction at the winner
+                        config, on a grid of separations and position angles
+                        (grid) or at random positions (random), each iterated
+                        on its contrast to the target S/N. The noise rings
+                        leave out the source, the known companions and their
+                        ADI sidelobes. off skips it
+  --cg-pa N             position angles per separation (default 12)
+  --cg-samples N        positions with --contrast-grid random (default 96)
+  --cg-step FWHM        separation step of the grid in FWHM (default 1)
+  --cg-target SNR       target S/N of the grid (default 5)
+  --cg-precision F      how close to the target a position must come, as a
+                        fraction of it (default 0.1)
+  --cg-snr {matched,aperture}
+                        the grid's S/N: the run's matched-filter Mawet S/N
+                        (matched, the default) or the aperture photometry of
+                        the IDL contrast generators (aperture)
+  --cg-sidelobe {rotation,fixed}
+                        a source's ADI sidelobes: the arc the field rotation
+                        sweeps, capped by anglemax and never under --cg-
+                        sidelobe-fwhm of arc (rotation, the default), or that
+                        width alone (fixed)
+  --cg-sidelobe-fwhm FWHM
+                        the sidelobes' least half-width, in FWHM of arc
+                        (default 2)
   --global-block        one parameter block for all nights
   --no-framesel
   --no-selection        no drop1/drop2 night-selection dims

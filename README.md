@@ -108,8 +108,9 @@ data.
    The best of several noisy medians is itself high, so the winner is scored once more on
    fresh sets, and that median is reported.  Search scores are upward-biased and are never
    reported.  `--n-final` adds a final round on common draws for a sharper election.
-4. **Products.**  Winner images and S/N maps, injection-calibrated 5σ contrast curve with a
-   KLIP forward-model cross-check, sensitivity-weighted stitch over annuli, parameter
+4. **Products.**  Winner images and S/N maps, a 5σ contrast curve from injections one at a
+   time over a grid of separations and position angles, each iterated to S/N 5, with a KLIP
+   forward-model cross-check, sensitivity-weighted stitch over annuli, parameter
    importance, corner and landscape books, verification and blind candidate search —
    see `docs/DISPLAY.md` for the panel anatomy and the product glossary.
 

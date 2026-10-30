@@ -273,7 +273,8 @@ def write_params_table(path: str, rows: Sequence[Dict[str, Any]]) -> str:
 def write_contrast_curve(path: str, curves: Sequence[Optional[Dict[str, Any]]], edges_px: Sequence[float],
                          fwhm: float, pxscale: float, legacy: bool = False,
                          contrasts: Optional[Sequence[float]] = None,
-                         fm_curves: Optional[Sequence[Optional[Dict[str, Any]]]] = None) -> Dict[str, np.ndarray]:
+                         fm_curves: Optional[Sequence[Optional[Dict[str, Any]]]] = None,
+                         grid_curves: Optional[Sequence[Optional[Dict[str, Any]]]] = None) -> Dict[str, np.ndarray]:
     """Run-level ``contrast_curve.txt``: per-annulus curves concatenated with the seam
     trim ``trim = max(round(fwhm/3), 1) * pxscale`` (annulus ``ia`` keeps ``r >=
     edge_ia + trim`` for ``ia > 0`` and ``r <= edge_ia+1 - trim`` for ``ia < nann-1``;
@@ -283,13 +284,23 @@ def write_contrast_curve(path: str, curves: Sequence[Optional[Dict[str, Any]]], 
     (the ``AnnulusResult.fm_curve`` dicts) append the ``# KLIP-FM`` cross-check section
     (A §6.4): two comment lines then ``sep_arcsec  contrast_5sig`` rows over all
     annuli, sorted by separation (no seam trim -- the test radii are inside the zone).
+    ``grid_curves`` (the ``AnnulusResult.grid_curve`` dicts, one injection per reduction) take
+    the main section's place annulus by annulus where present.
     Returns the concatenated arrays (``fm_r`` / ``fm_c`` when an FM section was written)."""
     nann = len(curves)
     trim = 0.0 if legacy else seam_trim(fwhm, pxscale)
+    grid = list(grid_curves or [])
+    use_grid = any(g for g in grid)
     R, C, SR, SC, SA = [], [], [], [], []
     for ia, cc in enumerate(curves):
-        if not cc or cc.get("r_as") is None or cc.get("curve") is None:
+        main = grid[ia] if (use_grid and ia < len(grid) and grid[ia]) else cc
+        if cc:
+            for a, b in zip(cc.get("sample_r") or [], cc.get("sample_c") or []):
+                if a is not None and b is not None and np.isfinite(a) and np.isfinite(b):
+                    SR.append(float(a)); SC.append(float(b)); SA.append(ia + 1)
+        if not main or main.get("r_as") is None or main.get("curve") is None:
             continue
+        cc = main
         r = np.array([np.nan if v is None else float(v) for v in cc["r_as"]])
         c = np.array([np.nan if v is None else float(v) for v in cc["curve"]])
         keep = np.isfinite(r) & np.isfinite(c)
@@ -298,14 +309,11 @@ def write_contrast_curve(path: str, curves: Sequence[Optional[Dict[str, Any]]], 
         if ia < nann - 1 and ia + 1 < len(edges_px):
             keep &= r <= edges_px[ia + 1] * pxscale - trim
         R.extend(r[keep]); C.extend(c[keep])
-        sr = cc.get("sample_r") or []
-        sc = cc.get("sample_c") or []
-        for a, b in zip(sr, sc):
-            if a is not None and b is not None and np.isfinite(a) and np.isfinite(b):
-                SR.append(float(a)); SC.append(float(b)); SA.append(ia + 1)
     R, C = np.asarray(R, float), np.asarray(C, float)
     o = np.argsort(R, kind="stable")
-    L = ["# Injection-calibrated SNR=5 contrast curve (validated winners per annulus)",
+    L = ["# Injection-recovery SNR=5 contrast curve (one injection per reduction at each annulus' winner config, "
+         "median over position angle)" if use_grid else
+         "# Injection-calibrated SNR=5 contrast curve (validated winners per annulus)",
          f"# klip_tpe {__version__} -- {_dt.datetime.now().isoformat(timespec='seconds')}",
          f"# seam trim = {trim:.4f} arcsec ({'legacy_stitch: no trim' if legacy else 'max(round(fwhm/3),1) px'});"
          f" annulus edges (px) = {', '.join(f'{e:.1f}' for e in edges_px)}"]
