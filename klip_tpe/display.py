@@ -2203,7 +2203,11 @@ def _live_curve_info(clean: Optional[np.ndarray], ad: AnnulusData, i: int) -> Tu
     or ``None`` with a one-line reason for the panel.  Like the IDL preview it needs
     only **two** positive per-source values: :func:`products.contrast_curve` fits a
     smooth ``K(r)`` for >= 3 samples, so with 2 the throughput is taken as the median
-    ``K`` of the samples (``throughput_fit``'s own rule for < 3 points)."""
+    ``K`` of the samples (``throughput_fit``'s own rule for < 3 points).
+
+    Real companions (``ad.known``) are kept out of the noise rings, as in the run's own
+    curve.  Without that, HD 95086 b put a spike in tutorial 02's preview at 0.62", about
+    1.7 times the limit beside it, where the validated curve, which leaves it out, has none."""
     if i < 0 or i >= ad.n:
         return None, "no evaluation yet"
     if clean is None or np.ndim(clean) != 2:
@@ -2225,12 +2229,13 @@ def _live_curve_info(clean: Optional[np.ndarray], ad: AnnulusData, i: int) -> Tu
         if not np.isfinite(c) or c <= 0:
             return None, f"injection contrast not positive ({c:g})"
         rin, rout = max(ad.inrad, ad.fwhm), max(ad.outrad, ad.inrad + 2 * ad.fwhm)
-        cc = contrast_curve(clean, r, s, c, ad.fwhm, ad.pxscale, rin, rout)
+        known = [tuple(k) for k in (getattr(ad, "known", None) or ())]
+        cc = contrast_curve(clean, r, s, c, ad.fwhm, ad.pxscale, rin, rout, known=known)
         curve = np.asarray(cc.get("curve"), float)
         if not np.isfinite(curve).any():
             # 2 positive samples: median-K throughput instead of the polynomial fit
             g = np.isfinite(r) & np.isfinite(s) & (s > 0)
-            sig, rprof = noise_profile(clean, ad.fwhm, rin, rout)
+            sig, rprof = noise_profile(clean, ad.fwhm, rin, rout, known=known, pxscale=ad.pxscale)
             ok = np.isfinite(sig)
             if ok.sum() < 2:
                 return None, "noise profile undefined in this annulus"

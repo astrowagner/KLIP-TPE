@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — 2026-10-30 (known companions out of the live contrast preview)
+
+- The live contrast preview (this evaluation's curve and the best evaluation's) leaves known
+  companions out of its noise rings, as the run's own curve and the KLIP-FM cross-check
+  already did.  HD 95086 b had put a spike in tutorial 02's preview at 0.62", about 1.7 times
+  the limit beside it.  The panels `klip-tpe render` draws afterwards get the same.
+
 ## Unreleased — 2026-10-30 (the finished annulus's contrast panel, the README panel's script)
 
 - The finished annulus's frame no longer draws the best evaluation's preview curve.  The
