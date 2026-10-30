@@ -1,16 +1,22 @@
 #!/usr/bin/env python
 """The README's panel, from tutorial 02's search on HD 95086 run until it has converged.
 
-    python3 scripts/readme_panel.py                       # 3,000 evaluations, about 2.5 h on the Mac Pro
+    python3 scripts/readme_panel.py                       # 3,000 evaluations, about an hour on the Mac Pro
     python3 scripts/readme_panel.py --n-iter 5000         # longer
+    python3 scripts/readme_panel.py --contrast 0          # tutorial 02's calibrated contrast
     python3 scripts/readme_panel.py --no-show             # no window, panels still written
 
 Tutorial 02 (VLT/SPHERE IRDIS K1+K2, 30-70 px, HD 95086 b passed as known) stops at 300
 evaluations, where the running mean is still climbing.  This is the same search with the same
 seed, data and settings, and a budget long enough to show the climb and the plateau after it.
-The warm-up is 200 evaluations.  The injections spread over the annulus, as the tutorial's do,
-so the injection-calibrated contrast curve and the KLIP-FM cross-check measure the same thing at
-every separation.
+The warm-up is 200 evaluations.
+
+The injections are at a fixed contrast of 3e-6 (``--contrast``).  Tutorial 02 calibrates it so
+that the default configuration scores S/N 5, which gives 4.8e-6 here, and at that level the
+search reaches its plateau within a few hundred evaluations.  The fainter sources make it climb
+for longer.  The injections spread over the annulus, as the tutorial's do, so the
+injection-calibrated contrast curve and the KLIP-FM cross-check measure the same thing at every
+separation.
 
 The run writes to ``~/klip_tpe_runs/hd95086`` (``--run-dir``, whose name the panel shows as
 its title), outside any synced folder, with a panel every fifth evaluation.  Its last panel,
@@ -42,6 +48,8 @@ def main(argv=None) -> int:
     p.add_argument("--n-iter", type=int, default=3000, help="evaluations (default 3000)")
     p.add_argument("--n-init", type=int, default=200, help="warm-up evaluations (default 200)")
     p.add_argument("--seed", type=int, default=3, help="tutorial 02's seed (default 3)")
+    p.add_argument("--contrast", type=float, default=3e-6,
+                   help="fixed injection contrast (default 3e-6), or 0 to calibrate it as tutorial 02 does")
     p.add_argument("--run-dir", default=os.path.expanduser("~/klip_tpe_runs/hd95086"),
                    help="run directory, whose name is the panel's title (default ~/klip_tpe_runs/hd95086)")
     p.add_argument("--every", type=int, default=5, help="a panel every this many evaluations (default 5)")
@@ -67,7 +75,8 @@ def main(argv=None) -> int:
     sampler.excl_fwhm = 6.0                                  # injections >= 6 FWHM from HD 95086 b
     cfg = RunConfig(ann_edges=[30, 70], n_iter=a.n_iter, n_init=a.n_init, seed=a.seed, n_remeasure=3,
                     validation=ValidationConfig(n_top=6, n_valid=8),
-                    calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=2),
+                    calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=2,
+                                                  forced=[a.contrast] if a.contrast > 0 else None),
                     defaults={"k_klip": 10}, fm_curve=True)
     display = LiveDisplay(a.run_dir, show=not a.no_show, every=a.every, pdf_every=0, movie=False)
     runner = Runner(red, space, objective, sampler, cfg, a.run_dir, callbacks=[display])
