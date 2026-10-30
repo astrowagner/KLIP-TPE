@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — 2026-10-30 (the README panel's injections in pairs, 180 deg apart)
+
+- `scripts/run_rxj0534.py --even-pa` spaces the injected sources evenly in angle, 360/N apart,
+  so a pair sits 180 deg apart.  They stay on the band's mid-radius, the companion's separation
+  for the default annulus, and the anchor is still drawn afresh for every evaluation.  Without
+  it the angles are independent and random, as before.
+- `scripts/readme_panel.py` injects two at a time on RX J0534 (`--n-sources`), with
+  `--even-pa`.
+
 ## Unreleased — 2026-10-30 (the README panel on RX J0534)
 
 - `scripts/readme_panel.py` makes the README's panel from RX J0534 b (LBTI/LMIRCam L', four

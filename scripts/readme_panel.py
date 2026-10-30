@@ -1,20 +1,22 @@
 #!/usr/bin/env python
 """The README's panel: RX J0534 b (LBTI/LMIRCam L', four nights), run until it has converged.
 
-    python3 scripts/readme_panel.py                       # 3,000 evaluations, about two days on the Mac Pro
+    python3 scripts/readme_panel.py                       # 3,000 evaluations, about ten hours on the Mac Pro
     python3 scripts/readme_panel.py --n-iter 5000         # longer
     python3 scripts/readme_panel.py --cg-step 1           # the contrast grid at FWHM steps
     python3 scripts/readme_panel.py --no-show             # no window, panels still written
     python3 scripts/readme_panel.py --target hd95086      # the panel on public data (VLT/SPHERE)
 
-RX J0534 is ``scripts/run_rxj0534.py``'s four-night search (``--partitions 4``): the companion
-held out of the objective, three injections on its ring at 0.39", the annulus its separation
-+/- 2 FWHM.  The README's image before this one was the same search at 5,000 evaluations, whose
-running median climbed for about 1,500 evaluations and then stayed flat, so 3,000 show the climb
-and a plateau as long again.  The contrast grid steps half a FWHM (``--cg-step``), which in that
-annulus gives five separations from 0.29" to 0.49" in place of three.  The panel's title is
-``--title`` ("RX J0534"), not the run directory's name.  The data are read from ``LMIRCAM_ROOT``
-(default /Volumes/RAID36TB/LMIRCam).
+RX J0534 is ``scripts/run_rxj0534.py``'s four-night search (``--partitions 4``), with the
+companion held out of the objective and the annulus its separation +/- 2 FWHM.  The injections
+go two at a time (``--n-sources``), 180 deg apart on the companion's ring at 0.39"
+(``run_rxj0534.py --even-pa``), from an anchor drawn afresh for every evaluation.  The README's
+image before this one was the same search at 5,000 evaluations with three injections at random
+angles, whose running median climbed for about 1,500 evaluations and then stayed flat, so 3,000
+show the climb and a plateau as long again.  The contrast grid steps half a FWHM
+(``--cg-step``), which in that annulus gives five separations from 0.29" to 0.49" in place of
+three.  The panel's title is ``--title`` ("RX J0534"), not the run directory's name.  The data
+are read from ``LMIRCAM_ROOT`` (default /Volumes/RAID36TB/LMIRCam).
 
 ``--target hd95086`` is tutorial 02's search on HD 95086 (VLT/SPHERE IRDIS K1+K2, 30-70 px,
 HD 95086 b passed as known) with the same data and seed, after a 200-evaluation warm-up.  Its
@@ -44,11 +46,12 @@ _HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-#: per target, the settings that differ: run directory, title, seed, warm-up, grid step
+#: per target, the settings that differ: run directory, title, seed, warm-up, grid step, sources
 TARGETS = {
     "rxj0534": dict(run_dir="~/klip_tpe_runs/rxj0534/readme", title="RX J0534", seed=None, n_init=None,
-                    cg_step=0.5),
-    "hd95086": dict(run_dir="~/klip_tpe_runs/hd95086", title="HD 95086", seed=3, n_init=200, cg_step=1.0),
+                    cg_step=0.5, n_sources=2),
+    "hd95086": dict(run_dir="~/klip_tpe_runs/hd95086", title="HD 95086", seed=3, n_init=200, cg_step=1.0,
+                    n_sources=None),
 }
 
 
@@ -61,6 +64,9 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--n-init", type=int, default=None,
                    help="warm-up evaluations (default: run_rxj0534.py's 400 for 3,000, or 200 on HD 95086)")
     p.add_argument("--seed", type=int, default=None, help="default: run_rxj0534.py's 21, or tutorial 02's 3")
+    p.add_argument("--n-sources", type=int, default=None,
+                   help="injected sources per evaluation (default 2 on RX J0534, evenly spaced in angle, "
+                        "and the runner's rule on HD 95086)")
     p.add_argument("--run-dir", default=None,
                    help="run directory (default ~/klip_tpe_runs/rxj0534/readme or ~/klip_tpe_runs/hd95086)")
     p.add_argument("--title", default=None, help="the panel's title (default \"RX J0534\" or \"HD 95086\")")
@@ -89,7 +95,7 @@ def parse(argv=None) -> argparse.Namespace:
 def rxj0534_argv(a: argparse.Namespace) -> list:
     """``scripts/run_rxj0534.py``'s command line for the README run."""
     argv = ["--partitions", "4", "--n-iter", str(a.n_iter), "--out", a.run_dir, "--title", a.title,
-            "--contrast-grid", "grid", "--cg-pa", str(a.cg_pa), "--cg-step", f"{a.cg_step:g}",
+            "--n-sources", str(a.n_sources), "--even-pa", "--contrast-grid", "grid", "--cg-pa", str(a.cg_pa), "--cg-step", f"{a.cg_step:g}",
             "--cg-target", f"{a.cg_target:g}", "--cg-snr", a.cg_snr, "--workers", str(a.workers)]
     if a.n_init is not None:
         argv += ["--n-init", str(a.n_init)]
@@ -134,6 +140,7 @@ def run_hd95086(a: argparse.Namespace) -> int:
     objective, sampler = generic.default_config(red, known=[(0.62, 145.0)])
     sampler.excl_fwhm = 6.0                                  # injections >= 6 FWHM from HD 95086 b
     cfg = RunConfig(ann_edges=[30, 70], n_iter=a.n_iter, n_init=a.n_init, seed=a.seed, n_remeasure=3,
+                    n_sources=a.n_sources,
                     validation=ValidationConfig(n_top=6, n_valid=8),
                     calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=2,
                                                   forced=[a.contrast] if a.contrast > 0 else None),

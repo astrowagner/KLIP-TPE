@@ -30,6 +30,7 @@ def test_the_default_is_rxj0534_through_run_rxj0534(monkeypatch, tmp_path):
     assert _opt(argv, "--partitions") == "4", "the README panel is the four-night search"
     assert _opt(argv, "--n-iter") == "3000"
     assert _opt(argv, "--title") == "RX J0534"
+    assert _opt(argv, "--n-sources") == "2" and "--even-pa" in argv, "two at a time, 180 deg apart"
     assert _opt(argv, "--contrast-grid") == "grid"
     assert _opt(argv, "--cg-step") == "0.5", "half-FWHM steps: five separations in the +/- 2 FWHM annulus"
     assert _opt(argv, "--cg-pa") == "12"
