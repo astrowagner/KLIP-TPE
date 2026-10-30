@@ -55,6 +55,7 @@ from .heartbeat import Heartbeat
 from .liveness import liveness_mode
 from .metrics import (Objective, Source, mawet_peak_snr, nanmedian_even, radprof, source_xy,
                       star_center)
+from .contrast_grid import ContrastGridConfig
 from .optimizers import GridSearch, History, Optimizer, RandomSearch, TPE
 from .positions import PositionSampler, n_sources_rule
 from .reducer import EvalImages, PartitionedReducer, Reducer, ReductionRequest
@@ -225,6 +226,13 @@ class RunConfig:
         the §9.3 live preview: at every new search best one extra clean FM pass at
         that eval's config with its own sources (``best_images['fm']``, shown by the
         display).  Off by default -- it costs a reduction per new best.
+    contrast_grid
+        the injection-recovery contrast curve after validation
+        (:mod:`klip_tpe.contrast_grid`): one injected source per reduction over a grid of
+        separations and position angles at the winner config, each iterated to S/N 5 ->
+        ``AnnulusResult.grid_curve``, ``annulusNN/contrast_grid.json`` and ``.txt``, and the
+        main curve of the run-level ``contrast_curve.txt``.  A run saved before it existed
+        resumes without it.
     """
 
     ann_edges: List[float] = field(default_factory=lambda: [11.0, 44.0])   # px
@@ -318,6 +326,7 @@ class RunConfig:
     defaults: Dict[str, Any] = field(default_factory=dict)   # default-config overrides
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
+    contrast_grid: ContrastGridConfig = field(default_factory=ContrastGridConfig)
     kfit_order: int = 2
     save_fits: bool = True
     save_eval_images: bool = True         # per-eval injected/clean crops (annulusNN/evals/, IDL evalNNNN_score_inj)
@@ -405,6 +414,10 @@ class RunConfig:
         v.setdefault("dedup", "vector")
         v.setdefault("n_rescore", 0)
         d["validation"] = _from_dict_filtered(ValidationConfig, v)
+        # and one saved before the injection grid existed made no grid
+        cg = d.get("contrast_grid")
+        d["contrast_grid"] = (_from_dict_filtered(ContrastGridConfig, cg) if isinstance(cg, dict)
+                              else ContrastGridConfig(mode="off"))
         return _from_dict_filtered(cls, d)
 
 
@@ -480,6 +493,10 @@ class AnnulusResult:
     #: ``[[eval, same_as_eval], ...]`` (0-based): configurations the validation skipped because
     #: their clean reduction equals an earlier candidate's (``ValidationConfig.dedup``)
     validation_duplicates: List[List[int]] = field(default_factory=list)
+    #: the injection-recovery curve (``RunConfig.contrast_grid``): per separation ``r_as``,
+    #: the median contrast at the target S/N over the settled positions (``curve``), its 16th
+    #: and 84th percentiles and the counts; ``annulusNN/contrast_grid.json`` has every position
+    grid_curve: Optional[Dict[str, Any]] = None
     #: the final round (``ValidationConfig.n_final``): ``n_draws`` and per entrant its
     #: ``candidate``, ``eval_index``, first-round ``validated_score``, ``final_score`` and
     #: ``trials``, with ``winner_candidate``.  ``validation_final.json`` adds the draws.
@@ -1363,6 +1380,161 @@ class Runner:
              "# sep_arcsec   contrast_5sig"]
         L += [f"{r:10.4f}   {c:12.4e}" for r, c in rows]
         return L
+
+    # -- injection-recovery contrast curve -----------------------------------------
+    def _rotation_deg(self, cfg: Config) -> Optional[float]:
+        """The field rotation the configuration's references can span (deg): the largest PA
+        range of the selected partitions' frames, capped by the largest ``anglemax`` among them.
+        None when the reducer does not give its frames' angles."""
+        pids = list(cfg.selected) if cfg.selected else [None]
+        spans = []
+        for pid in pids:
+            try:
+                ang = (self.reducer.frame_angles(pid) if isinstance(self.reducer, PartitionedReducer)
+                       else self.reducer.frame_angles())
+            except Exception:                 # noqa: BLE001
+                ang = None
+            if ang is not None and np.size(ang) > 1:
+                spans.append(float(np.ptp(np.asarray(ang, float))))
+        if not spans:
+            return None
+        rot = max(spans)
+        am = []
+        for pid in pids:
+            v = (cfg.params_for(pid) if pid is not None else cfg.params).get("anglemax")
+            if v is not None and np.isfinite(float(v)):
+                am.append(float(v))
+        return min(rot, max(am)) if am else rot
+
+    def _contrast_grid(self, ia: int, cfg: Config, zone: Tuple[float, float],
+                       fm_curve: Optional[Dict[str, Any]], curve: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Annulus ``ia``'s injection-recovery contrast curve at the winner config ``cfg``
+        (:mod:`klip_tpe.contrast_grid`): one injected source per reduction, each test position
+        iterated on its contrast to the target S/N, the noise rings without the injected source,
+        the known companions and their sidelobes.  The first guesses come from the KLIP-FM curve,
+        else the validated one.  Writes ``contrast_grid.json`` (every position and trial),
+        ``contrast_grid.txt`` (the curve) and a section of ``contrast_curve.txt``, and returns the
+        curve (:func:`klip_tpe.contrast_grid.summarize`).  The positions of ``mode="random"`` come
+        from :meth:`_side_rng`, so the run's generator stands where it did."""
+        from . import contrast_grid as CG
+        from .metrics import aperture_mawet_snr
+        gc = self.cfg.contrast_grid
+        if not gc.enabled:
+            return None
+        a_in, a_out = float(zone[0]), float(zone[1])
+        metric = getattr(self.objective, "metric", None)
+
+        def mget(k, dflt):
+            v = getattr(metric, k, dflt) if metric is not None else dflt
+            return dflt if v is None and dflt is not None else v
+        fwhm, pxscale = float(mget("fwhm", self.fwhm)), float(mget("pxscale", self.pxscale))
+        inner = float(mget("inner_fwhm", 1.0)) * fwhm
+        seps = CG.separations_px(a_in, a_out, fwhm, gc, floor_px=max(inner, fwhm))
+        conv = mget("angle_convention", None) or getattr(self.reducer, "angle_convention", "pa")
+        rot = self._rotation_deg(cfg)
+
+        def hw(r_px: float) -> float:
+            return CG.footprint_deg(r_px, fwhm, gc, rot)
+        known = [(float(k[0]), float(k[1])) for k in self._known()]
+        known_arcs = [(rk, tk, hw(rk / pxscale), gc.known_radial_fwhm) for rk, tk in known]
+        if str(gc.mode).lower() == "random":
+            positions = CG.random_positions(seps, gc.sep_step_fwhm * fwhm, gc.n_samples,
+                                            self._side_rng("contrast_grid", ia))
+        else:
+            positions = CG.grid_positions(seps, gc.n_pa)
+        for p in positions:
+            for rk, tk in known:
+                if CG.in_footprint(p.r_px, p.theta, rk / pxscale, tk, hw(rk / pxscale), gc.known_radial_fwhm * fwhm):
+                    p.status, p.why = "excluded", "in a known companion's sidelobes"
+                    break
+        # first guesses: a 5-sigma curve already in hand, scaled to the target
+        guide = None
+        for cc in (fm_curve, curve):
+            if cc and cc.get("r_as") and cc.get("curve"):
+                r_ = np.array([np.nan if v is None else v for v in cc["r_as"]], float)
+                c_ = np.array([np.nan if v is None else v for v in cc["curve"]], float)
+                ok = np.isfinite(r_) & np.isfinite(c_) & (c_ > 0)
+                if ok.any():
+                    o = np.argsort(r_[ok])
+                    guide = (r_[ok][o], np.log(c_[ok][o]))
+                    break
+        scale = float(gc.target_snr) / 5.0
+
+        def start(p) -> float:
+            if guide is None:
+                return float(self.contrast) * scale
+            return float(np.exp(np.interp(p.r_px * pxscale, guide[0], guide[1]))) * scale
+        window = self._reduction_window(len(cfg.selected))
+
+        def reduce_many(batch):
+            calls = [lambda p=p, c=c: self._reduce(cfg, [Source(p.r_px * pxscale, p.theta, c)],
+                                                   tag=f"a{ia+1}_cg{p.index}_{len(p.trials)}") for p, c in batch]
+            with contextlib.closing(self._run_ordered(calls, window)) as stream:
+                for _, res in stream:
+                    yield res
+        min_ring = int(mget("min_ring", 6))
+        aperture = str(gc.snr).lower() == "aperture"
+
+        def measure(res, p, c):
+            img = np.asarray(res.image, float)
+            rho = p.r_px * pxscale
+            arcs = [(rho, p.theta, hw(p.r_px), max(gc.known_radial_fwhm, 1.0))] + known_arcs
+            if aperture:
+                snr, det = aperture_mawet_snr(img, [rho], [p.theta], pxscale, fwhm, excl_fwhm=float(mget("excl_fwhm", 1.5)),
+                                              angle_convention=conv, known=known, excl_arcs=arcs, return_details=True)
+            else:
+                kern = metric.kernel(rho) if callable(getattr(metric, "kernel", None)) else None
+                im = radprof(img) if mget("flatten", False) else img
+                snr, det = mawet_peak_snr(im, [rho], [p.theta], pxscale, fwhm, kernel=kern,
+                                          search_px=float(mget("search_px", 1.5)), excl_fwhm=float(mget("excl_fwhm", 1.5)),
+                                          known=known, declip_nsig=mget("declip_nsig", 6.0),
+                                          band_fwhm=float(mget("band_fwhm", 0.6)), min_ring=min_ring,
+                                          penalty=str(mget("penalty", "geometric")), pixel_mask=mget("pixel_mask", None),
+                                          inner_fwhm=float(mget("inner_fwhm", 1.0)), angle_convention=conv,
+                                          return_details=True, excl_arcs=arcs)
+            d = det[0]
+            if d.get("why"):
+                return np.nan, str(d["why"])
+            if int(d.get("nclean", 0)) < min_ring:
+                return np.nan, f"{int(d.get('nclean', 0))} noise apertures left after the exclusions (fewer than {min_ring})"
+            return float(snr[0]), None
+        t0 = time.time()
+        n_test = sum(p.status != "excluded" for p in positions)
+        self.log(f"  contrast grid: {n_test} position(s) on {seps.size} separation(s), one injection per reduction, "
+                 f"S/N {gc.target_snr:g} +/- {100 * gc.precision:g} % ({'aperture' if aperture else 'matched-filter'} S/N, "
+                 f"sidelobes +/- {hw(float(np.median(seps))):.1f} deg at {np.median(seps) * pxscale:.2f}\")")
+        positions, n_red = CG.run_grid(
+            positions, start, reduce_many, measure, gc, log=self.log,
+            stage=lambda s_: self.hb.stage(f"annulus {ia + 1} contrast grid: {s_}", write=False, annulus=ia))
+        out = CG.summarize(positions, seps, pxscale, gc, [hw(r) for r in seps], n_red)
+        out["rotation_deg"] = rot
+        d = self._ann_dir(ia)
+        _atomic_write(os.path.join(d, "contrast_grid.json"),
+                      json.dumps(dict(out, positions=[p.to_dict(pxscale) for p in positions]), indent=1,
+                                 default=_json_default))
+        n_ok = sum(p.status in CG.STATUS_DONE for p in positions)
+        hdr = (f"annulus {ia + 1}  injection-recovery {gc.target_snr:g}-sigma contrast  (one injection per reduction, "
+               f"{n_test} positions, {gc.n_pa if str(gc.mode).lower() != 'random' else gc.n_samples} "
+               f"{'per separation' if str(gc.mode).lower() != 'random' else 'random'}, S/N {gc.target_snr:g} +/- "
+               f"{100 * gc.precision:g} %, {'aperture' if aperture else 'matched-filter'} S/N, median over position angle)")
+        rows = [(r, c, lo, hi, n_, np_) for r, c, lo, hi, n_, np_ in zip(out["r_as"], out["curve"], out["p16"],
+                                                                          out["p84"], out["n"], out["n_pos"])]
+        with open(os.path.join(d, "contrast_grid.txt"), "w") as f:
+            f.write(f"# {hdr}\n# sep_arcsec   contrast_median   p16   p84   n_settled   n_tested\n")
+            for r, c, lo, hi, n_, np_ in rows:
+                f.write(f"{r:10.4f}   {np.nan if c is None else c:12.4e}   {np.nan if lo is None else lo:12.4e}   "
+                        f"{np.nan if hi is None else hi:12.4e}   {n_:4d}   {np_:4d}\n")
+        with open(os.path.join(d, "contrast_curve.txt"), "a") as f:
+            f.write(f"# {hdr}\n# sep_arcsec   contrast_5sig\n")
+            for r, c, *_ in rows:
+                if c is not None:
+                    f.write(f"{r:10.4f}   {c:12.4e}\n")
+        self._durable_later(os.path.join(d, "contrast_grid.json"), os.path.join(d, "contrast_grid.txt"),
+                            os.path.join(d, "contrast_curve.txt"))
+        self.log(f"  contrast grid: {n_ok} of {n_test} position(s) settled in {n_red} reductions "
+                 f"({time.time() - t0:.0f} s), {sum(out['n_blocked'])} blocked"
+                 + (f", {out['n_excluded']} excluded for the known companions" if out["n_excluded"] else ""))
+        return out if n_ok else None
 
     def _fmkw(self, fm) -> Dict[str, Any]:
         """``fm=`` is passed to the objective only for a metric that asked for the
@@ -3633,6 +3805,12 @@ class Runner:
             except Exception as exc:
                 self.log(f"  KLIP-FM cross-check failed: {exc!r}")
                 fm_curve = None
+        grid_curve = None
+        if self.cfg.contrast_grid.enabled:
+            try:
+                grid_curve = self._contrast_grid(ia, cfg, (a_in, a_out), fm_curve, curve)
+            except Exception as exc:          # noqa: BLE001 - a product, never fatal
+                self.log(f"  contrast grid failed: {exc!r}")
         if self.cfg.save_fits:
             if clean_img is not None:
                 _write_fits(os.path.join(d, "best_clean.fits"), clean_img, hdr)
@@ -3684,7 +3862,8 @@ class Runner:
             election_score=None if winner.get("election_score") is None else float(winner["election_score"]),
             rescore_trials=winner.get("rescore_trials"), rescore_sources=winner.get("rescore_sources"),
             rescore_committed=winner.get("rescore_committed"),
-            validation_duplicates=list(self._val_dups.get(int(ia), [])), final_round=winner.get("final_round"))
+            validation_duplicates=list(self._val_dups.get(int(ia), [])), final_round=winner.get("final_round"),
+            grid_curve=grid_curve)
         # the products above and this record are what a resume reads back for a finished
         # annulus (_winner_from_disk, _annulus_images): on disk before the checkpoint that
         # marks the annulus done
@@ -4199,7 +4378,8 @@ class Runner:
             self._guard("contrast_curve.txt", write_contrast_curve, os.path.join(self.run_dir, "contrast_curve.txt"),
                         [r.contrast_curve for r in results], edges, self.fwhm, self.pxscale,
                         legacy=self.cfg.legacy_stitch, contrasts=[r.contrast for r in results],
-                        fm_curves=[r.fm_curve for r in results])
+                        fm_curves=[r.fm_curve for r in results],
+                        grid_curves=[getattr(r, "grid_curve", None) for r in results])
             self._durable_later(os.path.join(self.run_dir, "contrast_curve.txt"))
         # final_results.json says the run is finished (bench, klip-tpe runs): the products
         # above reach the disk first, and it is never left empty by a crash

@@ -2,7 +2,7 @@
 cross-check, and not the best evaluation's own preview.
 
 The preview is that evaluation's few injections.  Validation's curve replaces it, and the IDL
-panel colours the two alike, so leaving the preview in drew two solid curves that disagree
+panel colors the two alike, so leaving the preview in drew two solid curves that disagree
 for no reason a reader could see.
 """
 from __future__ import annotations

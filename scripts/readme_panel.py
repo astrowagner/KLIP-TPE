@@ -5,6 +5,7 @@
     python3 scripts/readme_panel.py --n-iter 5000         # longer
     python3 scripts/readme_panel.py --contrast 0          # tutorial 02's calibrated contrast
     python3 scripts/readme_panel.py --angsep 0 3          # tutorial 02's angsep range
+    python3 scripts/readme_panel.py --cg-pa 72            # the contrast grid at 5 deg steps
     python3 scripts/readme_panel.py --no-show             # no window, panels still written
 
 Tutorial 02 (VLT/SPHERE IRDIS K1+K2, 30-70 px, HD 95086 b passed as known) stops at 300
@@ -20,6 +21,10 @@ search reaches its plateau within a few hundred evaluations.  The fainter source
 for longer.  The injections spread over the annulus, as the tutorial's do, so the
 injection-calibrated contrast curve and the KLIP-FM cross-check measure the same thing at every
 separation.
+
+The contrast curve at the end is the injection grid (:mod:`klip_tpe.contrast_grid`): one
+source per reduction at 12 position angles per separation (``--cg-pa``), each iterated to S/N 5
+(``--cg-target``) with the run's matched-filter S/N or aperture photometry (``--cg-snr``).
 
 The run writes to ``~/klip_tpe_runs/hd95086`` (``--run-dir``, whose name the panel shows as
 its title), outside any synced folder, with a panel every fifth evaluation.  Its last panel,
@@ -40,7 +45,7 @@ if _HERE not in sys.path:
 
 from astropy.io import fits  # noqa: E402
 
-from klip_tpe import CalibrationConfig, Runner, RunConfig, ValidationConfig, datasets  # noqa: E402
+from klip_tpe import CalibrationConfig, ContrastGridConfig, Runner, RunConfig, ValidationConfig, datasets  # noqa: E402
 from klip_tpe.display import LiveDisplay  # noqa: E402
 from klip_tpe.instruments import generic  # noqa: E402
 
@@ -57,6 +62,10 @@ def main(argv=None) -> int:
                    help="fixed injection contrast (default 3e-6), or 0 to calibrate it as tutorial 02 does")
     p.add_argument("--run-dir", default=os.path.expanduser("~/klip_tpe_runs/hd95086"),
                    help="run directory, whose name is the panel's title (default ~/klip_tpe_runs/hd95086)")
+    p.add_argument("--cg-pa", type=int, default=12, help="contrast grid: position angles per separation (default 12)")
+    p.add_argument("--cg-target", type=float, default=5.0, help="contrast grid: target S/N (default 5)")
+    p.add_argument("--cg-snr", default="matched", choices=["matched", "aperture"],
+                   help="contrast grid: the run's matched-filter S/N (default) or aperture photometry")
     p.add_argument("--every", type=int, default=5, help="a panel every this many evaluations (default 5)")
     p.add_argument("--workers", default="auto", help="reduction workers (default auto)")
     p.add_argument("--no-show", action="store_true", help="no live window")
@@ -82,7 +91,8 @@ def main(argv=None) -> int:
                     validation=ValidationConfig(n_top=6, n_valid=8),
                     calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=2,
                                                   forced=[a.contrast] if a.contrast > 0 else None),
-                    defaults={"k_klip": 10}, fm_curve=True)
+                    defaults={"k_klip": 10}, fm_curve=True,
+                    contrast_grid=ContrastGridConfig(mode="grid", n_pa=a.cg_pa, target_snr=a.cg_target, snr=a.cg_snr))
     display = LiveDisplay(a.run_dir, show=not a.no_show, every=a.every, pdf_every=0, movie=False)
     runner = Runner(red, space, objective, sampler, cfg, a.run_dir, callbacks=[display])
     t0 = time.time()

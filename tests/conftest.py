@@ -86,9 +86,13 @@ def _never_skip_panels():
     Session-scoped on purpose: some of those runs are built by *module*-scoped fixtures,
     which are set up before any function-scoped fixture gets a chance to patch anything.
     """
+    from klip_tpe import contrast_grid
     from klip_tpe.display import LiveDisplay
     mp = pytest.MonkeyPatch()
     mp.setattr(LiveDisplay, "RENDER_GRACE", 600.0)
     mp.setattr(LiveDisplay, "VALIDATION_GRACE", 600.0)
+    # The injection-recovery grid is on by default and costs a hundred reductions or more an
+    # annulus, which the suite's many short runs do not need.  A test of it asks for it.
+    mp.setitem(contrast_grid._DEFAULT, "mode", "off")
     yield
     mp.undo()

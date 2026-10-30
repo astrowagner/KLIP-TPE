@@ -872,10 +872,25 @@ def _min_r_fwhm(a):
     return float(v)
 
 
+def _contrast_grid_config(a):
+    """``RunConfig.contrast_grid`` from the ``--contrast-grid`` / ``--cg-*`` options.  Without
+    ``--contrast-grid`` the mode is :class:`ContrastGridConfig`'s default (grid)."""
+    from .contrast_grid import ContrastGridConfig
+    mode = getattr(a, "contrast_grid", None)
+    return ContrastGridConfig(**({"mode": mode} if mode else {}), n_pa=int(getattr(a, "cg_pa", 12)),
+                              n_samples=int(getattr(a, "cg_samples", 96)),
+                              sep_step_fwhm=float(getattr(a, "cg_step", 1.0)),
+                              target_snr=float(getattr(a, "cg_target", 5.0)),
+                              precision=float(getattr(a, "cg_precision", 0.1)),
+                              snr=getattr(a, "cg_snr", "matched") or "matched",
+                              sidelobe=getattr(a, "cg_sidelobe", "rotation") or "rotation",
+                              sidelobe_fwhm=float(getattr(a, "cg_sidelobe_fwhm", 2.0)))
+
+
 def _protocol_config(a) -> dict:
     ns = _n_sources(a)
     rmin = _min_r_fwhm(a)
-    return dict(opt_width=a.opt_width, width_range=tuple(a.width_range), r_cap=a.r_cap, k_mode=a.k_mode,
+    return dict(contrast_grid=_contrast_grid_config(a), opt_width=a.opt_width, width_range=tuple(a.width_range), r_cap=a.r_cap, k_mode=a.k_mode,
                 k_scan_max=a.k_scan_max, stitch_every=a.stitch_every, verify=a.verify, verify_n_boot=a.verify_n_boot,
                 param_verify=a.param_verify, n_pv=a.n_pv, pv_divmin=a.pv_divmin, candidates=a.candidates,
                 n_remeasure=max(int(getattr(a, "n_remeasure", 1) or 1), 1),
@@ -1412,6 +1427,27 @@ def _add_run_args(p):
                         "own. The run's own random draws are untouched")
     p.add_argument("--n-final-draws", type=int, default=200, metavar="M",
                    help="common draws of the final round (default 200)")
+    p.add_argument("--contrast-grid", default=None, choices=["grid", "random", "off"],
+                   help="the contrast curve after validation (default grid). One injected source per reduction at "
+                        "the winner config, on a grid of separations and position angles (grid) or at random "
+                        "positions (random), each iterated on its contrast to the target S/N. The noise rings leave "
+                        "out the source, the known companions and their ADI sidelobes. off skips it")
+    p.add_argument("--cg-pa", type=int, default=12, metavar="N", help="position angles per separation (default 12)")
+    p.add_argument("--cg-samples", type=int, default=96, metavar="N",
+                   help="positions with --contrast-grid random (default 96)")
+    p.add_argument("--cg-step", type=float, default=1.0, metavar="FWHM",
+                   help="separation step of the grid in FWHM (default 1)")
+    p.add_argument("--cg-target", type=float, default=5.0, metavar="SNR", help="target S/N of the grid (default 5)")
+    p.add_argument("--cg-precision", type=float, default=0.1, metavar="F",
+                   help="how close to the target a position must come, as a fraction of it (default 0.1)")
+    p.add_argument("--cg-snr", default="matched", choices=["matched", "aperture"],
+                   help="the grid's S/N: the run's matched-filter Mawet S/N (matched, the default) or the aperture "
+                        "photometry of the IDL contrast generators (aperture)")
+    p.add_argument("--cg-sidelobe", default="rotation", choices=["rotation", "fixed"],
+                   help="a source's ADI sidelobes: the arc the field rotation sweeps, capped by anglemax and never "
+                        "under --cg-sidelobe-fwhm of arc (rotation, the default), or that width alone (fixed)")
+    p.add_argument("--cg-sidelobe-fwhm", type=float, default=2.0, metavar="FWHM",
+                   help="the sidelobes' least half-width, in FWHM of arc (default 2)")
     p.add_argument("--global-block", action="store_true", help="one parameter block for all nights")
     p.add_argument("--no-framesel", action="store_true")
     p.add_argument("--no-selection", action="store_true", help="no drop1/drop2 night-selection dims")

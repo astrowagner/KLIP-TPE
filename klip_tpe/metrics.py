@@ -347,6 +347,28 @@ def _aperture_sum(img: np.ndarray, x: float, y: float, r: float) -> float:
     return float(vals.sum()) if vals.size else np.nan
 
 
+def _arc_regions(arcs, pxscale: float, fwhm: float, cx: float, cy: float, angle_convention: str = "pa"):
+    """``excl_arcs`` entries ``(rho_arcsec, theta_deg, half_width_deg, radial_fwhm)`` as
+    ``(r_px, phi_rad, half_width_rad, radial_px)`` in the image's own polar coordinates."""
+    out = []
+    for a in arcs or ():
+        x, y = source_xy([float(a[0])], [float(a[1])], pxscale, cx, cy, angle_convention)
+        out.append((float(np.hypot(x[0] - cx, y[0] - cy)), float(np.arctan2(y[0] - cy, x[0] - cx)),
+                    float(np.deg2rad(a[2])), float(a[3]) * float(fwhm)))
+    return out
+
+
+def _in_arcs(x, y, regions, cx: float, cy: float):
+    """True where ``(x, y)`` lies in any arc region: within ``radial_px`` of the arc's radius
+    and within ``half_width`` of its azimuth.  Scalars or arrays."""
+    r = np.hypot(np.asarray(x, float) - cx, np.asarray(y, float) - cy)
+    ph = np.arctan2(np.asarray(y, float) - cy, np.asarray(x, float) - cx)
+    m = np.zeros(np.shape(r), bool)
+    for rc, pc, hw, dr in regions:
+        m |= (np.abs(r - rc) <= dr) & (np.abs((ph - pc + np.pi) % (2 * np.pi) - np.pi) <= hw)
+    return m
+
+
 # ----------------------------------------------------------------------------
 # per-source detection S/N  (near2_snrpk)
 # ----------------------------------------------------------------------------
@@ -363,7 +385,8 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                    declip_nsig: Optional[float] = 6.0, band_fwhm: float = 0.6,
                    min_ring: int = 6, penalty: str = "geometric",
                    pixel_mask: Optional[np.ndarray] = None, inner_fwhm: float = 1.0,
-                   angle_convention: str = "pa", return_details: bool = False):
+                   angle_convention: str = "pa", return_details: bool = False,
+                   excl_arcs: Sequence[Tuple[float, float, float, float]] = ()):
     """Matched-filter Mawet et al. (2014) detection S/N of each source.
 
     * optional single-pixel de-spiking, then convolution with ``kernel`` (default
@@ -392,6 +415,12 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
     source's geometry and, for a NaN, ``'why'`` (:data:`WHY_GUARD`, :data:`WHY_RING`,
     :data:`WHY_NOISE`).  ``pixel_mask`` (True = exclude) removes e.g. disk pixels from
     the noise samples.
+
+    ``excl_arcs`` = ``[(rho_arcsec, theta_deg, half_width_deg, radial_fwhm), ...]`` leaves
+    whole arcs out of the ring and the band: every aperture or pixel within ``radial_fwhm``
+    FWHM of the arc's radius and ``half_width_deg`` of its azimuth.  An ADI reduction
+    over-subtracts a source along the arc the field rotation sweeps at its radius, so these
+    are a source's sidelobes (:mod:`klip_tpe.contrast_grid`).  Default none.
 
     The IDL ``near2_snrpk`` asked the guard of the located peak instead.  On a clean
     image that peak is whichever noise pixel is highest within ``search_px``, and for a
@@ -429,6 +458,8 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
     finite = np.isfinite(img)
     if pixel_mask is not None:
         finite = finite & ~np.asarray(pixel_mask, bool)
+    arcs = _arc_regions(excl_arcs, pxscale, fwhm, cx, cy, angle_convention)
+    arc_px = _in_arcs(xx, yy, arcs, cx, cy) if arcs else None
     isr = int(np.ceil(search_px))
 
     snr = np.full(nsrc, np.nan)
@@ -469,6 +500,8 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                 continue
             if not (0 <= xk < nx and 0 <= yk < ny) or not finite[yk, xk]:
                 continue
+            if arcs and bool(_in_arcs(xk, yk, arcs, cx, cy)):
+                continue
             mok = not (kx.size and np.any(np.hypot(xk - kx, yk - ky) < exr))
             vals.append(A[yk, xk])
             valok.append(mok)
@@ -482,6 +515,8 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                 keep &= (xx - xs[t]) ** 2 + (yy - ys[t]) ** 2 >= exr * exr
             for t in range(kx.size):
                 keep &= (xx - kx[t]) ** 2 + (yy - ky[t]) ** 2 >= exr * exr
+            if arc_px is not None:
+                keep &= ~arc_px
             bvals = A[keep] if keep.sum() >= 5 else A[bnd]
             if bvals.size >= 5:
                 sd_band, mn_band = float(np.std(bvals, ddof=1)), float(np.mean(bvals))
@@ -522,12 +557,14 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
     return snr
 
 
-def _ring_fluxes(img, cx, cy, sep, phi0, nap, aprad, excl_xy, exr, known_xy):
+def _ring_fluxes(img, cx, cy, sep, phi0, nap, aprad, excl_xy, exr, known_xy, skip=None):
     ref, ok = [], []
     for k in range(1, nap):
         phik = phi0 + k * 2 * np.pi / nap
         xk, yk = cx + sep * np.cos(phik), cy + sep * np.sin(phik)
         if any(np.hypot(xk - ex, yk - ey) < exr for ex, ey in excl_xy):
+            continue
+        if skip is not None and skip(xk, yk):
             continue
         f = _aperture_sum(img, xk, yk, aprad)
         if np.isfinite(f):
@@ -578,9 +615,17 @@ def injection_difference_snr(img_inj: np.ndarray, img_clean: np.ndarray, rho, th
 
 
 def aperture_mawet_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
-                       excl_fwhm: float = 1.5, angle_convention: str = "pa") -> np.ndarray:
+                       excl_fwhm: float = 1.5, angle_convention: str = "pa",
+                       known: Sequence[Tuple[float, float]] = (),
+                       excl_arcs: Sequence[Tuple[float, float, float, float]] = (),
+                       return_details: bool = False):
     """Plain aperture Mawet S/N (``near2_snr``): ``(f_src - mean(ring)) / (std(ring)
-    sqrt(1+1/n))`` with FWHM/2 apertures; kept for completeness / legacy comparison."""
+    sqrt(1+1/n))`` with FWHM/2 apertures at the given position (no peak search), ring
+    apertures a FWHM apart, ``n`` the apertures kept.  It is the S/N of the IDL contrast
+    generators (``contrastcurve_*.pro``).
+
+    ``known`` companions and ``excl_arcs`` (see :func:`mawet_peak_snr`) leave apertures out
+    of the ring.  ``return_details`` adds each source's ``nclean``, the apertures used."""
     img = np.asarray(img, float)
     cx, cy = star_center(img.shape)
     rho = np.atleast_1d(np.asarray(rho, float))
@@ -590,17 +635,27 @@ def aperture_mawet_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float,
     imz = np.where(np.isfinite(img), img, 0.0)
     xs, ys = source_xy(rho, theta, pxscale, cx, cy, angle_convention)
     excl = list(zip(xs, ys))
+    if len(known):
+        kx, ky = source_xy([k[0] for k in known], [k[1] for k in known], pxscale, cx, cy, angle_convention)
+        excl += list(zip(kx, ky))
+    arcs = _arc_regions(excl_arcs, pxscale, fwhm, cx, cy, angle_convention)
+    skip = (lambda x_, y_: bool(_in_arcs(x_, y_, arcs, cx, cy))) if arcs else None
     phi = np.deg2rad(theta + (90.0 if angle_convention == "pa" else 0.0))
     snr = np.full(rho.size, np.nan)
+    details: List[Dict[str, Any]] = []
     for s in range(rho.size):
         sep = rho[s] / pxscale
         nap = max(int(np.floor(2 * np.pi * sep / fwhm)), 4)
         f_src = _aperture_sum(imz, xs[s], ys[s], aprad)
-        ref, _ = _ring_fluxes(img, cx, cy, sep, phi[s], nap, aprad, excl, exr, [])
+        ref, _ = _ring_fluxes(img, cx, cy, sep, phi[s], nap, aprad, excl, exr, [], skip=skip)
+        details.append({"nclean": int(ref.size), "nap": nap})
         if ref.size < 2 or not np.isfinite(f_src):
+            details[-1]["why"] = WHY_NOISE
             continue
         noise = np.std(ref, ddof=1) * np.sqrt(1.0 + 1.0 / ref.size)
         snr[s] = (f_src - ref.mean()) / noise if noise > 0 else np.nan
+    if return_details:
+        return snr, details
     return snr
 
 

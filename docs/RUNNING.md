@@ -98,6 +98,9 @@ in order:
   batch at a time, so a copy of an earlier candidate is skipped before its trials go out.  The
   final round's trials (`--n-final`) and the elected winner's fresh draws go out together after
   the first round.
+* The contrast grid reduces its test positions several at a time, one injected source in
+  each, a wave per iteration.  On HD 95086 (tutorial 02's annulus) its 79 test positions take
+  about 150 reductions.
 * param_verify, the calibration remeasurements and the k-scan pair work the same way.
 
 Every draw's positions are drawn first, in the order a one-at-a-time loop draws them.  The

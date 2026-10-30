@@ -31,4 +31,5 @@ from .reducer import (Reducer, KLIPReducer, PartitionedReducer, Dataset,  # noqa
 from .feasibility import ReferenceCountGuard, FrameSelectionGuard, compose  # noqa: E402,F401
 from .reducer import reducer_class                                       # noqa: E402,F401
 from .runner import Runner, RunConfig, CalibrationConfig, ValidationConfig  # noqa: E402,F401
+from .contrast_grid import ContrastGridConfig  # noqa: E402,F401
 from . import datasets                                                   # noqa: E402,F401
