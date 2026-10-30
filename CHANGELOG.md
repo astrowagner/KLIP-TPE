@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — 2026-10-30 (the finished annulus's contrast panel, the README panel's script)
+
+- The finished annulus's frame no longer draws the best evaluation's preview curve.  The
+  preview is that evaluation's own few injections, and validation's curve replaces it.  The
+  IDL panel colours both alike, so the final frame showed two solid curves that disagreed for
+  no reason a reader could see.  While the search runs, the preview stays.
+- `scripts/readme_panel.py` makes the README's panel.  It is tutorial 02's search on HD 95086
+  with the same data, seed and settings, run for 3,000 evaluations instead of 300, long enough
+  to show the climb and the plateau after it.
+
 ## Unreleased — 2026-10-28 (a final round of validation on common draws)
 
 From the addendum to the GPU session's note of 2026-10-28.  On its 200 common draws the

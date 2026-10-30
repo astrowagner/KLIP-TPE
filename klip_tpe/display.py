@@ -3949,11 +3949,17 @@ class LiveDisplay(RunCallback):
     def _curves(self, runner, ad: AnnulusData, live: Optional[Dict[str, Any]], done: bool = False):
         """Contrast-panel curves: this eval's preview, the best eval's preview (+ its
         KLIP-FM preview with ``fm_preview``) and, once the annulus is finished, the
-        validated injection curve together with the KLIP-FM cross-check curve."""
+        validated injection curve together with the KLIP-FM cross-check curve.
+
+        The finished annulus's frame (``done``) leaves the best eval's preview out.  It is
+        that evaluation's own few injections, and validation's curve replaces it.  Left in,
+        it drew a second solid curve beside the validated one in the IDL panel, which
+        colours both alike, so the final frame showed two curves that disagree for no
+        reason a reader could see."""
         out = []
         if live:
             out.append(("this eval (preview from its sources)", live, {"color": CUR_COLOR, "lw": 0.9, "ls": "--"}))
-        if self._best_curve:
+        if self._best_curve and not done:
             out.append(("best eval (preview)", self._best_curve, {"color": PHASE_COLORS["tpe"], "lw": 1.3}))
         fm_prev = (self._best_images(runner).get("fm") or {}).get("curve") if not done else None
         if fm_prev:
