@@ -249,6 +249,10 @@ def main(argv=None):
                     help="injected sources per evaluation (default 3). They share the ring with "
                          "the real planet, and every source on it blanks part of the noise "
                          "annulus the S/N is measured against")
+    ap.add_argument("--even-pa", action="store_true",
+                    help="space the injected sources evenly in PA, 360/N apart (with --n-sources 2, 180 deg "
+                         "apart), on the band's mid-radius, the anchor re-drawn every evaluation. Default: "
+                         "independent random PAs on that radius")
     ap.add_argument("--allow-offset-ann", action="store_true",
                     help="proceed even when the injections do not land on the companion's "
                          "separation. Only for a deliberately wide band (a contrast curve over "
@@ -331,8 +335,11 @@ def main(argv=None):
     # separation ring at PAs spread around it, as optimize_lmircam_tpe.pro's annmode does.
     # The RADIUS is what is fixed for the annulus; the PAs are re-drawn every evaluation, as
     # near2m_randpos does ("so sources still rotate eval-to-eval (anti-gaming)").
+    # --even-pa spaces them 360/n apart instead (a pair 180 deg apart) on the same radius,
+    # still from an anchor re-drawn every evaluation: the sampler's 'spread' spacing, with
+    # the band collapsed to its mid-radius (RunConfig.inject_rho), where 'fixed_pa' puts them.
     obj, samp = generic.default_config(red, known=[PLANET])
-    samp.strategy = "fixed_pa"
+    samp.strategy = "spread" if a.even_pa else "fixed_pa"
 
     n_init = a.n_init or min(max(int(0.15 * a.n_iter), 40), 400)
     # bin_range floors the space for a NEW run; the guard floors it for a RESUMED one, whose
@@ -362,6 +369,7 @@ def main(argv=None):
                     # when --n-sources 2 is chosen.  Here the band is already collapsed onto
                     # that ring on purpose, so the convention has nothing to add.
                     pair_area_midpoint=False,
+                    inject_rho=mid * PXSCALE if a.even_pa else None,
                     validation=ValidationConfig(n_top=1 if a.default_only else 6,
                                                 n_valid=10),
                     calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=3),

@@ -572,6 +572,26 @@ def test_the_source_count_is_adjustable(big_tree, tmp_path):
     assert "3 sources on it (2 injected + the planet)" in log
 
 
+def test_even_pa_puts_a_pair_180_deg_apart_on_the_ring(big_tree, tmp_path):
+    """--even-pa with two sources: both on the companion's ring, 180 deg apart, in the log's
+    representative draw and in the evaluation the run recorded."""
+    out = str(tmp_path / "o_pair")
+    rc = run_rxj0534.main(["--partitions", "4", "--default-only", "--out", out, "--n-sources", "2", "--even-pa",
+                           "--k-max", "4", "--max-drop", "0", "--crop", "0", "--workers", "1"])
+    assert rc == 0
+    log = open(os.path.join(out, "run.log")).read()
+    assert "injected sources (2;" in log
+    pas = [float(l.split("PA =")[1].split("deg")[0]) for l in log.splitlines() if "rho = " in l and "PA =" in l]
+    assert len(pas) == 2 and abs((pas[0] - pas[1]) % 360.0 - 180.0) < 0.01, pas
+    rec = json.loads(open(os.path.join(out, "results.jsonl")).readline())
+    (r1, t1, _), (r2, t2, _) = rec["sources"]
+    assert r1 == pytest.approx(run_rxj0534.PLANET[0], abs=1e-6) and r2 == pytest.approx(r1)
+    assert abs((t1 - t2) % 360.0 - 180.0) < 1e-6
+    for t in (t1, t2):
+        gap = abs((t - run_rxj0534.PLANET[1] + 180.0) % 360.0 - 180.0)
+        assert gap * np.pi / 180.0 * r1 > 1.4 * 8.9 * run_rxj0534.PXSCALE, "a source landed on the companion"
+
+
 def test_a_crowded_ring_is_called_out(big_tree, tmp_path):
     """Asking for too many must say what it costs rather than silently thinning the noise."""
     out = str(tmp_path / "o_many")
