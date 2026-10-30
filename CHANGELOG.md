@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — 2026-10-30 (the README panel on RX J0534)
+
+- `scripts/readme_panel.py` makes the README's panel from RX J0534 b (LBTI/LMIRCam L', four
+  nights) by default.  It runs `scripts/run_rxj0534.py --partitions 4` for 3,000 evaluations,
+  with the contrast grid at half-FWHM steps (five separations from 0.29" to 0.49" in the
+  annulus, the companion's separation +/- 2 FWHM) and the title "RX J0534".  `--target
+  hd95086` runs the earlier panel on public data.
+- `LiveDisplay(title=...)` names the run on the panels and the annulus books in place of the
+  run directory's name.
+- `scripts/run_rxj0534.py` takes `--title`, `--panels` (the panels without a window) and the
+  contrast grid's options (`--contrast-grid`, `--cg-pa`, `--cg-step`, `--cg-target`,
+  `--cg-snr`).
+
 ## Unreleased — 2026-10-30 (the contrast curve from an injection grid, one source at a time)
 
 The protocol of Kevin Wagner's IDL contrast generators (`contrastcurve_*.pro`), after

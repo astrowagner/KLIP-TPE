@@ -153,6 +153,7 @@ importance instead of the night panels.
 * `every`, `pdf_every`, `movie_every` — render / PDF / progress-movie cadence.  Frames go to
   `steps/`, the per-annulus movie to `annulusNN/progress.gif` (+ `.mp4`), the full movie to `opt_steps.gif`.
 * `aliens=True` — the IDL launch movie during the first calibration.
+* `title` — the run's name on the panels and books (default: the run directory's name).
 
 ## Command line
 

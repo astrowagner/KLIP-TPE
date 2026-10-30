@@ -3461,14 +3461,16 @@ class LiveDisplay(RunCallback):
 
     def __init__(self, run_dir: str, every: int = 1, pdf_every: int = 10, save_png: bool = True, show: bool = False,
                  cmap: str = "inferno", dpi: int = 100, movie: bool = True, log=None, aliens: bool = False,
-                 window_scale: float = 1.0, movie_every: Optional[int] = None):
+                 window_scale: float = 1.0, movie_every: Optional[int] = None, title: Optional[str] = None):
         """``aliens=True`` plays IDL's five-act launch movie in the live window during the
         first annulus' calibration and writes ``intro_frames/`` + ``intro.gif``; off by
         default (the calibration panel alone is shown).  ``movie_every`` (evaluations;
         default = ``pdf_every``) rebuilds the running per-annulus progress movie
         ``annulusNN/progress.gif`` / ``.mp4`` (IDL ``annNN_progress.gif`` on the pdf batch);
-        0 = only at annulus end."""
+        0 = only at annulus end.  ``title`` names the run on the panels and the annulus books
+        in place of the run directory's name (the README panel's "RX J0534")."""
         self.run_dir = run_dir
+        self.title = None if title is None or not str(title).strip() else str(title)
         self.movie_every = max(int(pdf_every if movie_every is None else movie_every), 0)
         self._ann_frames: List[str] = []
         self.aliens = bool(aliens)
@@ -3959,13 +3961,18 @@ class LiveDisplay(RunCallback):
         return out
 
     def _data(self, runner) -> AnnulusData:
+        ad = None
         if not self._records and getattr(runner, "history", None) is not None and len(runner.history):
             # resumed mid-annulus: the live record list is empty, take the annulus from the log on disk
             try:
-                return annulus_from_run(self.run_dir, runner.ia)
+                ad = annulus_from_run(self.run_dir, runner.ia)
             except Exception:
-                pass
-        return annulus_from_runner(runner, self._records)
+                ad = None
+        if ad is None:
+            ad = annulus_from_runner(runner, self._records)
+        if self.title:
+            ad.run_name = self.title
+        return ad
 
     def _curves(self, runner, ad: AnnulusData, live: Optional[Dict[str, Any]], done: bool = False):
         """Contrast-panel curves: this eval's preview, the best eval's preview (+ its
