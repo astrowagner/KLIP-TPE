@@ -45,7 +45,7 @@ import time
 import numpy as np
 from astropy.io import fits
 
-from klip_tpe import (CalibrationConfig, RunConfig, Runner, ValidationConfig)
+from klip_tpe import (CalibrationConfig, ContrastGridConfig, RunConfig, Runner, ValidationConfig)
 from klip_tpe.instruments import generic
 
 # ----------------------------------------------------------------- instrument / target
@@ -272,6 +272,20 @@ def main(argv=None):
     ap.add_argument("--show", nargs="?", const="window", default=False, metavar="MODE",
                     help="live window: --show for a matplotlib window, --show inline to update "
                          "a Jupyter output cell in place, --show auto to pick by context")
+    ap.add_argument("--panels", action="store_true",
+                    help="write the live panels to steps/ without a window (--show writes them too)")
+    ap.add_argument("--title", default=None,
+                    help="the run's name on the panels and books (default: the run directory's name)")
+    # the injection-grid contrast curve after validation (klip_tpe.contrast_grid)
+    ap.add_argument("--contrast-grid", default=None, choices=["grid", "random", "off"],
+                    help="the contrast curve from injections one at a time (default: the library's, grid)")
+    ap.add_argument("--cg-pa", type=int, default=12, help="contrast grid: position angles per separation (default 12)")
+    ap.add_argument("--cg-step", type=float, default=1.0,
+                    help="contrast grid: separation step in FWHM (default 1). The default annulus is the "
+                         "companion's separation +/- 2 FWHM, so 1 gives three separations and 0.5 five")
+    ap.add_argument("--cg-target", type=float, default=5.0, help="contrast grid: target S/N (default 5)")
+    ap.add_argument("--cg-snr", default="matched", choices=["matched", "aperture"],
+                    help="contrast grid: the run's matched-filter S/N (default) or aperture photometry")
     a = ap.parse_args(argv)
 
     out = a.out or os.path.join(os.getcwd(), f"rxj0534_p{a.partitions}")
@@ -337,6 +351,9 @@ def main(argv=None):
     # default) evaluation is the whole run: same calibration, same metric, same validation.
     # That makes 'default -> optimized' one comparison rather than two pipelines.
     n_iter, n_init = (1, 1) if a.default_only else (a.n_iter, n_init)
+    cg = dict(n_pa=a.cg_pa, sep_step_fwhm=a.cg_step, target_snr=a.cg_target, snr=a.cg_snr)
+    if a.contrast_grid:
+        cg["mode"] = a.contrast_grid
     cfg = RunConfig(ann_edges=[ann[0], ann[1]], n_iter=n_iter, n_init=n_init, seed=a.seed,
                     n_sources=a.n_sources,
                     # NEAR's two-source convention collapses the band to the annulus'
@@ -349,7 +366,8 @@ def main(argv=None):
                                                 n_valid=10),
                     calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=3),
                     defaults={"k_klip": 5},          # what the published reduction used
-                    fm_curve=True, verify=not a.default_only, save_eval_images=False)
+                    fm_curve=True, verify=not a.default_only, save_eval_images=False,
+                    contrast_grid=ContrastGridConfig(**cg))
 
     runner_probe = Runner(red, space, obj, samp, cfg, out, log=lambda s: None)
     runner_probe.ia = 0
@@ -389,13 +407,17 @@ def main(argv=None):
             f"evaluation draws")
 
     callbacks, disp = [], None
-    if a.show:
+    if a.show or a.panels:
         from klip_tpe.display import LiveDisplay
         # show= is what opens the window; without it the display writes panels to steps/
         # and nothing appears on screen, which looks exactly like a broken display
-        disp = LiveDisplay(out, every=10, pdf_every=0, movie=False, dpi=100, show=a.show)
+        disp = LiveDisplay(out, every=10, pdf_every=0, movie=False, dpi=100, show=a.show or False,
+                           title=a.title)
         callbacks = [disp]
-        log(f"live window: {a.show}  (a second, freeze-proof view: klip-tpe view --run-dir {out})")
+        if a.show:
+            log(f"live window: {a.show}  (a second, freeze-proof view: klip-tpe view --run-dir {out})")
+        else:
+            log(f"live panels: written to {os.path.join(out, 'steps')}, no window")
     # watch the real companion alongside the search without ever scoring it
     callbacks.append(CompanionTrace(red, PLANET, out, log, display=disp))
 

@@ -318,6 +318,42 @@ def test_show_does_not_break_a_headless_run(tree, tmp_path):
     assert "live window: window" in log, "the run should say what it opened"
 
 
+def test_title_and_panels_reach_the_display(tree, tmp_path, monkeypatch):
+    """--title names the run on the panels in place of the directory, and --panels writes
+    them without a window (the README panel's --no-show)."""
+    from klip_tpe.display import LiveDisplay
+    seen = {}
+    real = LiveDisplay.__init__
+
+    def spy(self, run_dir, *args, **kw):
+        seen.update(kw)
+        return real(self, run_dir, *args, **kw)
+
+    monkeypatch.setattr(LiveDisplay, "__init__", spy)
+    out = str(tmp_path / "out_panels")
+    rc = run_rxj0534.main(["--partitions", "4", "--default-only", "--out", out, "--panels",
+                           "--title", "RX J0534", "--ann", "8", "20", "--allow-offset-ann", "--k-max", "4",
+                           "--max-drop", "0", "--crop", "0", "--workers", "1"])
+    assert rc == 0
+    assert seen.get("show") is False and seen.get("title") == "RX J0534"
+    steps = os.path.join(out, "steps")
+    assert os.path.isdir(steps) and any(f.endswith(".png") for f in os.listdir(steps)), "--panels wrote no panels"
+    assert "live panels: written to" in open(os.path.join(out, "run.log")).read()
+
+
+def test_the_contrast_grid_options_reach_the_run(tree, tmp_path):
+    """--contrast-grid and the --cg-* options land in the run's configuration, and the grid runs."""
+    out = str(tmp_path / "out_cg")
+    rc = run_rxj0534.main(["--partitions", "4", "--default-only", "--out", out, "--contrast-grid", "grid",
+                           "--cg-pa", "4", "--cg-step", "0.5", "--cg-snr", "aperture",
+                           "--ann", "8", "20", "--allow-offset-ann", "--k-max", "4", "--max-drop", "0",
+                           "--crop", "0", "--workers", "1"])
+    assert rc == 0
+    cg = json.load(open(os.path.join(out, "checkpoint.json")))["config"]["contrast_grid"]
+    assert (cg["mode"], cg["n_pa"], cg["sep_step_fwhm"], cg["snr"]) == ("grid", 4, 0.5, "aperture")
+    assert os.path.exists(os.path.join(out, "annulus01", "contrast_grid.json"))
+
+
 # ------------------------------------------------------- injecting on the companion's ring
 def test_the_annulus_is_built_around_the_companion(big_tree, tmp_path):
     """The band must be symmetric about the companion, because 'fixed_pa' injects at the
