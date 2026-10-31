@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — 2026-10-31 (KLIP-FM one source at a time, and the finished panel on the winner's injections)
+
+- **The finished annulus's KLIP-FM square models the winner's own injections**, the ones in
+  `best_inj.fits` and the best cells, beside their injected-PSF model.  It showed the
+  cross-check's test spiral, up to 24 sources in one model.  The injected-PSF square now shows
+  those same injections too: the committed trial's, which are validation's fresh draw, where it
+  showed the search evaluation's.  The model is `annulusNN/best_fm_inj.fits`, and
+  `best_fm.fits` stays the spiral's.
+- **KLIP-FM one source at a time.**  `RunConfig.fm_one_at_a_time` gives each test source of the
+  cross-check a forward-model pass of its own and reads its response there, so none is read
+  through another's self-subtraction lobes.  The model is linear in the sources, so the single
+  models sum to the joint one.  A reduction per source.  Off by default.
+- `scripts/fm_one_at_a_time.py` compares, on a finished run, the cross-check's spiral in one
+  pass and one source per pass, and the forward model at the injection grid's positions with the
+  cross-check's noise and with the grid's own S/N, against the grid.  It rebuilds the reducer of
+  RX J0534 or HD 95086.
+- `Runner._grid_geometry` and `Runner._grid_snr` hold the grid's measurement, which the script
+  shares.  `products.fm_responses`, and `fm_contrast_curve(resp=...)`.
+  `run_rxj0534.make_reducer` and `readme_panel.hd95086_reducer` build the scripts' reducers.
+- On the finished frame the "green dashed = KLIP-FM" label sits under the grid's, at the top
+  right.  At the foot of the panel the KLIP-FM curve ran through it.
+- The `fm_preview` docstring said it was off by default.  It is on.
+
 ## Unreleased — 2026-10-30 (the README panel's injections in pairs, 180 deg apart)
 
 - `scripts/run_rxj0534.py --even-pa` spaces the injected sources evenly in angle, 360/N apart,

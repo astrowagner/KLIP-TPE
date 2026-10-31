@@ -11,7 +11,7 @@ from scipy import ndimage
 
 from .metrics import Source, gaussian_kernel, radprof, source_xy, star_center
 
-__all__ = ["noise_profile", "throughput_fit", "contrast_curve", "stitch_annuli", "snr_map",
+__all__ = ["noise_profile", "throughput_fit", "contrast_curve", "stitch_annuli", "snr_map", "fm_responses",
            "fm_response", "fm_test_sources", "fm_contrast_curve"]
 
 
@@ -241,6 +241,18 @@ def fm_response(img: np.ndarray, rho, theta, pxscale: float, fwhm: float,
     return resp
 
 
+def fm_responses(fm_image: np.ndarray, sources: Sequence[Source], pxscale: float, fwhm: float,
+                 kernel_fn: Optional[Callable[[float], Optional[np.ndarray]]] = None,
+                 search_px: float = 1.5, angle_convention: str = "pa", flatten: bool = False) -> np.ndarray:
+    """:func:`fm_response` of ``fm_image`` at each of ``sources``, after :func:`radprof` with
+    ``flatten`` (as :func:`fm_contrast_curve` measures them)."""
+    rho = np.array([s.rho for s in sources], float)
+    th = np.array([s.theta for s in sources], float)
+    img = radprof(fm_image) if flatten else np.asarray(fm_image, float)
+    return fm_response(img, rho, th, pxscale, fwhm, kernel_fn=kernel_fn, search_px=search_px,
+                       angle_convention=angle_convention)
+
+
 def fm_test_sources(rin_px: float, rout_px: float, pxscale: float, contrast: float) -> List[Source]:
     """The KLIP-FM cross-check test sources (L7574-7576): ``nfm = clip(floor((rout-1-rin)
     /1.5)+1, 5, 24)`` radii from ``rin`` to ``rout-1`` px on a golden-angle spiral
@@ -259,7 +271,8 @@ def fm_contrast_curve(fm_image: np.ndarray, clean_image: np.ndarray, contrast: f
                       kernel_fn: Optional[Callable[[float], Optional[np.ndarray]]] = None,
                       nsigma: float = 5.0, search_px: float = 1.5,
                       angle_convention: str = "pa", flatten: bool = False,
-                      known: Sequence[Tuple[float, float]] = ()) -> Dict[str, np.ndarray]:
+                      known: Sequence[Tuple[float, float]] = (),
+                      resp: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
     """KLIP-FM ``nsigma`` contrast curve (A_main_procedure.md section 9.1, L7655-7677).
 
     ``resp = fm_response(fm_image, sources)``; ``K_fm = resp / contrast``;
@@ -275,15 +288,24 @@ def fm_contrast_curve(fm_image: np.ndarray, clean_image: np.ndarray, contrast: f
 
     ``known`` = real companions [(rho_arcsec, pa_deg), ...] left out of the noise rings.
 
+    ``resp`` = the responses already measured, one per source (:func:`fm_responses`), in
+    place of measuring them on ``fm_image``: each on a forward-model pass of its own, say
+    (``Runner._fm_pass(one_at_a_time=True)``), so that no source is read through another's
+    self-subtraction lobes.
+
     Returns ``r_as`` (valid test radii, arcsec), ``curve``, ``K_fm`` and ``resp`` (all
     sources, NaN where invalid), plus ``sigma_mf`` / ``r_sigma_px`` (the profile) and
     ``r_test_as`` (all test radii).
     """
     rho = np.array([s.rho for s in sources], float)
-    th = np.array([s.theta for s in sources], float)
     _flat = radprof if flatten else (lambda a: np.asarray(a, float))
-    resp = fm_response(_flat(fm_image), rho, th, pxscale, fwhm, kernel_fn=kernel_fn,
-                       search_px=search_px, angle_convention=angle_convention)
+    if resp is None:
+        resp = fm_responses(fm_image, sources, pxscale, fwhm, kernel_fn=kernel_fn, search_px=search_px,
+                            angle_convention=angle_convention, flatten=flatten)
+    else:
+        resp = np.asarray(resp, float).ravel()
+        if resp.size != rho.size:
+            raise ValueError(f"{resp.size} responses for {rho.size} sources")
     K = resp / float(contrast)
     g = np.isfinite(K) & (K > 0)
     out: Dict[str, np.ndarray] = {"r_test_as": rho, "K_fm": K, "resp": resp,

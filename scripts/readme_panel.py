@@ -116,11 +116,16 @@ def run_rxj0534(a: argparse.Namespace) -> int:
     return rc
 
 
-def run_hd95086(a: argparse.Namespace) -> int:
+#: HD 95086 b (arcsec, deg), passed as known
+HD95086_B = (0.62, 145.0)
+
+
+def hd95086_reducer(workers="auto"):
+    """Tutorial 02's reducer of HD 95086 (VLT/SPHERE IRDIS K1+K2), as :func:`run_hd95086` builds
+    it.  ``scripts/fm_one_at_a_time.py`` rebuilds a run's with it."""
     from astropy.io import fits
 
-    from klip_tpe import CalibrationConfig, ContrastGridConfig, Runner, RunConfig, ValidationConfig, datasets
-    from klip_tpe.display import LiveDisplay
+    from klip_tpe import datasets
     from klip_tpe.instruments import generic
 
     files = datasets.fetch("sphere_hd95086")
@@ -133,11 +138,19 @@ def run_hd95086(a: argparse.Namespace) -> int:
         psf = ds.meta["psf"]
         star_flux[band] = float(psf[psf > 0].sum())      # the flux frames are on the science scale
         lam[band] = inst["lam_m"] if band == "K1" else inst["lam_m_K2"]
-    red = generic.make_reducer(dsets, pxscale=inst["pxscale"], lam_m=lam, diam_m=inst["diam_m"],
-                               star_flux=star_flux, max_workers=a.workers)
+    return generic.make_reducer(dsets, pxscale=inst["pxscale"], lam_m=lam, diam_m=inst["diam_m"],
+                                star_flux=star_flux, max_workers=workers)
+
+
+def run_hd95086(a: argparse.Namespace) -> int:
+    from klip_tpe import CalibrationConfig, ContrastGridConfig, Runner, RunConfig, ValidationConfig
+    from klip_tpe.display import LiveDisplay
+    from klip_tpe.instruments import generic
+
+    red = hd95086_reducer(a.workers)
     space = generic.make_space(red, k_klip_max=30, angsep_range=tuple(a.angsep))
     space.project = generic.make_guard(red, k_max=30)
-    objective, sampler = generic.default_config(red, known=[(0.62, 145.0)])
+    objective, sampler = generic.default_config(red, known=[HD95086_B])
     sampler.excl_fwhm = 6.0                                  # injections >= 6 FWHM from HD 95086 b
     cfg = RunConfig(ann_edges=[30, 70], n_iter=a.n_iter, n_init=a.n_init, seed=a.seed, n_remeasure=3,
                     n_sources=a.n_sources,

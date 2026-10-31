@@ -52,8 +52,8 @@ aggregate (`Test SNR = median`, `Best median S/N orig / corr`).
 |---|---|
 | TPE convergence | score per evaluation: warm-up / explore grey, TPE blue, local white; SMA20 (green) and SMA50 (yellow) moving averages, dashed = the random-phase SMA20 baseline, the incumbent circled, the vertical dotted line = end of warm-up |
 | S/N dist | histogram of scores (rotated, shares the y axis) |
-| KLIP-FM model (best) | the forward-modelled response of the incumbent to the injected companions (built-in engine only; symlog) |
-| injected PSF (best) | the injected PSF model, derotated to North-up |
+| KLIP-FM model (best) | the forward-modelled response of the incumbent to its injected companions, and on the finished annulus's frame of the winner to the injections in its best cells (built-in engine only; symlog) |
+| injected PSF (best) | the injected PSF model of the same injections, derotated to North-up |
 
 **Fourth row**
 
@@ -103,7 +103,8 @@ run_dir/
     winner.json                                 the AnnulusResult (winner, validation table, curves, partitions)
     best_inj.fits, best_clean.fits              the winner's images (with / without injections)
     best_*_partitions.fits                      the same per partition
-    best_fm.fits                                the KLIP-FM response
+    best_fm.fits                                the KLIP-FM cross-check's model of its test spiral
+    best_fm_inj.fits                            the KLIP-FM model of the winner's injections (those of best_inj.fits)
     contrast_curve.txt                          5-sigma contrast vs separation (+ KLIP-FM section)
     corner.pdf, landscapes.pdf                  sampled parameter space (scatter corner; TPE good/bad densities)
     parhist.pdf, edf.png, kbook.pdf             parameter histories, score EDF per phase, k requested vs used
