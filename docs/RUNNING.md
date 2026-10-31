@@ -178,16 +178,18 @@ The log says when a run uses `zone`.
 ### The card (`--gpu-share`, `--gpu-workers`)
 
 A share of the search's injected draws can be reduced on an NVIDIA card beside the CPU
-workers.  The card's reducer is `klip_tpe.gpu_reducer` (CuPy, on Linux), and without it the
-share is 0.  `--gpu-share 30` sends 30 % of those reductions to the card.  A hash of each job's
+workers.  The card's reducer is `klip_tpe.gpu_reducer`, the chain in `klip_tpe.klip_gpu` on
+CuPy, so the run's environment needs CuPy for CUDA 12: `pip install -e ".[gpu]"` in the
+checkout, or `pip install "cupy-cuda12x[ctk]"`.  `--gpu-share 30` sends 30 % of those
+reductions to the card.  A hash of each job's
 tag picks them, and the tag names the evaluation, the draw and the night, so where a job runs
 does not depend on timing, and a run and its resumes reproduce to the bit.  The clean
 reductions, the validation, the verify and the products stay on the CPU.  The card's images
 differ from the CPU's by about 1e-5 of the image noise, so a run with a card gives other scores
 than the same run without one, by far less than the draw scatter.
 
-`--gpu-share auto`, the default for a new run, is 30 where Linux shows a card and the module is
-there, else 0, so on a Mac no card worker starts.  A run keeps its share across resumes in
+`--gpu-share auto`, the default for a new run, is 30 where Linux shows a card and CuPy is
+installed, else 0, so on a Mac no card worker starts.  A run keeps its share across resumes in
 `card.json` in the run directory, as it keeps `--klip-gram`, and a resume that names another
 share writes it there with the time.  `--gpu-workers` (3 by default) is how many worker
 processes share the card.  At large bins one leaves the card idle while it prepares the next
@@ -201,6 +203,12 @@ the run goes on without it.  `final_results.json` and `bench_summary.txt` give t
 and the fraction of the time its workers were busy, from which to set the next run's share.
 Each record in `results.jsonl` lists the nights the card reduced (`meta.card`, and
 `meta.draw_card` draw by draw).
+
+The card's images agree with the CPU's to about 1e-5 of the image noise, not to the bit, and the
+same job on the card twice gives the same bits.  `tests/test_gpu_reducer.py` compares the two on
+synthetic nights, on NumPy everywhere and on the card where there is one.
+`scripts/check_gpu_reducer.py --run <run directory>` does it on a finished NEAR2 run's frames
+and recorded configurations, and is worth running on the card after an update.
 
 ## Edited frames (`--cube-name`, `--drop-frames`, `--subtract-sources`, `--inject-sources`)
 

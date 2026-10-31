@@ -1974,7 +1974,7 @@ class PartitionedReducer(Reducer):
         cfg = Config(params=dict(req.params), per_partition={p: dict(req.params) for p in self.reducers},
                      selected=list(self.reducers), x=np.zeros(0))
         ev = self.reduce_config(cfg, req.injections, req.k_scan, req.tag, fm_sources=req.fm_sources,
-                                extras=req.extras)
+                                extras=req.extras, card=bool(getattr(req, "card", False)))
         return ReductionResult(ev.image, 1.0, {"partitions": ev.partitions}, fm_image=ev.fm_image,
                                nosub=ev.nosub, cadi=ev.cadi)
 
