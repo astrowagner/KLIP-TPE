@@ -222,10 +222,16 @@ class RunConfig:
         pass at the winner config on the golden-angle test spiral -> ``AnnulusResult.
         fm_curve``, ``annulusNN/best_fm.fits`` and a ``# KLIP-FM`` section in the
         contrast-curve files.  Needs ``reducer.supports_fm``; skipped in the scan modes.
+        A second pass models the winner's own injections, the ones in ``best_inj.fits``
+        (``annulusNN/best_fm_inj.fits``), for the finished annulus's KLIP-FM panel.
+    fm_one_at_a_time
+        the cross-check's test sources each on a forward-model pass of their own, so that
+        no source's response is read through another's self-subtraction lobes.  A
+        reduction per source instead of one.  Off by default (the IDL's single pass).
     fm_preview
         the §9.3 live preview: at every new search best one extra clean FM pass at
         that eval's config with its own sources (``best_images['fm']``, shown by the
-        display).  Off by default -- it costs a reduction per new best.
+        display).  On by default.  It costs a reduction per new best.
     contrast_grid
         the injection-recovery contrast curve after validation
         (:mod:`klip_tpe.contrast_grid`): one injected source per reduction over a grid of
@@ -353,6 +359,7 @@ class RunConfig:
     partition_weighting: Optional[str] = None
     fm_curve: bool = True
     fm_preview: bool = True              # live KLIP-FM preview at each new best (IDL: 'after 1st best')
+    fm_one_at_a_time: bool = False       # the cross-check's test sources each on its own FM pass
     #: Before a new run's first evaluation, move every searched reduction dimension alone
     #: and see whether it changes the clean reduction
     #: (:func:`klip_tpe.liveness.check_live_dimensions`, about ``1 + ndim`` reductions; a
@@ -1342,28 +1349,60 @@ class Runner:
     # -- KLIP-FM (A §9.1 / §9.3) -------------------------------------------------
     def _fm_pass(self, cfg: Config, zone: Tuple[float, float], contrast: float, tag: str,
                  sources: Optional[Sequence[Source]] = None,
-                 clean_img: Optional[np.ndarray] = None) -> Optional[Dict[str, Any]]:
+                 clean_img: Optional[np.ndarray] = None, one_at_a_time: bool = False,
+                 keep_singles: bool = False) -> Optional[Dict[str, Any]]:
         """One CLEAN reduction of ``cfg`` with the KLIP-FM model cube of ``sources``
         (default: the golden-angle test spiral of ``products.fm_test_sources``) and the
         FM 5-sigma curve against ``clean_img`` (default: the pass' own clean image).
-        Returns ``{'images': EvalImages, 'fm_image', 'clean', 'sources', 'curve'}`` with
-        ``curve`` a JSON-safe dict of lists, or None when the reducer produced no FM image."""
-        from .products import fm_contrast_curve, fm_test_sources
+        Returns ``{'images': EvalImages, 'fm_image', 'clean', 'sources', 'curve',
+        'one_at_a_time'}`` with ``curve`` a JSON-safe dict of lists, or None when the reducer
+        produced no FM image.
+
+        ``one_at_a_time``: a forward-model pass for each source on its own, and each source's
+        response read on its own model, so none is read through another's self-subtraction
+        lobes.  The model is linear in the sources (first order, Pueyo 2016), so the sum of
+        the single models, which is the ``fm_image`` returned, is the joint pass' model.  It
+        costs a reduction per source.  ``keep_singles`` returns the single models too, as
+        ``'fm_singles'`` (one image per source, in order)."""
+        from .products import fm_contrast_curve, fm_responses, fm_test_sources
         a_in, a_out = zone
         rin = max(float(a_in), self.fwhm)
         srcs = list(sources) if sources else fm_test_sources(rin, float(a_out), self.pxscale, contrast)
         srcs = [Source(s.rho, s.theta, contrast) for s in srcs]
-        ev = self._reduce(cfg, None, fm_sources=srcs, tag=tag)
-        if ev.fm_image is None:
-            return None
+        kfn, conv = self.reducer.matched_filter_kernel, self.reducer.angle_convention
+        resp = None
+        if one_at_a_time and len(srcs) > 1:
+            calls = [lambda s=s, j=j: self._reduce(cfg, None, fm_sources=[s], tag=f"{tag}_s{j}")
+                     for j, s in enumerate(srcs)]
+            evs: List[EvalImages] = []
+            with contextlib.closing(self._run_ordered(calls, self._reduction_window(len(cfg.selected)))) as stream:
+                for _, res in stream:
+                    if isinstance(res, BaseException):
+                        raise res
+                    evs.append(res)
+            if any(e.fm_image is None for e in evs):
+                return None
+            resp = np.array([fm_responses(e.fm_image, [s], self.pxscale, self.fwhm, kernel_fn=kfn,
+                                          angle_convention=conv, flatten=self.flatten_products)[0]
+                             for e, s in zip(evs, srcs)])
+            ev = evs[0]
+            fm_image = np.sum([np.asarray(e.fm_image, float) for e in evs], axis=0)
+        else:
+            ev = self._reduce(cfg, None, fm_sources=srcs, tag=tag)
+            if ev.fm_image is None:
+                return None
+            fm_image = ev.fm_image
         clean = ev.image if clean_img is None else clean_img
-        cc = fm_contrast_curve(ev.fm_image, clean, contrast, self.fwhm, self.pxscale, rin, float(a_out), srcs,
-                               kernel_fn=self.reducer.matched_filter_kernel,
-                               angle_convention=self.reducer.angle_convention,
-                               flatten=self.flatten_products, known=self._known())
+        cc = fm_contrast_curve(fm_image, clean, contrast, self.fwhm, self.pxscale, rin, float(a_out), srcs,
+                               kernel_fn=kfn, angle_convention=conv, flatten=self.flatten_products,
+                               known=self._known(), resp=resp)
         curve = {k: [None if not np.isfinite(v) else float(v) for v in np.atleast_1d(np.asarray(v_, float))]
                  for k, v_ in cc.items()}
-        return {"images": ev, "fm_image": ev.fm_image, "clean": clean, "sources": srcs, "curve": curve}
+        out = {"images": ev, "fm_image": fm_image, "clean": clean, "sources": srcs, "curve": curve,
+               "one_at_a_time": resp is not None}
+        if keep_singles and resp is not None:
+            out["fm_singles"] = [np.asarray(e.fm_image, float) for e in evs]
+        return out
 
     @staticmethod
     def _fm_section(curve: Optional[Dict[str, Any]], ia: int, contrast: float) -> List[str]:
@@ -1406,6 +1445,56 @@ class Runner:
                 am.append(float(v))
         return min(rot, max(am)) if am else rot
 
+    def _grid_geometry(self, cfg: Config) -> Dict[str, Any]:
+        """The contrast grid's measuring settings at ``cfg``: the metric's FWHM, pixel scale,
+        angle convention and ring settings, the sidelobe half-width ``hw(r_px)`` (deg), the
+        known companions and their arcs (:meth:`_contrast_grid`, :meth:`_grid_snr`)."""
+        from . import contrast_grid as CG
+        gc = self.cfg.contrast_grid
+        metric = getattr(self.objective, "metric", None)
+
+        def mget(k, dflt):
+            v = getattr(metric, k, dflt) if metric is not None else dflt
+            return dflt if v is None and dflt is not None else v
+        fwhm, pxscale = float(mget("fwhm", self.fwhm)), float(mget("pxscale", self.pxscale))
+        rot = self._rotation_deg(cfg)
+
+        def hw(r_px: float) -> float:
+            return CG.footprint_deg(r_px, fwhm, gc, rot)
+        known = [(float(k[0]), float(k[1])) for k in self._known()]
+        return {"metric": metric, "mget": mget, "fwhm": fwhm, "pxscale": pxscale, "rot": rot, "hw": hw,
+                "inner": float(mget("inner_fwhm", 1.0)) * fwhm,
+                "conv": mget("angle_convention", None) or getattr(self.reducer, "angle_convention", "pa"),
+                "known": known, "known_arcs": [(rk, tk, hw(rk / pxscale), gc.known_radial_fwhm) for rk, tk in known],
+                "min_ring": int(mget("min_ring", 6)), "aperture": str(gc.snr).lower() == "aperture"}
+
+    def _grid_snr(self, geo: Dict[str, Any], img: np.ndarray, r_px: float, theta: float) -> Tuple[float, Dict[str, Any]]:
+        """The S/N the contrast grid measures for a source at ``(r_px, theta)`` in ``img``, and
+        its details (:func:`~klip_tpe.metrics.mawet_peak_snr` or
+        :func:`~klip_tpe.metrics.aperture_mawet_snr`): the noise ring without the source, its
+        sidelobes, the known companions and their arcs.  ``geo`` is :meth:`_grid_geometry`."""
+        from .metrics import aperture_mawet_snr
+        gc, mget, metric = self.cfg.contrast_grid, geo["mget"], geo["metric"]
+        img = np.asarray(img, float)
+        pxscale, fwhm = geo["pxscale"], geo["fwhm"]
+        rho = float(r_px) * pxscale
+        arcs = [(rho, float(theta), geo["hw"](float(r_px)), max(gc.known_radial_fwhm, 1.0))] + geo["known_arcs"]
+        if geo["aperture"]:
+            snr, det = aperture_mawet_snr(img, [rho], [theta], pxscale, fwhm, excl_fwhm=float(mget("excl_fwhm", 1.5)),
+                                          angle_convention=geo["conv"], known=geo["known"], excl_arcs=arcs,
+                                          return_details=True)
+        else:
+            kern = metric.kernel(rho) if callable(getattr(metric, "kernel", None)) else None
+            im = radprof(img) if mget("flatten", False) else img
+            snr, det = mawet_peak_snr(im, [rho], [theta], pxscale, fwhm, kernel=kern,
+                                      search_px=float(mget("search_px", 1.5)), excl_fwhm=float(mget("excl_fwhm", 1.5)),
+                                      known=geo["known"], declip_nsig=mget("declip_nsig", 6.0),
+                                      band_fwhm=float(mget("band_fwhm", 0.6)), min_ring=geo["min_ring"],
+                                      penalty=str(mget("penalty", "geometric")), pixel_mask=mget("pixel_mask", None),
+                                      inner_fwhm=float(mget("inner_fwhm", 1.0)), angle_convention=geo["conv"],
+                                      return_details=True, excl_arcs=arcs)
+        return float(snr[0]), dict(det[0])
+
     def _contrast_grid(self, ia: int, cfg: Config, zone: Tuple[float, float],
                        fm_curve: Optional[Dict[str, Any]], curve: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """Annulus ``ia``'s injection-recovery contrast curve at the winner config ``cfg``
@@ -1417,26 +1506,13 @@ class Runner:
         curve (:func:`klip_tpe.contrast_grid.summarize`).  The positions of ``mode="random"`` come
         from :meth:`_side_rng`, so the run's generator stands where it did."""
         from . import contrast_grid as CG
-        from .metrics import aperture_mawet_snr
         gc = self.cfg.contrast_grid
         if not gc.enabled:
             return None
         a_in, a_out = float(zone[0]), float(zone[1])
-        metric = getattr(self.objective, "metric", None)
-
-        def mget(k, dflt):
-            v = getattr(metric, k, dflt) if metric is not None else dflt
-            return dflt if v is None and dflt is not None else v
-        fwhm, pxscale = float(mget("fwhm", self.fwhm)), float(mget("pxscale", self.pxscale))
-        inner = float(mget("inner_fwhm", 1.0)) * fwhm
-        seps = CG.separations_px(a_in, a_out, fwhm, gc, floor_px=max(inner, fwhm))
-        conv = mget("angle_convention", None) or getattr(self.reducer, "angle_convention", "pa")
-        rot = self._rotation_deg(cfg)
-
-        def hw(r_px: float) -> float:
-            return CG.footprint_deg(r_px, fwhm, gc, rot)
-        known = [(float(k[0]), float(k[1])) for k in self._known()]
-        known_arcs = [(rk, tk, hw(rk / pxscale), gc.known_radial_fwhm) for rk, tk in known]
+        geo = self._grid_geometry(cfg)
+        fwhm, pxscale, rot, hw, known = geo["fwhm"], geo["pxscale"], geo["rot"], geo["hw"], geo["known"]
+        seps = CG.separations_px(a_in, a_out, fwhm, gc, floor_px=max(geo["inner"], fwhm))
         if str(gc.mode).lower() == "random":
             positions = CG.random_positions(seps, gc.sep_step_fwhm * fwhm, gc.n_samples,
                                             self._side_rng("contrast_grid", ia))
@@ -1472,32 +1548,15 @@ class Runner:
             with contextlib.closing(self._run_ordered(calls, window)) as stream:
                 for _, res in stream:
                     yield res
-        min_ring = int(mget("min_ring", 6))
-        aperture = str(gc.snr).lower() == "aperture"
+        min_ring, aperture = geo["min_ring"], geo["aperture"]
 
         def measure(res, p, c):
-            img = np.asarray(res.image, float)
-            rho = p.r_px * pxscale
-            arcs = [(rho, p.theta, hw(p.r_px), max(gc.known_radial_fwhm, 1.0))] + known_arcs
-            if aperture:
-                snr, det = aperture_mawet_snr(img, [rho], [p.theta], pxscale, fwhm, excl_fwhm=float(mget("excl_fwhm", 1.5)),
-                                              angle_convention=conv, known=known, excl_arcs=arcs, return_details=True)
-            else:
-                kern = metric.kernel(rho) if callable(getattr(metric, "kernel", None)) else None
-                im = radprof(img) if mget("flatten", False) else img
-                snr, det = mawet_peak_snr(im, [rho], [p.theta], pxscale, fwhm, kernel=kern,
-                                          search_px=float(mget("search_px", 1.5)), excl_fwhm=float(mget("excl_fwhm", 1.5)),
-                                          known=known, declip_nsig=mget("declip_nsig", 6.0),
-                                          band_fwhm=float(mget("band_fwhm", 0.6)), min_ring=min_ring,
-                                          penalty=str(mget("penalty", "geometric")), pixel_mask=mget("pixel_mask", None),
-                                          inner_fwhm=float(mget("inner_fwhm", 1.0)), angle_convention=conv,
-                                          return_details=True, excl_arcs=arcs)
-            d = det[0]
+            snr, d = self._grid_snr(geo, res.image, p.r_px, p.theta)
             if d.get("why"):
                 return np.nan, str(d["why"])
             if int(d.get("nclean", 0)) < min_ring:
                 return np.nan, f"{int(d.get('nclean', 0))} noise apertures left after the exclusions (fewer than {min_ring})"
-            return float(snr[0]), None
+            return snr, None
         t0 = time.time()
         n_test = sum(p.status != "excluded" for p in positions)
         self.log(f"  contrast grid: {n_test} position(s) on {seps.size} separation(s), one injection per reduction, "
@@ -3782,13 +3841,15 @@ class Runner:
         fm = None
         if self.cfg.fm_curve and self.do_fm:
             try:
-                fm = self._fm_pass(cfg, (a_in, a_out), self.contrast, f"a{ia+1}_fm", clean_img=clean_img)
+                fm = self._fm_pass(cfg, (a_in, a_out), self.contrast, f"a{ia+1}_fm", clean_img=clean_img,
+                                   one_at_a_time=self.cfg.fm_one_at_a_time)
                 if fm is None:
                     self.log("  KLIP-FM cross-check: reducer returned no FM image; skipped")
                 else:
                     fm_curve = fm["curve"]
                     nfin = int(np.sum([c is not None and c > 0 for c in fm_curve.get("curve", [])]))
-                    self.log(f"  KLIP-FM cross-check: {len(fm['sources'])} test sources, {nfin} curve points")
+                    self.log(f"  KLIP-FM cross-check: {len(fm['sources'])} test sources"
+                             f"{', one per pass' if fm.get('one_at_a_time') else ''}, {nfin} curve points")
                     sec = self._fm_section(fm_curve, ia, self.contrast)
                     if sec:
                         with open(os.path.join(d, "contrast_curve.txt"), "a") as f:
@@ -3805,6 +3866,24 @@ class Runner:
             except Exception as exc:
                 self.log(f"  KLIP-FM cross-check failed: {exc!r}")
                 fm_curve = None
+            # the finished annulus's KLIP-FM panel: the model of the winner's own injections, the
+            # ones in best_inj.fits, beside their injected-PSF model
+            if sources:
+                try:
+                    c_w = float(getattr(sources[0], "contrast", 0.0) or self.contrast)
+                    fmw = self._fm_pass(cfg, (a_in, a_out), c_w, f"a{ia+1}_fm_inj", sources=sources,
+                                        clean_img=clean_img)
+                    if fmw is not None:
+                        winner["fm_inj"] = {"fm_image": fmw["fm_image"], "sources": fmw["sources"]}
+                        if self.cfg.save_fits:
+                            hfi = self._fits_header(ia, cfg, float(winner["score"]), validated, "fm", fmw["sources"],
+                                                    zone=(a_in, a_out))
+                            hfi["IMGTYPE"] = "KLIP-FM forward model of the winner's injections (best_inj.fits)"
+                            _write_fits(os.path.join(d, "best_fm_inj.fits"), np.asarray(fmw["fm_image"], np.float32),
+                                        hfi)
+                            self._durable_later(os.path.join(d, "best_fm_inj.fits"))
+                except Exception as exc:          # noqa: BLE001 - a product, never fatal
+                    self.log(f"  KLIP-FM of the winner's injections failed: {exc!r}")
         grid_curve = None
         if self.cfg.contrast_grid.enabled:
             try:

@@ -221,6 +221,19 @@ def load(how=16, clean=False, crop_half=80, log=print):
     return dsets, (star_flux or None)
 
 
+def make_reducer(partitions=4, clean=False, crop=80, workers="auto", log=print):
+    """The reducer of the ``partitions`` sequences (:func:`load`) and their datasets, as
+    :func:`main` builds it.  ``scripts/fm_one_at_a_time.py`` rebuilds a run's with it."""
+    dsets, star_flux = load(partitions, clean=clean, crop_half=crop, log=log)
+    # what the panels should call a partition: at 4 they really are the four nights, at 8
+    # and 16 they are sub-sequences within them, and the landscape's title says so
+    label = "night" if partitions == 4 else "sequence"
+    red = generic.make_reducer(dsets, pxscale=PXSCALE, lam_m=LAM_M, diam_m=DIAM_M,
+                               star_flux=star_flux, max_workers=workers, log=log,
+                               partition_label=label)
+    return red, dsets
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--partitions", type=int, default=16, choices=[4, 8, 16],
@@ -305,14 +318,7 @@ def main(argv=None):
         f"({PLANET[0] / PXSCALE:.1f} px); published four-night stack: S/N ~ 5.2")
     log(f"loading {a.partitions} partitions from {ROOT} ({'cleaned' if a.clean else 'pre-selection'} frames"
         f"{'' if not a.crop else f', cropped to {2 * a.crop + 1} px'})")
-    dsets, star_flux = load(a.partitions, clean=a.clean, crop_half=a.crop, log=log)
-
-    # what the panels should call a partition: at 4 they really are the four nights, at 8
-    # and 16 they are sub-sequences within them, and the landscape's title says so
-    label = "night" if a.partitions == 4 else "sequence"
-    red = generic.make_reducer(dsets, pxscale=PXSCALE, lam_m=LAM_M, diam_m=DIAM_M,
-                               star_flux=star_flux, max_workers=a.workers, log=log,
-                               partition_label=label)
+    red, dsets = make_reducer(a.partitions, clean=a.clean, crop=a.crop, workers=a.workers, log=log)
     log(f"lambda/D = {(LAM_M / DIAM_M) * 206265.0 / PXSCALE:.2f} px, FWHM = {red.fwhm:.2f} px")
 
     # The annulus is built around the companion rather than chosen: +/- N FWHM puts its

@@ -2530,7 +2530,14 @@ def panel_contrast_idl(ax, curves, contrast: float, placeholder: Optional[str] =
         if np.isfinite(contrast) and contrast > 0:
             ax.axhline(contrast, color="#777777", ls=":", lw=0.7)
         if any("KLIP-FM" in lab for lab, cc, _ in curves if cc):
-            ax.text(0.98, 0.04, "green dashed = KLIP-FM", transform=ax.transAxes, ha="right", color="#3cb44b", fontsize=6.5)
+            # beside the grid's label on the finished frame, where the falling curves leave room;
+            # at the foot of the panel the KLIP-FM curve ran through it at the outer edge
+            if grid:
+                ax.text(0.98, 0.84, "green dashed = KLIP-FM", transform=ax.transAxes, ha="right", va="top",
+                        color="#3cb44b", fontsize=6.5)
+            else:
+                ax.text(0.98, 0.04, "green dashed = KLIP-FM", transform=ax.transAxes, ha="right", color="#3cb44b",
+                        fontsize=6.5)
         if any(lab.startswith(("this eval", "eval ")) for lab, cc, _ in curves if cc):
             ax.text(0.98, 0.12, "gray dashed = this eval", transform=ax.transAxes, ha="right", color="#8a8a8a", fontsize=6.5)
         if grid:
@@ -3099,7 +3106,8 @@ def render_products_sheet(run_dir: str, ia: int, out_pdf: str, run: Optional[Dic
     ad = annulus_from_run(run_dir, ia, run)
     d = os.path.join(run_dir, f"annulus{ia + 1:02d}")
     items = [("winner: injected", os.path.join(d, "best_inj.fits")), ("winner: clean (no injection)", os.path.join(d, "best_clean.fits")),
-             ("KLIP-FM response", os.path.join(d, "best_fm.fits")),
+             ("KLIP-FM response (test spiral)", os.path.join(d, "best_fm.fits")),
+             ("KLIP-FM: the winner's injections", os.path.join(d, "best_fm_inj.fits")),
              ("stitch: clean", os.path.join(run_dir, "klip_stitched.fits")), ("stitch: injected", os.path.join(run_dir, "klip_stitched_inj.fits")),
              ("stitch: S/N (clean)", os.path.join(run_dir, "klip_stitched_snr.fits")), ("stitch: S/N (injected)", os.path.join(run_dir, "klip_stitched_snr_inj.fits"))]
     src = ad.winner.get("winner_sources") if ad.winner else None
@@ -3339,7 +3347,9 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
         full = annulus_from_run(run_dir, ia, run)
         d = os.path.join(run_dir, f"annulus{ia + 1:02d}")
         b_inj, b_clean = _fits(os.path.join(d, "best_inj.fits")), _fits(os.path.join(d, "best_clean.fits"))
-        b_fm = _fits(os.path.join(d, "best_fm.fits"))
+        b_fm = _fits(os.path.join(d, "best_fm_inj.fits"))           # the winner's injections, as live
+        if b_fm is None:
+            b_fm = _fits(os.path.join(d, "best_fm.fits"))
         note = "winner FITS (rebuilt)" if b_inj is not None else "no images in log"
         wcurve = (full.winner or {}).get("grid_curve") or (full.winner or {}).get("contrast_curve")
         fmcurve = (full.winner or {}).get("fm_curve")
@@ -4580,9 +4590,10 @@ class LiveDisplay(RunCallback):
         self._guard(runner, "verify books", render_verify_books, self.run_dir, result.annulus)
         self._guard(runner, "products sheet", render_products_sheet, self.run_dir, result.annulus,
                     os.path.join(d, "products.pdf"))
-        # the KLIP-FM cross-check (A §9.1) came after validation: redraw the validation
-        # panel with the FM response image next to the winner thumbnails
-        fm = winner.get("fm") or {}
+        # the KLIP-FM passes (A §9.1) came after validation: redraw the validation panel with
+        # the FM response image next to the winner thumbnails.  The model of the winner's own
+        # injections when there is one (the sources of best_inj.fits), else the test spiral's.
+        fm = winner.get("fm_inj") or winner.get("fm") or {}
         if fm.get("fm_image") is not None and getattr(self, "_val_args", None) and result.validation_table:
             self._guard(runner, "validation panel (FM)", render_validation, ad, result.validation_table,
                         os.path.join(d, "validation_panel.png"), cmap=self.cmap, fm=fm["fm_image"], **self._val_args)
@@ -4617,14 +4628,19 @@ class LiveDisplay(RunCallback):
                 ps = list(bimg.get("per_source") or getattr(result, "per_source", None) or [])
                 b_lab = ps if len(ps) == len(b_src) else [None] * len(b_src)
             fm_src = [s.as_tuple() if hasattr(s, "as_tuple") else tuple(s) for s in (fm.get("sources") or [])] or None
+            # the injected-PSF and KLIP-FM squares show the injections of the picture in the
+            # best cells: the committed trial's, which are validation's fresh draw, when the
+            # runner kept that picture with its sources
+            m_src = b_src if b_src is not None else (ad.sources[int(result.winner_index)]
+                                                     if 0 <= int(result.winner_index) < ad.n else [])
             imgs = StepImages(fm_unavailable=getattr(self, "_fm_note", None), cur_clean=li.get("clean"), cur_inj=li.get("inj"), best_inj=bimg.get("inj"),
                               best_clean=bimg.get("clean"), best_index=int(result.winner_index),
                               best_sources=b_src, best_labels=b_lab,
                               note="annulus complete", fm_image=fm.get("fm_image"), fm_sources=fm_src,
-                              fm_label="KLIP-FM cross-check (winner, test spiral)",
+                              fm_label=("KLIP-FM model (winner's injections)" if winner.get("fm_inj")
+                                        else "KLIP-FM cross-check (winner, test spiral)"),
                               cur_label=f"Ann {result.annulus + 1}/{ad.nann}  last eval {i + 1}",
-                              inj_model=injected_model_image(runner, ad.sources[int(result.winner_index)]
-                                                             if 0 <= int(result.winner_index) < ad.n else [],
+                              inj_model=injected_model_image(runner, m_src,
                                                              None if bimg.get("inj") is None else np.shape(bimg.get("inj"))),
                               **self._running_stitch(runner))
             curves = self._curves(runner, ad, None, done=True)
