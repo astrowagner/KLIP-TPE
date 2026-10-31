@@ -15,7 +15,11 @@ only by option flags of :class:`MawetPeakSNR`.
 """
 from __future__ import annotations
 
+import collections
+import functools
+import hashlib
 import inspect
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -300,6 +304,73 @@ def kernel_from_profile(stamp: np.ndarray, fwhm: float) -> np.ndarray:
     return k / k.sum()
 
 
+# ----------------------------------------------------------------------------
+# one declip and one matched filter per image and kernel
+# ----------------------------------------------------------------------------
+#: images :func:`mawet_peak_snr` has prepared (declipped, zero-filled and convolved), kept by
+#: their bytes.  A trial's clean image is scored once for each of its draws, and
+#: :func:`sidelobe_snr` measures each source, and each fallback, on the same image again, so
+#: the same declip and the same convolutions came back several times an evaluation.  Keyed by
+#: the bytes, so an image changed in place is another image.  0 turns the cache off.
+PREPARED_CACHE_SIZE = 8
+_prepared_cache: "collections.OrderedDict[Tuple[Any, ...], Dict[str, Any]]" = collections.OrderedDict()
+_prepared_lock = threading.Lock()
+
+
+def _digest(a: np.ndarray) -> Tuple[Any, ...]:
+    """A key for an array's contents: its shape, dtype and a 128-bit hash of its bytes."""
+    a = np.ascontiguousarray(a)
+    return (a.shape, a.dtype.str, hashlib.blake2b(a.data, digest_size=16).digest())
+
+
+def _frozen(*arrays: np.ndarray) -> None:
+    for a in arrays:
+        a.flags.writeable = False
+
+
+def _prepare(img: np.ndarray, declip_nsig: Optional[float]) -> Dict[str, Any]:
+    """``img`` (float) declipped (``img``), zero-filled (``imz``), its finite pixels
+    (``finite``) and its convolutions so far, by kernel (``maps``): from the cache when these
+    bytes were prepared before.  The cached arrays are read-only copies, never the caller's."""
+    def build() -> Dict[str, Any]:
+        d = declip(img, declip_nsig) if declip_nsig is not None else img
+        if d is img:
+            d = img.copy()
+        return {"img": d, "imz": np.where(np.isfinite(d), d, 0.0), "finite": np.isfinite(d), "maps": {}}
+    if PREPARED_CACHE_SIZE <= 0:
+        return build()
+    key = _digest(img) + (None if declip_nsig is None else float(declip_nsig),)
+    with _prepared_lock:
+        hit = _prepared_cache.get(key)
+        if hit is not None:
+            _prepared_cache.move_to_end(key)
+            return hit
+    entry = build()
+    _frozen(entry["img"], entry["imz"], entry["finite"])
+    with _prepared_lock:
+        _prepared_cache[key] = entry
+        while len(_prepared_cache) > PREPARED_CACHE_SIZE:
+            _prepared_cache.popitem(last=False)
+    return entry
+
+
+def clear_prepared_cache() -> None:
+    """Forget every prepared image (:data:`PREPARED_CACHE_SIZE`)."""
+    with _prepared_lock:
+        _prepared_cache.clear()
+
+
+@functools.lru_cache(maxsize=16)
+def _grids(ny: int, nx: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``yy, xx`` pixel indices and ``rr``, the distance from the star (:func:`star_center`),
+    of a ``(ny, nx)`` image, read-only."""
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    cx, cy = star_center((ny, nx))
+    rr = np.hypot(xx - cx, yy - cy)
+    _frozen(yy, xx, rr)
+    return yy, xx, rr
+
+
 def _per_source_kernels(kernel, nsrc: int, fwhm: float) -> List[np.ndarray]:
     """Normalise the ``kernel`` argument of :func:`mawet_peak_snr` to one kernel per
     source, sharing the *same object* when they are all the same (so the convolution is
@@ -442,16 +513,22 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
     theta = np.atleast_1d(np.asarray(theta, float))
     nsrc = rho.size
     exr = excl_fwhm * fwhm
-    if declip_nsig is not None:
-        img = declip(img, declip_nsig)
-    imz = np.where(np.isfinite(img), img, 0.0)
+    # the declip, the zero fill and each kernel's convolution, once per image and kernel
+    prep = _prepare(img, declip_nsig)
+    img, imz = prep["img"], prep["imz"]
     kerns = _per_source_kernels(kernel, nsrc, fwhm)
     _amaps: Dict[int, np.ndarray] = {}
 
     def amap(i: int) -> np.ndarray:
         k = kerns[i]
         if id(k) not in _amaps:
-            _amaps[id(k)] = ndimage.convolve(imz, k, mode="nearest")
+            kk = _digest(np.asarray(k))
+            m = prep["maps"].get(kk)
+            if m is None:
+                m = ndimage.convolve(imz, k, mode="nearest")
+                _frozen(m)
+                prep["maps"][kk] = m
+            _amaps[id(k)] = m
         return _amaps[id(k)]
 
     xs, ys = source_xy(rho, theta, pxscale, cx, cy, angle_convention)
@@ -460,9 +537,8 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
         kr = np.array([k[0] for k in known], float)
         kt = np.array([k[1] for k in known], float)
         kx, ky = source_xy(kr, kt, pxscale, cx, cy, angle_convention)
-    yy, xx = np.mgrid[0:ny, 0:nx]
-    rr = np.hypot(xx - cx, yy - cy)
-    finite = np.isfinite(img)
+    yy, xx, rr = _grids(ny, nx)
+    finite = prep["finite"]
     if pixel_mask is not None:
         finite = finite & ~np.asarray(pixel_mask, bool)
     arcs = _arc_regions(excl_arcs, pxscale, fwhm, cx, cy, angle_convention)
