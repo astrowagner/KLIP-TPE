@@ -3,8 +3,8 @@
 ADI over-subtracts a source along the arc the field rotation sweeps at its radius.  Those
 negative arcs in a noise ring pull its mean down and its scatter up, so every S/N the run
 measures leaves them out: the injected sources' arcs and the known companions'.  Where fewer
-than 4 apertures are left, the 4 farthest from the source stand in ("farthest"), or the clean
-reduction's ring ("clean").  The source count keeps every source 4 apertures outside all the
+than 4 apertures are left, the 4 or more farthest from the source stand in ("farthest"), or
+the clean reduction's ring through the source ("clean").  The source count keeps every source 4 apertures outside all the
 arcs and out of the others' arcs, so a second source goes in only where it biases nothing.
 """
 from __future__ import annotations
@@ -19,6 +19,7 @@ from klip_tpe import ContrastGridConfig, Runner, RunConfig, ValidationConfig
 from klip_tpe.candidates import coverage_rim
 from klip_tpe.metrics import (InjectionDifferenceSNR, MawetPeakSNR, Objective, Sidelobes, Source, mawet_peak_snr,
                               sidelobe_snr, source_xy, star_center)
+from klip_tpe.runner import _few_apertures
 from klip_tpe.stitch import write_contrast_curve
 
 from conftest import build_synthetic_run
@@ -65,7 +66,7 @@ def test_too_few_apertures_take_the_farthest():
     clean, inj = _images(arc_deg=168.0)
     s, d = sidelobe_snr(inj, [RHO], [THETA], PX, FWHM, Sidelobes(rotation_deg=170.0))
     d = d[0]
-    assert d["n_arcs"] < 4 and d["fallback"] == "farthest"      # 2 left (the metric counts fewer than 3 as 0)
+    assert d["n_arcs"] == 2 and d["fallback"] == "farthest"     # 2 left beside the arcs
     assert d["nclean"] == 4, "the four apertures farthest from the source"
     assert 150.0 < d["arc_deg"] < 170.0 and np.isfinite(s[0])
 
@@ -75,14 +76,64 @@ def test_too_few_apertures_take_the_clean_ring():
     s, d = sidelobe_snr(inj, [RHO], [THETA], PX, FWHM, Sidelobes(rotation_deg=170.0, mode="clean"), img_clean=clean)
     d = d[0]
     assert d["fallback"] == "clean"
-    _, dc = mawet_peak_snr(clean, [RHO], [THETA], PX, FWHM, min_ring=4, return_details=True)
     _, di = mawet_peak_snr(inj, [RHO], [THETA], PX, FWHM, return_details=True)
+    _, dc = mawet_peak_snr(clean, [RHO], [THETA], PX, FWHM, min_ring=4, return_details=True,
+                           peak_xy=[(di[0]["x"], di[0]["y"])])
+    assert dc[0]["r"] == di[0]["r"], "the clean ring runs through the source as located"
     want = (di[0]["peak"] - dc[0]["bg"]) / (dc[0]["sigma"] * np.sqrt(1 + 1 / max(dc[0]["nap"], 3)))
     assert s[0] == pytest.approx(want)
     assert d["nclean"] == dc[0]["nclean"] > 20, "the clean ring has no sidelobes to leave out"
     # without a clean image the mode takes the farthest apertures
     _, d2 = sidelobe_snr(inj, [RHO], [THETA], PX, FWHM, Sidelobes(rotation_deg=170.0, mode="clean"))
     assert d2[0]["fallback"] == "farthest"
+
+
+def test_the_clean_ring_runs_through_the_injected_source():
+    """The clean image holds no source, so a peak search of its own settles on a noise peak.
+    Here a bump sits 1 px inside the source, where the ring holds 3 apertures.  The ring
+    through the source as the injected image located it holds 4."""
+    rng = np.random.default_rng(5)
+    clean = rng.normal(0.0, 1.0, (101, 101))
+    cx, cy = star_center(clean.shape)
+    rho = 0.23                                       # 4.6 px: the peak lands 5 px out, 7 apertures
+    x, y = source_xy([rho], [0.0], PX, cx, cy, "pa")
+    _gauss(clean, x[0], y[0] - 0.8, 20.0)
+    inj = clean.copy()
+    _gauss(inj, x[0], y[0], 2000.0)
+    _, di = mawet_peak_snr(inj, [rho], [0.0], PX, FWHM, return_details=True)
+    _, dn = mawet_peak_snr(clean, [rho], [0.0], PX, FWHM, min_ring=4, return_details=True)
+    assert di[0]["r"] == pytest.approx(5.0) and dn[0]["r"] == pytest.approx(4.0), "the setup"
+    assert dn[0]["nclean"] == 3, "the noise peak's ring"
+    s, d = sidelobe_snr(inj, [rho], [0.0], PX, FWHM, Sidelobes(rotation_deg=149.0, mode="clean"), img_clean=clean)
+    d = d[0]
+    assert d["n_arcs"] == 2 and d["fallback"] == "clean" and d["nclean"] == 4
+    _, dc = mawet_peak_snr(clean, [rho], [0.0], PX, FWHM, min_ring=4, return_details=True,
+                           peak_xy=[(di[0]["x"], di[0]["y"])])
+    assert dc[0]["r"] == di[0]["r"] and d["sigma"] == pytest.approx(dc[0]["sigma"])
+    assert np.isfinite(s[0])
+
+
+def test_a_ring_too_small_for_four_says_so():
+    """At 1 FWHM the whole ring holds 3 apertures outside 1.5 FWHM of the source, so neither
+    fallback reaches 4, and the grid's reason names the ring rather than the sidelobes."""
+    rng = np.random.default_rng(6)
+    noise = rng.normal(0.0, 1.0, (101, 101))
+    cx, cy = star_center(noise.shape)
+    rho = 0.21                                       # 4.2 px: the peak lands 4 px out, 6 apertures
+    x, y = source_xy([rho], [0.0], PX, cx, cy, "pa")
+    img = noise.copy()
+    _gauss(img, x[0], y[0], 2000.0)
+    _, d = sidelobe_snr(img, [rho], [0.0], PX, FWHM, Sidelobes(rotation_deg=149.0))
+    d = d[0]
+    assert d["n_arcs"] == 1 and d["fallback"] is None
+    assert d["fallback_tried"] == "farthest" and d["n_fallback"] == 3
+    assert _few_apertures(d, 4, 149.0) == "3 noise apertures on the whole ring (fewer than 4)"
+    _, dc = sidelobe_snr(img, [rho], [0.0], PX, FWHM, Sidelobes(rotation_deg=149.0, mode="clean"), img_clean=noise)
+    assert dc[0]["fallback_tried"] == "clean"
+    assert _few_apertures(dc[0], 4, 149.0) == "3 noise apertures on the clean reduction's ring (fewer than 4)"
+    # with the rings as before, no fallback: the count beside the arcs, 1 or 2 no longer read as 0
+    assert (_few_apertures({"nclean": 0, "n_left": 1}, 6, 170.0)
+            == "1 noise aperture left beside the +/- 170 deg sidelobes (fewer than 6)")
 
 
 def test_every_source_leaves_out_the_others_arcs():
@@ -147,7 +198,7 @@ def test_the_count_keeps_a_pair_out_of_each_others_sidelobes(tmp_path, monkeypat
 @pytest.mark.parametrize("mode", ["farthest", "off"])
 def test_the_grid_measures_inside_wide_sidelobes(tmp_path, monkeypatch, mode):
     """+/-170 deg of rotation leaves a ring 1 or 2 apertures beside a source's arcs.  The grid
-    now measures there on the 4 farthest; with the rings as before it fails, and says why."""
+    now measures there on the 4 or more farthest; with the rings as before it fails, and says why."""
     monkeypatch.setattr(Runner, "_rotation_deg", lambda self, cfg: 170.0)
     logs = []
     red, space, obj, samp, cfg = build_synthetic_run(sidelobes=mode, ann_edges=[8, 30], n_iter=[5], n_init=3,
@@ -158,7 +209,7 @@ def test_the_grid_measures_inside_wide_sidelobes(tmp_path, monkeypatch, mode):
     if mode == "farthest":
         far = [p for p in pos if p["noise"] == "farthest" and p["status"] in ("converged", "accepted")]
         assert far, pos
-        assert any("measured on the 4 apertures farthest from the source" in l for l in logs), logs
+        assert any("measured on the 4 or more apertures farthest from the source" in l for l in logs), logs
     else:
         assert any(p["status"] == "failed" and "beside the +/- 170 deg sidelobes" in (p["why"] or "") for p in pos)
         assert any("position(s) failed:" in l and "sidelobes" in l for l in logs), logs

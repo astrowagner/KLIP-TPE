@@ -387,7 +387,8 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                    min_ring: int = 6, penalty: str = "geometric",
                    pixel_mask: Optional[np.ndarray] = None, inner_fwhm: float = 1.0,
                    angle_convention: str = "pa", return_details: bool = False,
-                   excl_arcs: Sequence[Tuple[float, float, float, float]] = ()):
+                   excl_arcs: Sequence[Tuple[float, float, float, float]] = (),
+                   peak_xy: Optional[Sequence[Tuple[float, float]]] = None):
     """Matched-filter Mawet et al. (2014) detection S/N of each source.
 
     * optional single-pixel de-spiking, then convolution with ``kernel`` (default
@@ -422,6 +423,11 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
     FWHM of the arc's radius and ``half_width_deg`` of its azimuth.  An ADI reduction
     over-subtracts a source along the arc the field rotation sweeps at its radius, so these
     are a source's sidelobes (:mod:`klip_tpe.contrast_grid`).  Default none.
+
+    ``peak_xy`` = ``[(x, y), ...]``, one pixel per source, takes the peak there instead of
+    searching for it: the clean reduction's ring through an injected source as the injected
+    image located it (:func:`sidelobe_snr`).  The details' ``n_left`` counts the ring's
+    apertures left after the exclusions; ``nclean`` is 0 when fewer than 3 are left.
 
     The IDL ``near2_snrpk`` asked the guard of the located peak instead.  On a clean
     image that peak is whichever noise pixel is highest within ``search_px``, and for a
@@ -470,13 +476,18 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
         px, py = int(round(xs[s])), int(round(ys[s]))
         pkv = -np.inf
         bx, by = px, py
-        for dy in range(-isr, isr + 1):
-            for dx in range(-isr, isr + 1):
-                if dx * dx + dy * dy > search_px * search_px:
-                    continue
-                qx, qy = int(round(xs[s])) + dx, int(round(ys[s])) + dy
-                if 0 <= qx < nx and 0 <= qy < ny and np.isfinite(img[qy, qx]) and A[qy, qx] > pkv:
-                    pkv, bx, by = A[qy, qx], qx, qy
+        if peak_xy is not None:
+            bx, by = int(round(float(peak_xy[s][0]))), int(round(float(peak_xy[s][1])))
+            if 0 <= bx < nx and 0 <= by < ny and np.isfinite(img[by, bx]):
+                pkv = A[by, bx]
+        else:
+            for dy in range(-isr, isr + 1):
+                for dx in range(-isr, isr + 1):
+                    if dx * dx + dy * dy > search_px * search_px:
+                        continue
+                    qx, qy = int(round(xs[s])) + dx, int(round(ys[s])) + dy
+                    if 0 <= qx < nx and 0 <= qy < ny and np.isfinite(img[qy, qx]) and A[qy, qx] > pkv:
+                        pkv, bx, by = A[qy, qx], qx, qy
         px, py = bx, by
         r = float(np.hypot(px - cx, py - cy))
         nap = int(np.floor(2 * np.pi * r / fwhm))
@@ -542,7 +553,7 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
         # injected sources, known companions, the frame edge and the pixel mask have eaten
         # into the ring.  It decides whether the ring or the radial band is used, so it is
         # the quantity a source-count rule has to respect -- recorded so it can be checked.
-        det["nclean"], det["min_ring"] = int(nclean), int(min_ring)
+        det["nclean"], det["min_ring"], det["n_left"] = int(nclean), int(min_ring), int(vals.size)
         det["ring_used"] = bool(nclean >= min_ring and sd_ring > 0)
         if sd > 0:
             if sd_band > 0:
@@ -650,7 +661,7 @@ def aperture_mawet_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float,
         nap = max(int(np.floor(2 * np.pi * sep / fwhm)), 4)
         f_src = _aperture_sum(imz, xs[s], ys[s], aprad)
         ref, _ = _ring_fluxes(img, cx, cy, sep, phi[s], nap, aprad, excl, exr, [], skip=skip)
-        details.append({"nclean": int(ref.size), "nap": nap, "peak": float(f_src)})
+        details.append({"nclean": int(ref.size), "n_left": int(ref.size), "nap": nap, "peak": float(f_src)})
         if ref.size < 2 or not np.isfinite(f_src):
             details[-1]["why"] = WHY_NOISE
             continue
@@ -675,8 +686,8 @@ class Sidelobes:
     FWHM of its separation.  Every injected source's arc and every known companion's are
     left out of every source's noise ring.  Where fewer than ``min_apertures`` apertures
     remain, ``mode="farthest"`` takes the ones farthest from the source, its own arc shrinking
-    to let them in, and ``mode="clean"`` measures the noise on the clean reduction's ring,
-    which holds no injected source and so no sidelobes.  ``rotation_deg`` None: the floor
+    to let them in, and ``mode="clean"`` measures the noise on the clean reduction's ring
+    through the source, which holds no injected source and so no sidelobes.  ``rotation_deg`` None: the floor
     alone."""
 
     rotation_deg: Optional[float] = None
@@ -720,7 +731,12 @@ def sidelobe_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, sidel
     Returns ``(snr, details)``.  Each source's details add ``arc_deg`` (its own arc's
     half-width as measured), ``n_arcs`` (the apertures outside all the arcs) and ``fallback``:
     None, ``"farthest"``, ``"farthest, known arcs too"`` or ``"clean"``.  With
-    ``mode="clean"`` and no ``img_clean`` the farthest apertures are taken."""
+    ``mode="clean"`` and no ``img_clean`` the farthest apertures are taken.  The clean ring
+    runs through the injected source where the injected image located it (``peak_xy``), so
+    the two rings have one radius.  Where the fallback too leaves fewer than
+    ``min_apertures``, ``fallback_tried`` names it and ``n_fallback`` is the most apertures it
+    found: the whole ring's, with the source's own arc let in and then the known companions'
+    arcs, or the clean ring's."""
     measure = measure or mawet_peak_snr
     rho = np.atleast_1d(np.asarray(rho, float))
     theta = np.atleast_1d(np.asarray(theta, float))
@@ -736,39 +752,55 @@ def sidelobe_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, sidel
     retained = measure is not mawet_peak_snr or str(kw.get("penalty", "geometric")) != "geometric"
     snr = np.full(n, np.nan)
     dets: List[Dict[str, Any]] = []
+
+    def n_left(d_: Dict[str, Any]) -> int:
+        """The ring's apertures left after the exclusions (``nclean`` is 0 below 3)."""
+        return int(d_.get("n_left", d_.get("nclean", 0)))
     for i in range(n):
         others = src_arcs[:i] + src_arcs[i + 1:]
 
-        def run(own: float, with_known: bool = True, image=img, arcs=None):
+        def run(own: float, with_known: bool = True, image=img, arcs=None, **over):
             if arcs is None:
                 arcs = ([(src_arcs[i][0], src_arcs[i][1], own, rad)] if own > 0 else []) + others \
                     + (known_arcs if with_known else [])
             s_, d_ = measure(image, [rho[i]], [theta[i]], pxscale, fwhm, known=known, excl_arcs=arcs,
-                             angle_convention=angle_convention, return_details=True, **kw)
+                             angle_convention=angle_convention, return_details=True, **dict(kw, **over))
             return float(s_[0]), dict(d_[0])
         s, d = run(hw[i])
-        d.update(arc_deg=hw[i], n_arcs=int(d.get("nclean", 0)), fallback=None)
-        if not d.get("why") and d["n_arcs"] < min_ap:
+        d.update(arc_deg=hw[i], n_arcs=n_left(d), fallback=None)
+        if not d.get("why") and int(d.get("nclean", 0)) < min_ap:
             if sidelobes.mode == "clean" and img_clean is not None:
-                _, dc = run(0.0, image=img_clean, arcs=known_arcs)
+                # the clean ring through the injected source as located: a peak search of its
+                # own would settle on a noise peak up to search_px away, at another radius
+                over = ({"peak_xy": [(d["x"], d["y"])]}
+                        if measure is mawet_peak_snr and "x" in d and "y" in d else {})
+                _, dc = run(0.0, image=img_clean, arcs=known_arcs, **over)
                 peak, sd = d.get("peak", np.nan), dc.get("sigma", -1.0)
                 if not dc.get("why") and int(dc.get("nclean", 0)) >= min_ap and sd > 0 and np.isfinite(peak):
                     n_pen = max(int(dc.get("nclean", 1)), 1) if retained else max(int(dc.get("nap", 3)), 3)
                     s = (float(peak) - float(dc.get("bg", 0.0))) / (float(sd) * np.sqrt(1.0 + 1.0 / n_pen))
                     d.update(fallback="clean", nclean=int(dc["nclean"]), sigma=float(sd), bg=float(dc.get("bg", 0.0)))
+                else:
+                    d.update(fallback_tried="clean", n_fallback=n_left(dc))
             else:
-                found = False
+                found, most = False, d["n_arcs"]
                 for own in _farther_widths(int(d.get("nap", 0) or 0), hw[i]):
                     s2, d2 = run(own)
                     if d2.get("why"):
                         break
+                    most = max(most, n_left(d2))
                     if int(d2.get("nclean", 0)) >= min_ap:
                         s, d, found = s2, dict(d2, arc_deg=own, n_arcs=d["n_arcs"], fallback="farthest"), True
                         break
                 if not found and known_arcs:
                     s2, d2 = run(0.0, with_known=False)
-                    if not d2.get("why") and int(d2.get("nclean", 0)) >= min_ap:
-                        s, d = s2, dict(d2, arc_deg=0.0, n_arcs=d["n_arcs"], fallback="farthest, known arcs too")
+                    if not d2.get("why"):
+                        most = max(most, n_left(d2))
+                        if int(d2.get("nclean", 0)) >= min_ap:
+                            s, d, found = s2, dict(d2, arc_deg=0.0, n_arcs=d["n_arcs"],
+                                                   fallback="farthest, known arcs too"), True
+                if not found:
+                    d.update(fallback_tried="farthest", n_fallback=most)
         snr[i] = s
         dets.append(d)
     return snr, dets
