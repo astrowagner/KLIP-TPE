@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased — 2026-10-31 (the card as a worker in the pool)
+
+- **A share of the search's injected draws can go to an NVIDIA card** (`--gpu-share`,
+  `--gpu-workers`, `PartitionedReducer.card_share`, `parallel.CardSpec`).  Card worker processes
+  take them from a queue of their own, beside the CPU workers.  A hash of each job's tag picks
+  them (`parallel.card_slot`), so a run and its resumes send the same jobs there.  The clean
+  reductions, the validation, the verify and the products stay on the CPU.  A run keeps its share
+  across resumes (`card.json`).  See "The card" in docs/RUNNING.md.
+- If the card cannot start, a worker dies, or 3 jobs fail on it, its jobs go back to the CPU
+  workers and the run goes on without it, and the log says so.
+- Each record lists the nights the card reduced (`meta.card`, `meta.draw_card`).
+  `final_results.json` and `bench_summary.txt` give the card's jobs and how busy its workers were.
+- The card's reducer, `klip_tpe.gpu_reducer`, comes from the GPU session.  Until it is in the
+  package, `--gpu-share auto` is 0.  The tests use a stand-in card that runs the CPU reducer in
+  the card's processes (`tests/test_card_worker.py`).
+
 ## Unreleased — 2026-10-31 (each image declipped and filtered once)
 
 - **Each image goes through the declip and the matched filter once** (`metrics.PREPARED_CACHE_SIZE`,
