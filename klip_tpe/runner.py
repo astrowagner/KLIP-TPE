@@ -1423,10 +1423,12 @@ class Runner:
 
     def _reduce(self, cfg: Config, sources: Optional[Sequence[Source]], k_scan: bool = False,
                 tag: str = "", zone: Optional[Tuple[float, float]] = None,
-                fm_sources: Optional[Sequence[Source]] = None, extras: bool = False) -> EvalImages:
+                fm_sources: Optional[Sequence[Source]] = None, extras: bool = False,
+                card: bool = False) -> EvalImages:
         """One reduction of ``cfg`` at the current annulus' zone.  ``fm_sources`` requests
         the KLIP-FM pass (``EvalImages.fm_image``), ``extras`` the nosub / cadi reference
-        images; both are forwarded to partitioned and plain reducers alike."""
+        images; both are forwarded to partitioned and plain reducers alike.  ``card``: its
+        partition jobs may go to the card workers (the search's injected draws)."""
         ia_over = self._zone_overrides(self.ia, cfg) if zone is None else {"inrad": zone[0], "outrad": zone[1]}
         # zone geometry is a run property, not a searched parameter (unless searched)
         params = dict(cfg.params)
@@ -1461,7 +1463,8 @@ class Runner:
         if neg:
             sources = list(sources or []) + neg
         if isinstance(self.reducer, PartitionedReducer):
-            return self.reducer.reduce_config(cfg2, sources, k_scan, tag, fm_sources=fm_sources, extras=extras)
+            return self.reducer.reduce_config(cfg2, sources, k_scan, tag, fm_sources=fm_sources, extras=extras,
+                                              card=card)
         res = self.reducer.reduce(ReductionRequest(cfg2.params, sources, k_scan, tag, fm_sources=fm_sources,
                                                    extras=extras))
         return EvalImages(res.image, None, None, None, res.meta, fm_image=getattr(res, "fm_image", None),
@@ -2124,6 +2127,11 @@ class Runner:
             meta["kbest"] = kinfo.get("kbest")
             if "kpn" in kinfo:
                 meta["kpn"] = kinfo["kpn"]
+        # the partitions the card workers reduced (PartitionedReducer.card_share)
+        on_card = [str(p) for p, m in (getattr(inj, "meta", None) or {}).items()
+                   if isinstance(m, dict) and m.get("card")]
+        if on_card:
+            meta["card"] = on_card
         rec = EvalRecord(
             annulus=self.ia, index=-1, phase=phase, x=[float(v) for v in cfg.x], config=cfg.to_dict(),
             sources=[s.as_tuple() for s in sources],
@@ -2215,7 +2223,7 @@ class Runner:
         for j, d in enumerate(draws):
             srcs = [Source(s.rho, s.theta, self.contrast) for s in d]
             itag = f"{tag}_inj" if one else f"{tag}_d{j + 1}_inj"
-            calls.append(lambda srcs=srcs, itag=itag: self._reduce(cfg, srcs, tag=itag))
+            calls.append(lambda srcs=srcs, itag=itag: self._reduce(cfg, srcs, tag=itag, card=True))
         return calls
 
     def _trial_finish(self, x: np.ndarray, cfg: Config, phase: str, tag: str,
@@ -2332,6 +2340,9 @@ class Runner:
                                    else float(r.raw_score) for r in recs]
         meta["draw_n"] = len(recs)
         meta["draw_failed"] = int(len(recs) - len(good))
+        # the partitions the card reduced, draw by draw (the last draw's list stays in "card")
+        if any(r.meta.get("card") for r in recs):
+            meta["draw_card"] = [list(r.meta.get("card") or []) for r in recs]
         # the last draw's reason is not the trial's: the trial fails only when every draw does
         meta.pop("why", None)
         if meta["draw_failed"]:
@@ -2835,6 +2846,8 @@ class Runner:
         evaluations nor ``wall_s`` is either of them (NEAR2 note, 2026-10-12).  ``t_loop``
         is no longer used."""
         c = self.cfg
+        for line in getattr(self.reducer, "take_card_notes", lambda: [])():
+            self.log(line)
         bi, bs = self.history.best()
         if i == bi and inj.image is not None and inj.image.ndim == 2:
             self._set_best_images(rec, inj, clean)
@@ -4633,6 +4646,11 @@ class Runner:
         if stitched is not None:
             self._durable_later(*[p for p in (stitched.get("files") or {}).values() if isinstance(p, str)])
         self._sync_files()
+        card = getattr(self.reducer, "card_summary", lambda: None)()
+        if card:
+            out["card"] = card
+            self.log(f"  card: {card['jobs']} jobs, its workers busy {100 * card['busy_fraction']:.0f} % of the time "
+                     f"since the pool started" + ("" if card["up"] else f" (left out: {card['why_down']})"))
         _atomic_write(os.path.join(self.run_dir, "final_results.json"), json.dumps(out, indent=1, default=_json_default))
         # append to the benchmark summary (run-tagged, one row per annulus)
         with open(os.path.join(self.run_dir, "bench_summary.txt"), "a") as f:
@@ -4642,6 +4660,11 @@ class Runner:
                         f"{self.cfg.per_annulus(self.cfg.n_init, r.annulus):4d} "
                         f"{r.search_best_score:9.3f} {r.winner_score:9.3f} {int(r.validated)} "
                         f"{self.cfg.bench_tag} {os.path.basename(os.path.abspath(self.run_dir))}\n")
+            if card:
+                # read for the next run's --gpu-share; '#' keeps it out of the rows
+                f.write(f"# card: share {card['share']:g} %, {card['workers']} workers, {card['jobs']} jobs, "
+                        f"busy {100 * card['busy_fraction']:.0f} % of the time since the pool started"
+                        + ("" if card["up"] else f", left out: {card['why_down']}") + "\n")
         # final-layer hooks (guarded)
         if results and stitched is not None:
             if self.do_param_verify:

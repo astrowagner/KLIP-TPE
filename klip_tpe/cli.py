@@ -45,6 +45,7 @@ def _near_objects(a, log=print):
         raise SystemExit(f"--drop-frames: {exc}")
     _subtract(red, a, log)
     _set_threads_per_job(red, a)
+    _set_card(red, a)
     _set_klip_gram(red, a, log)
     objective, sampler = near.default_config(red, clean_subtract=not a.no_clean_subtract,
                                              metric=getattr(a, "metric", "mawet"),
@@ -421,6 +422,91 @@ def _klip_gram_for_run(a, record: bool = True) -> None:
           f"{os.path.join(os.path.basename(run_dir), _KLIP_GRAM_FILE)} for every later resume")
 
 
+_CARD_FILE = "card.json"
+
+
+def _auto_card_share() -> float:
+    """``--gpu-share auto``: 30 where Linux shows a card and :mod:`klip_tpe.gpu_reducer` is
+    there, else 0."""
+    from .parallel import card_present
+    from .reducer import _gpu_card_factory
+    return 30.0 if card_present() and _gpu_card_factory() is not None else 0.0
+
+
+def _card_share_value(v):
+    """``--gpu-share`` as a percentage, None for ``auto``."""
+    if v is None or str(v).strip().lower() == "auto":
+        return None
+    try:
+        f = float(v)
+    except ValueError:
+        raise SystemExit(f"--gpu-share {v!r}: a percentage from 0 to 100, or auto")
+    if not 0.0 <= f <= 100.0:
+        raise SystemExit(f"--gpu-share {v!r}: a percentage from 0 to 100, or auto")
+    return f
+
+
+def _card_for_run(a, record: bool = True) -> None:
+    """Settle ``--gpu-share`` and ``--gpu-workers`` for a command that searches a run directory:
+    what this command line says, else what the run has been using (``<run>/card.json``), else
+    ``auto`` and 3 workers.
+
+    The share decides which draws the card reduces, and the card's images differ from the
+    CPU's at about 1e-5 of the noise, so a run keeps its share across resumes, however they are
+    typed.  A command line that changes it writes the new values there with the time."""
+    import json
+    import time
+    run_dir = getattr(a, "run_dir", None)
+    path = os.path.join(run_dir, _CARD_FILE) if run_dir else None
+    rec = None
+    if path and os.path.exists(path):
+        try:
+            with open(path) as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            rec = None
+    given = _explicit_dests(getattr(a, "_argv", None))
+    if "gpu_share" in given:
+        share = _card_share_value(a.gpu_share)
+        share = _auto_card_share() if share is None else share
+    elif rec is not None:
+        share = float(rec.get("gpu_share", 0.0) or 0.0)
+    else:
+        share = _auto_card_share()
+    if "gpu_workers" in given and a.gpu_workers is not None:
+        workers = max(int(a.gpu_workers), 1)
+    else:
+        workers = int((rec or {}).get("gpu_workers", 3) or 3)
+    a.gpu_share, a.gpu_workers = share, workers
+    was = None if rec is None else (float(rec.get("gpu_share", 0.0) or 0.0), int(rec.get("gpu_workers", 3) or 3))
+    if was == (share, workers):
+        if share > 0:
+            print(f"  --gpu-share {share:g} --gpu-workers {workers}, as the run has been using ({_CARD_FILE})")
+        return
+    if path is None or not record or (was is None and share <= 0 and "gpu_share" not in given):
+        return
+    hist = list((rec or {}).get("history") or [])
+    hist.append({"gpu_share": share, "gpu_workers": workers, "since": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                 "previous": None if was is None else {"gpu_share": was[0], "gpu_workers": was[1]}})
+    os.makedirs(run_dir, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"gpu_share": share, "gpu_workers": workers, "history": hist}, f, indent=1)
+    if share > 0 or was is not None:
+        print(f"  --gpu-share {share:g} --gpu-workers {workers}"
+              + (f" from now on (it was {was[0]:g} and {was[1]})" if was is not None else "")
+              + f", recorded in {os.path.join(os.path.basename(run_dir), _CARD_FILE)} for every later resume")
+
+
+def _set_card(red, a) -> None:
+    """The card's share and workers on the reducer, before the worker pool starts.  A command
+    that did not settle them for a run (:func:`_card_for_run`) gets no card."""
+    if not hasattr(red, "card_share"):
+        return
+    share = getattr(a, "gpu_share", None)
+    red.card_share = float(share) if isinstance(share, (int, float)) else 0.0
+    red.card_workers = max(int(getattr(a, "gpu_workers", None) or 3), 1)
+
+
 def _generic_objects(a, log=print):
     """Reducer / objective / sampler / guard for plain registered cubes (``--cube``)."""
     import os as _os
@@ -466,6 +552,7 @@ def _generic_objects(a, log=print):
     _no_drop_frames(a, "--instrument generic")
     _subtract(red, a, log)
     _set_threads_per_job(red, a)
+    _set_card(red, a)
     _set_klip_gram(red, a, log)
     pm = _line_mask(red, a, log)
     objective, sampler = generic.default_config(red, clean_subtract=not a.no_clean_subtract,
@@ -521,6 +608,7 @@ def _nomic_objects(a, log=print):
     _no_drop_frames(a, "--instrument nomic")
     _subtract(red, a, log)
     _set_threads_per_job(red, a)
+    _set_card(red, a)
     _set_klip_gram(red, a, log)
     objective, sampler = nomic.default_config(red, clean_subtract=not a.no_clean_subtract,
                                               metric=getattr(a, "metric", "mawet"),
@@ -580,6 +668,7 @@ def _ales_objects(a, log=print):
     _no_drop_frames(a, "--instrument ales")
     _subtract(red, a, log)
     _set_threads_per_job(red, a)
+    _set_card(red, a)
     _set_klip_gram(red, a, log)
     pm = _line_mask(red, a, log)
     objective, sampler = ales.default_config(red, clean_subtract=not a.no_clean_subtract,
@@ -720,6 +809,15 @@ def _add_near_args(p):
                    help="threads per partition job on average (default 2, 4 before 2026-10-27). The pool gets "
                         "workers / threads-per-job processes, never fewer than min(workers, 2 x partitions). A job "
                         "expected to take long gets up to 4x as many and a light one 1")
+    p.add_argument("--gpu-share", default=None,
+                   help="percentage of the search's injected draws reduced on the card (an NVIDIA GPU, through "
+                        "klip_tpe.gpu_reducer), the rest on the CPU workers. A hash of the evaluation, the draw "
+                        "and the night picks them, so a run and its resumes reproduce. 'auto' (the default for a "
+                        "new run): 30 where Linux shows a card and the module is there, else 0. A run keeps its "
+                        "share across resumes (card.json in the run directory)")
+    p.add_argument("--gpu-workers", type=int, default=None,
+                   help="card worker processes sharing the card (default 3). At large bins one leaves the card "
+                        "idle while it prepares the next job")
     p.add_argument("--weighting", default="equal", choices=["equal", "sqrt_texp"])
     p.add_argument("--fast", action="store_true", help="single-basis KLIP (angsep/anglemax not searched)")
     p.add_argument("--klip-gram", default="target", choices=["target", "zone"],
@@ -956,6 +1054,7 @@ def cmd_near(a):
         print(f"run directory: {a.run_dir}")
     _register(a.run_dir)
     _klip_gram_for_run(a)
+    _card_for_run(a)
     _data_edits_for_run(a)                 # a near command on a check-pointed directory resumes it
     if getattr(a, "from_idl_setup", None):
         # mirror an IDL run: nights, annulus, budget, contrast, validation and TPE settings
@@ -1210,6 +1309,7 @@ def cmd_resume(a):
     # next resume inherits an entry that still carries the data root
     _register(a.run_dir, getattr(a, "_record_argv", None))
     _klip_gram_for_run(a)
+    _card_for_run(a)
     _data_edits_for_run(a)
     red, objective, sampler, guard, thr = _near_objects(a)
     r = Runner.resume(a.run_dir, red, objective, sampler, project=guard, throughput_fn=thr)
@@ -1221,6 +1321,7 @@ def cmd_extend(a):
     from .runner import Runner
     _resolve_run_dir(a)
     _klip_gram_for_run(a)
+    _card_for_run(a)
     _data_edits_for_run(a)
     red, objective, sampler, guard, thr = _near_objects(a)
     Runner.extend(a.run_dir, red, objective, sampler, a.n_iter, project=guard, throughput_fn=thr)

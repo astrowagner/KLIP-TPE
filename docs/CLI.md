@@ -41,6 +41,7 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--max-frames MAX_FRAMES] [--workers WORKERS]
                         [--pool {auto,processes,threads}]
                         [--threads-per-job THREADS_PER_JOB]
+                        [--gpu-share GPU_SHARE] [--gpu-workers GPU_WORKERS]
                         [--weighting {equal,sqrt_texp}] [--fast]
                         [--klip-gram {target,zone}] [--no-library]
                         [--no-clean-subtract] [--ladder-pair]
@@ -122,6 +123,19 @@ options:
                         per-job processes, never fewer than min(workers, 2 x
                         partitions). A job expected to take long gets up to 4x
                         as many and a light one 1
+  --gpu-share GPU_SHARE
+                        percentage of the search's injected draws reduced on
+                        the card (an NVIDIA GPU, through
+                        klip_tpe.gpu_reducer), the rest on the CPU workers. A
+                        hash of the evaluation, the draw and the night picks
+                        them, so a run and its resumes reproduce. 'auto' (the
+                        default for a new run): 30 where Linux shows a card
+                        and the module is there, else 0. A run keeps its share
+                        across resumes (card.json in the run directory)
+  --gpu-workers GPU_WORKERS
+                        card worker processes sharing the card (default 3). At
+                        large bins one leaves the card idle while it prepares
+                        the next job
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -530,6 +544,7 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--group-smooth GROUP_SMOOTH] [--max-frames MAX_FRAMES]
                      [--workers WORKERS] [--pool {auto,processes,threads}]
                      [--threads-per-job THREADS_PER_JOB]
+                     [--gpu-share GPU_SHARE] [--gpu-workers GPU_WORKERS]
                      [--weighting {equal,sqrt_texp}] [--fast]
                      [--klip-gram {target,zone}] [--no-library]
                      [--no-clean-subtract] [--ladder-pair]
@@ -607,6 +622,19 @@ options:
                         per-job processes, never fewer than min(workers, 2 x
                         partitions). A job expected to take long gets up to 4x
                         as many and a light one 1
+  --gpu-share GPU_SHARE
+                        percentage of the search's injected draws reduced on
+                        the card (an NVIDIA GPU, through
+                        klip_tpe.gpu_reducer), the rest on the CPU workers. A
+                        hash of the evaluation, the draw and the night picks
+                        them, so a run and its resumes reproduce. 'auto' (the
+                        default for a new run): 30 where Linux shows a card
+                        and the module is there, else 0. A run keeps its share
+                        across resumes (card.json in the run directory)
+  --gpu-workers GPU_WORKERS
+                        card worker processes sharing the card (default 3). At
+                        large bins one leaves the card idle while it prepares
+                        the next job
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -1015,6 +1043,7 @@ usage: klip-tpe resume [-h] [--instrument {near,nomic,generic,ales}]
                        [--group-smooth GROUP_SMOOTH] [--max-frames MAX_FRAMES]
                        [--workers WORKERS] [--pool {auto,processes,threads}]
                        [--threads-per-job THREADS_PER_JOB]
+                       [--gpu-share GPU_SHARE] [--gpu-workers GPU_WORKERS]
                        [--weighting {equal,sqrt_texp}] [--fast]
                        [--klip-gram {target,zone}] [--no-library]
                        [--no-clean-subtract] [--ladder-pair]
@@ -1063,6 +1092,19 @@ options:
                         per-job processes, never fewer than min(workers, 2 x
                         partitions). A job expected to take long gets up to 4x
                         as many and a light one 1
+  --gpu-share GPU_SHARE
+                        percentage of the search's injected draws reduced on
+                        the card (an NVIDIA GPU, through
+                        klip_tpe.gpu_reducer), the rest on the CPU workers. A
+                        hash of the evaluation, the draw and the night picks
+                        them, so a run and its resumes reproduce. 'auto' (the
+                        default for a new run): 30 where Linux shows a card
+                        and the module is there, else 0. A run keeps its share
+                        across resumes (card.json in the run directory)
+  --gpu-workers GPU_WORKERS
+                        card worker processes sharing the card (default 3). At
+                        large bins one leaves the card idle while it prepares
+                        the next job
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -1319,6 +1361,7 @@ usage: klip-tpe extend [-h] [--instrument {near,nomic,generic,ales}]
                        [--group-smooth GROUP_SMOOTH] [--max-frames MAX_FRAMES]
                        [--workers WORKERS] [--pool {auto,processes,threads}]
                        [--threads-per-job THREADS_PER_JOB]
+                       [--gpu-share GPU_SHARE] [--gpu-workers GPU_WORKERS]
                        [--weighting {equal,sqrt_texp}] [--fast]
                        [--klip-gram {target,zone}] [--no-library]
                        [--no-clean-subtract] [--ladder-pair]
@@ -1364,6 +1407,19 @@ options:
                         per-job processes, never fewer than min(workers, 2 x
                         partitions). A job expected to take long gets up to 4x
                         as many and a light one 1
+  --gpu-share GPU_SHARE
+                        percentage of the search's injected draws reduced on
+                        the card (an NVIDIA GPU, through
+                        klip_tpe.gpu_reducer), the rest on the CPU workers. A
+                        hash of the evaluation, the draw and the night picks
+                        them, so a run and its resumes reproduce. 'auto' (the
+                        default for a new run): 30 where Linux shows a card
+                        and the module is there, else 0. A run keeps its share
+                        across resumes (card.json in the run directory)
+  --gpu-workers GPU_WORKERS
+                        card worker processes sharing the card (default 3). At
+                        large bins one leaves the card idle while it prepares
+                        the next job
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -1617,6 +1673,7 @@ usage: klip-tpe fit-chain [-h] [--instrument {near,nomic,generic,ales}]
                           [--max-frames MAX_FRAMES] [--workers WORKERS]
                           [--pool {auto,processes,threads}]
                           [--threads-per-job THREADS_PER_JOB]
+                          [--gpu-share GPU_SHARE] [--gpu-workers GPU_WORKERS]
                           [--weighting {equal,sqrt_texp}] [--fast]
                           [--klip-gram {target,zone}] [--no-library]
                           [--no-clean-subtract] [--ladder-pair]
@@ -1666,6 +1723,19 @@ options:
                         per-job processes, never fewer than min(workers, 2 x
                         partitions). A job expected to take long gets up to 4x
                         as many and a light one 1
+  --gpu-share GPU_SHARE
+                        percentage of the search's injected draws reduced on
+                        the card (an NVIDIA GPU, through
+                        klip_tpe.gpu_reducer), the rest on the CPU workers. A
+                        hash of the evaluation, the draw and the night picks
+                        them, so a run and its resumes reproduce. 'auto' (the
+                        default for a new run): 30 where Linux shows a card
+                        and the module is there, else 0. A run keeps its share
+                        across resumes (card.json in the run directory)
+  --gpu-workers GPU_WORKERS
+                        card worker processes sharing the card (default 3). At
+                        large bins one leaves the card idle while it prepares
+                        the next job
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -1944,6 +2014,7 @@ usage: klip-tpe rereduce [-h] [--instrument {near,nomic,generic,ales}]
                          [--max-frames MAX_FRAMES] [--workers WORKERS]
                          [--pool {auto,processes,threads}]
                          [--threads-per-job THREADS_PER_JOB]
+                         [--gpu-share GPU_SHARE] [--gpu-workers GPU_WORKERS]
                          [--weighting {equal,sqrt_texp}] [--fast]
                          [--klip-gram {target,zone}] [--no-library]
                          [--no-clean-subtract] [--ladder-pair]
@@ -1990,6 +2061,19 @@ options:
                         per-job processes, never fewer than min(workers, 2 x
                         partitions). A job expected to take long gets up to 4x
                         as many and a light one 1
+  --gpu-share GPU_SHARE
+                        percentage of the search's injected draws reduced on
+                        the card (an NVIDIA GPU, through
+                        klip_tpe.gpu_reducer), the rest on the CPU workers. A
+                        hash of the evaluation, the draw and the night picks
+                        them, so a run and its resumes reproduce. 'auto' (the
+                        default for a new run): 30 where Linux shows a card
+                        and the module is there, else 0. A run keeps its share
+                        across resumes (card.json in the run directory)
+  --gpu-workers GPU_WORKERS
+                        card worker processes sharing the card (default 3). At
+                        large bins one leaves the card idle while it prepares
+                        the next job
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -2276,6 +2360,7 @@ usage: klip-tpe replay [-h] [--instrument {near,nomic,generic,ales}]
                        [--group-smooth GROUP_SMOOTH] [--max-frames MAX_FRAMES]
                        [--workers WORKERS] [--pool {auto,processes,threads}]
                        [--threads-per-job THREADS_PER_JOB]
+                       [--gpu-share GPU_SHARE] [--gpu-workers GPU_WORKERS]
                        [--weighting {equal,sqrt_texp}] [--fast]
                        [--klip-gram {target,zone}] [--no-library]
                        [--no-clean-subtract] [--ladder-pair]
@@ -2324,6 +2409,19 @@ options:
                         per-job processes, never fewer than min(workers, 2 x
                         partitions). A job expected to take long gets up to 4x
                         as many and a light one 1
+  --gpu-share GPU_SHARE
+                        percentage of the search's injected draws reduced on
+                        the card (an NVIDIA GPU, through
+                        klip_tpe.gpu_reducer), the rest on the CPU workers. A
+                        hash of the evaluation, the draw and the night picks
+                        them, so a run and its resumes reproduce. 'auto' (the
+                        default for a new run): 30 where Linux shows a card
+                        and the module is there, else 0. A run keeps its share
+                        across resumes (card.json in the run directory)
+  --gpu-workers GPU_WORKERS
+                        card worker processes sharing the card (default 3). At
+                        large bins one leaves the card idle while it prepares
+                        the next job
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -2581,6 +2679,7 @@ usage: klip-tpe compare [-h] [--instrument {near,nomic,generic,ales}]
                         [--max-frames MAX_FRAMES] [--workers WORKERS]
                         [--pool {auto,processes,threads}]
                         [--threads-per-job THREADS_PER_JOB]
+                        [--gpu-share GPU_SHARE] [--gpu-workers GPU_WORKERS]
                         [--weighting {equal,sqrt_texp}] [--fast]
                         [--klip-gram {target,zone}] [--no-library]
                         [--no-clean-subtract] [--ladder-pair]
@@ -2634,6 +2733,19 @@ options:
                         per-job processes, never fewer than min(workers, 2 x
                         partitions). A job expected to take long gets up to 4x
                         as many and a light one 1
+  --gpu-share GPU_SHARE
+                        percentage of the search's injected draws reduced on
+                        the card (an NVIDIA GPU, through
+                        klip_tpe.gpu_reducer), the rest on the CPU workers. A
+                        hash of the evaluation, the draw and the night picks
+                        them, so a run and its resumes reproduce. 'auto' (the
+                        default for a new run): 30 where Linux shows a card
+                        and the module is there, else 0. A run keeps its share
+                        across resumes (card.json in the run directory)
+  --gpu-workers GPU_WORKERS
+                        card worker processes sharing the card (default 3). At
+                        large bins one leaves the card idle while it prepares
+                        the next job
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
