@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased — 2026-10-31 (each draw scored where it was reduced)
+
+- **Each draw's search score is made in the thread that ran its reduction** (`Runner.SCORE_EARLY`),
+  as soon as its images and the trial's clean ones are back.  The main thread finds the trial
+  scored when its turn comes, and spends that time on the next proposal, the files and the log.
+  The scores are the same objective on the same images at the same positions, so every record is
+  the one the main thread's scoring made.  Scoring is mostly convolution and array work, which
+  leave the interpreter to the main thread: two threads scored 1.7x as fast as one.  Not for a
+  metric that needs a forward-model pass of its own, and not on a serial reducer.
+- **`scripts/bench_main_thread.py`** times the main thread's own work per evaluation, with every
+  reduction returned at once.  On this sandbox's two cores, six 150 px nights at NEAR's FWHM, five
+  draws a trial: 316 ms per evaluation before 8cfc1fe, 194 ms with its cache, 178 ms with the early
+  scoring, and 67 ms with the scoring stubbed.  With spare cores the early scoring runs beside the
+  main thread, so the pace on patrick should come closer to the stubbed figure.
+- `Runner._reduce` passes `card=` to `reduce_config` only for a marked draw, so a `reduce_config`
+  of the old signature (a wrapper, a test's spy) serves every other reduction.  Three tests in
+  `tests/test_fmmf.py` had failed on e880ba6 for that reason.
+- Tests in `tests/test_score_early.py`.
+
 ## Unreleased — 2026-10-31 (the card's reducer, from the GPU session)
 
 - **`klip_tpe.gpu_reducer` and `klip_tpe.klip_gpu`**, written in the GPU session (version 0.6).
