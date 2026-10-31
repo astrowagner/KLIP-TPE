@@ -749,6 +749,17 @@ class _ReductionQueue:
             self._ex.shutdown(wait=False, cancel_futures=True)
 
 
+class _Scored:
+    """A draw's injected images and their search score (a :class:`ScoreResult`, or the
+    exception scoring raised), made in the thread that ran the reduction
+    (:meth:`Runner._scored_calls`)."""
+
+    __slots__ = ("images", "score")
+
+    def __init__(self, images, score):
+        self.images, self.score = images, score
+
+
 # ----------------------------------------------------------------------------
 # runner
 # ----------------------------------------------------------------------------
@@ -1463,8 +1474,11 @@ class Runner:
         if neg:
             sources = list(sources or []) + neg
         if isinstance(self.reducer, PartitionedReducer):
+            # card= only when it is set, so a reduce_config of the old signature (a wrapper, a
+            # test's spy) still serves every other reduction
+            more = {"card": True} if card else {}
             return self.reducer.reduce_config(cfg2, sources, k_scan, tag, fm_sources=fm_sources, extras=extras,
-                                              card=card)
+                                              **more)
         res = self.reducer.reduce(ReductionRequest(cfg2.params, sources, k_scan, tag, fm_sources=fm_sources,
                                                    extras=extras))
         return EvalImages(res.image, None, None, None, res.meta, fm_image=getattr(res, "fm_image", None),
@@ -2192,7 +2206,7 @@ class Runner:
         cfg = self.space.decode(x)
         draws = [self._draw_sources(cfg, self.contrast) for _ in range(n)]
         back: List[float] = []
-        stream = self._run_ordered(self._timed(self._trial_calls(cfg, draws, tag), back),
+        stream = self._run_ordered(self._scored_calls(self._timed(self._trial_calls(cfg, draws, tag), back), draws),
                                    len(draws) + 1 if self._parallel_reducer() else 1)
         try:
             return self._trial_finish(x, cfg, phase, tag, draws, stream, on_draw, t0, back=back)
@@ -2284,8 +2298,13 @@ class Runner:
                 if isinstance(res, BaseException):
                     clean = None                      # as evaluate() returned it for a failed reduction
                     raise res
-                inj = res
-                sr = self._score_images(inj, shared, srcs)
+                if isinstance(res, _Scored):          # scored where it was reduced (_scored_calls)
+                    inj, sr = res.images, res.score
+                    if isinstance(sr, BaseException):
+                        raise sr
+                else:
+                    inj = res
+                    sr = self._score_images(inj, shared, srcs)
                 failed = False
             except Exception as exc:                  # noqa: BLE001
                 self.log(f"  evaluation failed: {exc!r}")
@@ -2304,6 +2323,66 @@ class Runner:
     #: :meth:`evaluate_mean`).  False restores the per-draw loop -- a switch for the test
     #: that the two give the same trial, not a setting.
     SHARE_CLEAN = True
+
+    #: score each draw in the thread that ran its reduction, as soon as its images and the
+    #: trial's clean ones are back (:meth:`_scored_calls`).  False scores them on the main
+    #: thread when the trial's turn comes -- a switch for the test that the two give the same
+    #: run, not a setting.
+    SCORE_EARLY = True
+
+    def _score_early(self) -> bool:
+        """Whether :meth:`_scored_calls` scores the draws where they were reduced: on a
+        parallel reducer, for a metric that needs no forward-model pass of its own."""
+        return (bool(self.SCORE_EARLY) and self._parallel_reducer()
+                and not getattr(self.objective.metric, "needs_fm", False))
+
+    def _scored_calls(self, calls: List[Callable[[], Any]], draws: Sequence[Sequence[Source]]
+                      ) -> List[Callable[[], Any]]:
+        """``calls`` (:meth:`_timed` over :meth:`_trial_calls`) with each draw's search score
+        made in the thread that ran its reduction, once its images and the trial's clean ones
+        are back, so the main thread finds the trial scored when its turn comes.  The scores
+        are the ones :meth:`_trial_finish` makes: the same objective on the same images, at
+        the same positions, on another thread.  Scoring is mostly convolution and array work,
+        which leave the interpreter free for the main thread meanwhile.  A draw whose clean
+        reduction failed comes back unscored, for :meth:`_trial_finish`'s per-draw path."""
+        if not self._score_early():
+            return list(calls)
+        calls = list(calls)
+        has_clean = self._needs_clean()
+        box: Dict[str, Any] = {"done": threading.Event(), "res": None}
+        out: List[Callable[[], Any]] = []
+        if has_clean:
+            cfn = calls.pop(0)
+
+            def clean_call(cfn=cfn):
+                try:
+                    res = cfn()
+                    box["res"] = res
+                    return res
+                except BaseException as exc:      # noqa: BLE001 - re-raised, as before
+                    box["res"] = exc
+                    raise
+                finally:
+                    box["done"].set()
+            out.append(clean_call)
+        for fn, d in zip(calls, draws):
+            srcs = [Source(s.rho, s.theta, self.contrast) for s in d]
+
+            def draw_call(fn=fn, srcs=srcs):
+                res = fn()                         # a failed reduction raises, as before
+                clean = None
+                if has_clean:
+                    # the trial's clean reduction went out first, so it is running or done
+                    if not box["done"].wait(timeout=600.0) or isinstance(box["res"], BaseException):
+                        return res
+                    clean = box["res"]
+                try:
+                    sr = self._score_images(res, clean, srcs)
+                except Exception as exc:          # noqa: BLE001 - _trial_finish fails the draw with it
+                    sr = exc
+                return _Scored(res, sr)
+            out.append(draw_call)
+        return out
 
     def _evaluate_draws_each(self, x: np.ndarray, phase: str, tag: str, n: int, on_draw=None
                              ) -> Tuple[EvalRecord, EvalImages, Optional[EvalImages]]:
@@ -2989,7 +3068,8 @@ class Runner:
 
         def dispatch(item):
             item["t0"], item["back"] = time.time(), []
-            for fn in self._timed(self._trial_calls(item["cfg"], item["draws"], item["tag"]), item["back"]):
+            calls = self._timed(self._trial_calls(item["cfg"], item["draws"], item["tag"]), item["back"])
+            for fn in self._scored_calls(calls, item["draws"]):
                 q.submit(fn)
             pend.append(item)
 
