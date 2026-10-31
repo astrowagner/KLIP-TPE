@@ -171,6 +171,12 @@ class ValidationConfig:
     n_final_draws: int = 200
 
 
+#: The default ``RunConfig.sidelobes`` of a new run.  The test suite sets it to ``"off"``
+#: (tests/conftest.py), so that its many runs keep the noise rings their expectations were
+#: written for, and a test of the sidelobe rings asks for them.
+_SIDELOBES_DEFAULT = {"mode": "farthest"}
+
+
 @dataclass
 class RunConfig:
     """Everything that defines a run except the data objects.
@@ -224,6 +230,16 @@ class RunConfig:
         contrast-curve files.  Needs ``reducer.supports_fm``; skipped in the scan modes.
         A second pass models the winner's own injections, the ones in ``best_inj.fits``
         (``annulusNN/best_fm_inj.fits``), for the finished annulus's KLIP-FM panel.
+    sidelobes
+        the noise rings of every S/N the run measures with :class:`~klip_tpe.metrics.MawetPeakSNR`
+        (search, calibration, validation, the contrast grid) leave out the ADI sidelobes of
+        every injected source and known companion: ``+/- the data's PA coverage``, never less
+        than 2 FWHM of arc (:class:`~klip_tpe.metrics.Sidelobes`).  Where fewer than 4
+        apertures remain, ``"farthest"`` (default) takes the 4 farthest from the source and
+        ``"clean"`` measures the noise on the clean reduction's ring.  The source count is
+        capped so that every source keeps 4 apertures outside all the arcs, and no source sits
+        in another's arc.  ``"off"``: the rings of runs saved before 2026-10-31, which resume
+        with it.
     fm_one_at_a_time
         the cross-check's test sources each on a forward-model pass of their own, so that
         no source's response is read through another's self-subtraction lobes.  A
@@ -360,6 +376,7 @@ class RunConfig:
     fm_curve: bool = True
     fm_preview: bool = True              # live KLIP-FM preview at each new best (IDL: 'after 1st best')
     fm_one_at_a_time: bool = False       # the cross-check's test sources each on its own FM pass
+    sidelobes: str = field(default_factory=lambda: _SIDELOBES_DEFAULT["mode"])   # "farthest" | "clean" | "off"
     #: Before a new run's first evaluation, move every searched reduction dimension alone
     #: and see whether it changes the clean reduction
     #: (:func:`klip_tpe.liveness.check_live_dimensions`, about ``1 + ndim`` reductions; a
@@ -425,6 +442,8 @@ class RunConfig:
         cg = d.get("contrast_grid")
         d["contrast_grid"] = (_from_dict_filtered(ContrastGridConfig, cg) if isinstance(cg, dict)
                               else ContrastGridConfig(mode="off"))
+        # a run saved before the noise rings left the sidelobes out keeps its rings
+        d.setdefault("sidelobes", "off")
         return _from_dict_filtered(cls, d)
 
 
@@ -868,6 +887,7 @@ class Runner:
         self.throughput_fn = throughput_fn
         self.log = log
         self._apply_sampler_config()
+        self._install_sidelobes()
         self.callbacks: List[RunCallback] = list(callbacks)
         self._last_images: Dict[str, Any] = {}
         os.makedirs(run_dir, exist_ok=True)
@@ -1088,11 +1108,18 @@ class Runner:
                 n = cand
                 break
         mr = self._min_ring()
+        rule = getattr(self.objective, "sidelobes", None)
         if n < asked and self._nsrc_warned.get(ia) != n:
             self._nsrc_warned[ia] = n
-            self.log(f"  annulus {ia+1}: {asked} sources requested, {n} used -- more would leave "
-                     f"some separation's Mawet ring fewer than {mr} clean apertures, and it would "
-                     f"fall back to the radial band there")
+            if rule is not None:
+                self.log(f"  annulus {ia+1}: {asked} sources requested, {n} used -- more would leave some source "
+                         f"fewer than {mr} noise apertures outside the sources' ADI sidelobes (+/- "
+                         f"{rule.half_width(a_out, self.fwhm):.0f} deg at the outer edge), or put one in "
+                         f"another's sidelobe")
+            else:
+                self.log(f"  annulus {ia+1}: {asked} sources requested, {n} used -- more would leave "
+                         f"some separation's Mawet ring fewer than {mr} clean apertures, and it would "
+                         f"fall back to the radial band there")
         # The count used can still starve a ring: one source close to the star, whose ring
         # holds only a handful of apertures, is never capped.  Asked at the sources themselves
         # and over more azimuths than the cap asks: where a source falls on the pixel grid
@@ -1102,10 +1129,18 @@ class Runner:
             few, rho, most = got
             who = "one source" if n == 1 else f"with {n} sources, the one"
             keeps = f"{few}" if most == few else f"{few} to {most}"
-            self.log(f"  annulus {ia+1}: {who} at {rho:.3f}\" keeps {keeps} clean aperture"
-                     f"{'s' * (most != 1)} in its Mawet ring, fewer than {mr}"
-                     + (", so its S/N comes from the radial band instead" if most < mr else
-                        f" at some azimuths, and there its S/N comes from the radial band instead"))
+            if rule is not None:
+                inst = ("the clean reduction's ring" if rule.mode == "clean"
+                        else f"the {mr} apertures farthest from it")
+                self.log(f"  annulus {ia+1}: {who} at {rho:.3f}\" keeps {keeps} noise aperture"
+                         f"{'s' * (most != 1)} outside its ADI sidelobes, fewer than {mr}"
+                         + (f", so its noise comes from {inst}" if most < mr else
+                            f" at some azimuths, and there its noise comes from {inst}"))
+            else:
+                self.log(f"  annulus {ia+1}: {who} at {rho:.3f}\" keeps {keeps} clean aperture"
+                         f"{'s' * (most != 1)} in its Mawet ring, fewer than {mr}"
+                         + (", so its S/N comes from the radial band instead" if most < mr else
+                            f" at some azimuths, and there its S/N comes from the radial band instead"))
         self._nsrc_cache[ia] = n
         return n
 
@@ -1118,6 +1153,53 @@ class Runner:
         if v is not None and hasattr(smp, "min_r_fwhm"):
             smp.min_r_fwhm = float(v)
         self._fit_inner_guard(smp)
+
+    def _pa_coverage(self) -> Optional[float]:
+        """The data's parallactic-angle coverage (deg): the largest PA range of any partition's
+        frames, or of the frames, or None when the reducer does not give them."""
+        pids = list(getattr(self.reducer, "reducers", {}) or {}) if isinstance(self.reducer, PartitionedReducer) else [None]
+        spans = []
+        for pid in pids:
+            try:
+                ang = self.reducer.frame_angles(pid) if pid is not None else self.reducer.frame_angles()
+            except Exception:                 # noqa: BLE001
+                ang = None
+            if ang is not None and np.size(ang) > 1:
+                spans.append(float(np.ptp(np.asarray(ang, float))))
+        return max(spans) if spans else None
+
+    def _sidelobe_rule(self, rotation_deg: Optional[float] = None, mode: Optional[str] = None):
+        """``RunConfig.sidelobes`` as a :class:`~klip_tpe.metrics.Sidelobes`, at ``rotation_deg``
+        (default: the data's PA coverage), or None when it is ``"off"``."""
+        from .metrics import Sidelobes
+        m = str(mode or self.cfg.sidelobes or "off").lower()
+        if m == "off":
+            return None
+        if m not in ("farthest", "clean"):
+            raise ValueError(f"RunConfig.sidelobes={self.cfg.sidelobes!r}: 'farthest', 'clean' or 'off'")
+        gc = self.cfg.contrast_grid
+        rot = self._pa_coverage() if rotation_deg is None else rotation_deg
+        return Sidelobes(rotation_deg=rot, mode=m, min_apertures=4, floor_fwhm=float(gc.sidelobe_fwhm),
+                         radial_fwhm=float(gc.known_radial_fwhm))
+
+    def _install_sidelobes(self) -> None:
+        """The objective's noise rings, from ``RunConfig.sidelobes``: every configuration is
+        scored with the same arcs, those of the data's PA coverage, so the noise samples do
+        not depend on the configuration being compared."""
+        if not hasattr(self.objective, "sidelobes"):
+            return
+        try:
+            rule = self._sidelobe_rule()
+        except ValueError:
+            raise
+        except Exception as exc:              # noqa: BLE001 - the rings fall back to the old ones
+            rule = None
+            self.log(f"  sidelobe rings unavailable ({exc!r}): the noise rings keep the sidelobes")
+        self.objective.sidelobes = rule
+        # and the sampler draws no source in another's arc (the base of a replay too)
+        smp = getattr(self.sampler, "base", None) or self.sampler
+        if hasattr(smp, "sidelobes"):
+            smp.sidelobes = rule
 
     def _fit_inner_guard(self, smp) -> None:
         """Lower the metric's inner guard (``inner_fwhm``, no S/N inside it) to the injection
@@ -1163,6 +1245,11 @@ class Runner:
         return got is None or got[0] >= self._min_ring()    # a guard that cannot measure must not veto
 
     def _min_ring(self) -> int:
+        """The clean apertures a source's ring has to keep: the sidelobe rule's minimum when
+        the rings leave the sidelobes out (``RunConfig.sidelobes``), else the metric's."""
+        rule = getattr(self.objective, "sidelobes", None)
+        if rule is not None:
+            return int(rule.min_apertures)
         return int(getattr(getattr(self.objective, "metric", None), "min_ring", 6) or 6)
 
     def _inner_fwhm(self) -> float:
@@ -1182,9 +1269,14 @@ class Runner:
         through that.  ``at_sources`` puts a spike on each source instead, so the metric finds
         it where it was put, as it finds an injected source.  Close to the star the two
         differ: on NEAR at 0.312" the blank probe keeps 0 apertures where the source keeps 3
-        or 4."""
+        or 4.
+
+        With the sidelobe rule (``RunConfig.sidelobes``) a ring keeps the apertures outside
+        every source's arc and the known companions', and a source that sits in another
+        source's arc keeps none: its own signal would carry that source's sidelobe."""
         m = getattr(self.objective, "metric", None)
         mr = self._min_ring()
+        rule = getattr(self.objective, "sidelobes", None)
         try:
             lo, hi = self._band_for(ia, n, None)
             shape = self._probe_shape()
@@ -1209,12 +1301,25 @@ class Runner:
                         if 0 <= iy < shape[0] and 0 <= ix < shape[1]:
                             probe[iy, ix] = 1.0
                     kw["declip_nsig"] = None          # the spikes must stay
-                _, det = mawet_peak_snr(probe, [s.rho for s in src], [s.theta for s in src],
-                                        self.pxscale, self.fwhm, known=self._known(),
-                                        excl_fwhm=float(getattr(m, "excl_fwhm", 1.5) or 1.5),
-                                        pixel_mask=getattr(m, "pixel_mask", None),
-                                        inner_fwhm=self._inner_fwhm(),
-                                        angle_convention=conv, min_ring=mr, return_details=True, **kw)
+                mkw = dict(known=self._known(), excl_fwhm=float(getattr(m, "excl_fwhm", 1.5) or 1.5),
+                           pixel_mask=getattr(m, "pixel_mask", None), inner_fwhm=self._inner_fwhm(),
+                           angle_convention=conv, **kw)
+                if rule is not None:
+                    from dataclasses import replace as _replace
+                    from .metrics import sidelobe_snr
+                    _, det = sidelobe_snr(probe, [s.rho for s in src], [s.theta for s in src], self.pxscale,
+                                          self.fwhm, _replace(rule, min_apertures=0), min_ring=mr, **mkw)
+                    det = [dict(d, nclean=d["n_arcs"]) for d in det]
+                    rp = [s.rho / self.pxscale for s in src]
+                    for i in range(len(src)):
+                        for j in range(len(src)):
+                            dth = abs((src[i].theta - src[j].theta + 180.0) % 360.0 - 180.0)
+                            if (i != j and abs(rp[i] - rp[j]) <= rule.radial_fwhm * self.fwhm
+                                    and dth <= rule.half_width(rp[j], self.fwhm)):
+                                det[i]["nclean"] = 0      # in source j's sidelobe
+                else:
+                    _, det = mawet_peak_snr(probe, [s.rho for s in src], [s.theta for s in src],
+                                            self.pxscale, self.fwhm, min_ring=mr, return_details=True, **mkw)
                 fewest = None
                 for s, d in zip(src, det):
                     c = int(d.get("nclean", 0))
@@ -1462,22 +1567,47 @@ class Runner:
         def hw(r_px: float) -> float:
             return CG.footprint_deg(r_px, fwhm, gc, rot)
         known = [(float(k[0]), float(k[1])) for k in self._known()]
+        # the sidelobe rule (RunConfig.sidelobes) at this configuration's rotation: at least 4
+        # noise apertures, the farthest from the source or the clean ring's where the arcs leave
+        # fewer.  "off": the arcs as before, and no S/N where they leave fewer than min_ring
+        rule = self._sidelobe_rule(rotation_deg=rot if str(gc.sidelobe).lower() != "fixed" else float("nan"))
         return {"metric": metric, "mget": mget, "fwhm": fwhm, "pxscale": pxscale, "rot": rot, "hw": hw,
                 "inner": float(mget("inner_fwhm", 1.0)) * fwhm,
                 "conv": mget("angle_convention", None) or getattr(self.reducer, "angle_convention", "pa"),
                 "known": known, "known_arcs": [(rk, tk, hw(rk / pxscale), gc.known_radial_fwhm) for rk, tk in known],
-                "min_ring": int(mget("min_ring", 6)), "aperture": str(gc.snr).lower() == "aperture"}
+                "rule": rule, "min_ring": int(rule.min_apertures) if rule is not None else int(mget("min_ring", 6)),
+                "aperture": str(gc.snr).lower() == "aperture"}
 
-    def _grid_snr(self, geo: Dict[str, Any], img: np.ndarray, r_px: float, theta: float) -> Tuple[float, Dict[str, Any]]:
+    def _grid_snr(self, geo: Dict[str, Any], img: np.ndarray, r_px: float, theta: float,
+                  clean: Optional[np.ndarray] = None) -> Tuple[float, Dict[str, Any]]:
         """The S/N the contrast grid measures for a source at ``(r_px, theta)`` in ``img``, and
         its details (:func:`~klip_tpe.metrics.mawet_peak_snr` or
         :func:`~klip_tpe.metrics.aperture_mawet_snr`): the noise ring without the source, its
-        sidelobes, the known companions and their arcs.  ``geo`` is :meth:`_grid_geometry`."""
-        from .metrics import aperture_mawet_snr
+        sidelobes, the known companions and their arcs, under the sidelobe rule
+        (:func:`~klip_tpe.metrics.sidelobe_snr`, whose ``"clean"`` mode reads ``clean``).
+        ``geo`` is :meth:`_grid_geometry`."""
+        from .metrics import aperture_mawet_snr, sidelobe_snr
         gc, mget, metric = self.cfg.contrast_grid, geo["mget"], geo["metric"]
         img = np.asarray(img, float)
         pxscale, fwhm = geo["pxscale"], geo["fwhm"]
         rho = float(r_px) * pxscale
+        rule = geo.get("rule")
+        if rule is not None:
+            if geo["aperture"]:
+                kw: Dict[str, Any] = dict(excl_fwhm=float(mget("excl_fwhm", 1.5)), measure=aperture_mawet_snr)
+                cln = None if clean is None else np.asarray(clean, float)
+            else:
+                flat = bool(mget("flatten", False))
+                kw = dict(kernel=metric.kernel(rho) if callable(getattr(metric, "kernel", None)) else None,
+                          search_px=float(mget("search_px", 1.5)), excl_fwhm=float(mget("excl_fwhm", 1.5)),
+                          declip_nsig=mget("declip_nsig", 6.0), band_fwhm=float(mget("band_fwhm", 0.6)),
+                          penalty=str(mget("penalty", "geometric")), pixel_mask=mget("pixel_mask", None),
+                          inner_fwhm=float(mget("inner_fwhm", 1.0)))
+                img = radprof(img) if flat else img
+                cln = None if clean is None else (radprof(np.asarray(clean, float)) if flat else np.asarray(clean, float))
+            snr, det = sidelobe_snr(img, [rho], [theta], pxscale, fwhm, rule, img_clean=cln, known=geo["known"],
+                                    angle_convention=geo["conv"], **kw)
+            return float(snr[0]), dict(det[0])
         arcs = [(rho, float(theta), geo["hw"](float(r_px)), max(gc.known_radial_fwhm, 1.0))] + geo["known_arcs"]
         if geo["aperture"]:
             snr, det = aperture_mawet_snr(img, [rho], [theta], pxscale, fwhm, excl_fwhm=float(mget("excl_fwhm", 1.5)),
@@ -1496,7 +1626,8 @@ class Runner:
         return float(snr[0]), dict(det[0])
 
     def _contrast_grid(self, ia: int, cfg: Config, zone: Tuple[float, float],
-                       fm_curve: Optional[Dict[str, Any]], curve: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+                       fm_curve: Optional[Dict[str, Any]], curve: Optional[Dict[str, Any]],
+                       clean_img: Optional[np.ndarray] = None) -> Optional[Dict[str, Any]]:
         """Annulus ``ia``'s injection-recovery contrast curve at the winner config ``cfg``
         (:mod:`klip_tpe.contrast_grid`): one injected source per reduction, each test position
         iterated on its contrast to the target S/N, the noise rings without the injected source,
@@ -1551,11 +1682,13 @@ class Runner:
         min_ring, aperture = geo["min_ring"], geo["aperture"]
 
         def measure(res, p, c):
-            snr, d = self._grid_snr(geo, res.image, p.r_px, p.theta)
+            snr, d = self._grid_snr(geo, res.image, p.r_px, p.theta, clean=clean_img)
+            p.noise = d.get("fallback")
             if d.get("why"):
                 return np.nan, str(d["why"])
             if int(d.get("nclean", 0)) < min_ring:
-                return np.nan, f"{int(d.get('nclean', 0))} noise apertures left after the exclusions (fewer than {min_ring})"
+                return np.nan, (f"{int(d.get('nclean', 0))} noise apertures left beside the +/- "
+                                f"{float(d.get('arc_deg', hw(p.r_px))):.0f} deg sidelobes (fewer than {min_ring})")
             return snr, None
         t0 = time.time()
         n_test = sum(p.status != "excluded" for p in positions)
@@ -1593,6 +1726,17 @@ class Runner:
         self.log(f"  contrast grid: {n_ok} of {n_test} position(s) settled in {n_red} reductions "
                  f"({time.time() - t0:.0f} s), {sum(out['n_blocked'])} blocked"
                  + (f", {out['n_excluded']} excluded for the known companions" if out["n_excluded"] else ""))
+        # why positions failed, and where the noise came from instead of the ring beside the arcs
+        failed = collections.Counter(str(p.why) for p in positions if p.status == "failed")
+        for why, k in failed.most_common():
+            self.log(f"  contrast grid: {k} position(s) failed: {why}")
+        noise = collections.Counter(str(p.noise) for p in positions if p.noise and p.status in CG.STATUS_DONE)
+        for how, k in noise.most_common():
+            what = ("the clean reduction's ring" if how == "clean"
+                    else f"the {min_ring} apertures farthest from the source" + (", the known companions' arcs let in"
+                                                                                if "known" in how else ""))
+            self.log(f"  contrast grid: {k} settled position(s) measured on {what}: fewer than {min_ring} "
+                     f"apertures were left beside the sidelobes")
         return out if n_ok else None
 
     def _fmkw(self, fm) -> Dict[str, Any]:
@@ -3887,7 +4031,7 @@ class Runner:
         grid_curve = None
         if self.cfg.contrast_grid.enabled:
             try:
-                grid_curve = self._contrast_grid(ia, cfg, (a_in, a_out), fm_curve, curve)
+                grid_curve = self._contrast_grid(ia, cfg, (a_in, a_out), fm_curve, curve, clean_img=clean_img)
             except Exception as exc:          # noqa: BLE001 - a product, never fatal
                 self.log(f"  contrast grid failed: {exc!r}")
         if self.cfg.save_fits:
@@ -4265,7 +4409,7 @@ class Runner:
         """Blind candidate search (``klip_tpe.candidates``) on the running stitch after
         annulus ``ia`` (quick: ranked table only) or on the final stitch (top-N verified,
         plus the injection-recovery search on the injected stitch)."""
-        from .candidates import find_candidates, write_candidates
+        from .candidates import coverage_rim, find_candidates, write_candidates
         st = stitched if stitched is not None else self._running_stitch(ia, True)
         if not st or st.get("clean") is None:
             return None
@@ -4275,6 +4419,15 @@ class Runner:
         ny, nx = st["clean"].shape
         iwa = max(edges[0], 1.2 * self.fwhm)
         owa = min(edges[-1], min(nx, ny) / 2.0 - 2.0)
+        # where the frames stop covering the field, the pixels beside the gaps carry the edge's
+        # artifacts: the search stays a FWHM inside the last ring every night covers in full
+        # (the ring at the last edge is partly outside the zone in every run, so it is not asked)
+        rim = coverage_rim(st["clean"], st.get("nights"), iwa, min(owa, edges[-1] - 1.0),
+                           stack_from=edges[-2] + 1.0 if len(edges) > 2 else None)
+        if rim is not None and rim - 1.0 - self.fwhm < owa:
+            owa = max(rim - 1.0 - self.fwhm, iwa)
+            self.log(f"  candidate search: OWA {owa:.1f} px, a FWHM inside {rim - 1.0:.0f} px, the last ring every "
+                     f"night covers in full (the stitch reaches {edges[-1]:.1f} px)")
         known = [tuple(k) for k in getattr(self.sampler, "known", ()) or ()]
         rng = np.random.default_rng((int(self.cfg.seed or 0) + 4241 * (ia + 1)) % (2 ** 32))
         pmap = None
@@ -4970,6 +5123,7 @@ class Runner:
         """
         self.cfg = RunConfig.from_dict(st["config"])
         self._apply_sampler_config()
+        self._install_sidelobes()
         self.space = SearchSpace.from_dict(
             st["space"], project=project if project is not None else getattr(self.space, "project", None))
         self.rng.bit_generator.state = st["rng_state"]

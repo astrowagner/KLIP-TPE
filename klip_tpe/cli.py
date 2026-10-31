@@ -896,6 +896,7 @@ def _protocol_config(a) -> dict:
                 n_remeasure=max(int(getattr(a, "n_remeasure", 1) or 1), 1),
                 write_setup_files=a.write_setup_files, legacy_stitch=a.legacy_stitch,
                 partition_weighting=a.weighting, fm_curve=a.fm_curve, fm_preview=a.fm_preview,
+                **({"sidelobes": a.sidelobes} if getattr(a, "sidelobes", None) else {}),
                 pair_area_midpoint=not getattr(a, "ladder_pair", False),
                 liveness_check=getattr(a, "liveness_check", "warn"),
                 batch=max(int(getattr(a, "batch", 1) or 1), 1),
@@ -1448,6 +1449,12 @@ def _add_run_args(p):
                         "under --cg-sidelobe-fwhm of arc (rotation, the default), or that width alone (fixed)")
     p.add_argument("--cg-sidelobe-fwhm", type=float, default=2.0, metavar="FWHM",
                    help="the sidelobes' least half-width, in FWHM of arc (default 2)")
+    p.add_argument("--sidelobes", default=None, choices=["farthest", "clean", "off"],
+                   help="every S/N's noise ring (search, validation, the grid) leaves out the ADI sidelobes of the "
+                        "injected sources and known companions, +/- the data's PA coverage, and the source count "
+                        "keeps 4 apertures outside them. Where fewer than 4 are left: the 4 farthest from the source "
+                        "(farthest, the default) or the clean reduction's ring (clean). off: the rings as before "
+                        "2026-10-31")
     p.add_argument("--global-block", action="store_true", help="one parameter block for all nights")
     p.add_argument("--no-framesel", action="store_true")
     p.add_argument("--no-selection", action="store_true", help="no drop1/drop2 night-selection dims")

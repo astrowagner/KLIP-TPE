@@ -25,7 +25,8 @@ from scipy import ndimage
 __all__ = ["radprof", "declip", "gaussian_kernel", "source_xy", "mawet_peak_snr",
            "injection_difference_snr", "aperture_mawet_snr", "clip0", "MawetPeakSNR",
            "InjectionDifferenceSNR", "Objective", "Source", "nanmedian_even", "pa_wedge_mask", "line_mask",
-           "disk_mask_from_image", "why_failed", "WHY_GUARD", "WHY_RING", "WHY_NOISE"]
+           "disk_mask_from_image", "why_failed", "WHY_GUARD", "WHY_RING", "WHY_NOISE", "Sidelobes",
+           "sidelobe_snr"]
 
 
 def line_mask(shape: Tuple[int, int], lines: Sequence[Tuple[float, float]], angle_convention: str = "pa",
@@ -625,7 +626,8 @@ def aperture_mawet_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float,
     generators (``contrastcurve_*.pro``).
 
     ``known`` companions and ``excl_arcs`` (see :func:`mawet_peak_snr`) leave apertures out
-    of the ring.  ``return_details`` adds each source's ``nclean``, the apertures used."""
+    of the ring.  ``return_details`` adds each source's ``nclean``, the apertures used, and
+    ``peak``, ``bg`` and ``sigma``, the source's flux and the ring's mean and scatter."""
     img = np.asarray(img, float)
     cx, cy = star_center(img.shape)
     rho = np.atleast_1d(np.asarray(rho, float))
@@ -648,15 +650,128 @@ def aperture_mawet_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float,
         nap = max(int(np.floor(2 * np.pi * sep / fwhm)), 4)
         f_src = _aperture_sum(imz, xs[s], ys[s], aprad)
         ref, _ = _ring_fluxes(img, cx, cy, sep, phi[s], nap, aprad, excl, exr, [], skip=skip)
-        details.append({"nclean": int(ref.size), "nap": nap})
+        details.append({"nclean": int(ref.size), "nap": nap, "peak": float(f_src)})
         if ref.size < 2 or not np.isfinite(f_src):
             details[-1]["why"] = WHY_NOISE
             continue
-        noise = np.std(ref, ddof=1) * np.sqrt(1.0 + 1.0 / ref.size)
+        sd = float(np.std(ref, ddof=1))
+        details[-1].update(bg=float(ref.mean()), sigma=sd)
+        noise = sd * np.sqrt(1.0 + 1.0 / ref.size)
         snr[s] = (f_src - ref.mean()) / noise if noise > 0 else np.nan
     if return_details:
         return snr, details
     return snr
+
+
+# ----------------------------------------------------------------------------
+# noise rings without the sources' ADI sidelobes
+# ----------------------------------------------------------------------------
+@dataclass
+class Sidelobes:
+    """The noise rings' sidelobe rule (:func:`sidelobe_snr`).
+
+    ADI over-subtracts a source along the arc the field rotation sweeps at its radius,
+    ``+/- rotation_deg`` (never less than ``floor_fwhm`` FWHM of arc), within ``radial_fwhm``
+    FWHM of its separation.  Every injected source's arc and every known companion's are
+    left out of every source's noise ring.  Where fewer than ``min_apertures`` apertures
+    remain, ``mode="farthest"`` takes the ones farthest from the source, its own arc shrinking
+    to let them in, and ``mode="clean"`` measures the noise on the clean reduction's ring,
+    which holds no injected source and so no sidelobes.  ``rotation_deg`` None: the floor
+    alone."""
+
+    rotation_deg: Optional[float] = None
+    mode: str = "farthest"
+    min_apertures: int = 4
+    floor_fwhm: float = 2.0
+    radial_fwhm: float = 1.5
+
+    def half_width(self, r_px: float, fwhm: float) -> float:
+        """The arc's half-width (deg) at separation ``r_px``."""
+        floor = float(np.rad2deg(self.floor_fwhm * fwhm / max(float(r_px), 1e-6)))
+        rot = self.rotation_deg
+        if rot is None or not np.isfinite(rot):
+            return min(floor, 180.0)
+        return min(max(float(rot), floor), 180.0)
+
+    def describe(self) -> Dict[str, Any]:
+        return {"rotation_deg": None if self.rotation_deg is None else float(self.rotation_deg),
+                "mode": str(self.mode), "min_apertures": int(self.min_apertures),
+                "floor_fwhm": float(self.floor_fwhm), "radial_fwhm": float(self.radial_fwhm)}
+
+
+def _farther_widths(nap: int, start_deg: float) -> List[float]:
+    """Half-widths below ``start_deg``, widest first, each admitting the next group of ring
+    apertures in order of their distance from the source (``nap`` on the ring, the source's
+    own at 0)."""
+    step = 360.0 / max(int(nap), 1)
+    dist = sorted({min(q, nap - q) * step for q in range(1, int(nap))}, reverse=True)
+    return [d - 0.25 * step for d in dist if d - 0.25 * step < start_deg]
+
+
+def sidelobe_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, sidelobes: Sidelobes, *,
+                 img_clean: Optional[np.ndarray] = None, known: Sequence[Tuple[float, float]] = (),
+                 measure: Optional[Callable] = None, angle_convention: str = "pa", **kw):
+    """Each source's S/N by ``measure`` (default :func:`mawet_peak_snr`) with
+    :class:`Sidelobes` noise rings, one source at a time: every source's arc and the known
+    companions' arcs left out of its ring, then the at-least-``min_apertures`` rule.
+
+    ``kw`` goes to ``measure``; :func:`mawet_peak_snr`'s ``min_ring`` defaults to
+    ``min_apertures``, so a ring that keeps them is used rather than the radial band.
+    Returns ``(snr, details)``.  Each source's details add ``arc_deg`` (its own arc's
+    half-width as measured), ``n_arcs`` (the apertures outside all the arcs) and ``fallback``:
+    None, ``"farthest"``, ``"farthest, known arcs too"`` or ``"clean"``.  With
+    ``mode="clean"`` and no ``img_clean`` the farthest apertures are taken."""
+    measure = measure or mawet_peak_snr
+    rho = np.atleast_1d(np.asarray(rho, float))
+    theta = np.atleast_1d(np.asarray(theta, float))
+    n = rho.size
+    min_ap = max(int(sidelobes.min_apertures), 1)
+    rad = float(sidelobes.radial_fwhm)
+    known = [(float(k[0]), float(k[1])) for k in known]
+    known_arcs = [(kr, kt, sidelobes.half_width(kr / pxscale, fwhm), rad) for kr, kt in known]
+    hw = [sidelobes.half_width(r / pxscale, fwhm) for r in rho]
+    src_arcs = [(float(rho[i]), float(theta[i]), hw[i], rad) for i in range(n)]
+    if measure is mawet_peak_snr:
+        kw.setdefault("min_ring", min_ap)
+    retained = measure is not mawet_peak_snr or str(kw.get("penalty", "geometric")) != "geometric"
+    snr = np.full(n, np.nan)
+    dets: List[Dict[str, Any]] = []
+    for i in range(n):
+        others = src_arcs[:i] + src_arcs[i + 1:]
+
+        def run(own: float, with_known: bool = True, image=img, arcs=None):
+            if arcs is None:
+                arcs = ([(src_arcs[i][0], src_arcs[i][1], own, rad)] if own > 0 else []) + others \
+                    + (known_arcs if with_known else [])
+            s_, d_ = measure(image, [rho[i]], [theta[i]], pxscale, fwhm, known=known, excl_arcs=arcs,
+                             angle_convention=angle_convention, return_details=True, **kw)
+            return float(s_[0]), dict(d_[0])
+        s, d = run(hw[i])
+        d.update(arc_deg=hw[i], n_arcs=int(d.get("nclean", 0)), fallback=None)
+        if not d.get("why") and d["n_arcs"] < min_ap:
+            if sidelobes.mode == "clean" and img_clean is not None:
+                _, dc = run(0.0, image=img_clean, arcs=known_arcs)
+                peak, sd = d.get("peak", np.nan), dc.get("sigma", -1.0)
+                if not dc.get("why") and int(dc.get("nclean", 0)) >= min_ap and sd > 0 and np.isfinite(peak):
+                    n_pen = max(int(dc.get("nclean", 1)), 1) if retained else max(int(dc.get("nap", 3)), 3)
+                    s = (float(peak) - float(dc.get("bg", 0.0))) / (float(sd) * np.sqrt(1.0 + 1.0 / n_pen))
+                    d.update(fallback="clean", nclean=int(dc["nclean"]), sigma=float(sd), bg=float(dc.get("bg", 0.0)))
+            else:
+                found = False
+                for own in _farther_widths(int(d.get("nap", 0) or 0), hw[i]):
+                    s2, d2 = run(own)
+                    if d2.get("why"):
+                        break
+                    if int(d2.get("nclean", 0)) >= min_ap:
+                        s, d, found = s2, dict(d2, arc_deg=own, n_arcs=d["n_arcs"], fallback="farthest"), True
+                        break
+                if not found and known_arcs:
+                    s2, d2 = run(0.0, with_known=False)
+                    if not d2.get("why") and int(d2.get("nclean", 0)) >= min_ap:
+                        s, d = s2, dict(d2, arc_deg=0.0, n_arcs=d["n_arcs"], fallback="farthest, known arcs too")
+        snr[i] = s
+        dets.append(d)
+    return snr, dets
 
 
 # ----------------------------------------------------------------------------
@@ -728,16 +843,24 @@ class MawetPeakSNR(Metric):
                 return k
         return gaussian_kernel(self.mf_fwhm or self.fwhm)
 
-    def per_source(self, img_inj, img_clean, rho, theta, why: Optional[list] = None) -> np.ndarray:
+    def per_source(self, img_inj, img_clean, rho, theta, why: Optional[list] = None,
+                   sidelobes: Optional["Sidelobes"] = None) -> np.ndarray:
         """Per-source S/N.  ``why``: a list, filled with each source's reason for a NaN
-        (None for a finite S/N)."""
+        (None for a finite S/N).  ``sidelobes``: the noise rings leave out the sources' and
+        the known companions' ADI sidelobes (:func:`sidelobe_snr`); ``img_clean`` serves its
+        ``mode="clean"``."""
         img = radprof(img_inj) if self.flatten else np.asarray(img_inj, float)
-        snr, det = mawet_peak_snr(img, rho, theta, self.pxscale, self.fwhm, kernel=self.kernel(rho),
-                                  search_px=self.search_px, excl_fwhm=self.excl_fwhm, known=self.known,
-                                  declip_nsig=self.declip_nsig, band_fwhm=self.band_fwhm,
-                                  min_ring=self.min_ring, penalty=self.penalty,
-                                  pixel_mask=self.pixel_mask, inner_fwhm=self.inner_fwhm,
-                                  angle_convention=self.angle_convention, return_details=True)
+        kw = dict(kernel=self.kernel(rho), search_px=self.search_px, excl_fwhm=self.excl_fwhm,
+                  declip_nsig=self.declip_nsig, band_fwhm=self.band_fwhm, penalty=self.penalty,
+                  pixel_mask=self.pixel_mask, inner_fwhm=self.inner_fwhm)
+        if sidelobes is not None:
+            cln = None if img_clean is None else (radprof(img_clean) if self.flatten else np.asarray(img_clean, float))
+            snr, det = sidelobe_snr(img, rho, theta, self.pxscale, self.fwhm, sidelobes, img_clean=cln,
+                                    known=self.known, angle_convention=self.angle_convention, **kw)
+        else:
+            snr, det = mawet_peak_snr(img, rho, theta, self.pxscale, self.fwhm, known=self.known,
+                                      min_ring=self.min_ring, angle_convention=self.angle_convention,
+                                      return_details=True, **kw)
         if why is not None:
             why[:] = [d.get("why") for d in det]
         return snr
@@ -801,16 +924,16 @@ class ScoreResult:
 _TAKES_WHY: Dict[Any, bool] = {}
 
 
-def _takes_why(metric) -> bool:
-    """Does ``metric.per_source`` take ``why=`` (see :meth:`MawetPeakSNR.per_source`)?"""
+def _takes(metric, name: str) -> bool:
+    """Does ``metric.per_source`` take the keyword ``name``?"""
     ps = getattr(metric, "per_source", None)
-    key = getattr(ps, "__func__", ps)
+    key = (getattr(ps, "__func__", ps), name)
     try:
         return _TAKES_WHY[key]
     except (KeyError, TypeError):
         pass
     try:
-        ok = "why" in inspect.signature(ps).parameters
+        ok = name in inspect.signature(ps).parameters
     except (TypeError, ValueError):
         ok = False
     try:
@@ -818,6 +941,11 @@ def _takes_why(metric) -> bool:
     except TypeError:
         pass
     return ok
+
+
+def _takes_why(metric) -> bool:
+    """Does ``metric.per_source`` take ``why=`` (see :meth:`MawetPeakSNR.per_source`)?"""
+    return _takes(metric, "why")
 
 
 def why_failed(raw, why_raw=None, clean=None, why_clean=None) -> str:
@@ -864,6 +992,9 @@ class Objective:
         self.metric = metric
         self.clean_subtract = bool(clean_subtract)
         self.aggregate = aggregate
+        #: the noise rings' sidelobe rule (:class:`Sidelobes`), handed to a metric that takes
+        #: it; the :class:`~klip_tpe.runner.Runner` sets it from ``RunConfig.sidelobes``
+        self.sidelobes: Optional[Sidelobes] = None
 
     @property
     def needs_clean(self) -> bool:
@@ -892,6 +1023,8 @@ class Objective:
     def _values(self, img, img_clean, rho, th, kw) -> Tuple[np.ndarray, Optional[List[Optional[str]]]]:
         """The metric's per-source values, and each NaN one's reason when the metric can
         give one (``why=``, asked only of a metric that takes it)."""
+        if self.sidelobes is not None and _takes(self.metric, "sidelobes"):
+            kw = dict(kw, sidelobes=self.sidelobes)
         if not _takes_why(self.metric):
             return self.metric.per_source(img, img_clean, rho, th, **kw), None
         why: List[Optional[str]] = []
@@ -925,5 +1058,8 @@ class Objective:
         return ScoreResult(agg, corr, raw, cl, why=None if np.isfinite(agg) else why_failed(raw, wr, cl, wc))
 
     def describe(self) -> Dict:
-        return {"metric": self.metric.describe(), "clean_subtract": self.clean_subtract,
-                "effective_clean_subtract": self.effective_clean_subtract, "aggregate": self.aggregate}
+        out = {"metric": self.metric.describe(), "clean_subtract": self.clean_subtract,
+               "effective_clean_subtract": self.effective_clean_subtract, "aggregate": self.aggregate}
+        if self.sidelobes is not None and _takes(self.metric, "sidelobes"):
+            out["sidelobes"] = self.sidelobes.describe()
+        return out

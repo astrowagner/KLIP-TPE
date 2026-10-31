@@ -21,7 +21,10 @@ The protocol of the IDL contrast generators (``contrastcurve_*.pro``, e.g.
   companion's sidelobes either.  A sidelobe is the arc ADI over-subtracts a source along:
   ``+/- min(PA span of the data, the configuration's anglemax)`` (``sidelobe="rotation"``),
   never less than ``sidelobe_fwhm`` FWHM of arc, the IDL's two apertures each side
-  (``sidelobe="fixed"``: that floor alone);
+  (``sidelobe="fixed"``: that floor alone).  Where the arcs leave fewer than 4 apertures, the 4
+  farthest from the source are used, or the clean reduction's ring (``RunConfig.sidelobes``,
+  :func:`klip_tpe.metrics.sidelobe_snr`).  A ring the run's sidelobes setting leaves as it was
+  (``"off"``) gives no S/N below the metric's ``min_ring`` apertures;
 * the curve is the median over the converged positions at each separation, with the 16th and
   84th percentiles.
 
@@ -87,11 +90,15 @@ class GridPosition:
     contrast: Optional[float] = None
     why: Optional[str] = None
     next_c: Optional[float] = None
+    #: where its last measurement's noise came from when the ring beside the sidelobes held
+    #: too few apertures (:func:`klip_tpe.metrics.sidelobe_snr`'s ``fallback``), else None
+    noise: Optional[str] = None
 
     def to_dict(self, pxscale: float) -> Dict[str, Any]:
         return {"index": self.index, "rho_as": float(self.r_px * pxscale), "theta": float(self.theta),
                 "sep_index": int(self.sep_index), "status": self.status,
                 "contrast": None if self.contrast is None else float(self.contrast), "why": self.why,
+                "noise": self.noise,
                 "trials": [[float(c), None if not np.isfinite(s) else float(s)] for c, s in self.trials]}
 
 
