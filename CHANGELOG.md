@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — 2026-10-31 (each image declipped and filtered once)
+
+- **Each image goes through the declip and the matched filter once** (`metrics.PREPARED_CACHE_SIZE`,
+  `metrics.clear_prepared_cache`).  A trial's clean image was filtered again for each of its draws.
+  Since the sidelobe rule, each source and each fallback attempt filtered the same image again as
+  well.  The prepared images are kept by their bytes, so an image changed in place is prepared
+  again, and every number is the one the repeats gave.  On a 150 px frame at NEAR's FWHM a draw's
+  search score took 64 ms with the rule and takes 30 ms (41 ms before the rule).  On a 432 px frame
+  it took 323 ms and takes 205 ms (284 ms before the rule).
+- The matched filter's pixel grids are made once per image shape.
+
 ## Unreleased — 2026-10-31 (the grid's reason for a ring too small, and the clean ring through the source)
 
 - **A grid position whose whole ring holds fewer than 4 apertures says so.**  Inside about
