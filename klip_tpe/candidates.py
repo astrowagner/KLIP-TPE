@@ -39,7 +39,44 @@ from .products import snr_map
 from .verify import mf_convolve, snr_fap, verify_candidates
 
 __all__ = ["detect_peaks", "psf_correlation", "candidate_metrics", "score_candidates",
-           "find_candidates", "write_candidates"]
+           "find_candidates", "write_candidates", "coverage_rim"]
+
+
+def coverage_rim(image: np.ndarray, stack: Optional[np.ndarray], r_lo: float, r_hi: float,
+                 drop: float = 0.8, stack_from: Optional[float] = None) -> Optional[float]:
+    """The innermost integer radius in ``[r_lo, r_hi]`` (px) where the image, or from
+    ``stack_from`` on a layer of ``stack`` (the nights) that reaches that ring at all, is finite
+    on less than ``drop`` of the largest fraction it covered on the rings inside: the rim where
+    the frames stop covering the field.  None when no ring drops.
+
+    A layer with nothing at a radius is a night left out of that annulus and does not count.
+    ``stack_from`` keeps the nights' check off the seams inside the field, where a night that
+    one annulus keeps and the next leaves out covers part of a ring.  A share of every ring
+    that is always missing, as along the MIRI 4QPM boundaries, keeps the fraction level and
+    is not a rim."""
+    img = np.asarray(image, float)
+    cx, cy = star_center(img.shape)
+    yy, xx = np.mgrid[0:img.shape[0], 0:img.shape[1]]
+    rint = np.rint(np.hypot(xx - cx, yy - cy)).astype(int)
+    layers = [img]
+    if stack is not None and np.ndim(stack) == 3:
+        layers += [np.asarray(lay, float) for lay in stack]
+    best = [0.0] * len(layers)
+    s_from = float(r_lo) if stack_from is None else float(stack_from)
+    for r in range(int(np.ceil(r_lo)), int(np.floor(r_hi)) + 1):
+        ring = rint == r
+        if not ring.any():
+            continue
+        for j, lay in enumerate(layers):
+            if j > 0 and r < s_from:
+                continue
+            f = float(np.isfinite(lay[ring]).mean())
+            if f == 0.0:
+                continue
+            if best[j] > 0 and f < drop * best[j]:
+                return float(r)
+            best[j] = max(best[j], f)
+    return None
 
 
 # ----------------------------------------------------------------------------

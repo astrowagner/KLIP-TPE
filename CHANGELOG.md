@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased — 2026-10-31 (noise rings without the sources' sidelobes, and NEAR2's note on the grid, the curve file and the rim)
+
+- **Every S/N leaves the ADI sidelobes out of its noise ring** (`RunConfig.sidelobes`,
+  `--sidelobes`, `metrics.Sidelobes`, `metrics.sidelobe_snr`).  Search, calibration and
+  validation now do what the contrast grid did.  The arcs beside each injected source and known
+  companion are left out, +/- the data's PA coverage and never under 2 FWHM of arc.  They are
+  the same for every configuration, so no configuration gets more noise samples than another.
+  Where fewer than 4 apertures are left, the 4 farthest from the source stand in (`farthest`,
+  the default) or the clean reduction's ring (`clean`).
+- **One injection at a time, and more only where they bias nothing.**  The source count goes
+  down until every source keeps 4 apertures outside all the arcs and none sits in another's
+  arc, and the sampler draws no source in another's arc.  On NEAR, with about 150 deg of
+  rotation, a pair on one ring becomes one source.  RX J0534's pair, at +/- 62 deg, stays two.
+- **The contrast grid inside 1" on NEAR** (NEAR2's `run_20261030_185422`).  The rotation arcs
+  left 2 or 3 apertures there, every position failed, and the curve fell back to the
+  validation injections without saying so.  The grid now measures with at least 4 apertures
+  under the same rule.  The log counts the positions measured on the farthest apertures or the
+  clean ring, and the ones that failed, with the reason, and `contrast_grid.json` keeps each
+  position's `noise`.
+- **`contrast_curve.txt` names the annuli of each method** when only some annuli have a grid
+  curve.
+- **The candidate search stops a FWHM inside the last ring every night covers in full**
+  (`candidates.coverage_rim`).  In that run the stitch reached 72 px, the frames covered only
+  part of the rings past 71 px, and the list's first candidate was an edge artifact there.
+- A run saved before resumes with its old rings (`off`).  The test suite keeps the old rings
+  unless a test asks for the new ones (`tests/test_sidelobe_rings.py`, and
+  `KLIP_TPE_TEST_SIDELOBES` for the whole suite).
+
 ## Unreleased — 2026-10-31 (KLIP-FM one source at a time, and the finished panel on the winner's injections)
 
 - **The finished annulus's KLIP-FM square models the winner's own injections**, the ones in

@@ -6,6 +6,8 @@ evaluations per annulus.
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pytest
 
@@ -86,7 +88,7 @@ def _never_skip_panels():
     Session-scoped on purpose: some of those runs are built by *module*-scoped fixtures,
     which are set up before any function-scoped fixture gets a chance to patch anything.
     """
-    from klip_tpe import contrast_grid
+    from klip_tpe import contrast_grid, runner
     from klip_tpe.display import LiveDisplay
     mp = pytest.MonkeyPatch()
     mp.setattr(LiveDisplay, "RENDER_GRACE", 600.0)
@@ -94,5 +96,10 @@ def _never_skip_panels():
     # The injection-recovery grid is on by default and costs a hundred reductions or more an
     # annulus, which the suite's many short runs do not need.  A test of it asks for it.
     mp.setitem(contrast_grid._DEFAULT, "mode", "off")
+    # The noise rings leave the sources' ADI sidelobes out by default (RunConfig.sidelobes).
+    # The suite's runs keep the rings their expectations were written for, and the tests of
+    # the sidelobe rings ask for them (tests/test_sidelobe_rings.py).  KLIP_TPE_TEST_SIDELOBES
+    # runs the suite with another default.
+    mp.setitem(runner._SIDELOBES_DEFAULT, "mode", os.environ.get("KLIP_TPE_TEST_SIDELOBES", "off"))
     yield
     mp.undo()

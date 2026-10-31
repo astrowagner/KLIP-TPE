@@ -270,6 +270,21 @@ def write_params_table(path: str, rows: Sequence[Dict[str, Any]]) -> str:
     return text
 
 
+def _spans(nums: Sequence[int]) -> str:
+    """``[1, 2, 3, 5]`` as ``"1-3, 5"``."""
+    out, run = [], []
+    for v in sorted(int(x) for x in nums):
+        if run and v == run[-1] + 1:
+            run.append(v)
+            continue
+        if run:
+            out.append(f"{run[0]}-{run[-1]}" if len(run) > 1 else f"{run[0]}")
+        run = [v]
+    if run:
+        out.append(f"{run[0]}-{run[-1]}" if len(run) > 1 else f"{run[0]}")
+    return ", ".join(out)
+
+
 def write_contrast_curve(path: str, curves: Sequence[Optional[Dict[str, Any]]], edges_px: Sequence[float],
                          fwhm: float, pxscale: float, legacy: bool = False,
                          contrasts: Optional[Sequence[float]] = None,
@@ -285,13 +300,15 @@ def write_contrast_curve(path: str, curves: Sequence[Optional[Dict[str, Any]]], 
     (A §6.4): two comment lines then ``sep_arcsec  contrast_5sig`` rows over all
     annuli, sorted by separation (no seam trim -- the test radii are inside the zone).
     ``grid_curves`` (the ``AnnulusResult.grid_curve`` dicts, one injection per reduction) take
-    the main section's place annulus by annulus where present.
+    the main section's place annulus by annulus where present, and when only some annuli have
+    one the header names the annuli of each method.
     Returns the concatenated arrays (``fm_r`` / ``fm_c`` when an FM section was written)."""
     nann = len(curves)
     trim = 0.0 if legacy else seam_trim(fwhm, pxscale)
     grid = list(grid_curves or [])
     use_grid = any(g for g in grid)
     R, C, SR, SC, SA = [], [], [], [], []
+    by_method: Dict[str, List[int]] = {"grid": [], "validation": []}
     for ia, cc in enumerate(curves):
         main = grid[ia] if (use_grid and ia < len(grid) and grid[ia]) else cc
         if cc:
@@ -300,6 +317,7 @@ def write_contrast_curve(path: str, curves: Sequence[Optional[Dict[str, Any]]], 
                     SR.append(float(a)); SC.append(float(b)); SA.append(ia + 1)
         if not main or main.get("r_as") is None or main.get("curve") is None:
             continue
+        by_method["grid" if main is not cc else "validation"].append(ia + 1)
         cc = main
         r = np.array([np.nan if v is None else float(v) for v in cc["r_as"]])
         c = np.array([np.nan if v is None else float(v) for v in cc["curve"]])
@@ -311,9 +329,16 @@ def write_contrast_curve(path: str, curves: Sequence[Optional[Dict[str, Any]]], 
         R.extend(r[keep]); C.extend(c[keep])
     R, C = np.asarray(R, float), np.asarray(C, float)
     o = np.argsort(R, kind="stable")
-    L = ["# Injection-recovery SNR=5 contrast curve (one injection per reduction at each annulus' winner config, "
-         "median over position angle)" if use_grid else
-         "# Injection-calibrated SNR=5 contrast curve (validated winners per annulus)",
+    if use_grid and by_method["validation"]:
+        head = ("# SNR=5 contrast curve from two methods.  Injection grid (one injection per reduction at the winner "
+                f"config, median over position angle): annuli {_spans(by_method['grid'])}.  Validation injections "
+                f"(no grid curve): annuli {_spans(by_method['validation'])}")
+    elif use_grid:
+        head = ("# Injection-recovery SNR=5 contrast curve (one injection per reduction at each annulus' winner config, "
+                "median over position angle)")
+    else:
+        head = "# Injection-calibrated SNR=5 contrast curve (validated winners per annulus)"
+    L = [head,
          f"# klip_tpe {__version__} -- {_dt.datetime.now().isoformat(timespec='seconds')}",
          f"# seam trim = {trim:.4f} arcsec ({'legacy_stitch: no trim' if legacy else 'max(round(fwhm/3),1) px'});"
          f" annulus edges (px) = {', '.join(f'{e:.1f}' for e in edges_px)}"]

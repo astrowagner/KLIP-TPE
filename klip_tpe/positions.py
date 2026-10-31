@@ -65,6 +65,10 @@ class PositionSampler:
     mask_pxscale: Optional[float] = None
     mask_clear_fwhm: float = 0.0
     mask_angle_convention: str = "pa"
+    #: the noise rings' sidelobe rule (:class:`~klip_tpe.metrics.Sidelobes`): no source is drawn
+    #: in another's ADI sidelobe arc, where its signal would carry the other's negative lobe.
+    #: The :class:`~klip_tpe.runner.Runner` sets it from ``RunConfig.sidelobes``.
+    sidelobes: Optional[object] = field(default=None, repr=False, compare=False)
     _mask_dist: Optional[np.ndarray] = field(default=None, init=False, repr=False, compare=False)
 
     def _xy(self, rho, theta):
@@ -103,7 +107,24 @@ class PositionSampler:
             d = np.abs((np.asarray(theta) - c + 180.0) % 360.0 - 180.0)
             if np.any(d < hw):
                 return True
+        if self._in_sidelobes(rho, theta):
+            return True
         return self._on_mask(rho, theta)
+
+    def _in_sidelobes(self, rho, theta) -> bool:
+        """Does any source sit in another's sidelobe arc (``sidelobes``)?"""
+        rule = self.sidelobes
+        rho, theta = np.atleast_1d(np.asarray(rho, float)), np.atleast_1d(np.asarray(theta, float))
+        if rule is None or rho.size < 2:
+            return False
+        dr = float(rule.radial_fwhm) * self.fwhm_as
+        for i in range(rho.size):
+            for j in range(rho.size):
+                if i == j or abs(rho[i] - rho[j]) > dr:
+                    continue
+                if abs((theta[i] - theta[j] + 180.0) % 360.0 - 180.0) <= rule.half_width(rho[j], self.fwhm_as):
+                    return True
+        return False
 
     def sample(self, n: int, r_lo: float, r_hi: float, rng: np.random.Generator,
                contrast: float = 0.0) -> List[Source]:

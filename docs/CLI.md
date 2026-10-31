@@ -65,7 +65,8 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--cg-samples N] [--cg-step FWHM] [--cg-target SNR]
                         [--cg-precision F] [--cg-snr {matched,aperture}]
                         [--cg-sidelobe {rotation,fixed}]
-                        [--cg-sidelobe-fwhm FWHM] [--global-block]
+                        [--cg-sidelobe-fwhm FWHM]
+                        [--sidelobes {farthest,clean,off}] [--global-block]
                         [--no-framesel] [--no-selection] [--max-drop MAX_DROP]
                         [--tag TAG] [--from-idl-setup RUN_SETUP_TXT]
                         [--opt-width] [--width-range W0 W1] [--r-cap R_CAP]
@@ -262,6 +263,14 @@ options:
   --cg-sidelobe-fwhm FWHM
                         the sidelobes' least half-width, in FWHM of arc
                         (default 2)
+  --sidelobes {farthest,clean,off}
+                        every S/N's noise ring (search, validation, the grid)
+                        leaves out the ADI sidelobes of the injected sources
+                        and known companions, +/- the data's PA coverage, and
+                        the source count keeps 4 apertures outside them. Where
+                        fewer than 4 are left: the 4 farthest from the source
+                        (farthest, the default) or the clean reduction's ring
+                        (clean). off: the rings as before 2026-10-31
   --global-block        one parameter block for all nights
   --no-framesel
   --no-selection        no drop1/drop2 night-selection dims
@@ -543,7 +552,8 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--cg-target SNR] [--cg-precision F]
                      [--cg-snr {matched,aperture}]
                      [--cg-sidelobe {rotation,fixed}]
-                     [--cg-sidelobe-fwhm FWHM] [--global-block]
+                     [--cg-sidelobe-fwhm FWHM]
+                     [--sidelobes {farthest,clean,off}] [--global-block]
                      [--no-framesel] [--no-selection] [--max-drop MAX_DROP]
                      [--tag TAG] [--from-idl-setup RUN_SETUP_TXT]
                      [--opt-width] [--width-range W0 W1] [--r-cap R_CAP]
@@ -738,6 +748,14 @@ options:
   --cg-sidelobe-fwhm FWHM
                         the sidelobes' least half-width, in FWHM of arc
                         (default 2)
+  --sidelobes {farthest,clean,off}
+                        every S/N's noise ring (search, validation, the grid)
+                        leaves out the ADI sidelobes of the injected sources
+                        and known companions, +/- the data's PA coverage, and
+                        the source count keeps 4 apertures outside them. Where
+                        fewer than 4 are left: the 4 farthest from the source
+                        (farthest, the default) or the clean reduction's ring
+                        (clean). off: the rings as before 2026-10-31
   --global-block        one parameter block for all nights
   --no-framesel
   --no-selection        no drop1/drop2 night-selection dims
