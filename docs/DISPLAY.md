@@ -179,9 +179,9 @@ ones the live display skipped, into `steps_rebuilt/` with its own movie.
   aperture photometry with `--cg-snr aperture`.  Each noise ring leaves out the injected
   source, the known companions and their ADI sidelobes, the arc the field rotation sweeps
   (up to `anglemax`, never under 2 FWHM of arc), and no test position goes on a companion's
-  sidelobes.  Where fewer than 4 apertures are left beside them, the 4 farthest from the source
-  stand in, or the clean reduction's ring with `--sidelobes clean`, and the log counts the
-  positions measured so and the ones that failed, with the reason.  The final frame draws the median over position angle with its 16-84 % band.
+  sidelobes.  Where fewer than 4 apertures are left beside them, the 4 or more farthest from the
+  source stand in, or the clean reduction's ring through the source with `--sidelobes clean`, and
+  the log counts the positions measured so and the ones that failed, with the reason.  The final frame draws the median over position angle with its 16-84 % band.
   `contrast_grid.json` keeps every position's trials, `contrast_grid.txt` the curve.  The
   KLIP-FM section is an independent forward-model estimate on the built-in engine.  Without
   the grid (`--contrast-grid off`, or a run saved before it) the curve is the fit to the

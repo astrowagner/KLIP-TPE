@@ -103,8 +103,8 @@ in order:
   source and known companion, +/- the data's PA coverage in the search and never under 2 FWHM
   of arc (`--sidelobes`, `RunConfig.sidelobes`).  The arcs are the same for every
   configuration, so no configuration gets more noise samples than another.  Where fewer than 4
-  apertures are left beside them, the 4 farthest from the source stand in (`farthest`, the
-  default) or the clean reduction's ring (`clean`).  The source count goes down until every
+  apertures are left beside them, the 4 or more farthest from the source stand in (`farthest`,
+  the default) or the clean reduction's ring through the source (`clean`).  The source count goes down until every
   source keeps 4 apertures outside all the arcs and none sits in another's arc, so on NEAR, with
   about 150 deg of rotation, a pair on one ring becomes one source.  A run saved before
   2026-10-31 resumes with its old rings (`off`).

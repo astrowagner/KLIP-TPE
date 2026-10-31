@@ -235,8 +235,8 @@ class RunConfig:
         (search, calibration, validation, the contrast grid) leave out the ADI sidelobes of
         every injected source and known companion: ``+/- the data's PA coverage``, never less
         than 2 FWHM of arc (:class:`~klip_tpe.metrics.Sidelobes`).  Where fewer than 4
-        apertures remain, ``"farthest"`` (default) takes the 4 farthest from the source and
-        ``"clean"`` measures the noise on the clean reduction's ring.  The source count is
+        apertures remain, ``"farthest"`` (default) takes the 4 or more farthest from the source
+        and ``"clean"`` measures the noise on the clean reduction's ring through the source.  The source count is
         capped so that every source keeps 4 apertures outside all the arcs, and no source sits
         in another's arc.  ``"off"``: the rings of runs saved before 2026-10-31, which resume
         with it.
@@ -573,6 +573,22 @@ def _whys(counts: "collections.Counter", top: int = 3) -> str:
     out = ", ".join(f"{n} {w}" for w, n in items[:top])
     rest = sum(n for _, n in items[top:])
     return out + (f", {rest} other" if rest else "")
+
+
+def _few_apertures(d: Dict[str, Any], min_ring: int, arc_deg: float) -> str:
+    """Why a contrast-grid position kept fewer than ``min_ring`` noise apertures, for its
+    record and the log, from its S/N details (:func:`klip_tpe.metrics.sidelobe_snr`).  Where
+    the fallback was tried, the reason is the ring itself, not the sidelobes."""
+    def aps(k: int) -> str:
+        return f"{k} noise aperture{'' if k == 1 else 's'}"
+    tried, n_fb = d.get("fallback_tried"), d.get("n_fallback")
+    if tried == "clean" and n_fb is not None:
+        return f"{aps(int(n_fb))} on the clean reduction's ring (fewer than {min_ring})"
+    if tried == "farthest" and n_fb is not None:
+        return f"{aps(int(n_fb))} on the whole ring (fewer than {min_ring})"
+    k = int(d.get("n_arcs", d.get("n_left", d.get("nclean", 0))))
+    return (f"{aps(k)} left beside the +/- {float(d.get('arc_deg', arc_deg)):.0f} deg sidelobes "
+            f"(fewer than {min_ring})")
 
 
 def _atomic_write(path: str, text: Union[str, bytes], keep: Optional[str] = None) -> None:
@@ -1131,7 +1147,7 @@ class Runner:
             keeps = f"{few}" if most == few else f"{few} to {most}"
             if rule is not None:
                 inst = ("the clean reduction's ring" if rule.mode == "clean"
-                        else f"the {mr} apertures farthest from it")
+                        else f"the {mr} or more apertures farthest from it")
                 self.log(f"  annulus {ia+1}: {who} at {rho:.3f}\" keeps {keeps} noise aperture"
                          f"{'s' * (most != 1)} outside its ADI sidelobes, fewer than {mr}"
                          + (f", so its noise comes from {inst}" if most < mr else
@@ -1687,8 +1703,7 @@ class Runner:
             if d.get("why"):
                 return np.nan, str(d["why"])
             if int(d.get("nclean", 0)) < min_ring:
-                return np.nan, (f"{int(d.get('nclean', 0))} noise apertures left beside the +/- "
-                                f"{float(d.get('arc_deg', hw(p.r_px))):.0f} deg sidelobes (fewer than {min_ring})")
+                return np.nan, _few_apertures(d, min_ring, hw(p.r_px))
             return snr, None
         t0 = time.time()
         n_test = sum(p.status != "excluded" for p in positions)
@@ -1733,8 +1748,8 @@ class Runner:
         noise = collections.Counter(str(p.noise) for p in positions if p.noise and p.status in CG.STATUS_DONE)
         for how, k in noise.most_common():
             what = ("the clean reduction's ring" if how == "clean"
-                    else f"the {min_ring} apertures farthest from the source" + (", the known companions' arcs let in"
-                                                                                if "known" in how else ""))
+                    else f"the {min_ring} or more apertures farthest from the source"
+                    + (", the known companions' arcs let in" if "known" in how else ""))
             self.log(f"  contrast grid: {k} settled position(s) measured on {what}: fewer than {min_ring} "
                      f"apertures were left beside the sidelobes")
         return out if n_ok else None

@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — 2026-10-31 (the grid's reason for a ring too small, and the clean ring through the source)
+
+- **A grid position whose whole ring holds fewer than 4 apertures says so.**  Inside about
+  1.1 FWHM the ring has 6 apertures and only 3 lie outside 1.5 FWHM of the source, so neither
+  fallback reaches 4.  The log blamed the sidelobes ("0 noise apertures left beside the +/- 149
+  deg sidelobes").  It now reads "3 noise apertures on the whole ring (fewer than 4)", or "on
+  the clean reduction's ring".  `metrics.sidelobe_snr` records the fallback it tried
+  (`fallback_tried`) and the most apertures it found (`n_fallback`).  `n_arcs` now counts 1 or
+  2 apertures as such.  The matched filter's `nclean` reads 0 below 3, and its new `n_left`
+  gives the count.
+- **The clean ring runs through the injected source** (`--sidelobes clean`).  The matched
+  filter located the source on the clean image too, where there is none, and so ran the ring
+  through a noise peak up to 1.5 px away, at another radius.  Whether that ring held 4
+  apertures depended on the noise.  It now runs through the source where the injected image
+  located it (`mawet_peak_snr(peak_xy=...)`).
+- The settled positions' log line says "the 4 or more apertures farthest from the source".  The
+  apertures come in pairs, so the farthest can number 5.
+
 ## Unreleased — 2026-10-31 (noise rings without the sources' sidelobes, and NEAR2's note on the grid, the curve file and the rim)
 
 - **Every S/N leaves the ADI sidelobes out of its noise ring** (`RunConfig.sidelobes`,
