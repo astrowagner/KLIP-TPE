@@ -95,6 +95,7 @@ def cpu_only(tmp_path_factory):
     return _run(tmp_path_factory.mktemp("card"), "cpu")
 
 
+@pytest.mark.slow
 def test_the_card_takes_the_share_its_hash_picks_and_changes_no_score(tmp_path, cpu_only):
     recs, logs, run_dir = _run(tmp_path, "card", StandIn.from_cpu)
     assert _scores(recs) == _scores(cpu_only[0]), "the stand-in card gives the CPU's bits"
@@ -118,6 +119,7 @@ def test_the_card_takes_the_share_its_hash_picks_and_changes_no_score(tmp_path, 
     assert any(ln.startswith("# card: share 50 %") for ln in open(os.path.join(run_dir, "bench_summary.txt")))
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("kind,why", [(NoWarm, "it did not start (RuntimeError: no card here)"),
                                       (Broken, "3 jobs failed on it"),
                                       (Dies, "died")])
@@ -129,6 +131,59 @@ def test_without_the_card_the_run_goes_on_on_the_cpu(tmp_path, cpu_only, kind, w
     assert not card["up"] and why in card["why_down"]
     if kind is NoWarm:
         assert not any(r["meta"].get("card") or r["meta"].get("draw_card") for r in recs)
+
+
+def test_the_card_reducer_runs_in_the_card_workers():
+    """klip_tpe.gpu_reducer's reducer on its NumPy backend, in the card workers: built in the
+    parent, warmed after the fork, every partition job of a marked draw on the card, and its
+    images the CPU's to 1e-3 of the noise with the same NaN footprint."""
+    from klip_tpe.gpu_reducer import GPUKLIPReducer
+    from klip_tpe.injection import GaussianPSF
+    from klip_tpe.metrics import Source
+    from klip_tpe.reducer import Dataset, KLIPReducer
+    from klip_tpe.space import Config
+
+    def numpy_card(r):
+        g = GPUKLIPReducer.from_cpu(r)
+        g.backend_name = "numpy"
+        return g
+
+    def night(seed, n=40, ny=64):
+        rng = np.random.default_rng(seed)
+        yy, xx = np.mgrid[0:ny, 0:ny]
+        rr = np.hypot(xx - (ny - 1) / 2.0, yy - (ny - 1) / 2.0)
+        halo = (3000.0 * np.exp(-rr / 6.0) + 40.0 * np.exp(-rr / 25.0)).astype(np.float32)
+        speck = rng.normal(size=(ny, ny)).astype(np.float32) * 6.0
+        cube = (halo[None] + speck[None] * np.linspace(0.8, 1.2, n)[:, None, None]
+                + rng.normal(size=(n, ny, ny)).astype(np.float32) * 2.0)
+        model = GaussianPSF(4.0, star_flux=2.0e5)
+        return KLIPReducer(Dataset(cube, np.linspace(-60.0, 70.0, n), texp=float(n)), pxscale=0.05, lam_m=4e-6,
+                           diam_m=8.0, injection_model=model, fallback_model=model, fwhm_px=4.0, outrad_cap=28.0,
+                           defaults={"fast": False, "n_min_ref": 5, "comb_type": "nwadi"})
+
+    def parts():
+        return {f"n{i}": night(i) for i in (1, 2)}
+    params = {"inrad": 6.0, "outrad": 18.0, "k_klip": 5, "bin": 2}
+    cfg = Config(params=dict(params), per_partition={p: dict(params) for p in ("n1", "n2")},
+                 selected=["n1", "n2"], x=np.zeros(0))
+    srcs = [Source(0.6, 30.0, 0.05)]
+    cpu = PartitionedReducer(parts(), max_workers=1).reduce_config(cfg, srcs, tag="a1_e1_d1_inj")
+    pr = PartitionedReducer(parts(), max_workers=4, pool="processes")
+    pr.card_share, pr.card_workers, pr.card_factory = 100.0, 1, numpy_card
+    try:
+        ev = pr.reduce_config(cfg, srcs, tag="a1_e1_d1_inj", card=True)
+        clean = pr.reduce_config(cfg, None, tag="a1_e1_d1_clean")          # not marked: the CPU's
+        summary = pr.card_summary()
+    finally:
+        pr.close()
+    for pid in ("n1", "n2"):
+        assert ev.meta[pid]["card"] is True and ev.meta[pid]["device"] == "gpu"
+        assert not clean.meta[pid].get("card") and "device" not in clean.meta[pid]
+    a, b = ev.stack, cpu.stack
+    assert np.array_equal(np.isnan(a), np.isnan(b))
+    noise = np.nanstd(b, axis=(1, 2))
+    assert np.all(np.nanmax(np.abs(a - b), axis=(1, 2)) < 1e-3 * noise)
+    assert summary["up"] and summary["jobs"] == 2 and summary["info"]["name"] == "numpy"
 
 
 def test_no_share_no_card_workers(tmp_path):

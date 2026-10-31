@@ -426,11 +426,16 @@ _CARD_FILE = "card.json"
 
 
 def _auto_card_share() -> float:
-    """``--gpu-share auto``: 30 where Linux shows a card and :mod:`klip_tpe.gpu_reducer` is
-    there, else 0."""
+    """``--gpu-share auto``: 30 where Linux shows a card and CuPy is installed (found, not
+    imported: the parent never loads CUDA), else 0."""
+    import importlib.util
     from .parallel import card_present
     from .reducer import _gpu_card_factory
-    return 30.0 if card_present() and _gpu_card_factory() is not None else 0.0
+    try:
+        cupy = importlib.util.find_spec("cupy") is not None
+    except (ImportError, ValueError):
+        cupy = False
+    return 30.0 if card_present() and cupy and _gpu_card_factory() is not None else 0.0
 
 
 def _card_share_value(v):

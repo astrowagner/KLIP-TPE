@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased — 2026-10-31 (the card's reducer, from the GPU session)
+
+- **`klip_tpe.gpu_reducer` and `klip_tpe.klip_gpu`**, written in the GPU session (version 0.6).
+  `GPUKLIPReducer.from_cpu` takes a loaded `KLIPReducer` and reduces on the card the requests
+  `supports` accepts: no KLIP-FM pass, k-scan, extras, reference library or SDI pool, destriping
+  or fast path.  It does the injection, high-pass, binning, annular KLIP in the Gram form with
+  the sectors of a night in one solver call, derotation and combine on CuPy.  CuPy is loaded only
+  in the card workers.  The images agree with `KLIPReducer.reduce` to about 1e-5 of the noise on
+  NEAR2's frames, and the same job twice gives the same bits.  With them, `--gpu-share` has a
+  card to send work to.
+- `--gpu-share auto` is 30 where Linux shows a card and CuPy is installed (found, not imported).
+- `tests/test_gpu_reducer.py`: ten configurations against `KLIPReducer.reduce` on synthetic
+  nights, on NumPy everywhere and on the card where there is one.  `tests/test_card_worker.py`
+  runs the real reducer, on NumPy, in the card workers.  `scripts/check_gpu_reducer.py` checks a
+  finished NEAR2 run's frames and configurations on the card.
+- `pip install -e ".[gpu]"` installs CuPy for CUDA 12.
+- `PartitionedReducer.reduce` passes a request's `card` on.  The card tests that run a search
+  are marked slow.
+
 ## Unreleased — 2026-10-31 (the card as a worker in the pool)
 
 - **A share of the search's injected draws can go to an NVIDIA card** (`--gpu-share`,
