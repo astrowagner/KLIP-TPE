@@ -89,9 +89,28 @@
 - `--score-floor off` keeps the means.  Runs saved before 2026-11-01 resume without a floor, and
   `--from-idl-setup` runs go without one, as the IDL does.
 - Tests in `tests/test_score_floor.py`.
-- **The source count line stays off a starved ring.**  The line of b7c903c said each ring keeps
-  at least 6 apertures even where the next line said one source's ring keeps fewer.  Over a
-  starved ring only that line is logged now, and `tests/test_injection_floor.py` holds both cases.
+- **The source count line claims no full rings over a starved ring.**  The line of b7c903c said
+  each ring keeps at least 6 apertures even where the next line said one source's ring keeps
+  fewer.  As merged with c8d4ea0 (the next entry), a starved ring gets the count alone and the
+  starved-ring line, and `tests/test_injection_floor.py` holds both cases.
+
+## Unreleased — 2026-11-01 (the count line claims only the rings it saw)
+
+- **An annulus' count line no longer contradicts the starved-ring line under it.**  The line of
+  b7c903c for an annulus the cap leaves alone said each ring keeps at least `min_ring` clean
+  apertures whenever the count was not lowered, so close to the star the log read `annulus 1: 1
+  source a draw, as asked, and each separation's Mawet ring keeps at least 6 clean apertures`
+  and then `annulus 1: one source at 0.275" keeps 5 clean apertures in its Mawet ring, fewer
+  than 6, ...`.  The cap never asks a single source (`_ring_survives` passes n <= 1), and its
+  blank probe can differ from the sources' own rings close to the star.  The claim now follows
+  the probe at the sources, which `_nsrc` asks first: a starved ring gets the count alone
+  (`annulus 1: 1 source a draw, as asked`) and the starved-ring line, and rings that cannot be
+  measured get no claim.  The sidelobe rule's wording is treated the same way.  The source count
+  itself is unchanged.
+- `tests/test_injection_floor.py` and `tests/test_inner_guard.py` had failed since b7c903c: they
+  count the lines naming the Mawet ring, and the count line named it too.  The roomy annulus of
+  `test_one_source_that_starves_its_ring_is_logged`, whose count line names the Mawet ring by
+  design, now looks for the warning itself.  New tests in `tests/test_count_line.py`.
 
 ## Unreleased — 2026-11-01 (the card's memory, shared among its workers)
 
