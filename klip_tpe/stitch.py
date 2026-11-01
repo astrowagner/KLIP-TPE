@@ -27,7 +27,7 @@ import numpy as np
 from . import __version__
 from .metrics import star_center
 
-__all__ = ["tile_mask", "stitch_tiles", "stitch_stacks", "seam_pixels", "seam_trim",
+__all__ = ["tile_mask", "stitch_tiles", "stitch_stacks", "seam_pixels", "seam_trim", "annulus_tiles",
            "fits_header", "write_fits", "read_fits", "write_params_table", "write_contrast_curve",
            "write_setup_file", "PARAM_COLUMNS"]
 
@@ -43,6 +43,25 @@ def _radius(shape) -> np.ndarray:
     cx, cy = star_center((ny, nx))
     yy, xx = np.mgrid[0:ny, 0:nx]
     return np.hypot(xx - cx, yy - cy)
+
+
+def annulus_tiles(zones: Sequence[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    """Each annulus' tile, the radii the stitch takes from it, for ``zones`` sorted by centre.
+
+    Where two annuli next to each other overlap, the boundary between their tiles is the
+    midpoint between their centres, kept within the overlap, so each radius comes from the
+    annulus whose centre is nearest.  Where they meet, or leave a gap, the tiles keep the
+    zones' edges.  So without overlaps the tiles are the zones (``--ann-extra``,
+    NEAR2 s6 note, section 5)."""
+    z = [(float(a), float(b)) for a, b in zones]
+    tiles = [[a, b] for a, b in z]
+    for k in range(len(z) - 1):
+        (a0, b0), (a1, b1) = z[k], z[k + 1]
+        if b0 > a1:
+            m = min(max(0.25 * (a0 + b0 + a1 + b1), a1), b0)
+            tiles[k][1] = m
+            tiles[k + 1][0] = m
+    return [(a, b) for a, b in tiles]
 
 
 def tile_mask(shape, rin: float, rout: float, pad: Any = 2.0) -> np.ndarray:
@@ -235,21 +254,30 @@ def write_params_table(path: str, rows: Sequence[Dict[str, Any]]) -> str:
     significant digits, so they can be rounded again without the error of a second rounding.
 
     Each row dict: ``ann, inner_px, outer_px, params (dict), best_SNR, partitions (list),
-    per_partition ({pid: params})`` plus optional ``validated``, ``contrast``.
-    Returns the text."""
+    per_partition ({pid: params})`` plus optional ``validated``, ``contrast``.  Rows with
+    ``tile_in_px`` / ``tile_out_px`` (overlapping annuli, ``RunConfig.ann_extra``) add the
+    two tile columns after the zone's.  Returns the text."""
     def g(v, w):
         return f"{_fmt(v, '{:.6g}'):>{w}}"
+    tiles = any(r.get("tile_in_px") is not None for r in rows)
     L = ["# Per-annulus optimal parameters used for klip_stitched.fits",
          f"# klip_tpe {__version__} -- {_dt.datetime.now().isoformat(timespec='seconds')}",
          "# inner/outer in pixels.  Representative values = the median over the partitions the winner keeps, "
-         "6 significant digits.",
-         f"{'ann':>4}  {'inner_px':>8}  {'outer_px':>8}  {'k':>6}  {'bin':>7}  {'n_ang':>7}  {'filter':>7}  "
-         f"{'angsep':>9}  {'anglemax':>9}  {'corr':>9}  {'noise':>9}  {'coro':>9}  {'best_SNR':>9}  "
-         f"{'valid':>5}  {'contrast':>10}  partitions"]
+         "6 significant digits."]
+    if tiles:
+        L.append("# inner/outer: each annulus' zone.  tile_in/tile_out: the radii the stitch takes from it "
+                 "(nearest centre where annuli overlap).")
+    L.append(f"{'ann':>4}  {'inner_px':>8}  {'outer_px':>8}  "
+             + (f"{'tile_in':>8}  {'tile_out':>8}  " if tiles else "")
+             + f"{'k':>6}  {'bin':>7}  {'n_ang':>7}  {'filter':>7}  "
+             f"{'angsep':>9}  {'anglemax':>9}  {'corr':>9}  {'noise':>9}  {'coro':>9}  {'best_SNR':>9}  "
+             f"{'valid':>5}  {'contrast':>10}  partitions")
     for r in rows:
         p = _kept_median(r)
         parts = r.get("partitions") or []
-        L.append(f"{int(r['ann']):4d}  {float(r['inner_px']):8.2f}  {float(r['outer_px']):8.2f}  "
+        tcol = (f"{_fmt(r.get('tile_in_px'), '{:8.2f}'):>8}  {_fmt(r.get('tile_out_px'), '{:8.2f}'):>8}  "
+                if tiles else "")
+        L.append(f"{int(r['ann']):4d}  {float(r['inner_px']):8.2f}  {float(r['outer_px']):8.2f}  {tcol}"
                  f"{g(p.get('k_klip'), 6)}  {g(p.get('bin'), 7)}  {g(p.get('n_ang'), 7)}  {g(p.get('filter'), 7)}  "
                  f"{g(p.get('angsep'), 9)}  {g(p.get('anglemax'), 9)}  {g(p.get('corr_thresh'), 9)}  "
                  f"{g(p.get('noise_max'), 9)}  {g(p.get('coronoise_max'), 9)}  {_fmt(r.get('best_SNR'), '{:9.3f}'):>9}  "

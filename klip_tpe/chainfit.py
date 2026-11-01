@@ -341,12 +341,13 @@ def fit_chain(runner, nodes: Dict[str, Sequence[Source]], labels: Optional[Seque
         raise ValueError("an annulus' winner images are missing (the run kept no FITS products?)")
     cleans = [d["clean"] for _, d in items]
     zones = [tuple(float(v) for v in d["zone"]) for _, d in items]
-    edges = [z[0] for z in zones] + [zones[-1][1]]
+    zt = runner._tiles(zones)                    # the run's stitch tiles (its zones without overlaps)
+    edges = [z[0] for z in zt] + [zt[-1][1]]
     w = runner._stitch_weights(cleans, zones)
-    pads = runner._tile_pads(zones)
+    pads = runner._tile_pads(zt)
     image = read_fits(os.path.join(runner.run_dir, "klip_stitched.fits"))
     if image is None:
-        image = runner._maybe_flatten(stitch_tiles(cleans, zones, w, pads=pads))
+        image = runner._maybe_flatten(stitch_tiles(cleans, zt, w, pads=pads))
     image = np.asarray(image, float)
     ny, nx = image.shape
     pa = chain_pa({n: nodes[n] for n in labels}) if line_pa is None else float(line_pa) % 180.0
@@ -367,7 +368,7 @@ def fit_chain(runner, nodes: Dict[str, Sequence[Source]], labels: Optional[Seque
                 if ev.fm_image is None:
                     raise ValueError(f"annulus {r.annulus + 1}: the reduction returned no KLIP-FM image")
                 tiles.append(np.asarray(ev.fm_image, float))
-            basis.append(runner._maybe_flatten(stitch_tiles(tiles, zones, w, pads=pads)))
+            basis.append(runner._maybe_flatten(stitch_tiles(tiles, zt, w, pads=pads)))
             log(f"  node {n}: {len(src)} source(s) through {len(items)} annulus winner(s)")
     finally:
         runner.ia = ia_keep
@@ -510,9 +511,10 @@ def fit_per_night(runner, chain: Sequence[Source], *, line_pa: Optional[float] =
     if any(d is None or d.get("clean_stack") is None for _, d in items):
         raise ValueError("the run kept no per-partition images (best_clean_partitions.fits)")
     zones = [tuple(float(v) for v in d["zone"]) for _, d in items]
-    edges = [z[0] for z in zones] + [zones[-1][1]]
+    zt = runner._tiles(zones)
+    edges = [z[0] for z in zt] + [zt[-1][1]]
     w = runner._stitch_weights([d["clean"] for _, d in items], zones)
-    pads = runner._tile_pads(zones)
+    pads = runner._tile_pads(zt)
     fm_stacks, fm_ids = [], []
     ia_keep = runner.ia
     try:
@@ -526,9 +528,9 @@ def fit_per_night(runner, chain: Sequence[Source], *, line_pa: Optional[float] =
             fm_ids.append([str(p) for p in ev.partitions])
     finally:
         runner.ia = ia_keep
-    fm, ids = stitch_stacks(fm_stacks, fm_ids, zones, w, pads=pads)
+    fm, ids = stitch_stacks(fm_stacks, fm_ids, zt, w, pads=pads)
     cl, ids_c = stitch_stacks([np.asarray(d["clean_stack"], float) for _, d in items],
-                              [d["parts"] for _, d in items], zones, w, pads=pads)
+                              [d["parts"] for _, d in items], zt, w, pads=pads)
     if fm is None or cl is None:
         raise ValueError("nothing to stitch")
     ny, nx = fm.shape[-2:]

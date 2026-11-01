@@ -633,6 +633,17 @@ def _per_annulus(val, ia: int) -> int:
     return int(val)
 
 
+def _cfg_zones(cfg: Dict[str, Any]) -> Optional[List[Tuple[float, float]]]:
+    """A saved run's zones by centre when it has annuli beside its edges (``ann_extra``, as
+    :attr:`klip_tpe.runner.RunConfig.zones` orders them), else None."""
+    extra = (cfg or {}).get("ann_extra") or []
+    if not extra:
+        return None
+    e = [float(v) for v in (cfg.get("ann_edges") or [])]
+    zs = [(e[i], e[i + 1]) for i in range(len(e) - 1)] + [(float(z[0]), float(z[1])) for z in extra]
+    return sorted(zs, key=lambda z: (0.5 * (z[0] + z[1]), z[0]))
+
+
 def annulus_from_records(records: Sequence[Dict[str, Any]], space: Dict[str, Any], cfg: Dict[str, Any],
                          ia: int, pxscale: float, fwhm: float, metric_name: str = "metric",
                          run_name: str = "", winner: Optional[Dict[str, Any]] = None,
@@ -666,6 +677,10 @@ def annulus_from_records(records: Sequence[Dict[str, Any]], space: Dict[str, Any
     inrad = float(edges[ia]) if len(edges) > ia + 1 else 0.0
     outrad = float(edges[ia + 1]) if len(edges) > ia + 1 else (float(edges[0]) if edges else 0.0)
     nann = max(len(edges) - 1, 1)
+    zs = _cfg_zones(cfg)
+    if zs:                                    # overlapping annuli (RunConfig.ann_extra), numbered by centre
+        inrad, outrad = zs[min(ia, len(zs) - 1)]
+        nann = len(zs)
     return AnnulusData(
         run_name=run_name, annulus=ia, nann=nann, inrad=inrad, outrad=outrad, pxscale=float(pxscale),
         fwhm=float(fwhm), params=params, partitions=parts, X=X, y=y,
@@ -2209,8 +2224,11 @@ def render_intro(setup: Dict[str, Any], out: str, size=(16.0, 10.0), dpi: int = 
         edges = cfg.get("ann_edges", [])
         red = setup.get("reducer", {}) or {}
         parts = space.get("partitions", [])
+        zs = _cfg_zones(cfg)
         lines = [
-            f"annuli: {max(len(edges) - 1, 1)}   edges (px): {', '.join(f'{e:g}' for e in edges)}",
+            f"annuli: {max(len(edges) - 1, 1)}   edges (px): {', '.join(f'{e:g}' for e in edges)}" if not zs else
+            f"annuli: {len(zs)}   edges (px): {', '.join(f'{e:g}' for e in edges)}   and "
+            + ", ".join(f"{a:g}-{b:g}" for a, b in (cfg.get("ann_extra") or [])),
             f"search: {cfg.get('search_mode', '?')}   n_iter {cfg.get('n_iter')}   n_init {cfg.get('n_init')}   gamma {cfg.get('gamma')}",
             f"reducer: {red.get('name', '?')}   partitions: {', '.join(parts) if parts else 'single'}   selection: {space.get('selection')}",
             f"searched: {', '.join(sorted({(p.get('base') or p['name']) for p in space.get('params', [])}))}",

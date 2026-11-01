@@ -54,6 +54,7 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--inject-sources FILE] [--metric {mawet,fmmf}]
                         [--run-dir RUN_DIR]
                         [--ann-edges ANN_EDGES [ANN_EDGES ...]]
+                        [--ann-extra IN:OUT [IN:OUT ...]]
                         [--n-iter N_ITER [N_ITER ...]]
                         [--n-init N_INIT [N_INIT ...]]
                         [--mode {tpe,random,grid}] [--blocks BLOCKS]
@@ -231,6 +232,16 @@ options:
                         <root>/comb/opt/run_YYYYMMDD_HHMMSS, the IDL layout;
                         generic and ales: ./runs/run_...)
   --ann-edges ANN_EDGES [ANN_EDGES ...]
+  --ann-extra IN:OUT [IN:OUT ...]
+                        annuli beside those of --ann-edges, each IN:OUT px,
+                        which may overlap them, e.g. 6.85:16.16 16.16:25.47.
+                        All are numbered by centre and searched, validated and
+                        verified over their own zones. Where annuli overlap,
+                        the stitch takes each radius from the annulus with the
+                        nearest centre (their tiles, in final_results.json and
+                        klip_stitched_params.txt). The per-annulus lists of
+                        --n-iter, --n-init, --n-sources and --use-contrast
+                        follow the numbering by centre
   --n-iter N_ITER [N_ITER ...]
   --n-init N_INIT [N_INIT ...]
   --mode {tpe,random,grid}
@@ -579,6 +590,7 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--inject-sources FILE] [--metric {mawet,fmmf}]
                      [--run-dir RUN_DIR]
                      [--ann-edges ANN_EDGES [ANN_EDGES ...]]
+                     [--ann-extra IN:OUT [IN:OUT ...]]
                      [--n-iter N_ITER [N_ITER ...]]
                      [--n-init N_INIT [N_INIT ...]] [--mode {tpe,random,grid}]
                      [--blocks BLOCKS] [--seed SEED] [--contrast0 CONTRAST0]
@@ -753,6 +765,16 @@ options:
                         <root>/comb/opt/run_YYYYMMDD_HHMMSS, the IDL layout;
                         generic and ales: ./runs/run_...)
   --ann-edges ANN_EDGES [ANN_EDGES ...]
+  --ann-extra IN:OUT [IN:OUT ...]
+                        annuli beside those of --ann-edges, each IN:OUT px,
+                        which may overlap them, e.g. 6.85:16.16 16.16:25.47.
+                        All are numbered by centre and searched, validated and
+                        verified over their own zones. Where annuli overlap,
+                        the stitch takes each radius from the annulus with the
+                        nearest centre (their tiles, in final_results.json and
+                        klip_stitched_params.txt). The per-annulus lists of
+                        --n-iter, --n-init, --n-sources and --use-contrast
+                        follow the numbering by centre
   --n-iter N_ITER [N_ITER ...]
   --n-init N_INIT [N_INIT ...]
   --mode {tpe,random,grid}
