@@ -89,8 +89,9 @@ def test_one_source_that_starves_its_ring_is_logged(tmp_path):
     assert len(said) == 1 and "one source at 0.275\"" in said[0] and "radial band" in said[0], logs
     assert r._nsrc(0) == 1 and len([l for l in logs if "Mawet ring" in l]) == 1, "once per annulus"
     r2, logs2 = _klip_runner(tmp_path / "wide", [8, 30], 1.0)
-    # a ring that keeps its apertures: the count line alone, and only there does it say "at least"
-    assert r2._nsrc(0) == 1
+    # a roomy annulus starves no ring.  No line warns "in its Mawet ring", and the count line,
+    # which names the Mawet ring too, is the only line to say "at least"
+    assert r2._nsrc(0) == 1 and not [l for l in logs2 if "in its Mawet ring" in l]
     said2 = [l for l in logs2 if "Mawet ring" in l]
-    assert len(said2) == 1 and "keeps at least 6 clean apertures" in said2[0], logs2
-    assert not any("at least" in l for l in said), "no count line over the starved ring"
+    assert len(said2) == 1 and "each separation's Mawet ring keeps at least 6 clean apertures" in said2[0], logs2
+    assert not any("at least" in l for l in said), "no full-ring claim over the starved ring"

@@ -1230,7 +1230,8 @@ class Runner:
         # The count used can still starve a ring: one source close to the star, whose ring
         # holds only a handful of apertures, is never capped.  Asked at the sources themselves
         # and over more azimuths than the cap asks: where a source falls on the pixel grid
-        # moves its count by one.
+        # moves its count by one.  Asked before the count is logged, because the count line
+        # may claim only the rings this probe saw keep ``min_ring``.
         got = self._ring_clean(ia, n, ndraw=12, at_sources=True)
         starved = got is not None and got[0] < mr
         if n < asked and self._nsrc_warned.get(ia) != n:
@@ -1246,17 +1247,21 @@ class Runner:
                          f"fall back to the radial band there")
         elif n == asked and self._nsrc_warned.get(ia) != n:
             # the count an annulus keeps is said too, so a log without the line above is not
-            # read as the cap having been skipped.  Not over a starved ring, whose own line
-            # follows and where the line's "at least" would not hold.
+            # read as the cap having been skipped.  It claims the rings keep ``min_ring`` only
+            # when the probe at the sources saw every one do it: the cap never asks a single
+            # source (``_ring_survives`` passes n <= 1), and its blank probe can differ from the
+            # sources' own rings close to the star.  A starved ring gets the line below instead,
+            # and a ring that could not be measured gets no claim.
             self._nsrc_warned[ia] = n
             src = "as asked" if ns is not None else "as the count for its separation gives"
-            if not starved and rule is not None:
-                self.log(f"  annulus {ia+1}: {n} source{'s' * (n != 1)} a draw, {src}, and each keeps at least "
-                         f"{mr} noise apertures outside the sources' ADI sidelobes (+/- "
-                         f"{rule.half_width(a_out, self.fwhm):.0f} deg at the outer edge)")
-            elif not starved:
-                self.log(f"  annulus {ia+1}: {n} source{'s' * (n != 1)} a draw, {src}, and each separation's "
-                         f"Mawet ring keeps at least {mr} clean apertures")
+            head = f"  annulus {ia+1}: {n} source{'s' * (n != 1)} a draw, {src}"
+            if got is None or starved:
+                self.log(head)
+            elif rule is not None:
+                self.log(f"{head}, and each keeps at least {mr} noise apertures outside the sources' ADI "
+                         f"sidelobes (+/- {rule.half_width(a_out, self.fwhm):.0f} deg at the outer edge)")
+            else:
+                self.log(f"{head}, and each separation's Mawet ring keeps at least {mr} clean apertures")
         if starved:
             few, rho, most = got
             who = "one source" if n == 1 else f"with {n} sources, the one"
