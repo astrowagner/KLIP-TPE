@@ -1272,25 +1272,55 @@ def panel_importance_live(ax, ad: AnnulusData, cs: Optional[Dict[str, Any]] = No
     ax.set_xlabel("|corr| with S/N")
 
 
+def _partition_tick_labels(names: Sequence[str]) -> Tuple[List[str], str]:
+    """Tick labels for a row of partitions: the names without the prefix they all share up to
+    a separator (``n2_g00 ... n2_g19`` -> ``g00 ... g19``, prefix ``n2_``), or the full names
+    (prefix ``""``) when that would leave an empty or a repeated label."""
+    names = [str(n) for n in names]
+    if len(names) < 2:
+        return names, ""
+    pre = os.path.commonprefix(names)
+    cut = max(pre.rfind(c) for c in "_-.:/") + 1
+    short = [n[cut:] for n in names]
+    if cut == 0 or not all(short) or len(set(short)) < len(short):
+        return names, ""
+    return short, pre[:cut]
+
+
 def panel_partition_effect(ax, ad: AnnulusData):
     """near2m_npanel: per partition, the scores of evals that included it (dark) vs
-    excluded it (grey) with group means."""
+    excluded it (grey) with group means.
+
+    Past 300 valid evaluations the points are drawn small and translucent and the means
+    outlined, so that the means stay visible on the clouds.  The tick labels drop the prefix
+    all partitions share (named in the axis label) and stand on end past 10 partitions:
+    20 wavelength groups' full names ran into each other."""
     ax.set_title("partition effect (dark = included, gray = excluded)", loc="left")
     v = ad.valid
     if not ad.multi or not v.any():
         ax.text(0.5, 0.5, "n/a", ha="center", va="center", transform=ax.transAxes)
         return
+    from matplotlib import patheffects
+    halo = [patheffects.withStroke(linewidth=4.0, foreground=_grey("#ffffff", "#000000"))]
     inc = ad.inclusion()
     rng = np.random.default_rng(0)
+    dense = int(v.sum()) > 300
     for j, pid in enumerate(ad.partitions):
         for m, col, off in ((inc[:, j] & v, _fg(), -0.18), (~inc[:, j] & v, "#9a9a9a", 0.18)):
             if m.any():
-                ax.scatter(j + 1 + off + rng.uniform(-0.08, 0.08, m.sum()), ad.y[m], s=9, color=col, zorder=3)
+                ax.scatter(j + 1 + off + rng.uniform(-0.08, 0.08, m.sum()), ad.y[m], s=3 if dense else 9,
+                           color=col, alpha=0.25 if dense else 1.0, zorder=3, rasterized=dense)
                 mu = float(np.mean(ad.y[m]))
-                ax.plot([j + 1 + off - 0.14, j + 1 + off + 0.14], [mu, mu], color=col, lw=2.2)
+                ax.plot([j + 1 + off - 0.14, j + 1 + off + 0.14], [mu, mu], color=col, lw=2.2, zorder=4,
+                        path_effects=halo if dense else None)
+    labels, prefix = _partition_tick_labels(ad.partitions)
     ax.set_xticks(range(1, len(ad.partitions) + 1))
-    ax.set_xticklabels(ad.partitions)
-    ax.set_xlabel("partition")
+    if len(labels) > 10:
+        ax.set_xticklabels(labels, rotation=90, fontsize=7)
+    else:
+        ax.set_xticklabels(labels)
+    ax.set_xlim(0.4, len(ad.partitions) + 0.6)
+    ax.set_xlabel(f"partition ({prefix}\u2026)" if prefix else "partition")
     ax.set_ylabel("search score")
 
 
@@ -1933,17 +1963,55 @@ def render_edf(ad: AnnulusData, out: str) -> str:
     return out
 
 
+def _fit_suptitle(fig, run_name: str, what: str, fontsize: float = 9.0, min_fontsize: float = 5.5,
+                  width: float = 0.98):
+    """``fig.suptitle`` of ``"<run name> <what>"`` that fits the figure's width: on one line
+    when it fits at ``fontsize``, else the run name over ``what``, both smaller until the
+    wider line fits (down to ``min_fontsize``).  A run name is one long token, and a centred
+    one-line title wider than the figure lost both its ends.  Needs a canvas on ``fig``."""
+    renderer = fig.canvas.get_renderer()
+    limit = width * fig.bbox.width
+    t = fig.suptitle(f"{run_name} {what}".strip(), fontsize=fontsize)
+    if t.get_window_extent(renderer).width <= limit or not run_name:
+        return t
+    t.set_text(f"{run_name}\n{what}")
+    fs = float(fontsize)
+    while fs > min_fontsize and t.get_window_extent(renderer).width > limit:
+        fs = max(float(min_fontsize), fs - 0.5)
+        t.set_fontsize(fs)
+    return t
+
+
 def render_nightmap(ad: AnnulusData, out: str) -> str:
-    """near2m_nightmap: inclusion matrix + partition effect + score vs # partitions."""
+    """near2m_nightmap: inclusion matrix + partition effect + score vs # partitions.
+
+    Up to 10 partitions (nights, epochs) the two lower panels share a row, as in the IDL.
+    With more (an integral-field spectrograph's wavelength groups: 20 for ALES, 40 with two
+    nights) each panel has a row of the full width and the inclusion matrix grows with the
+    number of partitions; side by side, the partition effect of 20 groups was unreadable."""
+    npart = len(ad.partitions)
+    wide = npart > 10
+    heights, gap, foot = [max(2.6, 0.13 * npart), 2.3, 1.9], 0.85, 0.65     # inches, for the wide layout
     with _rc():
-        fig = Figure(figsize=(8.0, 7.0))
+        fig = Figure(figsize=(8.0, sum(heights) + 2 * gap + foot + 0.9) if wide else (8.0, 7.0))
         FigureCanvasAgg(fig)
-        gs = GridSpec(2, 2, figure=fig, height_ratios=[1.1, 1], hspace=0.45, wspace=0.3, left=0.09, right=0.97,
-                      top=0.93, bottom=0.08)
-        panel_inclusion(fig.add_subplot(gs[0, :]), ad)
-        panel_partition_effect(fig.add_subplot(gs[1, 0]), ad)
-        panel_partition_count(fig.add_subplot(gs[1, 1]), ad)
-        fig.suptitle(f"{ad.run_name} annulus {ad.annulus + 1}: partition inclusion history", fontsize=9)
+        t = _fit_suptitle(fig, ad.run_name, f"annulus {ad.annulus + 1}: partition inclusion history")
+        H = fig.bbox.height
+        top = min(0.93, 0.98 - (t.get_window_extent(fig.canvas.get_renderer()).height + 0.3 * fig.dpi) / H)
+        if wide:
+            gs = GridSpec(3, 1, figure=fig, height_ratios=heights, hspace=gap / np.mean(heights), left=0.09,
+                          right=0.97, top=top, bottom=foot * fig.dpi / H)
+            ax0 = fig.add_subplot(gs[0])
+            panel_inclusion(ax0, ad)
+            ax0.tick_params(axis="y", labelsize=7 if npart <= 24 else 6)
+            panel_partition_effect(fig.add_subplot(gs[1]), ad)
+            panel_partition_count(fig.add_subplot(gs[2]), ad)
+        else:
+            gs = GridSpec(2, 2, figure=fig, height_ratios=[1.1, 1], hspace=0.45, wspace=0.3, left=0.09, right=0.97,
+                          top=top, bottom=0.08)
+            panel_inclusion(fig.add_subplot(gs[0, :]), ad)
+            panel_partition_effect(fig.add_subplot(gs[1, 0]), ad)
+            panel_partition_count(fig.add_subplot(gs[1, 1]), ad)
         fig.savefig(out)
     return out
 

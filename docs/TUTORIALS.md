@@ -3,7 +3,7 @@
 The tutorials are Jupyter notebooks in `tutorials/`. Each one is written as
 `tutorials/NN_name.py`, with `# %%` cell markers, and `python tutorials/_build_notebooks.py`
 turns the scripts into `.ipynb` files (`--execute` also runs them and stores the outputs).
-Tutorials 1 to 6 are stored with their outputs, so they read as documents without running
+Tutorials 1 to 7 are stored with their outputs, so they read as documents without running
 anything. Notebooks 1, 2, 4 and 7 run on data the package downloads itself. Notebooks 3, 5 and 6 need
 JWST data from MAST and the STPSF model of the coronagraph.
 
@@ -15,7 +15,7 @@ JWST data from MAST and the STPSF model of the coronagraph.
 | 4 | `04_known_sources.ipynb` | VLT/NACO β Pic (the data of tutorial 1) | **Known companions and disks.** What `known=[(ρ, PA)]` does to the injections, the noise rings and the contrast curve, and what forgetting it costs. `forbidden_pa` and `pixel_mask` for extended signal, and tuning *for* a known companion. |
 | 5 | `05_jwst_miri_hip65426.ipynb` | JWST/MIRI F1140C of HIP 65426, its reference star and the program's background pointings (MAST, `scripts/fetch_jwst_ar.py --targets hip65426_miri`) | **The four-quadrant phase mask.** Throughput as a function of position rather than radius: a factor of 6.5 at one separation, boundaries 4° off the detector axes, and two-fold rather than four-fold symmetry. The three things that have to happen to the dead zones, and the one that must not. What an archive download of one program contains, including the files the pipeline has already background-subtracted. A contrast axis anchored to another filter and checked against the published values. |
 | 6 | `06_jwst_miri_hr8799.ipynb` | JWST/MIRI F1065C (also F1140C and F1550C) of HR 8799 and its reference star in a 9-point small-grid dither (MAST, `scripts/fetch_jwst_ar.py --targets hr8799`) | **A one-roll observation.** With no field rotation, ADI is impossible, and the partition layout decides whether `mode` means anything. The reference-library dimensions that matter when RDI is all there is, four companions at four position angles as a test of a two-dimensional throughput, why the tutorial leaves their positions to you, and a stellar flux that agrees to 1% with one derived from WISE and AKARI. |
-| 7 | `07_lbti_ales_mwc758.ipynb` | LBTI/ALES integral-field cubes of MWC 758 from 2019 November 14, the longer of the two nights of Wagner et al. (2023), in 20 wavelength groups (491 MB from the GitHub release) | **An integral-field spectrograph.** Wavelength groups as partitions, the group flags and their bound, a faint red companion (MWC 758c) as a known source, and what injections with the star's spectrum optimize for. January 5 as 20 more partitions, c's spectrum and SDI as variations. |
+| 7 | `07_lbti_ales_mwc758.ipynb` | LBTI/ALES integral-field cubes of MWC 758 from 2019 November 14, the longer of the two nights of Wagner et al. (2023), in 20 wavelength groups (491 MB from the GitHub release), and two disk masks in `tutorials/data/` | **A planet in a disk, with an integral-field spectrograph.** Wavelength groups as partitions, injections with the companion's spectrum (MWC 758c), a mask that keeps the spiral arms out of the noise and the injections, the settings that trade the arms for point-source S/N and the ones the search is therefore not given, the injections' radius and contrast, two searches (the band of the paper's Fig. 1b held, and all 20 groups with their flags searched), and the second one's selection checked on common draws after the search, group by group. Star-colored injections and January 5 as variations. |
 | — | `notebooks/near2_production_run.ipynb` | NEAR campaign (private) | The production run from Jupyter: a background thread, a watch cell, and resuming. |
 
 Every notebook that searches draws a **live panel** while it runs. The panel is where you
@@ -24,7 +24,8 @@ search uses the budget tutorial 1 explains: 300 evaluations, the first 40 of the
 warm-up, and the six best candidates validated on eight fresh injection sets each. Each
 evaluation averages three injection draws, except in tutorial 3, which uses one. A smaller
 budget does not give a rougher answer but a meaningless one ([BUDGET.md](BUDGET.md) has the
-measurements, on tutorial 1's data). Where a companion's position is given, the injections are
+measurements, on tutorial 1's data). Tutorial 7's two searches use the production budget instead, 3000 evaluations with 200 of
+warm-up, for 5 and 25 dimensions. Where a companion's position is given, the injections are
 also kept a few FWHM clear of it (`sampler.excl_fwhm`), so that none of them lands beside it in
 the panel. Tutorial 4 shows what the radius does, and tutorial 6 leaves its planets' positions
 to you.
@@ -32,7 +33,7 @@ to you.
 Reading order: 1, then 4 if your field has a real companion or disk, then 2 or 3 depending on
 your data. For JWST/MIRI, read 3 first for the spaceKLIP path, then 5 for everything the
 four-quadrant masks change, then 6 if your observation has a single roll. For an integral-field
-spectrograph, read 2 for partitions and then 7. pyNOMIC users need 1 for the concepts and then
+spectrograph, read 2 for partitions and then 7, and 4 before 7 if your field has a disk. pyNOMIC users need 1 for the concepts and then
 `docs/PYNOMIC.md`, because the NOMIC adapter does what tutorial 2 does by hand.
 
 ## Requirements
@@ -57,7 +58,11 @@ display. With the live panel it took 13 minutes on a two-core machine. Tutorial 
 minutes on the same machine with the panel. On a Mac, with pyKLIP doing the reductions,
 tutorial 3's two searches took 11 and 13 minutes, tutorial 5's just under two hours (82
 science and 90 reference frames), and tutorial 6's 19 minutes (9 and 18). Tutorial 4 runs in
-about a minute, because it makes no search. Most of the time with the display goes into
+about a minute, because it makes no search. Tutorial 7's two searches took about 15 and 20 hours
+on a 32-core Mac. `KLIP_TPE_TUT7_FIXED` and `KLIP_TPE_TUT7_FULL` point the notebook at finished
+runs of them (section 11 has the command lines), which it reads without writing to them, and
+the rest of the notebook then makes about 90 reductions, 18 of them of all 20 groups at 5-frame
+bins, in 16 minutes on the same Mac. Most of the time with the display goes into
 drawing it. `every=2` in `LiveDisplay` draws every second
 evaluation, and `show=False` removes the window but keeps the frames on disk
 ([BUDGET.md](BUDGET.md) has both measurements).
@@ -73,4 +78,4 @@ python tutorials/_build_notebooks.py --only 03_                     # rewrite wi
 Without `--execute`, the builder writes the notebook without outputs, in place of the stored
 one. Without the MAST files, notebooks 3, 5 and 6 skip their cells and say so. With the files
 but without the STPSF model, they stop with the name of the missing cache file, which also
-stops a `--execute` over all six.
+stops a `--execute` over all of them.

@@ -129,6 +129,20 @@
   unless a test asks for the new ones (`tests/test_sidelobe_rings.py`, and
   `KLIP_TPE_TEST_SIDELOBES` for the whole suite).
 
+## Unreleased — 2026-10-31 (the partition map with many partitions)
+
+- `partition_map.png` (`display.render_nightmap`) gives each of its three panels a row of the
+  full width when there are more than 10 partitions, and the inclusion matrix grows with their
+  number.  With ALES's 20 wavelength groups the partition-effect panel shared a row with the
+  count panel, and its labels ran into each other.
+- The partition-effect labels drop the prefix all partitions share (`n2_g00` reads `g00`, and
+  the axis label names `n2_`) and stand on end past 10 partitions.  Past 300 evaluations its
+  points are drawn small and translucent and the group means outlined, so that the means show
+  on the clouds.
+- The title fits the figure: a run name too long for one line goes on a line of its own, smaller
+  if need be.  Centred and wider than the figure, it lost both its ends.
+- Up to 10 partitions the layout is as before.  Tests in `tests/test_partition_map.py`.
+
 ## Unreleased — 2026-10-31 (KLIP-FM one source at a time, and the finished panel on the winner's injections)
 
 - **The finished annulus's KLIP-FM square models the winner's own injections**, the ones in
@@ -151,6 +165,35 @@
 - On the finished frame the "green dashed = KLIP-FM" label sits under the grid's, at the top
   right.  At the foot of the panel the KLIP-FM curve ran through it.
 - The `fm_preview` docstring said it was off by default.  It is on.
+
+## Unreleased — 2026-10-30 (tutorial 7: a planet in a disk)
+
+Tutorial 7 is rewritten around the c-tuned MWC 758 searches of 2026-10-18 to 10-29
+(`docs/ALES.md` sections 8-10), as a tutorial for ALES data with a planet and a disk.
+
+- The injections have c's spectrum, the KLIP zones are the paper's, and g17's PSF is the
+  matched filter.  Two disk masks in `tutorials/data/` keep the disk out of the noise and the
+  injections: `mwc758_disk_mask.fits`, the arms (391 spaxels), and `mwc758_disk_mask_neg.fits`,
+  the arms and their ADI troughs (592), both made by `scripts/make_disk_mask.py` from the
+  paper's ADI image.
+- New sections: the paper's reduction inside klip-tpe, with c placed among the empty positions
+  of its ring and the arms' flux as the reference; how the disk gets eaten, from the paper's
+  step one setting at a time (angsep 0, 18 and 25 modes, the noise cut, a 98° rotation window,
+  and the correlation cut, which lifts the injections most and keeps the arms); two searches
+  with the disk-eating routes held, injections at 0.6" capped at 2e-5 and 3000 evaluations each,
+  the band of the paper's Fig. 1b held (the run of 2026-10-27/28, 5 dimensions) and all 20 groups
+  with their flags searched (2026-10-28/29, 25 dimensions); the second one's group selection
+  checked on common draws from one reduction of all 20 groups per draw, with and without the
+  correlation cut, against the first one's winner, and by greedy selection; c group by group
+  against the injections.  The contrast-curve cell draws the injection grid when a run made one.
+- A finished run is read from its `final_results.json` without being written to, and
+  `KLIP_TPE_TUT7_FIXED` and `KLIP_TPE_TUT7_FULL` point the notebook at finished runs made
+  elsewhere; section 11 has the `scripts/run_mwc758_ales_clike.py` command lines that make them.
+  The star-colored search of the earlier version is a variation.  The notebook is stored with
+  its outputs, from the two finished runs (16 minutes on the Mac that made them).
+- `run_mwc758_ales_clike.py`: `ALPHA_DEFAULT` is the fit's 6.7616 rather than 6.76, so a run
+  without the contrasts file injects what one with it does; the docstring calls the
+  star-colored search the earlier tutorial 7.
 
 ## Unreleased — 2026-10-30 (the README panel's injections in pairs, 180 deg apart)
 
@@ -222,6 +265,15 @@ validation at each annulus's winning configuration (`RunConfig.contrast_grid`,
 - `scripts/readme_panel.py` makes the README's panel.  It is tutorial 02's search on HD 95086
   with the same data, seed and settings, run for 3,000 evaluations instead of 300, long enough
   to show the climb and the plateau after it.
+
+## Unreleased — 2026-10-29 (the full-band c-tuned MWC 758 run in docs/ALES.md)
+
+- docs/ALES.md §10: the search on all 20 Nov 14 groups with the group flags searched
+  (`run_mwc758_ales_clike.py --max-excluded 19 --p-include 0.5`).  It settled its selection by
+  evaluation 222, and on common draws at its own settings g15-g19 scores higher; c is strongest on
+  the selection it kept, and does not brighten to the red as the c-coloured injections do.
+- `scripts/compare_mwc758_fig1b_clike.py` names a winner's groups when they are not contiguous
+  (`g00, g02, g10, g12-g19`, where it printed `g00-g19`).
 
 ## Unreleased — 2026-10-28 (a final round of validation on common draws)
 
@@ -358,6 +410,36 @@ validation's pace too.
   the stitches and `final_results.json` (its paths aside).  On 2 cores the workers set the pace, so the run took
   564 s against 592 s.  On patrick the farm has room, and the note expects the search to run
   at the farm's pace, 1.3-1.6x faster in such annuli.
+
+## Unreleased — 2026-10-24 (holding a searched parameter in the c-tuned ALES script)
+
+- **`scripts/run_mwc758_ales_clike.py --pin NAME=VALUE`** (may repeat) holds a searched
+  parameter at a value for every evaluation, through `make_space(pin=)`: `--pin noise_max=3`
+  takes the noise cut out of the search, since no frame of Nov 14's g15-g19 has more than 2.8
+  times the mean noise.  A name the run does not search, or a value outside its range, is
+  refused; the run directory is tagged `_NAMEVALUE` (`_noisemax3`), a run is not resumed with
+  other parameters held, and `clike_summary.json` lists what was held and what was searched.
+  The 2e-5 run's winner took its gain from the noise cut (at 1.12 times the mean it drops a
+  third of the frames, from the ends of the sequence, and the arms keep 0.41 of their flux).  On
+  these data the three cuts overlap: `corr_thresh` at 0.993-0.996 drops 95-98 % of the frames
+  that noise cut drops (the correlation follows the noise, r = -0.8 to -0.95), and
+  `coronoise_max` cuts only between about 0.8 and 1.3 times its mean.
+- **`near.make_space(..., corr_range=(lo, hi))`** (and through it `generic.make_space` and
+  `ales.make_space`), with **`run_mwc758_ales_clike.py --corr-range LO HI`**: `corr_thresh`
+  searched over lo-hi instead of 0-1, its default clipped into the range.  Frame correlations sit
+  just below 1 (Nov 14, g15-g19: 0.944-0.999, median 0.997), so a threshold under about 0.945
+  cuts nothing and the frame-selection guard records it at the floor, the no-cut corner; over 0-1,
+  463 of the first 480 evaluations of the run holding the noise cuts and `anglemax` sat there, and
+  only random draws (about 6 % of them) tried a cut.  The floor is then the least cut a
+  configuration makes: the script refuses one that would drop more than 1 % of a group's frames
+  and lists the outlier frames it drops otherwise (with all 20 groups, 0.94 drops 27 of them in
+  every evaluation, none in g15-g19 and up to 6 in g05, whose lowest correlation is -0.24).  The
+  run directory is tagged `_corrLO-HI`, and a run is not resumed with any parameter's range
+  changed.  Searched over 0.94-1 on g15-g19, the cut went to 0.993-0.995 in all of the top 50.
+- **`run_mwc758_ales_clike.py --p-include P`**: the chance that a random (warm-up or explore)
+  draw switches a group on, 0.75 by default (about 15 of 20 groups, so a random draw almost never
+  tries a set of five); 0.5 explores the small sets too.  The TPE models the flags itself.  Tagged
+  `_pincP`; a run is not resumed with another value.
 
 ## Unreleased — 2026-10-24 (frames left out of a NEAR night at load)
 

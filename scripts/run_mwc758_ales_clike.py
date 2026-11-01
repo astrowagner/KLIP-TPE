@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""run_mwc758_ales_clike.py -- tutorial 7's search, tuned for a companion with MWC 758c's spectrum, in a
-space that holds the ALES paper's reduction of the 2019 November 14 night (Wagner et al. 2023).
+"""run_mwc758_ales_clike.py -- tutorial 7's search from the command line, tuned for a companion with MWC 758c's
+spectrum, in a space that holds the ALES paper's reduction of the 2019 November 14 night (Wagner et al. 2023).
+Section 11 of the tutorial has the options that make its run.
 
-Tutorial 7 injects sources with the star's spectrum, one contrast in every wavelength group, and its winner
-(5-px high-pass, a zone the width of the 0.4-0.8" annulus) suits them: c, a much redder source, comes out at
-S/N 1.9 in it against 3.6-3.7 in the paper's images.  This run differs in five things:
+The earlier tutorial 7 injected sources with the star's spectrum, one contrast in every wavelength group, and its
+winner (5-px high-pass, a zone the width of the 0.4-0.8" annulus) suited them: c, a much redder source, came out
+at S/N 1.9 in it against 3.6-3.7 in the paper's images.  This search differs in five things:
 
 * the injected sources have c's spectrum: a power law fitted to the c contrasts the paper's IDL injection
   tests used for November 14 (``MWC758_spec_2_Lp_fix.sav``), so a group gets the source at
   (lambda / 3.8 um)^alpha times the contrast quoted, which is c's at L' (``--alpha`` sets the index,
-  ``--spectrum star`` is tutorial 7's flat spectrum);
+  ``--spectrum star`` is the earlier tutorial 7's flat spectrum);
 * the KLIP zone is the paper's for every evaluation (``--geometry paper``, the default): one 5-27 px
   annulus about the paper's zone centre (30, 30) in 6 sectors, while the injections and the score stay in
-  tutorial 7's 0.4-0.8" annulus round c.  ``--free-sectors`` searches the number of sectors again, and
+  the 0.4-0.8" annulus round c.  ``--free-sectors`` searches the number of sectors again, and
   ``--geometry searched`` searches the zone's reach beyond the annulus as well (``zone_in``, ``zone_out``,
   0-8 px each), which is how the two-night run of 2026-10-18 ran;
 * the residuals' second high-pass is a searched switch (``post_hp``), so the paper's ADI step is in the
@@ -23,9 +24,10 @@ S/N 1.9 in it against 3.6-3.7 in the paper's images.  This run differs in five t
 * with both nights the partitions are weighted by the square root of their exposure, so January 5 (18 % of
   the exposure) no longer gets most of the weight when the search keeps more of its groups.
 
-The metric, its matched filter (n2_g10, 3.50 um), the annulus, the budget and the validation are tutorial 7's,
-so the two runs' S/N for c are on one yardstick.  ``--nights nov14`` searches November 14 alone, the night of
-the paper's Fig. 1b; ``--sdi`` (one night only) adds the other groups' frames as a searched SDI pool.
+The metric, its matched filter (n2_g10, 3.50 um, unless ``--kernel-group``), the annulus, the budget and the
+validation are the earlier tutorial 7's, so the two searches' S/N for c are on one yardstick.  ``--nights nov14``
+searches November 14 alone, the night of the paper's Fig. 1b; ``--sdi`` (one night only) adds the other groups'
+frames as a searched SDI pool.
 The search may switch off up to half of the groups (10 of November 14's 20; the guard switches groups back on
 past that).  The paper's ADI band, 3.4-4.15 um (g09-g19), is within that bound and its Fig. 1b, 3.8-4.15 um
 (g15-g19, 5 of 20), is not: ``--max-excluded 15`` lets the search go as far as Fig. 1b.
@@ -54,7 +56,17 @@ configuration at angsep 0.01 keeps 0.55, with c a little fainter as well.  ``--n
 injection draws per evaluation (3 by default, N + 1 reductions); at a faint cap the mean of three scatters by
 about as much as the configurations differ.  ``--k-max K`` searches at most K modes: past about 15 the per-target
 basis starts to fit the arms, which barely move from frame to frame (at the paper's step with the winner's cuts the
-arm flux falls from 1.0 at 15 modes to 0.66 at 18 and 0.38 at 25).
+arm flux falls from 1.0 at 15 modes to 0.66 at 18 and 0.38 at 25).  ``--pin NAME=VALUE`` holds a searched
+parameter at a value for every evaluation (``make_space(pin=...)``): ``--pin noise_max=3`` takes the noise cut out
+of the search, since no frame of these data has more than 2.8 times the mean noise.  The three cuts overlap on these
+data: ``corr_thresh`` at 0.993-0.996 drops 95-98 % of the frames the noise cut at 1.12 does (the correlation
+follows the noise, r = -0.8 to -0.95), and ``coronoise_max`` cuts only between about 0.8 and 1.3 times its mean;
+``--pin corr_thresh=0 --pin coronoise_max=3`` takes them out too.  ``--corr-range 0.94 1`` searches
+``corr_thresh`` over 0.94-1 instead of 0-1 (``make_space(corr_range=...)``): the frames correlate at 0.944-0.999,
+so below about 0.945 the cut drops nothing and the guard records it at the floor, and over 0-1 only the 6 % of the
+random draws that fall in the band where it acts try a cut at all.  With all 20 groups the floor 0.94 drops 27
+outlier frames in every evaluation (none in g15-g19; up to 6 in g05, whose lowest correlation is -0.24); a floor that
+would drop more than 1 % of a group's frames is refused.
 
   python3 scripts/run_mwc758_ales_clike.py                       # both nights, 3000 evaluations
   python3 scripts/run_mwc758_ales_clike.py --nights nov14        # November 14 alone
@@ -64,7 +76,7 @@ arm flux falls from 1.0 at 15 modes to 0.66 at 18 and 0.38 at 25).
   python3 scripts/run_mwc758_ales_clike.py --quick               # a 12-evaluation smoke test first
 
 Run from the repository root.  The run directory defaults to
-tutorials/runs/mwc758_ales_clike[_nov14][_zonesearched][_cmaxC][_gLO-HI][_maxexN][_mfgNN][_disk][_rinjR][_asA][_nrmN][_kmaxK][_sdi][_star].
+tutorials/runs/mwc758_ales_clike[_nov14][_zonesearched][_cmaxC][_gLO-HI][_maxexN][_mfgNN][_disk][_rinjR][_asA][_nrmN][_kmaxK][_corrLO-HI][_pincP][_NAMEVALUE...][_sdi][_star].
 The same command again resumes an interrupted run.
 """
 import argparse
@@ -84,7 +96,7 @@ from klip_tpe.reducer import set_klip_gram, set_zone_center                     
 
 RHO, PA = 0.603, 228.5          # MWC 758c in the 2019 November 14 ALES data
 SAV = "/Users/kevinwagner/Library/CloudStorage/Dropbox/Astrophysics/Research/MWC 758/MWC758_ALES/MWC758_spec_2_Lp_fix.sav"
-ALPHA_DEFAULT = 6.76            # the fit to SAV (+- 1.22), when the file is not at hand
+ALPHA_DEFAULT = 6.7616          # the fit to SAV (6.76 +- 1.22), when the file is not at hand
 
 ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
 ap.add_argument("--nights", choices=("both", "nov14"), default="both")
@@ -98,7 +110,7 @@ ap.add_argument("--geometry", choices=("paper", "searched"), default="paper",
                 help="paper: the KLIP zone is the paper's 5-27 px about (30, 30) in 6 sectors, fixed; searched: "
                      "zone_in, zone_out and n_ang are searched (the two-night run of 2026-10-18)")
 ap.add_argument("--free-sectors", action="store_true", help="with --geometry paper, search the number of sectors")
-ap.add_argument("--no-seed-paper", action="store_true", help="seed with tutorial 7's baseline instead")
+ap.add_argument("--no-seed-paper", action="store_true", help="seed with the ALES baseline instead (the earlier tutorial 7's seed)")
 ap.add_argument("--max-contrast", type=float, default=None,
                 help="cap on the injected contrast, through the calibration and every re-calibration "
                      "(CalibrationConfig.ceiling); with c's spectrum it is the contrast at 3.8 um, the number "
@@ -124,6 +136,18 @@ ap.add_argument("--angsep-min", type=float, default=None, metavar="LD",
                      "out of its own basis, which angsep 0 with anglemax at the PA span does not)")
 ap.add_argument("--n-remeasure", type=int, default=3, metavar="N",
                 help="injection draws averaged per evaluation (default 3; N + 1 reductions each)")
+ap.add_argument("--pin", action="append", default=[], metavar="NAME=VALUE",
+                help="hold a searched parameter at VALUE for every evaluation (may repeat): noise_max=3 takes the "
+                     "noise cut out (no frame of these data is past 2.8 times the mean), corr_thresh=0 and "
+                     "coronoise_max=3 the other two cuts, as in the paper")
+ap.add_argument("--corr-range", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                help="search corr_thresh over LO-HI instead of 0-1; these frames correlate at 0.944-0.999 in "
+                     "g15-g19, so 0.94 1 spends the draws where the cut acts.  LO is then the least cut there is: "
+                     "the run stops if it would drop more than 1%% of a group's frames, and lists the outlier frames "
+                     "it drops otherwise (the blue groups hold a few, correlated as low as -0.24)")
+ap.add_argument("--p-include", type=float, default=None, metavar="P",
+                help="the chance that a random (warm-up or explore) draw switches a group on (default 0.75, so "
+                     "about 15 of 20 groups; 0.5 explores the small sets too)")
 ap.add_argument("--k-max", type=int, default=None, metavar="K",
                 help="search k_klip up to K modes (default: the space's rule, 100 here); the arms fade from about "
                      "15 modes on")
@@ -156,6 +180,23 @@ if a.n_remeasure < 1:
     ap.error(f"--n-remeasure wants 1 or more draws, not {a.n_remeasure}")
 if a.k_max is not None and not 1 <= a.k_max <= 100:
     ap.error(f"--k-max wants 1-100 modes, not {a.k_max}")
+if a.p_include is not None:
+    if not 0.0 < a.p_include < 1.0:
+        ap.error(f"--p-include wants 0 < P < 1, not {a.p_include:g}")
+    if fixed:
+        ap.error("--p-include has no meaning with --fixed-groups: there are no group flags")
+if a.corr_range is not None and not 0.0 <= a.corr_range[0] < a.corr_range[1] <= 1.0:
+    ap.error(f"--corr-range wants 0 <= LO < HI <= 1, not {a.corr_range[0]:g} {a.corr_range[1]:g}")
+user_pin = {}
+for _it in a.pin:
+    _name, _sep, _val = _it.partition("=")
+    _name = _name.strip()
+    if not _sep or not _name:
+        ap.error(f"--pin wants NAME=VALUE, noise_max=3 say, not {_it!r}")
+    try:
+        user_pin[_name] = float(_val)
+    except ValueError:
+        ap.error(f"--pin {_it}: {_val.strip()!r} is not a number")
 if a.kernel_group is not None:
     a.kernel_group = a.kernel_group.lower()
     if not (len(a.kernel_group) == 3 and a.kernel_group[0] == "g" and a.kernel_group[1:].isdigit()):
@@ -193,7 +234,7 @@ files = datasets.fetch("lbti_ales_mwc758", roles=roles)
 dsets, lam, fwhm, table = ales.load_release(files, nights=["20191114"] if a.nights == "nov14" else None,
                                            labels={"20190105": "n1", "20191114": "n2"}, only=fixed)
 weighting = a.weighting or ("sqrt_texp" if a.nights == "both" else "equal")
-# the matched filter's group: n2_g10 (3.50 um) as in tutorial 7, or with the groups held the band's middle one,
+# the matched filter's group: n2_g10 (3.50 um) as in the earlier tutorial 7, or with the groups held the band's middle one,
 # which ales.make_reducer would choose itself (the group nearest the band's mean wavelength)
 rep_default = ales.representative_group({p: v for p, v in lam.items() if p.startswith("n2_")}) if fixed else "n2_g10"
 rep_group = "n2_" + a.kernel_group if a.kernel_group else rep_default
@@ -214,6 +255,25 @@ PAPER = {"bin": 15, "filter": 11, "k_klip": 15, "n_ang": 6, "angsep": 0.01, "ang
 as_kw = {} if a.angsep_min is None else {"angsep_range": (float(a.angsep_min), 3.0)}
 if a.k_max is not None:
     as_kw["k_klip_max"] = int(a.k_max)
+corr_floor_cuts = {}          # --corr-range: the frames of each group the floor itself drops
+if a.corr_range is not None:
+    # The floor is the least cut a configuration can make: the frame-selection guard records an inert cut at it.
+    # Below it lie only a group's outlier frames, if any (the blue groups hold a few, correlated as low as
+    # -0.24), which every evaluation then drops; a floor that would drop more than 1 % of a group is refused.
+    _cmin = {}
+    for _p in red.partitions():
+        _t = red.reducers[_p].frame_tags() or {}
+        _c = np.asarray(_t.get("corrs", []), float)
+        if _c.size and np.isfinite(_c).any():
+            _cmin[_p] = float(np.nanmin(_c))
+            _below = np.nonzero(_c < a.corr_range[0])[0]
+            if _below.size:
+                corr_floor_cuts[str(_p)] = [int(i) for i in _below]
+                if _below.size > 0.01 * _c.size:
+                    ap.error(f"--corr-range {a.corr_range[0]:g} {a.corr_range[1]:g}: the floor would drop {_below.size} of "
+                             f"{_p}'s {_c.size} frames, more than 1 %; take a lower LO (its lowest correlation is "
+                             f"{_cmin[_p]:.4f})")
+    as_kw["corr_range"] = (float(a.corr_range[0]), float(a.corr_range[1]))
 if a.geometry == "paper":
     # the processing geometry of reduce_ales_mwc758_2.pro: adiklip's annmode_inout=[5, 27] and n_ang=6, the
     # zones drawn by the 2015 getzone about (sc/2 - 1, sc/2 - 1) = (30, 30), which the run never moves
@@ -221,11 +281,30 @@ if a.geometry == "paper":
     if not a.free_sectors:
         pin["n_ang"] = PAPER["n_ang"]
     set_zone_center(red, (30.0, 30.0), angles="getzone2015")
-    space = ales.make_space(red, bin_range=(5, 30), search_post_hp=True, pin=pin,
-                            defaults=None if a.no_seed_paper else PAPER, selection=None if fixed else "binary", **as_kw)
-else:
-    space = ales.make_space(red, bin_range=(5, 30), zone_range=(0.0, 8.0), search_post_hp=True,
-                            defaults=None if a.no_seed_paper else PAPER, selection=None if fixed else "binary", **as_kw)
+
+
+def build_space(extra=None):
+    """The run's space; ``extra`` (--pin) holds more of its parameters out of the search."""
+    if a.geometry == "paper":
+        return ales.make_space(red, bin_range=(5, 30), search_post_hp=True, pin=dict(pin, **(extra or {})),
+                               defaults=None if a.no_seed_paper else PAPER, selection=None if fixed else "binary",
+                               **as_kw)
+    return ales.make_space(red, bin_range=(5, 30), zone_range=(0.0, 8.0), search_post_hp=True, pin=extra or None,
+                           defaults=None if a.no_seed_paper else PAPER, selection=None if fixed else "binary", **as_kw)
+
+
+space = build_space()
+held = {}                     # --pin, as the reducer gets it (an int parameter as an int)
+if user_pin:
+    by_name = {q.name: q for q in space.params if not q.name.startswith("sel_")}
+    for _name, _v in user_pin.items():
+        q = by_name.get(_name)
+        if q is None:
+            ap.error(f"--pin {_name}: not a searched parameter; this run searches {', '.join(by_name)}")
+        if not q.lo <= _v <= q.hi:
+            ap.error(f"--pin {_name}={_v:g} is outside its range, {q.lo:g}-{q.hi:g}")
+        held[_name] = int(round(_v)) if q.is_int else float(_v)
+    space = build_space(held)
 as_par = next((p for p in space.params if p.base == "angsep"), None)
 k_par = next((p for p in space.params if p.base == "k_klip"), None)
 n_part = len(red.partitions())
@@ -239,6 +318,8 @@ else:
     if not 0 <= max_excl < n_part:
         ap.error(f"--max-excluded must be 0-{n_part - 1} with {n_part} groups")
 space.project = ales.make_guard(red, max_excluded=max_excl, prefer_m=3.95e-6)
+if a.p_include is not None:
+    space.p_include = float(a.p_include)      # random draws only; the TPE models the flags itself
 disk_mask = None
 if a.disk_mask:
     dm = np.squeeze(np.asarray(fits.getdata(a.disk_mask)))
@@ -257,7 +338,8 @@ if fixed:
     print(f"every evaluation combines all {n_part} groups, {fixed[0]}-{fixed[-1]} "
           f"({min(lam.values()) * 1e6:.2f}-{max(lam.values()) * 1e6:.2f} um), held", flush=True)
 else:
-    print(f"the search may switch off up to {max_excl} of the {n_part} groups", flush=True)
+    print(f"the search may switch off up to {max_excl} of the {n_part} groups; a random draw keeps each with "
+          f"probability {space.p_include:g}", flush=True)
 print(f"matched filter: {rep_group}'s PSF ({lam[rep_group] * 1e6:.3f} um)", flush=True)
 if disk_mask is not None:
     _yy, _xx = np.mgrid[0:disk_mask.shape[0], 0:disk_mask.shape[1]]
@@ -283,6 +365,19 @@ if a.n_remeasure != 3:
     print(f"{a.n_remeasure} injection draws per evaluation ({a.n_remeasure + 1} reductions)", flush=True)
 if a.k_max is not None and k_par is not None:
     print(f"k_klip searched up to {k_par.hi:g} modes", flush=True)
+c_par = next((q for q in space.params if q.base == "corr_thresh"), None)
+if a.corr_range is not None and c_par is not None:
+    if corr_floor_cuts:
+        _n = sum(len(v) for v in corr_floor_cuts.values())
+        print(f"corr_thresh searched over {c_par.lo:g}-{c_par.hi:g}; the floor drops {_n} outlier frames in every "
+              f"evaluation: " + ", ".join(f"{k.split('_')[-1]} {len(v)}" for k, v in corr_floor_cuts.items()), flush=True)
+    else:
+        print(f"corr_thresh searched over {c_par.lo:g}-{c_par.hi:g} ({c_par.lo:g} = no cut; the frames' lowest correlation "
+              f"{min(_cmin.values()):.4f})" if _cmin else f"corr_thresh searched over {c_par.lo:g}-{c_par.hi:g}", flush=True)
+if held:
+    print("held out of the search (--pin): " + ", ".join(f"{k}={v:g}" for k, v in held.items())
+          + f"; {len([q for q in space.params if not q.name.startswith('sel_')])} parameters searched: "
+          + ", ".join(q.name for q in space.params if not q.name.startswith("sel_")), flush=True)
 if a.geometry == "paper":
     print(f"KLIP zone held at the paper's: {EDGES[0] - pin['zone_in']:.2f}-{min(EDGES[1] + pin['zone_out'], 27.0):.2f} px "
           f"about (30, 30)" + (", 6 sectors" if "n_ang" in pin else ", sectors searched"), flush=True)
@@ -298,6 +393,9 @@ tag += f"_rinj{a.inject_rho:g}" if a.inject_rho is not None else ""
 tag += f"_as{a.angsep_min:g}" if a.angsep_min is not None else ""
 tag += f"_nrm{a.n_remeasure}" if a.n_remeasure != 3 else ""
 tag += f"_kmax{a.k_max}" if a.k_max is not None else ""
+tag += f"_corr{a.corr_range[0]:g}-{a.corr_range[1]:g}" if a.corr_range is not None else ""
+tag += f"_pinc{a.p_include:g}" if a.p_include is not None else ""
+tag += "".join(f"_{k.replace('_', '')}{v:g}" for k, v in sorted(held.items()))
 tag += "_sdi" if a.sdi else ""
 tag += "_star" if a.spectrum == "star" else ""
 run_dir = os.path.abspath(a.run_dir or os.path.join("tutorials", "runs", f"mwc758_ales_clike{tag}" + ("_quick" if a.quick else "")))
@@ -325,7 +423,9 @@ else:
                           + (f"; injections at {a.inject_rho:g}\"" if a.inject_rho is not None else "")
                           + (f"; angsep from {a.angsep_min:g} lambda/D" if a.angsep_min is not None else "")
                           + (f"; {a.n_remeasure} draws per evaluation" if a.n_remeasure != 3 else "")
-                          + (f"; k up to {a.k_max}" if a.k_max is not None else ""))
+                          + (f"; k up to {a.k_max}" if a.k_max is not None else "")
+                          + (f"; corr_thresh {a.corr_range[0]:g}-{a.corr_range[1]:g}" if a.corr_range is not None else "")
+                          + (f"; held {', '.join(f'{k}={v:g}' for k, v in held.items())}" if held else ""))
 # the same command again resumes the run (Runner.run picks up its checkpoint); a run started with another
 # spectrum is not continued with this one
 setup = os.path.join(run_dir, "run_setup.json")
@@ -388,12 +488,35 @@ if os.path.exists(setup):
     if as_old is not None and as_par is not None and abs(float(as_old["lo"]) - as_par.lo) > 1e-12:
         sys.exit(f"{run_dir} was started with angsep searched from {float(as_old['lo']):g} lambda/D, this run searches "
                  f"it from {as_par.lo:g} (--angsep-min); give --run-dir for a new run")
+    # nor with other parameters held (--pin): the checkpoint's vectors have the old space's dimensions
+    sp_old = json.load(open(setup)).get("space") or {}
+    names_old = [q.get("name") for q in (sp_old.get("params") or [])]
+    names_new = [q.name for q in space.params]
+    fixed_old = sp_old.get("fixed") or {}
+    if names_old and (names_old != names_new or any(
+            k not in fixed_old or abs(float(fixed_old[k]) - float(v)) > 1e-12 for k, v in held.items())):
+        gone = [n for n in names_old if n not in names_new]
+        sys.exit(f"{run_dir} was started searching {', '.join(names_old)}; this run "
+                 + (f"holds {', '.join(f'{k}={v:g}' for k, v in held.items())}" if held else "holds nothing")
+                 + (f" ({', '.join(gone)} no longer searched)" if gone else "")
+                 + " (--pin); give --run-dir for a new run")
     # nor with k searched up to another count
     k_old = next((q for q in ((json.load(open(setup)).get("space") or {}).get("params") or [])
                   if q.get("base", q.get("name")) == "k_klip"), None)
     if k_old is not None and k_par is not None and abs(float(k_old["hi"]) - k_par.hi) > 1e-9:
         sys.exit(f"{run_dir} was started with k_klip searched up to {float(k_old['hi']):g}, this run up to {k_par.hi:g} "
                  f"(--k-max); give --run-dir for a new run")
+    # nor with the random draws keeping groups at another rate
+    pinc_old = sp_old.get("p_include")
+    if pinc_old is not None and not fixed and abs(float(pinc_old) - space.p_include) > 1e-12:
+        sys.exit(f"{run_dir} was started with random draws keeping each group with probability {float(pinc_old):g}, "
+                 f"this run {space.p_include:g} (--p-include); give --run-dir for a new run")
+    # nor with any parameter searched over another range (--corr-range, and any other)
+    rng_old = {q.get("name"): (float(q["lo"]), float(q["hi"])) for q in (sp_old.get("params") or []) if "lo" in q}
+    moved = [f"{q.name} {rng_old[q.name][0]:g}-{rng_old[q.name][1]:g}, now {q.lo:g}-{q.hi:g}" for q in space.params
+             if q.name in rng_old and (abs(rng_old[q.name][0] - q.lo) > 1e-12 or abs(rng_old[q.name][1] - q.hi) > 1e-12)]
+    if moved:
+        sys.exit(f"{run_dir} was started with other ranges ({'; '.join(moved)}); give --run-dir for a new run")
     # nor with another number of draws per evaluation (the checkpoint's would win)
     nrm_old = (json.load(open(setup)).get("config") or {}).get("n_remeasure")
     if not a.quick and nrm_old is not None and int(nrm_old) != a.n_remeasure:
@@ -431,11 +554,14 @@ img = fits.getdata(os.path.join(run_dir, "annulus01", "best_clean.fits"))
 c_snr = float(metric.per_source(img, None, [RHO], [PA])[0])
 print(f"MWC 758c in the winner's image: S/N {c_snr:.2f} with {rep_group}'s matched filter"
       + (", the disk masked" if disk_mask is not None else "")
-      + (" (tutorial 7's winner 1.9; the paper's Nov 14 images 3.6-3.7)" if rep_group == "n2_g10" and disk_mask is None else ""))
+      + (" (the earlier tutorial 7's winner 1.9; the paper's Nov 14 images 3.6-3.7)" if rep_group == "n2_g10" and disk_mask is None else ""))
 json.dump({"c_snr_winner": c_snr, "winner_score": r.winner_score, "contrast": r.contrast, "spectrum": spec_label,
            "winner_block": {k: blk.get(k) for k in keep}, "partitions": list(r.partitions), "paper_seed": PAPER,
            "max_excluded": max_excl, "fixed_groups": fixed, "matched_filter": rep_group,
            "disk_mask": a.disk_mask, "disk_mask_px": None if disk_mask is None else int(disk_mask.sum()),
            "inject_rho": a.inject_rho, "angsep_range": None if as_par is None else [as_par.lo, as_par.hi],
-           "n_remeasure": 1 if a.quick else a.n_remeasure, "k_max": None if k_par is None else k_par.hi},
+           "n_remeasure": 1 if a.quick else a.n_remeasure, "k_max": None if k_par is None else k_par.hi,
+           "held": held, "searched": [q.name for q in space.params if not q.name.startswith("sel_")],
+           "corr_range": None if c_par is None else [c_par.lo, c_par.hi], "corr_floor_cuts": corr_floor_cuts,
+           "p_include": None if fixed else space.p_include},
           open(os.path.join(run_dir, "clike_summary.json"), "w"), indent=1, default=float)
