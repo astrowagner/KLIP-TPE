@@ -17,6 +17,8 @@ the sectors batched against one by one and the compact size classes against the 
 The run is found as a path, or by name under <root>/comb/opt/ and its completed/.  The frames are
 loaded as the run loaded them (near.make_reducer with the run's data edits: cube_name, dropped
 frames, subtracted and injected sources) and checked against the run's record, as a resume does.
+The plate scale, the PSF library and each night's true north are the run's (its run_setup.json),
+as for a resume: a run that recorded none gets 0.0456"/px and 36.5 deg.
 Reads the run and the data only; writes nothing but its log (tee it).  Exit status 0 on PASS
 (every job within 1e-3 of the noise, every card job bit-identical with itself).
 
@@ -118,10 +120,14 @@ def pad_edges(cfg: Dict[str, Any], a_in: float, a_out: float) -> Tuple[bool, boo
     return a_in > lo + 1e-6, not outer_end
 
 
-def build_reducer(root: str, nights: Sequence[int], cfg: Dict[str, Any], threads: int, log=print):
+def build_reducer(root: str, nights: Sequence[int], cfg: Dict[str, Any], threads: int, log=print,
+                  run_dir: str = None):
     """klip-tpe's NEAR reducer on the frames the run was made on: near.make_reducer with the
-    run's data edits, then the check a resume makes (runner._core_edits) that the reducer's frames
-    are the run's."""
+    run's data edits and constants (the plate scale, the PSF library and each night's true north,
+    settled as a resume settles them: cli._constants_for_run), then the check a resume makes
+    (runner._core_edits) that the reducer's frames are the run's."""
+    import argparse as _ap
+    from klip_tpe import cli
     from klip_tpe.instruments import near
     from klip_tpe.metrics import Source
     from klip_tpe.runner import _core_edits, _describe_edits
@@ -146,7 +152,15 @@ def build_reducer(root: str, nights: Sequence[int], cfg: Dict[str, Any], threads
         kw["subtract_sources"] = [Source(*[float(v) for v in s[:3]]) for s in edits["subtracted_sources"]]
     if edits.get("injected_sources"):
         kw["inject_sources"] = [Source(*[float(v) for v in s[:3]]) for s in edits["injected_sources"]]
-    pr = near.make_reducer(root, [int(s) for s in nights], max_workers=1, pool="threads", log=log, **kw)
+    if run_dir:
+        c = _ap.Namespace(instrument="near", run_dir=run_dir, _argv=["resume"], pxscale=None, psflib=None,
+                          north=None)
+        cli._constants_for_run(c)
+        kw.update(pxscale=c.pxscale, psflib=c.psflib, north=c.north or "files")
+    try:
+        pr = near.make_reducer(root, [int(s) for s in nights], max_workers=1, pool="threads", log=log, **kw)
+    except near.NorthFileError as exc:
+        raise SystemExit(f"{exc}: the frames' north is not the run's")
     want = _core_edits(edits)
     if missing:                                     # the nights not loaded cannot carry their drops
         want["dropped_frames"] = {k: v for k, v in want.get("dropped_frames", {}).items() if k not in missing}
@@ -226,7 +240,7 @@ def main() -> int:
     cfg = setup.get("config") if isinstance(setup.get("config"), dict) else setup
     print(f"== run {os.path.basename(run_dir)}, klip-tpe {kt_describe()}, GPUKLIPReducer from "
           f"{sys.modules[GPUKLIPReducer.__module__].__file__}")
-    pr = build_reducer(a.root, a.nights, cfg, a.threads, log=lambda s: print("  " + s))
+    pr = build_reducer(a.root, a.nights, cfg, a.threads, log=lambda s: print("  " + s), run_dir=run_dir)
     objective = objective_for(pr, setup, log=print)
     ia = a.annulus - 1
     recs = load_records(run_dir, ia)

@@ -27,8 +27,8 @@ import numpy as np
 from .injection import (InjectionModel, _check_float32_headroom, add_crop, cube_peak, inject_frames,
                         place_source, prepare_sources)
 from .klip import (BLOCK_BYTES, KLIPParams, _highpass_frames, arcdist_deg, bin_by_groups, bin_frames,
-                   bin_groups, derotate, destripe, frame_blocks, frame_selection_mask, group_bounds, group_mean,
-                   highpass_stack, klip_annular, nw_ang_comb, run_blocks)
+                   bin_groups, bin_values, derotate, destripe, frame_blocks, frame_selection_mask, group_bounds,
+                   group_mean, highpass_stack, klip_annular, nw_ang_comb, run_blocks)
 from .metrics import Source
 from .space import Config
 
@@ -96,6 +96,9 @@ class PreparedFrames:
     #: beyond it.  ``angsep``'s arc and the bin's PA span are measured on the annulus.  None
     #: (a caller that builds one itself): the zone is the annulus.
     ann: Optional[Tuple[float, float]] = None
+    #: each kept bin's true north (deg), its frames' mean, when the frames carry their own
+    #: (``Dataset.north``); None: the reducer's ``truenorth`` for every bin
+    bnorth: Optional[np.ndarray] = None
 
     def siblings_payload(self, pid: Any, lam_m: float) -> SiblingFrames:
         return SiblingFrames(pid, float(lam_m), np.ascontiguousarray(self.bcube, np.float32),
@@ -178,6 +181,9 @@ class Dataset:
     name: str = "data"
     meta: Dict[str, Any] = field(default_factory=dict)
     ref_cube: Optional[np.ndarray] = None  # (nref, ny, nx) pre-registered PSF-reference-star frames (RDI/ARDI)
+    #: each frame's true north (deg), the frames' own in place of the reducer's ``truenorth``,
+    #: at derotation and in the injection azimuth.  None: the reducer's one angle.
+    north: Optional[np.ndarray] = None
 
     @property
     def nframes(self) -> int:
@@ -232,7 +238,7 @@ class _CropCache:
 
 
 def _flux_taken(orig: np.ndarray, edited: np.ndarray, angles: np.ndarray, sources: Sequence[Source], model,
-                pxscale: float, *, truenorth: float, fallback, angle_convention: str,
+                pxscale: float, *, truenorth, fallback, angle_convention: str,
                 n_frames: int = 32) -> Tuple[float, int]:
     """The fraction of the ``sources``' flux that left the frames when they were subtracted
     (1 = all of it), measured on up to ``n_frames`` frames spread over the cube:
@@ -243,7 +249,8 @@ def _flux_taken(orig: np.ndarray, edited: np.ndarray, angles: np.ndarray, source
     n = int(orig.shape[0])
     idx = np.unique(np.linspace(0, n - 1, min(n, max(int(n_frames), 1))).round().astype(np.intp))
     m = np.zeros((idx.size,) + tuple(orig.shape[-2:]), np.float32)
-    inject_frames(m, m, np.asarray(angles, float)[idx], list(sources), model, pxscale, None, truenorth=truenorth,
+    tn = truenorth if np.ndim(truenorth) == 0 else np.asarray(truenorth, float)[idx]
+    inject_frames(m, m, np.asarray(angles, float)[idx], list(sources), model, pxscale, None, truenorth=tn,
                   fallback=fallback, angle_convention=angle_convention)
     took = (np.asarray(orig[idx], np.float32).astype(np.float64)
             - np.asarray(edited[idx], np.float32).astype(np.float64))
@@ -378,6 +385,21 @@ class KLIPReducer(Reducer):
         self.fwhm = float(fwhm_px) if fwhm_px else 1.028 * self.lam_over_d_px
         self.model = injection_model
         self.fallback = fallback_model
+        # the frames' own true north (Dataset.north) where it varies; a list of one value is
+        # that one angle, so it reduces as the constant does, to the bit
+        north = getattr(data, "north", None)
+        self.north_frames: Optional[np.ndarray] = None
+        if north is not None:
+            north = np.asarray(north, float).ravel()
+            if north.shape[0] != data.nframes:
+                raise ValueError(f"{getattr(data, 'name', 'data')}: {north.shape[0]} true-north values for "
+                                 f"{data.nframes} frames")
+            if not np.all(np.isfinite(north)):
+                raise ValueError(f"{getattr(data, 'name', 'data')}: a true-north value is not finite")
+            if north.size and np.all(north == north[0]):
+                truenorth = float(north[0])
+            else:
+                self.north_frames = north
         self.truenorth = float(truenorth)
         self.zone_pad = float(zone_pad)
         self.outrad_cap = float(outrad_cap)
@@ -551,7 +573,7 @@ class KLIPReducer(Reducer):
             todo = np.flatnonzero(want & ~ent.done)
             if todo.size:
                 inject_frames(ent.cube, base, self.data.angles, sources, self.model, self.pxscale, todo,
-                              truenorth=self.truenorth, fallback=self.fallback,
+                              truenorth=self.injection_north(), fallback=self.fallback,
                               angle_convention=self.angle_convention, threads=threads)
                 ent.done[todo] = True
             return ent.cube if want.all() else ent.cube[want]
@@ -569,6 +591,56 @@ class KLIPReducer(Reducer):
         self._inj_lock = threading.Lock()
         self._crops = {"inj": _CropCache(), "fm": _CropCache()}
         self.__dict__.setdefault("_peak", None)
+        self.__dict__.setdefault("north_frames", None)
+
+    # -- the true north ------------------------------------------------------
+    def injection_north(self):
+        """The true north the injection takes: each frame's own (:attr:`north_frames`,
+        indexed as ``data.angles``) when the frames carry their own, else the one angle
+        :attr:`truenorth`."""
+        nf = getattr(self, "north_frames", None)
+        return self.truenorth if nf is None else nf
+
+    def binned_north(self, keep: np.ndarray, grp: np.ndarray, bkeep: np.ndarray, bin_: int) -> Optional[np.ndarray]:
+        """Each kept bin's true north, the mean of its frames' (:func:`~klip_tpe.klip.bin_values`,
+        the mean :func:`~klip_tpe.klip.bin_frames` takes of the angles), or None when the frames
+        share :attr:`truenorth`.  ``keep``: the frame selection; ``grp``, ``bkeep``: the binning's
+        groups over the kept frames and its kept bins."""
+        nf = getattr(self, "north_frames", None)
+        if nf is None:
+            return None
+        keep = np.asarray(keep, bool)
+        n_ = nf if keep.all() else nf[keep]
+        return bin_values(n_, grp, bin_)[np.asarray(bkeep, bool)]
+
+    @property
+    def supports_frame_north(self) -> bool:
+        """True where the derotation takes each bin's own north: the built-in KLIP, or a
+        backend that says so (``_honours_frame_north``).  pyKLIP's and VIP's backends derotate
+        by one angle, and refuse frames that carry their own."""
+        return (type(self)._subtract is KLIPReducer._subtract
+                or bool(getattr(type(self), "_honours_frame_north", False)))
+
+    def north_record(self) -> Dict[str, Any]:
+        """What a run records of the true north this reducer used: the loader's record
+        (``data.meta["north"]``: where the values came from), with the values' range over the
+        frames, or the one angle."""
+        rec = dict((getattr(self.data, "meta", None) or {}).get("north") or {})
+        north = getattr(self.data, "north", None)
+        if north is None:
+            rec.setdefault("source", "constant")
+            rec["deg"] = self.truenorth
+            return rec
+        v = np.asarray(north, float)
+        rec.setdefault("source", "per frame")
+        rec.update(frames=int(v.size), min=float(v.min()), median=float(np.median(v)), max=float(v.max()))
+        return rec
+
+    def _check_frame_north(self) -> None:
+        if getattr(self, "north_frames", None) is not None and not self.supports_frame_north:
+            raise ValueError(f"{type(self).__name__} derotates every frame by one angle, and "
+                             f"{getattr(self.data, 'name', 'the data')} has a true north per frame: reduce it "
+                             f"with the built-in KLIP, or with the frames' north set to one angle")
 
     def cube_peak(self) -> float:
         """The level of the cube's brightest pixels as the float32 headroom check samples it
@@ -653,11 +725,12 @@ class KLIPReducer(Reducer):
         orig = self.data.cube
         cube = np.array(orig, dtype=np.float32, order="C", copy=True)
         inject_frames(cube, cube, self.data.angles, todo, self.model, self.pxscale, None,
-                      truenorth=self.truenorth, fallback=self.fallback,
+                      truenorth=self.injection_north(), fallback=self.fallback,
                       angle_convention=self.angle_convention, threads=max(int(threads), 1))
         before, after = (orig, cube) if sign < 0 else (cube, orig)
         kept, k = _flux_taken(before, after, self.data.angles, own, self.model, self.pxscale,
-                              truenorth=self.truenorth, fallback=self.fallback, angle_convention=self.angle_convention)
+                              truenorth=self.injection_north(), fallback=self.fallback,
+                              angle_convention=self.angle_convention)
         if np.isfinite(kept) and abs(kept - 1.0) > 1e-3:
             warnings.warn(f"{what}: {kept:.5f} of the sources' flux {'left' if sign < 0 else 'reached'} the frames "
                           f"(measured on {k} of {orig.shape[0]} frames), float32 rounding "
@@ -1017,7 +1090,8 @@ class KLIPReducer(Reducer):
                 f"masked cube must be cropped to its finite region before it reaches the "
                 f"reducer.")
         return PreparedFrames(p, k, bin_, filt, inrad, outrad, dth, keep, bcube, bang, grp, bkeep, mcube,
-                              hp_nan, hp_binned, nth, meta, ann=(ann_in, ann_out))
+                              hp_nan, hp_binned, nth, meta, ann=(ann_in, ann_out),
+                              bnorth=self.binned_north(keep, grp, bkeep, bin_))
 
     # ------------------------------------------------------------------ the fused path
     def _prep_fused(self, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth, injections=None, fm_sources=None):
@@ -1076,7 +1150,7 @@ class KLIPReducer(Reducer):
         ny, nx = self.data.cube.shape[1:]
         center = ((nx - 1) / 2.0, (ny - 1) / 2.0)
         angles = np.asarray(self.data.angles, float)
-        model, truenorth, conv = self.model, self.truenorth, self.angle_convention
+        model, truenorth, conv = self.model, self.injection_north(), self.angle_convention
 
         def place(frames: np.ndarray, J: np.ndarray) -> None:
             todo = []
@@ -1236,6 +1310,11 @@ class KLIPReducer(Reducer):
         meta, nth = prep.meta, prep.nth
         ds = self.data
         spec = self._reflib_spec
+        # the frames' own north, per bin, at every derotation (None: the one angle)
+        bnorth = getattr(prep, "bnorth", None)
+        if bnorth is not None:
+            self._check_frame_north()
+        dnorth = self.truenorth if bnorth is None else bnorth
         # a zone reaching beyond its annulus (zone_in / zone_out) keeps angsep's arc, and the
         # SDI displacement rule's radius, on the annulus
         ann = None if prep.ann is None else (float(prep.ann[0]), float(prep.ann[1]))
@@ -1312,17 +1391,18 @@ class KLIPReducer(Reducer):
         fm_img = nosub = cadi = None
         with np.errstate(all="ignore"), warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)          # nanmedian of all-NaN corners
-            img, fm_img, info = self._subtract(bcube, bang, kp, p, filt, req, mcube, ref_basis, fm_ref, meta)
+            img, fm_img, info = self._subtract(bcube, bang, kp, p, filt, req, mcube, ref_basis, fm_ref, meta,
+                                               **({} if bnorth is None else {"north": bnorth}))
             if req.extras:
                 if req.injections:
                     # classical ADI (L2072-2086): 2nd high-pass, median PSF in the detector frame, derotate, median
                     c2 = highpass_stack(bcube, filt, nan_aware=True, threads=nth) if filt > 1 else bcube
                     c2 = c2 - np.nanmedian(c2, axis=0)
-                    cadi = np.asarray(np.nanmedian(derotate(c2, bang, self.truenorth, threads=nth), axis=0),
+                    cadi = np.asarray(np.nanmedian(derotate(c2, bang, dnorth, threads=nth), axis=0),
                                       np.float32)
                 else:
                     # no subtraction (L2087-2096): derotate + median stack of the selected/filtered/binned cube
-                    nosub = np.asarray(np.nanmedian(derotate(bcube, bang, self.truenorth, threads=nth), axis=0),
+                    nosub = np.asarray(np.nanmedian(derotate(bcube, bang, dnorth, threads=nth), axis=0),
                                        np.float32)
         if self.mask_fn is not None:
             img = np.stack([self.mask_fn(im) for im in img]) if req.k_scan else self.mask_fn(img)
@@ -1363,13 +1443,20 @@ class KLIPReducer(Reducer):
     # ------------------------------------------------------------------ backend hook
     def _subtract(self, bcube: np.ndarray, bang: np.ndarray, kp: KLIPParams, p: Dict[str, Any], filt: int,
                   req: ReductionRequest, mcube: Optional[np.ndarray], ref_basis: Optional[np.ndarray],
-                  fm_ref: Optional[np.ndarray], meta: Dict[str, Any]):
+                  fm_ref: Optional[np.ndarray], meta: Dict[str, Any], north: Optional[np.ndarray] = None):
         """PSF subtraction + derotation + combination of the *pre-processed* (injected,
         frame-selected, high-passed, binned) cube.  Returns ``(image, fm_image, info)``
         where ``image`` is ``(ny, nx)`` or, for ``kp.k_scan``, ``(k, ny, nx)`` for
         ``k = 1..kp.k_klip``.  Backends (pyKLIP, VIP, a user pipeline) override this and
         inherit the rest of the chain unchanged; the reference implementation is the
-        annular KLIP of :mod:`klip_tpe.klip`."""
+        annular KLIP of :mod:`klip_tpe.klip`.
+
+        ``north``: each bin's true north (:meth:`binned_north`) when the frames carry their
+        own, else None and every bin is derotated by ``bang + truenorth``.  The noise-weighted
+        combination rotates the frames back by the angles it is given to measure each pixel's
+        variance, so it gets ``bang + (north - truenorth)``: the frames line up again to one
+        common angle, as they do with one north.  A backend that overrides this method without
+        ``_honours_frame_north`` is never handed frames with their own north."""
         out = klip_annular(bcube, bang, kp, self.lam_over_d_px, fm_cube=mcube, ref_cube=ref_basis,
                            fm_ref_cube=fm_ref, fm_selfsub=bool(p["fm_selfsub"]))
         res, info = out[0], out[1]
@@ -1380,17 +1467,20 @@ class KLIPReducer(Reducer):
         # made them, as the ALES reduction's ADI images of MWC 758 are
         post_hp = filt > 1 and _flag(p.get("post_hp", True))
 
+        dnorth = self.truenorth if north is None else np.asarray(north, float)
+        wang = bang if north is None else np.asarray(bang, float) + (dnorth - self.truenorth)
+
         def _post(rc: np.ndarray) -> np.ndarray:
             if post_hp:
                 rc = highpass_stack(rc, filt, nan_aware=True, threads=nth)
-            return derotate(rc, bang, self.truenorth, threads=nth)
+            return derotate(rc, bang, dnorth, threads=nth)
 
         def _combine(dr: np.ndarray, ref: Optional[np.ndarray] = None) -> np.ndarray:
             if ct == "median":
                 return np.nanmedian(dr, axis=0)
             if ct == "mean":
                 return np.nanmean(dr, axis=0)
-            return nw_ang_comb(dr, bang, ref_cube=ref, threads=nth)
+            return nw_ang_comb(dr, wang, ref_cube=ref, threads=nth)
 
         fm_img = None
         if req.k_scan:
@@ -1414,6 +1504,8 @@ class KLIPReducer(Reducer):
                  frames=(getattr(self.data, "meta", None) or {}).get("provenance"))
         if getattr(self, "data_edits", None):
             d["data_edits"] = dict(self.data_edits)
+        if getattr(self.data, "north", None) is not None:
+            d["north"] = self.north_record()
         spec = getattr(self, "_reflib_spec", None)
         if spec is not None:
             n_ref = 0 if self.data.ref_cube is None else int(np.asarray(self.data.ref_cube).shape[0])
