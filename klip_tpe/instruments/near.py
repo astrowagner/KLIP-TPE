@@ -10,6 +10,9 @@ Per night ``n<seq>/`` under ``root``::
     texp.sav                        texp (s)                      (optional)
     PSF_ACenB.fits                  16x16 B-star template, centre (7.5, 7.5)
     AB_cube_refstar_clean.fits      pre-registered PSF-reference-star frames (optional, RDI/ARDI)
+    AB_truenorth_clean.txt          each frame's true north (deg), one number per line, ``#``
+                                    comments (optional; :attr:`NEAR.truenorth` for every frame
+                                    without it)
 root/psflib/n4_psf_cube_EEnorm.fits    measured off-axis AGPM PSF library [14, 41, 41]
 root/psflib/throughput_merged.csv      EE(1 lambda/D) throughput vs separation
 
@@ -36,7 +39,8 @@ from ..space import Param, SearchSpace, kgrid
 from .search_space import make_space, pa_span_max, production_defaults  # noqa: E402,F401
 
 __all__ = ["NEAR", "load_night", "N4Library", "make_reducer", "make_space", "make_guard",
-           "default_config", "production_defaults", "legacy_masks", "near_constants"]
+           "default_config", "production_defaults", "legacy_masks", "near_constants", "NORTH_FILE",
+           "NorthFileError", "read_north"]
 
 
 class NEAR:
@@ -50,7 +54,8 @@ class NEAR:
     lam_klip = 11.25e-6              # m, used for lambda/D (angsep unit, binning rule)
     lam_metric = 11.0e-6             # m, the optimizer's FWHM (6.24 px)
     diam = 8.2                       # m
-    truenorth = 36.5                 # deg, added to the parallactic angle at derotation
+    truenorth = 36.5                 # deg, added to the parallactic angle at derotation, for every
+                                     # frame of a night without a north file (NORTH_FILE)
     hsize = 216                      # full-frame half size (432 px)
     shsize = 75                      # KLIP crop half size (150 px)
     n4_refpa = -93.9                 # deg, distortion axis of the PSF library
@@ -82,6 +87,59 @@ def _readsav(path: str) -> Dict[str, Any]:
 class DropFramesError(ValueError):
     """A ``drop_frames`` list that cannot be applied: a night not loaded, an index past the
     night's cube, or every frame of a night."""
+
+
+#: each frame's true north (deg) in a night's directory, from the astrometry of the cubes: one
+#: number per line in the order of the cube's frames, ``#`` comments
+NORTH_FILE = "AB_truenorth_clean.txt"
+
+
+class NorthFileError(ValueError):
+    """A north file that cannot be used: a line that is not one number, a count that is not
+    the cube's, or not the file a run was made with."""
+
+
+def read_north(path: str, n: Optional[int] = None, night: str = "") -> np.ndarray:
+    """A night's true north per frame (deg) from ``path`` (:data:`NORTH_FILE`): one number per
+    line, ``#`` and what follows it a comment, blank lines skipped.  ``n``: the cube's frame
+    count, which the file must match."""
+    vals = []
+    tag = f"{night}: " if night else ""
+    with open(path) as f:
+        for k, line in enumerate(f, 1):
+            t = line.split("#", 1)[0].strip()
+            if not t:
+                continue
+            try:
+                vals.append(float(t))
+            except ValueError:
+                raise NorthFileError(f"{tag}line {k} of {path} is not one number: {line.strip()!r}") from None
+    v = np.asarray(vals, float)
+    if not np.all(np.isfinite(v)):
+        raise NorthFileError(f"{tag}{path} holds a value that is not finite")
+    if n is not None and v.size != int(n):
+        raise NorthFileError(f"{tag}{path} holds {v.size} values for the cube's {int(n)} frames")
+    return v
+
+
+def _sha1(path: str) -> str:
+    import hashlib
+    with open(path, "rb") as f:
+        return hashlib.sha1(f.read()).hexdigest()
+
+
+def _north_choice(north) -> Tuple[str, Optional[str]]:
+    """``(mode, sha1)`` from ``load_night``'s ``north``: ``"file"`` or ``"constant"``, and the
+    recorded file's SHA-1 when a run's record asks for it."""
+    if isinstance(north, dict):
+        src = str(north.get("source", "constant"))
+        return ("file", north.get("sha1")) if src == "file" else ("constant", None)
+    m = str(north or "file").lower()
+    if m in ("file", "files"):
+        return "file", None
+    if m == "constant":
+        return "constant", None
+    raise ValueError(f"north={north!r}: 'files', 'constant' or a run's record of a night")
 
 
 def _drop_spec(drop: Optional[Dict[Any, Sequence[int]]]) -> Dict[str, List[int]]:
@@ -138,7 +196,8 @@ def _pick(values, sl, hit: Optional[np.ndarray]) -> np.ndarray:
 
 
 def load_night(root: str, seq: int, crop_half: int = NEAR.shsize, frames: Optional[slice] = None,
-               cube_name: Optional[str] = None, drop_frames: Optional[Sequence[int]] = None) -> Dataset:
+               cube_name: Optional[str] = None, drop_frames: Optional[Sequence[int]] = None,
+               north: Any = "file") -> Dataset:
     """Load one night as a cropped :class:`Dataset` (float32).  ``frames`` may
     subsample the sequence for quick tests.  ``cube_name`` defaults to the full
     cleaned cube, falling back to ``AB_cube_crop150.fits`` (a pre-cropped copy).
@@ -148,7 +207,14 @@ def load_night(root: str, seq: int, crop_half: int = NEAR.shsize, frames: Option
     else sees them: the angles, the frame tags, and so the frame cut, the binning, the
     injections and KLIP-FM.  ``texp`` scales with the frames kept.  ``meta["frame_index"]``
     holds each loaded frame's index in the cube and ``meta["dropped_frames"]`` the indices
-    dropped.  The reference star's cube is not touched."""
+    dropped.  The reference star's cube is not touched.
+
+    ``north``: ``"file"`` reads each frame's true north from :data:`NORTH_FILE` when the night
+    has one (``Dataset.north``, sliced and dropped as the angles are), and leaves the frames
+    on :attr:`NEAR.truenorth` when it has none.  ``"constant"``: :attr:`NEAR.truenorth` for
+    every frame.  A run's record of the night (``{"source": "file", "sha1": ...}``, from
+    ``PartitionedReducer.provenance``): the file it was made with, refused when it is gone or
+    has changed (:class:`NorthFileError`), or the constant.  ``meta["north"]`` says which."""
     from astropy.io import fits
     d = os.path.join(root, f"n{seq}")
     if cube_name is None:
@@ -167,6 +233,22 @@ def load_night(root: str, seq: int, crop_half: int = NEAR.shsize, frames: Option
         # the kept frames only, so a dropped frame is never read
         cube = np.ascontiguousarray(data[sl if hit is None else keep, y0:y1, x0:x1]).astype(np.float32)
     angles = _pick(_readsav(os.path.join(d, "AB_parang_clean.sav"))["angles"], sl, hit)
+    mode, want_sha = _north_choice(north)
+    nf = os.path.join(d, NORTH_FILE)
+    tn, tn_meta = None, {"source": "constant"}
+    if mode == "file" and (os.path.exists(nf) or want_sha):
+        if not os.path.exists(nf):
+            raise NorthFileError(f"n{seq}: the run was made with {nf}, which is not there")
+        sha = _sha1(nf)
+        if want_sha and sha != want_sha:
+            raise NorthFileError(f"n{seq}: {nf} is not the file the run was made with (SHA-1 {want_sha[:12]} "
+                                 f"recorded, {sha[:12]} now)")
+        tn = _pick(read_north(nf, n, f"n{seq}"), sl, hit)
+        tn_meta = {"source": "file", "file": NORTH_FILE, "path": os.path.abspath(nf), "sha1": sha, "n_file": int(n)}
+    elif mode == "file":
+        tn_meta["why"] = f"no {NORTH_FILE}"
+    else:
+        tn_meta["why"] = "--north constant" if not isinstance(north, dict) else "as the run was made"
     tags = None
     tf = os.path.join(d, "AB_frametags.sav")
     if os.path.exists(tf):
@@ -198,8 +280,8 @@ def load_night(root: str, seq: int, crop_half: int = NEAR.shsize, frames: Option
     return Dataset(cube, angles, tags, texp=texp, name=f"n{seq}",
                    meta={"psf_template": psf, "crop_half": crop_half, "nframes_total": n, "root": root,
                          "ref_file": rf if ref_cube is not None else None,
-                         "frame_index": keep, "dropped_frames": dropped},
-                   ref_cube=ref_cube)
+                         "frame_index": keep, "dropped_frames": dropped, "north": tn_meta},
+                   ref_cube=ref_cube, north=tn)
 
 
 # ----------------------------------------------------------------------------
@@ -351,6 +433,17 @@ class N4Library:
                           throughput_fn=self.throughput, refpa_deg=NEAR.n4_refpa, flux_unit=flux_unit)
 
 
+def _north_text(rec: Dict[str, Any]) -> str:
+    """A night's true north for the log, from :meth:`KLIPReducer.north_record`."""
+    if rec.get("source") == "file":
+        same = rec["min"] == rec["max"]
+        span = f"{rec['min']:.3f} deg for every frame" if same else \
+            f"{rec['min']:.3f}-{rec['max']:.3f} deg (median {rec['median']:.3f})"
+        return f"true north per frame from {rec.get('file', NORTH_FILE)}, {span}"
+    why = rec.get("why")
+    return f"true north {float(rec.get('deg', NEAR.truenorth)):g} deg for every frame" + (f" ({why})" if why else "")
+
+
 def template_flux_unit(psf_template: np.ndarray, lam_over_d_px: Optional[float] = None) -> float:
     """Flux unit for a contrast relative to alpha Cen A: ``(129/57) * EE_B(1 lambda/D)`` of
     the B-star template (16x16, centre 7.5, 7.5), within ``lam_over_d_px`` (default
@@ -376,7 +469,8 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
                  subtract_sources: Optional[Sequence[Any]] = None,
                  inject_sources: Optional[Sequence[Any]] = None,
                  drop_frames: Optional[Dict[Any, Sequence[int]]] = None,
-                 pxscale: Optional[float] = None, psflib: Optional[str] = None) -> PartitionedReducer:
+                 pxscale: Optional[float] = None, psflib: Optional[str] = None,
+                 north: Any = "files") -> PartitionedReducer:
     """Build the per-night :class:`PartitionedReducer` for the NEAR campaign.
     ``backend``: ``'klip'`` (built-in) | ``'pyklip'`` | ``'vip'`` PSF subtraction.
     ``use_rdi``/``rdi_mode`` use ``n<seq>/AB_cube_refstar_clean.fits`` when present
@@ -395,7 +489,15 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
     ``pxscale`` (arcsec/px, default :attr:`NEAR.pxscale`) sets the pixel constants
     (:func:`near_constants`), and ``psflib`` the PSF library's directory (default
     ``root/psflib``).  Both go into the reducer's ``provenance``, which ``run_setup.json``
-    records and a resume reads back."""
+    records and a resume reads back.
+
+    ``north``: ``"files"`` gives each night's frames their own true north from the night's
+    :data:`NORTH_FILE` where there is one (:func:`load_night`), ``"constant"``
+    :attr:`NEAR.truenorth` for every frame, and a run's record (``provenance["north"]``, one
+    entry per night) what the run was made with.  The north is used at derotation and in the
+    injection azimuth.  The frame selection, the binning and the reference selection read the
+    parallactic angles alone, as before.  ``provenance["north"]`` records each night's
+    source, the file's SHA-1 and the values' range."""
     drop = _drop_spec(drop_frames)
     labels = [f"n{int(seq)}" for seq in nights]
     extra = [k for k in drop if k not in labels]
@@ -416,10 +518,13 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
         except Exception as exc:
             log(f"  psflib unavailable ({exc!r}); using the B template + analytic throughput")
     reducers = {}
+    rec_north = north if isinstance(north, dict) else None
     for seq in nights:
+        nn = (rec_north.get(f"n{seq}") or "files") if rec_north is not None else north
         ds = datasets[seq] if datasets and seq in datasets else load_night(root, seq, frames=frames,
                                                                              cube_name=cube_name,
-                                                                             drop_frames=drop.get(f"n{seq}"))
+                                                                             drop_frames=drop.get(f"n{seq}"),
+                                                                             north=nn)
         psf = ds.meta.get("psf_template")
         fu = template_flux_unit(psf, const["lam_over_d_px"]) if psf is not None else 1.0
         thru = lib.throughput if lib is not None else analytic_throughput
@@ -438,6 +543,7 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
         nref = 0 if ds.ref_cube is None else int(ds.ref_cube.shape[0])
         log(f"  loaded n{seq}: {ds.nframes} frames, PA span {ds.angles.min():.1f}..{ds.angles.max():.1f} deg, "
             f"texp {ds.texp:.0f} s, tags {'yes' if ds.tags else 'no'}, ref-star frames {nref}")
+        log(f"    n{seq}: {_north_text(red.north_record())}")
         if f"n{seq}" in drop:
             gone = list(ds.meta.get("dropped_frames") or [])
             past = [i for i in drop[f"n{seq}"] if i not in gone]
@@ -450,7 +556,8 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
                     f"there")
     pr = PartitionedReducer(reducers, weighting=weighting, max_workers=max_workers, pool=pool, log=log)
     pr.name = "near"
-    pr.provenance = {"instrument": "NEAR", **const, "psflib": None if lib is None else lib.describe()}
+    pr.provenance = {"instrument": "NEAR", **const, "psflib": None if lib is None else lib.describe(),
+                     "north": {k: r.north_record() for k, r in reducers.items()}}
     if const["pxscale"] != NEAR.pxscale:
         log(f"  pixel scale {const['pxscale']:g}\"/px (lambda/D {const['lam_over_d_px']:.3f} px, FWHM "
             f"{const['fwhm_px']:.3f} px), not the default {NEAR.pxscale:g}")

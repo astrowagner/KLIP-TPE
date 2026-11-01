@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased — 2026-11-01 (each frame's own true north)
+
+- **NEAR reads each frame's true north** from a night's `AB_truenorth_clean.txt` (NEAR2 note,
+  2026-10-31: the astrometry of the 2026 cubes), one number per line with `#` comments.
+  `load_night` checks the count against the cube's and applies `--max-frames` and `--drop-frames`
+  to it as to the angles (`Dataset.north`).  A night without the file stays at 36.5 deg.
+- **The reducer derotates each bin by its frames' mean angle plus their mean north**
+  (`klip.bin_values`, `KLIPReducer.binned_north`), and injects each frame at its own north, on
+  the CPU and on the card (`gpu_reducer` 0.7).  The noise-weighted combine rotates the frames back
+  by the angles less the constant, so they line up as with one north.  The frame cut, the binning
+  and the reference selection read the parallactic angles alone, as before.  A file of one value
+  is that angle, and reduces as the constant does, to the bit.  pyKLIP's and VIP's backends
+  derotate by one angle and refuse frames with their own.
+- **`--north files|constant`.**  A new run takes the files.  `run_setup.json` records each
+  night's source, the file's SHA-1 and the values' range (`provenance["north"]`), and `resume`,
+  `extend`, `fit-chain` and `rereduce` keep the run's own.  A recorded file that has changed or
+  gone is refused, and a run that recorded none, made before today, gets 36.5 deg.  The log has
+  a line per night.  The stitched headers say `TRUENORT = 'per frame (ICRS)'`, with each night's
+  values in `TN_<night>`.
+- `replay`, `compare` and a new `near --from-idl-setup` mirror IDL runs, so they take the IDL's
+  0.0456"/px and 36.5 deg unless told otherwise.  Since 33fe73b they had taken the new plate
+  scale.
+- The contrast curve's throughput comes from the run's `--psflib`, not always `ROOT/psflib`.
+- Tests in `tests/test_true_north.py`: the file and the frame plan, the record and its refusals,
+  the CLI's choice per run, each frame's north in the injection and the derotation, one value
+  per frame against the constant to the bit (both preparation paths, KLIP-FM and the extras), a
+  planet put in with a drifting north found at its PA, the card against the CPU, a backend that
+  refuses, the headers.
+
 ## Unreleased — 2026-11-01 (the production search space in a module of its own)
 
 - **`make_space`, `pa_span_max` and `production_defaults` move to

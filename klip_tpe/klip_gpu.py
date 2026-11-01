@@ -191,16 +191,21 @@ class XsyevBatched:
 
 
 # ----------------------------------------------------------------------------- the per-frame steps
-def inject(be: Backend, cube_dev, angles: np.ndarray, sources, model, pxscale: float, truenorth: float,
+def inject(be: Backend, cube_dev, angles: np.ndarray, sources, model, pxscale: float, truenorth,
            angle_convention: str = "pa", fallback=None):
     """klip-tpe's inject_sources on the device: per source, the stamp rotated per frame (refpa
     models), shifted by the fractional offset and added at the integer one, every frame at once.
-    ``cube_dev`` (n, ny, nx) float32 is not changed; the injected cube is returned (float32)."""
+    ``cube_dev`` (n, ny, nx) float32 is not changed; the injected cube is returned (float32).
+    ``truenorth``: one angle (deg), or one per frame of ``angles``."""
     xp, ndi = be.xp, be.ndi
     n, ny, nx = cube_dev.shape
     out = cube_dev.astype(xp.float64)            # klip-tpe adds each stamp in float64 and stores float32
     cx, cy = (nx - 1) / 2.0, (ny - 1) / 2.0
     angles = np.asarray(angles, float)
+    if np.ndim(truenorth) > 0:
+        truenorth = np.asarray(truenorth, float).ravel()
+        if truenorth.shape[0] != angles.shape[0]:
+            raise ValueError(f"{truenorth.shape[0]} true-north values for {angles.shape[0]} frames")
     for s in sources:
         st, sc, ok = model.stamp(s.rho)
         m = model

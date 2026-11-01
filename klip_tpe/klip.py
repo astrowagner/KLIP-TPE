@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 from scipy import ndimage
 
-__all__ = ["frame_selection_mask", "bin_frames", "bin_groups", "bin_by_groups", "bin_angles",
+__all__ = ["frame_selection_mask", "bin_frames", "bin_groups", "bin_by_groups", "bin_angles", "bin_values",
            "highpass", "highpass_stack", "destripe", "rotate_ccw", "rotate_ccw_many", "derotate",
            "group_mean", "group_bounds",
            "nw_ang_comb", "nw_ang_comb_ref", "klip_basis", "zone_indices", "klip_annular", "klip_fm_zone",
@@ -197,6 +197,19 @@ def bin_frames(cube: np.ndarray, angles: np.ndarray, bin_: int, dth_max_deg: flo
     if return_groups:
         return bc[keep], ba[keep], grp, keep
     return bc[keep], ba[keep]
+
+
+def bin_values(values: np.ndarray, grp: np.ndarray, bin_: int) -> np.ndarray:
+    """A per-frame quantity averaged over the bin groups ``grp`` exactly as
+    :func:`bin_frames` averages the angles (each frame's own value at ``bin_ <= 1``), before
+    the empty bins are dropped: index the result with ``bin_frames``' ``keep``.  For the
+    frames' true north, so a bin is derotated by its frames' mean angle plus their mean
+    north."""
+    v = np.asarray(values, float)
+    if int(round(max(bin_, 1))) <= 1:
+        return v.copy()
+    ng = int(np.asarray(grp).max()) + 1
+    return np.bincount(grp, weights=v, minlength=ng) / np.bincount(grp, minlength=ng)
 
 
 # ----------------------------------------------------------------------------
@@ -414,14 +427,21 @@ def _centred_grid(ny: int, nx: int) -> Tuple[np.ndarray, np.ndarray]:
     return g
 
 
-def derotate(cube: np.ndarray, angles: np.ndarray, truenorth: float = 0.0, threads: int = 1) -> np.ndarray:
+def derotate(cube: np.ndarray, angles: np.ndarray, truenorth=0.0, threads: int = 1) -> np.ndarray:
     """Rotate every frame CCW by ``angle + truenorth`` (sky North up after this).
-    ``threads``: the frames go to that many threads, each rotated as before."""
+    ``truenorth``: one angle (deg), or one per frame (the frames' own true north, averaged
+    over each bin as the angles are: :func:`bin_values`).  ``threads``: the frames go to that
+    many threads, each rotated as before."""
     out = np.empty_like(cube, dtype=np.float32)
+    per = np.ndim(truenorth) > 0
+    if per:
+        tn = np.asarray(truenorth, float).ravel()
+        if tn.shape[0] != cube.shape[0]:
+            raise ValueError(f"derotate: {tn.shape[0]} true-north values for {cube.shape[0]} frames")
 
     def block(lo, hi):
         for i in range(lo, hi):
-            out[i] = rotate_ccw(cube[i], float(angles[i]) + truenorth)
+            out[i] = rotate_ccw(cube[i], float(angles[i]) + (float(tn[i]) if per else truenorth))
     run_blocks(block, frame_blocks(cube.shape[0], threads), threads)
     return out
 

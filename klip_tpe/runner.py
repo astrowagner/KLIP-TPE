@@ -4316,6 +4316,7 @@ class Runner:
         hdr = {"ANNULUS": ia + 1, "NEVAL": neval, "RUNNING": 1, "NANN": len(cleans), "PHASE": "final" if at_end else "eval",
                "IMGTYPE": f"running equal-weight stitch{self._flat_tag}", "EDGES": ",".join(f"{z[0]:.1f}" for z in zones)
                + f",{zones[-1][1]:.1f}"}
+        hdr.update(self._north_header())
         pads = self._tile_pads(zones)
         st = self._maybe_flatten(stitch_tiles(cleans, zones, pads=pads))
         files = {"clean": os.path.join(self.run_dir, "klip_stitched_running.fits")}
@@ -4823,6 +4824,7 @@ class Runner:
                "NTOP": self.cfg.validation.n_top, "GAMMA": self.cfg.gamma, "NCAND": self.cfg.ncand,
                "SEED": self.cfg.seed, "RUNDIR": os.path.basename(os.path.abspath(self.run_dir)),
                "OPTWIDTH": int(self.cfg.opt_width)}
+        hdr.update(self._north_header())
         hdr.update(extra_header or {})
         files = {"clean": os.path.join(self.run_dir, "klip_stitched.fits")}
         _write_fits(files["clean"], st_f, hdr, hist)
@@ -4880,6 +4882,32 @@ class Runner:
         write_params_table(files["params"], rows)
         self._emit("on_stitch", "final", files)
         return out
+
+    def _north_header(self) -> Dict[str, Any]:
+        """The stitched headers' true north, from the reducer's ``provenance["north"]`` (NEAR):
+        ``TRUENORT`` "per frame (ICRS)" when a night's frames carry their own north, else the
+        one angle, and ``TN_<night>`` with each night's values.  Nothing for a reducer that
+        records no north."""
+        prov = getattr(self.reducer, "provenance", None)
+        recs = prov.get("north") if isinstance(prov, dict) else None
+        if not isinstance(recs, dict) or not recs:
+            return {}
+        recs = {k: (r if isinstance(r, dict) else {}) for k, r in recs.items()}
+        h: Dict[str, Any] = {}
+        if any(r.get("source") in ("file", "per frame") for r in recs.values()):
+            h["TRUENORT"] = "per frame (ICRS)"
+        else:
+            vals = {float(r["deg"]) for r in recs.values() if r.get("deg") is not None}
+            if len(vals) == 1:
+                h["TRUENORT"] = vals.pop()
+        for pid, r in recs.items():
+            if r.get("min") is not None:
+                txt = (f"{r['min']:.3f} deg, every frame" if r["min"] == r["max"] else
+                       f"{r['median']:.3f} ({r['min']:.3f}-{r['max']:.3f}) deg")
+                h[f"TN_{pid}"] = f"{txt}, {r.get('file') or 'per frame'}"
+            elif r.get("deg") is not None:
+                h[f"TN_{pid}"] = f"{float(r['deg']):g} deg, every frame"
+        return h
 
     def _final_verify(self, stitched: Dict[str, Any], header: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         """``near2_verify`` with the known sources as candidates and all validated injections

@@ -18,6 +18,9 @@ Settings (constructor): ``eigh`` ("xbatched64", the validated default; "jacobi32
 later a float32 solver of our own), ``compact`` (the size-class step of the per-target
 eigenproblems, 0 = padded), ``frames_dtype`` (float32: the frames' precision on the card).
 
+Frames with their own true north (``KLIPReducer.north_frames``, from ``Dataset.north``) are
+injected at each frame's north and derotated by each bin's mean north, as on the CPU (0.7).
+
 Results agree with KLIPReducer.reduce to ~1e-5 of the image noise on a run's frames (NEAR2 s5,
 2026-10-31), not to the bit: the Gram's dot products and the solver differ in rounding.  The same
 job on the card twice gives the same image to the bit (deterministic kernels).  Tests:
@@ -40,7 +43,7 @@ try:
 except ImportError:
     import klip_gpu as kg                 # standalone, in bench/gpu_reducer/
 
-VERSION = "0.6 (2026-10-31, name in warm(), for klip_tpe/)"
+VERSION = "0.7 (2026-11-01, per-frame true north, for klip_tpe/)"
 
 
 class GPUKLIPReducer(KLIPReducer):
@@ -176,7 +179,7 @@ class GPUKLIPReducer(KLIPReducer):
     last_steps: Optional[Dict[str, float]] = None
 
     def _reduce_gpu(self, req: ReductionRequest) -> ReductionResult:
-        from klip_tpe.klip import bin_groups, frame_selection_mask
+        from klip_tpe.klip import bin_groups, bin_values, frame_selection_mask
         dev = self._device()
         be, xp = dev["be"], dev["be"].xp
         ds = self.data
@@ -220,9 +223,13 @@ class GPUKLIPReducer(KLIPReducer):
         if not keep.all():
             cube = cube[xp.asarray(np.flatnonzero(keep))]
         lap("select")
+        # the frames' own true north where they carry it (KLIPReducer.north_frames), per kept
+        # frame for the injection and per kept bin, its frames' mean, for the derotation
+        nf = getattr(self, "north_frames", None)
+        n_ = None if nf is None else np.asarray(nf, float)[keep]
         if req.injections:
-            cube = kg.inject(be, cube, a_, req.injections, self.model, self.pxscale, self.truenorth,
-                             self.angle_convention, fallback=self.fallback)
+            cube = kg.inject(be, cube, a_, req.injections, self.model, self.pxscale,
+                             self.truenorth if n_ is None else n_, self.angle_convention, fallback=self.fallback)
         lap("inject")
         grp = bin_groups(a_, bin_, dth) if bin_ > 1 else np.arange(a_.size)
         if bin_ > 1:
@@ -245,6 +252,7 @@ class GPUKLIPReducer(KLIPReducer):
         # bins whose frames are all NaN (or sum to 0) are dropped, as bin_frames drops them
         tot = xp.nansum(bc.reshape(bc.shape[0], -1), axis=1)
         bkeep = be.asnumpy(tot != 0)
+        bnorth = None if n_ is None else bin_values(n_, grp, bin_)[bkeep]
         if not bkeep.all():
             bc = bc[xp.asarray(np.flatnonzero(bkeep))]
             bang = bang[bkeep]
@@ -265,7 +273,10 @@ class GPUKLIPReducer(KLIPReducer):
         if post_hp:
             res = kg.highpass(be, res, filt, nan_aware=True, dtype=self.frames_dtype)
         lap("post highpass")
-        dr = kg.rotate(be, res, bang + self.truenorth, cval=np.nan).astype(xp.float32)
+        if bnorth is None:
+            dr = kg.rotate(be, res, bang + self.truenorth, cval=np.nan).astype(xp.float32)
+        else:
+            dr = kg.rotate(be, res, bang + bnorth, cval=np.nan).astype(xp.float32)
         del res
         lap("derotate")
         ct = str(p.get("comb_type", "nwadi"))
@@ -275,7 +286,7 @@ class GPUKLIPReducer(KLIPReducer):
                 warnings.simplefilter("ignore", RuntimeWarning)       # all-NaN columns outside the zone
                 img = xp.nanmedian(dr, axis=0) if ct == "median" else xp.nanmean(dr, axis=0)
         else:
-            img = kg.nw_ang_comb(be, dr, bang)
+            img = kg.nw_ang_comb(be, dr, bang if bnorth is None else bang + (bnorth - self.truenorth))
         del dr
         lap("combine")
         out = be.asnumpy(img).astype(np.float32)

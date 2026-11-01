@@ -517,6 +517,7 @@ def inject_sources(cube: np.ndarray, angles: np.ndarray, sources: Sequence[Sourc
     per frame the stamp is placed at
     ``center + (rho/pxscale) * (cos az, sin az)`` with ``az = theta - truenorth - 270 -
     parang`` (``angle_convention='pa'``) or ``az = theta - parang`` (``'math'``).
+    ``truenorth`` is one angle (deg) or one per frame of ``angles``, each frame's own.
     Anisotropic models (``refpa_deg`` set) have their stamp rotated CCW by
     ``az - refpa`` first.
 
@@ -591,6 +592,7 @@ def inject_frames(out: np.ndarray, cube: np.ndarray, angles: np.ndarray, sources
     """``out[j] = cube[j]`` with the sources added, for every frame ``j`` of ``frames`` (all
     by default), the numbers :func:`inject_sources` gives.  ``out`` is a float32 cube of
     the same shape and may be ``cube`` itself.  Frames not listed are not touched.
+    ``truenorth``: one angle (deg), or one per frame of ``angles``, indexed as they are.
 
     Each frame's stamps are added in the order of ``sources``, as before.  The frames go
     to ``threads`` threads in blocks, and each block writes only its own frames.  Within a
@@ -606,6 +608,7 @@ def inject_frames(out: np.ndarray, cube: np.ndarray, angles: np.ndarray, sources
     if center is None:
         center = ((nx - 1) / 2.0, (ny - 1) / 2.0)
     angles = np.asarray(angles, float)
+    truenorth = _north_values(truenorth, angles)
     copy_in = out is not cube
 
     def block(lo, hi):
@@ -629,6 +632,22 @@ def _azimuth(s: Source, angle: float, truenorth: float, angle_convention: str):
     return s.theta - angle
 
 
+def _north_values(truenorth, angles):
+    """``truenorth`` as the injection uses it: one angle as it was given, or one per frame of
+    ``angles`` as a float array of the same length."""
+    if np.ndim(truenorth) == 0:
+        return truenorth
+    tn = np.asarray(truenorth, float).ravel()
+    if tn.shape[0] != np.asarray(angles).shape[0]:
+        raise ValueError(f"{tn.shape[0]} true-north values for {np.asarray(angles).shape[0]} frames")
+    return tn
+
+
+def _north_at(truenorth, j):
+    """Frame ``j``'s true north: the one angle, or the frame's own."""
+    return truenorth if np.ndim(truenorth) == 0 else truenorth[j]
+
+
 def _place_shared(J, p: _Prepared, angles, truenorth, center, angle_convention, shape, sink) -> None:
     """Place a source whose scaled stamp is the same in every frame on the frames ``J``:
     ``sink(i, crop)`` receives the :func:`stamp_crop` of frame ``J[i]`` (a view into a
@@ -638,7 +657,7 @@ def _place_shared(J, p: _Prepared, angles, truenorth, center, angle_convention, 
     xs, ys = np.empty(k), np.empty(k)
     rot = []
     for i, j in enumerate(J):
-        az = _azimuth(s, angles[j], truenorth, angle_convention)
+        az = _azimuth(s, angles[j], _north_at(truenorth, j), angle_convention)
         azr = np.deg2rad(az)
         xs[i], ys[i] = center[0] + p.r_px * np.cos(azr), center[1] + p.r_px * np.sin(azr)
         if m.refpa_deg is not None:
@@ -662,7 +681,7 @@ def _place_each(J, p: _Prepared, model, angles, truenorth, center, angle_convent
     sc = p.center
     buf = None
     for i, j in enumerate(J):
-        az = _azimuth(s, angles[j], truenorth, angle_convention)
+        az = _azimuth(s, angles[j], _north_at(truenorth, j), angle_convention)
         azr = np.deg2rad(az)
         xs, ys = center[0] + p.r_px * np.cos(azr), center[1] + p.r_px * np.sin(azr)
         t_j = float(model.throughput(s.rho, az)) if p.az_aware else p.thru
@@ -685,7 +704,9 @@ def place_source(J, p: _Prepared, model, angles, truenorth, center, angle_conven
     """One prepared source (:func:`prepare_sources`) on the frames ``J`` of a cube of frame
     ``shape``: ``sink(i, crop)`` receives what frame ``J[i]`` gets (:func:`stamp_crop`), with
     the numbers :func:`inject_frames` adds.  ``model`` is the injection model (the
-    throughput's), ``center`` the star's ``(x, y)``."""
+    throughput's), ``center`` the star's ``(x, y)``.  ``truenorth``: one angle, or one per
+    frame of ``angles``."""
+    truenorth = _north_values(truenorth, angles)
     if p.base is not None:
         _place_shared(J, p, angles, truenorth, center, angle_convention, shape, sink)
     else:

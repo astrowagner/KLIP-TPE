@@ -191,6 +191,28 @@ each slice's separation, as do a header's `SEP00`.. keywords.  A library without
 the 75-mas grid of v1, so v1 runs inject where they always did.  The log gives the library's
 path, its stamps and their range.
 
+### The true north per frame (`--north`)
+
+The astrometry of the 2026 cubes also gives each frame's true north.  A night's
+`AB_truenorth_clean.txt` holds it, one number per line in degrees, in the order of the cube's
+frames, with `#` comments.  A new run reads the file of every night that has one, and leaves a
+night without one at 36.5 deg for every frame.  The count must match the cube's, and
+`--max-frames` and `--drop-frames` apply to the values as to the parallactic angles.  The
+frames' own north is used at derotation, each bin with its frames' mean, and in the injection
+azimuth.  The frame cut, the binning and the reference selection read the parallactic angles
+alone, as before, so a run with the files selects and bins the same frames as one without.  The
+card does the same.  pyKLIP's and VIP's backends derotate by one angle and refuse such frames.
+
+`run_setup.json` records each night's north (the reducer's `provenance`): the file with its
+SHA-1 and the values' range, or the constant.  `resume`, `extend`, `fit-chain` and `rereduce`
+use the run's own and refuse a recorded file that has changed or gone.  A run made before
+2026-11-01 recorded none and used 36.5 deg, so it gets that.  `--north constant` gives 36.5 deg
+for every frame, and `--north files` reads the files as they are now.  On an old run either one
+no longer reproduces it.  The log has a line per night, and the stitched headers say `TRUENORT
+= 'per frame (ICRS)'` with each night's values in `TN_n1`, `TN_n2` and so on.  `replay`,
+`compare` and a new `near --from-idl-setup` mirror IDL runs, so they take the IDL's 0.0456"/px
+and 36.5 deg unless told otherwise.
+
 ### The card (`--gpu-share`, `--gpu-workers`)
 
 A share of the search's injected draws can be reduced on an NVIDIA card beside the CPU

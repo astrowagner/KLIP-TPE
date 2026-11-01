@@ -41,9 +41,13 @@ def _near_objects(a, log=print):
                                 n_min_ref=a.n_min_ref, backend=getattr(a, "backend", "klip"),
                                 cube_name=getattr(a, "cube_name", None) or None,
                                 drop_frames=_drop_frames(a) or None,
-                                pxscale=getattr(a, "pxscale", None), psflib=getattr(a, "psflib", None))
+                                pxscale=getattr(a, "pxscale", None), psflib=getattr(a, "psflib", None),
+                                north=getattr(a, "north", None) or "files")
     except near.DropFramesError as exc:
         raise SystemExit(f"--drop-frames: {exc}")
+    except near.NorthFileError as exc:
+        raise SystemExit(f"{exc}. --north files takes the north files as they are now, --north constant "
+                         f"{near.NEAR.truenorth:g} deg for every frame; either one no longer reproduces the run")
     _subtract(red, a, log)
     _set_threads_per_job(red, a)
     _set_card(red, a)
@@ -56,7 +60,7 @@ def _near_objects(a, log=print):
     red.start_workers()                    # logs the worker budget and the pool kind it got
     thr = None
     try:
-        thr = near.N4Library(os.path.join(root, "psflib")).throughput
+        thr = near.N4Library(getattr(a, "psflib", None) or os.path.join(root, "psflib")).throughput
     except Exception:
         thr = near.analytic_throughput
     return red, objective, sampler, guard, thr
@@ -263,14 +267,16 @@ def _line_mask(red, a, log=print):
 
 
 def _constants_for_run(a) -> None:
-    """Settle ``--pxscale`` and ``--psflib`` for a NEAR command on a run directory: what this
-    command line says, else what the run was made with (``run_setup.json``'s reducer
-    ``provenance``), else, for a run made before 2026-11-01, which recorded neither,
-    ``NEAR.legacy_pxscale`` and ``ROOT/psflib``.  A new run takes ``NEAR.pxscale``.
+    """Settle ``--pxscale``, ``--psflib`` and ``--north`` for a NEAR command on a run
+    directory: what this command line says, else what the run was made with
+    (``run_setup.json``'s reducer ``provenance``), else, for a run made before 2026-11-01,
+    which recorded none of them, ``NEAR.legacy_pxscale``, ``ROOT/psflib`` and the constant
+    north.  A new run takes ``NEAR.pxscale`` and the nights' north files.
 
     The constants decide where every source is injected and how every S/N is measured, so a
     resume, an extension, a re-reduction and a check reproduce the run only with its own.  A
-    recorded library that is not on this machine is refused rather than replaced."""
+    recorded library that is not on this machine is refused rather than replaced, and so is a
+    recorded north file that is gone or has changed (when the reducer is built)."""
     import json
     from .instruments.near import NEAR
     if getattr(a, "instrument", "near") not in (None, "near"):
@@ -302,8 +308,31 @@ def _constants_for_run(a) -> None:
             raise SystemExit(f"the run was made with the PSF library {path}, which is not on this machine: "
                              f"give --psflib")
         a.psflib = path or None
-    if existed and ("pxscale" in given or "psflib" in given):
-        print("  --pxscale / --psflib differ from the run's record: this command does not reproduce the run")
+    if "north" not in given:
+        rec = (prov or {}).get("north")
+        if isinstance(rec, dict) and rec:
+            a.north = rec
+        elif existed:
+            a.north = "constant"
+            print(f"  --north constant: the run predates per-frame north (run_setup.json), "
+                  f"{NEAR.truenorth:g} deg for every frame")
+        else:
+            a.north = "files"
+    if existed and ("pxscale" in given or "psflib" in given or "north" in given):
+        print("  --pxscale / --psflib / --north given: this command may not reproduce the run")
+
+
+def _idl_constants(a) -> None:
+    """The constants of ``reduce_near_2.pro`` for a command that mirrors an IDL run (``replay``,
+    ``compare``, a new ``near --from-idl-setup``): 0.0456"/px and 36.5 deg for every frame,
+    unless typed.  The IDL derotates by one north and has not taken the 2026 plate scale."""
+    from .instruments.near import NEAR
+    given = _explicit_dests(getattr(a, "_argv", None))
+    if "pxscale" not in given:
+        a.pxscale = float(NEAR.legacy_pxscale)
+    if "north" not in given:
+        a.north = "constant"
+    print(f"  the IDL's constants: --pxscale {a.pxscale:g}, --north {a.north if isinstance(a.north, str) else 'as given'}")
 
 
 def _data_edits_for_run(a) -> None:
@@ -899,6 +928,12 @@ def _add_near_args(p):
     p.add_argument("--psflib", default=None, metavar="DIR",
                    help="near: the PSF library's directory (default ROOT/psflib), e.g. psflib_v2. Recorded in "
                         "run_setup.json and kept on resume, extend and rereduce when not typed")
+    p.add_argument("--north", default=None, choices=["files", "constant"],
+                   help="near: each frame's true north at derotation and in the injection azimuth. files (a new "
+                        "run's default): each night's AB_truenorth_clean.txt, one number per frame, where there "
+                        "is one, else 36.5 deg. constant: 36.5 deg for every frame. Recorded in run_setup.json "
+                        "with each file's SHA-1. resume, extend and rereduce keep the run's own and refuse a "
+                        "recorded file that is gone or has changed. A run made before 2026-11-01 used 36.5")
     p.add_argument("--cube-name", default=None, metavar="NAME",
                    help="near: the cube read in each night's directory (default AB_cube_skysub_cen_clean.fits, "
                         "or AB_cube_crop150.fits where only that is there), e.g. a reduction's "
@@ -1114,6 +1149,8 @@ def cmd_near(a):
     _card_for_run(a)
     _data_edits_for_run(a)                 # a near command on a check-pointed directory resumes it
     _constants_for_run(a)
+    if getattr(a, "from_idl_setup", None) and not os.path.exists(os.path.join(a.run_dir, "run_setup.json")):
+        _idl_constants(a)
     if getattr(a, "from_idl_setup", None):
         # mirror an IDL run: nights, annulus, budget, contrast, validation and TPE settings
         from .idl_compare import matched_run_config
@@ -1472,6 +1509,7 @@ def cmd_replay(a):
     from .idl_replay import read_idl_log, replay, summarize
     from .instruments import near
     from .runner import CalibrationConfig, RunConfig, Runner
+    _idl_constants(a)
     red, objective, sampler, guard, thr = _near_objects(a)
     log = read_idl_log(a.idl_log)
     space = near.make_space(red, k_klip_max=a.k_max, anglemax_hi=a.anglemax_hi)
@@ -1529,6 +1567,8 @@ def cmd_compare(a):
     """Replay the evaluations of a (running) IDL run through the Python objective."""
     from .idl_compare import LiveComparison
     from .runner import CalibrationConfig, RunConfig, Runner, ValidationConfig
+    if getattr(a, "instrument", "near") in (None, "near"):
+        _idl_constants(a)
     red, objective, sampler, guard, thr = _near_objects(a)
     space = build_near_space(red, a)
     space.project = guard

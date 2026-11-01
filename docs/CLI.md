@@ -47,7 +47,8 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--no-clean-subtract] [--ladder-pair]
                         [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                         [--bin-min N] [--bin-max N] [--known RHO PA]
-                        [--psflib DIR] [--cube-name NAME]
+                        [--psflib DIR] [--north {files,constant}]
+                        [--cube-name NAME]
                         [--drop-frames NIGHT:INDEX[,INDEX...]]
                         [--subtract-sources FILE] [--subtract-line FILE]
                         [--inject-sources FILE] [--metric {mawet,fmmf}]
@@ -170,6 +171,15 @@ options:
                         ROOT/psflib), e.g. psflib_v2. Recorded in
                         run_setup.json and kept on resume, extend and rereduce
                         when not typed
+  --north {files,constant}
+                        near: each frame's true north at derotation and in the
+                        injection azimuth. files (a new run's default): each
+                        night's AB_truenorth_clean.txt, one number per frame,
+                        where there is one, else 36.5 deg. constant: 36.5 deg
+                        for every frame. Recorded in run_setup.json with each
+                        file's SHA-1. resume, extend and rereduce keep the
+                        run's own and refuse a recorded file that is gone or
+                        has changed. A run made before 2026-11-01 used 36.5
   --cube-name NAME      near: the cube read in each night's directory (default
                         AB_cube_skysub_cen_clean.fits, or AB_cube_crop150.fits
                         where only that is there), e.g. a reduction's
@@ -559,8 +569,8 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--no-clean-subtract] [--ladder-pair]
                      [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                      [--bin-min N] [--bin-max N] [--known RHO PA]
-                     [--psflib DIR] [--cube-name NAME]
-                     [--drop-frames NIGHT:INDEX[,INDEX...]]
+                     [--psflib DIR] [--north {files,constant}]
+                     [--cube-name NAME] [--drop-frames NIGHT:INDEX[,INDEX...]]
                      [--subtract-sources FILE] [--subtract-line FILE]
                      [--inject-sources FILE] [--metric {mawet,fmmf}]
                      [--run-dir RUN_DIR]
@@ -679,6 +689,15 @@ options:
                         ROOT/psflib), e.g. psflib_v2. Recorded in
                         run_setup.json and kept on resume, extend and rereduce
                         when not typed
+  --north {files,constant}
+                        near: each frame's true north at derotation and in the
+                        injection azimuth. files (a new run's default): each
+                        night's AB_truenorth_clean.txt, one number per frame,
+                        where there is one, else 36.5 deg. constant: 36.5 deg
+                        for every frame. Recorded in run_setup.json with each
+                        file's SHA-1. resume, extend and rereduce keep the
+                        run's own and refuse a recorded file that is gone or
+                        has changed. A run made before 2026-11-01 used 36.5
   --cube-name NAME      near: the cube read in each night's directory (default
                         AB_cube_skysub_cen_clean.fits, or AB_cube_crop150.fits
                         where only that is there), e.g. a reduction's
@@ -1068,7 +1087,8 @@ usage: klip-tpe resume [-h] [--instrument {near,nomic,generic,ales}]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                        [--bin-min N] [--bin-max N] [--known RHO PA]
-                       [--psflib DIR] [--cube-name NAME]
+                       [--psflib DIR] [--north {files,constant}]
+                       [--cube-name NAME]
                        [--drop-frames NIGHT:INDEX[,INDEX...]]
                        [--subtract-sources FILE] [--subtract-line FILE]
                        [--inject-sources FILE] [--metric {mawet,fmmf}]
@@ -1158,6 +1178,15 @@ options:
                         ROOT/psflib), e.g. psflib_v2. Recorded in
                         run_setup.json and kept on resume, extend and rereduce
                         when not typed
+  --north {files,constant}
+                        near: each frame's true north at derotation and in the
+                        injection azimuth. files (a new run's default): each
+                        night's AB_truenorth_clean.txt, one number per frame,
+                        where there is one, else 36.5 deg. constant: 36.5 deg
+                        for every frame. Recorded in run_setup.json with each
+                        file's SHA-1. resume, extend and rereduce keep the
+                        run's own and refuse a recorded file that is gone or
+                        has changed. A run made before 2026-11-01 used 36.5
   --cube-name NAME      near: the cube read in each night's directory (default
                         AB_cube_skysub_cen_clean.fits, or AB_cube_crop150.fits
                         where only that is there), e.g. a reduction's
@@ -1395,7 +1424,8 @@ usage: klip-tpe extend [-h] [--instrument {near,nomic,generic,ales}]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                        [--bin-min N] [--bin-max N] [--known RHO PA]
-                       [--psflib DIR] [--cube-name NAME]
+                       [--psflib DIR] [--north {files,constant}]
+                       [--cube-name NAME]
                        [--drop-frames NIGHT:INDEX[,INDEX...]]
                        [--subtract-sources FILE] [--subtract-line FILE]
                        [--inject-sources FILE] [--metric {mawet,fmmf}]
@@ -1482,6 +1512,15 @@ options:
                         ROOT/psflib), e.g. psflib_v2. Recorded in
                         run_setup.json and kept on resume, extend and rereduce
                         when not typed
+  --north {files,constant}
+                        near: each frame's true north at derotation and in the
+                        injection azimuth. files (a new run's default): each
+                        night's AB_truenorth_clean.txt, one number per frame,
+                        where there is one, else 36.5 deg. constant: 36.5 deg
+                        for every frame. Recorded in run_setup.json with each
+                        file's SHA-1. resume, extend and rereduce keep the
+                        run's own and refuse a recorded file that is gone or
+                        has changed. A run made before 2026-11-01 used 36.5
   --cube-name NAME      near: the cube read in each night's directory (default
                         AB_cube_skysub_cen_clean.fits, or AB_cube_crop150.fits
                         where only that is there), e.g. a reduction's
@@ -1716,7 +1755,8 @@ usage: klip-tpe fit-chain [-h] [--instrument {near,nomic,generic,ales}]
                           [--no-clean-subtract] [--ladder-pair]
                           [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                           [--bin-min N] [--bin-max N] [--known RHO PA]
-                          [--psflib DIR] [--cube-name NAME]
+                          [--psflib DIR] [--north {files,constant}]
+                          [--cube-name NAME]
                           [--drop-frames NIGHT:INDEX[,INDEX...]]
                           [--subtract-sources FILE] [--subtract-line FILE]
                           [--inject-sources FILE] [--metric {mawet,fmmf}]
@@ -1807,6 +1847,15 @@ options:
                         ROOT/psflib), e.g. psflib_v2. Recorded in
                         run_setup.json and kept on resume, extend and rereduce
                         when not typed
+  --north {files,constant}
+                        near: each frame's true north at derotation and in the
+                        injection azimuth. files (a new run's default): each
+                        night's AB_truenorth_clean.txt, one number per frame,
+                        where there is one, else 36.5 deg. constant: 36.5 deg
+                        for every frame. Recorded in run_setup.json with each
+                        file's SHA-1. resume, extend and rereduce keep the
+                        run's own and refuse a recorded file that is gone or
+                        has changed. A run made before 2026-11-01 used 36.5
   --cube-name NAME      near: the cube read in each night's directory (default
                         AB_cube_skysub_cen_clean.fits, or AB_cube_crop150.fits
                         where only that is there), e.g. a reduction's
@@ -2066,7 +2115,8 @@ usage: klip-tpe rereduce [-h] [--instrument {near,nomic,generic,ales}]
                          [--no-clean-subtract] [--ladder-pair]
                          [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                          [--bin-min N] [--bin-max N] [--known RHO PA]
-                         [--psflib DIR] [--cube-name NAME]
+                         [--psflib DIR] [--north {files,constant}]
+                         [--cube-name NAME]
                          [--drop-frames NIGHT:INDEX[,INDEX...]]
                          [--subtract-sources FILE] [--subtract-line FILE]
                          [--inject-sources FILE] [--metric {mawet,fmmf}]
@@ -2154,6 +2204,15 @@ options:
                         ROOT/psflib), e.g. psflib_v2. Recorded in
                         run_setup.json and kept on resume, extend and rereduce
                         when not typed
+  --north {files,constant}
+                        near: each frame's true north at derotation and in the
+                        injection azimuth. files (a new run's default): each
+                        night's AB_truenorth_clean.txt, one number per frame,
+                        where there is one, else 36.5 deg. constant: 36.5 deg
+                        for every frame. Recorded in run_setup.json with each
+                        file's SHA-1. resume, extend and rereduce keep the
+                        run's own and refuse a recorded file that is gone or
+                        has changed. A run made before 2026-11-01 used 36.5
   --cube-name NAME      near: the cube read in each night's directory (default
                         AB_cube_skysub_cen_clean.fits, or AB_cube_crop150.fits
                         where only that is there), e.g. a reduction's
@@ -2421,7 +2480,8 @@ usage: klip-tpe replay [-h] [--instrument {near,nomic,generic,ales}]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                        [--bin-min N] [--bin-max N] [--known RHO PA]
-                       [--psflib DIR] [--cube-name NAME]
+                       [--psflib DIR] [--north {files,constant}]
+                       [--cube-name NAME]
                        [--drop-frames NIGHT:INDEX[,INDEX...]]
                        [--subtract-sources FILE] [--subtract-line FILE]
                        [--inject-sources FILE] [--metric {mawet,fmmf}]
@@ -2511,6 +2571,15 @@ options:
                         ROOT/psflib), e.g. psflib_v2. Recorded in
                         run_setup.json and kept on resume, extend and rereduce
                         when not typed
+  --north {files,constant}
+                        near: each frame's true north at derotation and in the
+                        injection azimuth. files (a new run's default): each
+                        night's AB_truenorth_clean.txt, one number per frame,
+                        where there is one, else 36.5 deg. constant: 36.5 deg
+                        for every frame. Recorded in run_setup.json with each
+                        file's SHA-1. resume, extend and rereduce keep the
+                        run's own and refuse a recorded file that is gone or
+                        has changed. A run made before 2026-11-01 used 36.5
   --cube-name NAME      near: the cube read in each night's directory (default
                         AB_cube_skysub_cen_clean.fits, or AB_cube_crop150.fits
                         where only that is there), e.g. a reduction's
@@ -2749,7 +2818,8 @@ usage: klip-tpe compare [-h] [--instrument {near,nomic,generic,ales}]
                         [--no-clean-subtract] [--ladder-pair]
                         [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                         [--bin-min N] [--bin-max N] [--known RHO PA]
-                        [--psflib DIR] [--cube-name NAME]
+                        [--psflib DIR] [--north {files,constant}]
+                        [--cube-name NAME]
                         [--drop-frames NIGHT:INDEX[,INDEX...]]
                         [--subtract-sources FILE] [--subtract-line FILE]
                         [--inject-sources FILE] [--metric {mawet,fmmf}]
@@ -2844,6 +2914,15 @@ options:
                         ROOT/psflib), e.g. psflib_v2. Recorded in
                         run_setup.json and kept on resume, extend and rereduce
                         when not typed
+  --north {files,constant}
+                        near: each frame's true north at derotation and in the
+                        injection azimuth. files (a new run's default): each
+                        night's AB_truenorth_clean.txt, one number per frame,
+                        where there is one, else 36.5 deg. constant: 36.5 deg
+                        for every frame. Recorded in run_setup.json with each
+                        file's SHA-1. resume, extend and rereduce keep the
+                        run's own and refuse a recorded file that is gone or
+                        has changed. A run made before 2026-11-01 used 36.5
   --cube-name NAME      near: the cube read in each night's directory (default
                         AB_cube_skysub_cen_clean.fits, or AB_cube_crop150.fits
                         where only that is there), e.g. a reduction's
