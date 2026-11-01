@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased — 2026-11-01 (the count each annulus keeps, and what the card took)
+
+- **Every annulus logs the source count it keeps** (NEAR2 s6 note, section 4).  The line that
+  said when the rule lowered the count now has a twin for an annulus the rule leaves alone:
+  `annulus 3: 2 sources a draw, as asked, and each keeps at least 4 noise apertures outside the
+  sources' ADI sidelobes (+/- 150 deg at the outer edge)`.
+- **After each annulus' search the log says what the card took** (section 6): `annulus 2: the
+  card reduced 312 of the 330 jobs marked for it, and turned away 18 (extras 18)`.  The pool
+  counts the jobs marked for the card and in its share, and the ones its reducer turns away by
+  reason (`GPUKLIPReducer.refusal`, which `supports` now reads).  `final_results.json` keeps the
+  totals in `card.marked` and `card.refused`.
+- Tests in `tests/test_card_counts.py`, `tests/test_card_worker.py` and
+  `tests/test_sidelobe_rings.py`.
+
 ## Unreleased — 2026-11-01 (the sidelobe rule in the verify and the candidate search)
 
 - **The verify takes the run's sidelobe rule** (NEAR2 s6 note, section 4).  Path A and the

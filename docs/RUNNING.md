@@ -248,13 +248,17 @@ card cannot start, a worker dies, or 3 jobs fail on it, its jobs go back to the 
 the run goes on without it.  `final_results.json` and `bench_summary.txt` give the card's jobs
 and the fraction of the time its workers were busy, from which to set the next run's share.
 Each record in `results.jsonl` lists the nights the card reduced (`meta.card`, and
-`meta.draw_card` draw by draw).
+`meta.draw_card` draw by draw).  After each annulus' search the log says how many of its jobs
+were marked for the card, how many the card reduced, and how many its reducer turned away and
+why, such as `extras` or `KLIP-FM` (`GPUKLIPReducer.refusal`).  `final_results.json` keeps the
+totals (`marked`, `refused`).
 
 The card's images agree with the CPU's to about 1e-5 of the image noise, not to the bit, and the
 same job on the card twice gives the same bits.  `tests/test_gpu_reducer.py` compares the two on
 synthetic nights, on NumPy everywhere and on the card where there is one.
 `scripts/check_gpu_reducer.py --run <run directory>` does it on a finished NEAR2 run's frames
-and recorded configurations, and is worth running on the card after an update.
+and recorded configurations, with the run's plate scale, library and north, and is worth
+running on the card after an update.
 
 ## Edited frames (`--cube-name`, `--drop-frames`, `--subtract-sources`, `--inject-sources`)
 

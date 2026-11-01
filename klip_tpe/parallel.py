@@ -511,6 +511,8 @@ class ProcessPool:
         self.card_info: Optional[dict] = None
         self.card_busy = 0.0               # seconds the card workers spent in jobs
         self.card_jobs = 0
+        self.card_marked = 0               # jobs marked for the card and in its share, while it was up
+        self.card_refused: Dict[str, int] = {}   # of those, the ones supports() turned away, by reason
         self.card_why: Optional[str] = None
         self._card_t0 = time.time()
         self._notes: list = []             # log lines for the caller's thread (take_notes)
@@ -565,15 +567,23 @@ class ProcessPool:
 
     # -- the card ----------------------------------------------------------------------
     def _to_card(self, pid, req) -> bool:
-        """Whether a job goes to the card (call with the lock held)."""
+        """Whether a job goes to the card (call with the lock held).  A job marked for it and in
+        its share counts in ``card_marked``, and one its reducer turns away in ``card_refused``
+        under the reason (``refusal(req)`` where the reducer has it, else ``supports``)."""
         if not self._card_ok or not getattr(req, "card", False) or pid not in self.card.reducers:
             return False
         if card_slot(getattr(req, "tag", "")) >= self.card.share:
             return False
+        self.card_marked += 1
+        red = self.card.reducers[pid]
         try:
-            return bool(self.card.reducers[pid].supports(req))
-        except Exception:
+            why = red.refusal(req) if hasattr(red, "refusal") else (None if red.supports(req) else "not supported")
+        except Exception as exc:
+            why = f"supports() raised {type(exc).__name__}"
+        if why is not None:
+            self.card_refused[str(why)] = self.card_refused.get(str(why), 0) + 1
             return False
+        return True
 
     def _card_down(self, why: str) -> None:
         """Leave the card out from now on (call with the lock held): its jobs go back to the
@@ -622,7 +632,8 @@ class ProcessPool:
         return {"share": self.card.share, "workers": self.card.workers, "up": bool(self._card_ok),
                 "ready": self._card_ready, "why_down": self.card_why, "info": self.card_info,
                 "jobs": self.card_jobs, "busy_s": round(self.card_busy, 3),
-                "busy_fraction": round(self.card_busy / (wall * self.card.workers), 4)}
+                "busy_fraction": round(self.card_busy / (wall * self.card.workers), 4),
+                "marked": self.card_marked, "refused": dict(self.card_refused)}
 
     def _card_result(self, item) -> None:
         """A card worker's message (the collector's thread)."""
