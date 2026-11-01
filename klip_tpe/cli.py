@@ -1625,7 +1625,9 @@ def _add_run_args(p):
                         "16.16:25.47. All are numbered by centre and searched, validated and verified over their own "
                         "zones. Where annuli overlap, the stitch takes each radius from the annulus with the nearest "
                         "centre (their tiles, in final_results.json and klip_stitched_params.txt). The per-annulus "
-                        "lists of --n-iter, --n-init, --n-sources and --use-contrast follow the numbering by centre")
+                        "lists of --n-iter, --n-init, --n-sources and --use-contrast follow the numbering by centre. "
+                        "The first three repeat their last entry past their end, and an annulus past the end of "
+                        "--use-contrast is calibrated")
     p.add_argument("--n-iter", type=int, nargs="+", default=[200])
     p.add_argument("--n-init", type=int, nargs="+", default=[50])
     p.add_argument("--mode", default="tpe", choices=["tpe", "random", "grid"])
@@ -1636,7 +1638,10 @@ def _add_run_args(p):
                    help="TPE density model: univariate (default; the IDL reference) | partitions | full")
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--contrast0", type=float, default=3e-5)
-    p.add_argument("--use-contrast", type=float, nargs="+", default=None, help="forced contrast per annulus (0 = calibrate)")
+    p.add_argument("--use-contrast", type=float, nargs="+", default=None,
+                   help="forced contrast per annulus, in the annuli's order (by centre with --ann-extra). 0 calibrates "
+                        "that annulus, and so does every annulus past the end of the list. Unlike --n-iter, the list "
+                        "does not repeat its last entry"),
     p.add_argument("--cmax-cal", type=float, default=None)
     p.add_argument("--k-max", type=int, default=None)
     p.add_argument("--n-top", type=int, default=3)

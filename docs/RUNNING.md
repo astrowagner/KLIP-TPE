@@ -232,7 +232,9 @@ NEAR2's s6 adds three on the seams of its first edges:
 
 All annuli are numbered by their centre radius, so this run has ten, from `annulus01` (2.19-11.5)
 to `annulus10` (58.05-67.36), and the per-annulus lists of `--n-iter`, `--n-init`,
-`--n-sources` and `--use-contrast` follow that order.  Each annulus is searched, calibrated, validated, gridded and verified over its own zone,
+`--n-sources` and `--use-contrast` follow that order.  The first three repeat their last entry
+for the annuli past their end.  `--use-contrast` does not.  An annulus past its end is
+calibrated, as one given 0 is.  Each annulus is searched, calibrated, validated, gridded and verified over its own zone,
 as any annulus is.  Where two annuli overlap, the stitch takes each radius from the annulus whose
 centre is nearest.  The boundary between their tiles is the midpoint between the centres, with
 the same 2 px blend as an edge between annuli.  Where annuli meet without overlapping, the tile

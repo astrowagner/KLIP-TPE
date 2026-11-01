@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — 2026-11-01 (`--use-contrast` past its end, in the docs)
+
+- The help of `--use-contrast` and `--ann-extra`, `docs/RUNNING.md` and `CalibrationConfig`'s
+  docstring now say that an annulus past the end of `--use-contrast` is calibrated, as one given
+  0 is.  `--n-iter`, `--n-init` and `--n-sources` repeat their last entry, and
+  `--use-contrast` does not.  The note of 5a1f9ba had said all four repeat (NEAR2, 2026-10-31
+  20:40).  The code is unchanged, and a test in `tests/test_overlap_annuli.py` now holds it.
+
 ## Unreleased — 2026-11-01 (overlapping annuli)
 
 - **`--ann-extra IN:OUT ...`** (`RunConfig.ann_extra`) adds annuli beside those of `--ann-edges`,
