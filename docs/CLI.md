@@ -292,13 +292,17 @@ options:
                         the sidelobes' least half-width, in FWHM of arc
                         (default 2)
   --sidelobes {farthest,clean,off}
-                        every S/N's noise ring (search, validation, the grid)
-                        leaves out the ADI sidelobes of the injected sources
-                        and known companions, +/- the data's PA coverage, and
-                        the source count keeps 4 apertures outside them. Where
-                        fewer than 4 are left: the 4 farthest from the source
-                        (farthest, the default) or the clean reduction's ring
-                        (clean). off: the rings as before 2026-10-31
+                        every S/N's noise ring (search, validation, the grid,
+                        the verify and the candidates) leaves out the ADI
+                        sidelobes of the injected sources and known
+                        companions, +/- the data's PA coverage, and the source
+                        count keeps 4 apertures outside them. Where fewer than
+                        4 are left, farthest (the default) takes the 4
+                        farthest from the source and clean the clean
+                        reduction's ring (the verify and the candidates take
+                        the farthest). The S/N maps leave out the known
+                        companions' sidelobes. off: the rings as before
+                        2026-10-31
   --global-block        one parameter block for all nights
   --no-framesel
   --no-selection        no drop1/drop2 night-selection dims
@@ -810,13 +814,17 @@ options:
                         the sidelobes' least half-width, in FWHM of arc
                         (default 2)
   --sidelobes {farthest,clean,off}
-                        every S/N's noise ring (search, validation, the grid)
-                        leaves out the ADI sidelobes of the injected sources
-                        and known companions, +/- the data's PA coverage, and
-                        the source count keeps 4 apertures outside them. Where
-                        fewer than 4 are left: the 4 farthest from the source
-                        (farthest, the default) or the clean reduction's ring
-                        (clean). off: the rings as before 2026-10-31
+                        every S/N's noise ring (search, validation, the grid,
+                        the verify and the candidates) leaves out the ADI
+                        sidelobes of the injected sources and known
+                        companions, +/- the data's PA coverage, and the source
+                        count keeps 4 apertures outside them. Where fewer than
+                        4 are left, farthest (the default) takes the 4
+                        farthest from the source and clean the clean
+                        reduction's ring (the verify and the candidates take
+                        the farthest). The S/N maps leave out the known
+                        companions' sidelobes. off: the rings as before
+                        2026-10-31
   --global-block        one parameter block for all nights
   --no-framesel
   --no-selection        no drop1/drop2 night-selection dims

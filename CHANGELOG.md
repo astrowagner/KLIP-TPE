@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased — 2026-11-01 (the sidelobe rule in the verify and the candidate search)
+
+- **The verify takes the run's sidelobe rule** (NEAR2 s6 note, section 4).  Path A and the
+  subsets of `verify_report.txt` and `stitched_verify_report.txt`, with `rereduce
+  --verify-sources` too, leave out of each ring the ADI arcs of the source, of the known
+  companions and of the injection block's other sources, as the run's own S/N does since
+  b992328 (`verify.ring_snr`).  The sources are given, not counted, so where the arcs leave
+  fewer than 4 samples the source's own arc narrows to let in the farthest, then the other
+  sources' arcs are let in, then the known companions'.  The last is the ring without the rule.
+  The STIM annulus and the solved contrasts leave out what the source's Path-A ring left out.
+  The report describes the rule and lists the rings that fell back, and each row has `noise`.
+- **The candidate search takes it too.**  Each peak's S/N (per night, even / odd, combined)
+  leaves out its own arc and the known companions'.  A candidate at a known companion is not
+  left out of its own ring as a companion.  The S/N maps, `klip_stitched_snr.fits` and the
+  running and injected ones, and the blind search's map leave out the known companions' arcs
+  alone.  Without a known companion they are unchanged.
+- The verify's fallback is the farthest samples in `clean` mode too, since the subsets and the
+  candidates have no clean ring through the source.
+- `sidelobes off`, and every run saved before 2026-10-31, keeps every number as before.
+- `metrics.sidelobe_snr` takes `only=` (one source of several) and `drop=` (what the fallback
+  lets in, in order), and records the `arcs` each measurement left out.  The run's own S/N is
+  unchanged.  The offline verify books (`display.render_verify_books`) take the run's rule from
+  its setup.
+- Tests in `tests/test_verify_sidelobes.py`.
+
 ## Unreleased — 2026-11-01 (the live panel says what each S/N is)
 
 - **Under `--n-remeasure` the S/N titles say they are a mean of draws** (ALES note,

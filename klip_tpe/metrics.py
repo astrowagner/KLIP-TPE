@@ -797,7 +797,8 @@ def _farther_widths(nap: int, start_deg: float) -> List[float]:
 
 def sidelobe_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, sidelobes: Sidelobes, *,
                  img_clean: Optional[np.ndarray] = None, known: Sequence[Tuple[float, float]] = (),
-                 measure: Optional[Callable] = None, angle_convention: str = "pa", **kw):
+                 measure: Optional[Callable] = None, angle_convention: str = "pa",
+                 only: Optional[int] = None, drop: Sequence[str] = ("known",), **kw):
     """Each source's S/N by ``measure`` (default :func:`mawet_peak_snr`) with
     :class:`Sidelobes` noise rings, one source at a time: every source's arc and the known
     companions' arcs left out of its ring, then the at-least-``min_apertures`` rule.
@@ -812,7 +813,17 @@ def sidelobe_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, sidel
     the two rings have one radius.  Where the fallback too leaves fewer than
     ``min_apertures``, ``fallback_tried`` names it and ``n_fallback`` is the most apertures it
     found: the whole ring's, with the source's own arc let in and then the known companions'
-    arcs, or the clean ring's."""
+    arcs, or the clean ring's.
+
+    ``drop``: what the farthest fallback lets in, one after the other, once the source's own arc
+    is gone: ``"known"`` the known companions' arcs (the default, the run's metric), ``"others"``
+    the other sources' arcs.  ``("others", "known")`` (the verify's) lets in the other sources'
+    arcs first, ``fallback`` then ``"farthest, the other sources' arcs too"``, and both last,
+    ``"farthest, every arc let in"``, the ring without the rule.  ``only``: measure that source
+    alone, the others giving their arcs (the rest of the returned S/N NaN).  Each source's
+    details hold the ``arcs`` its measurement left out, ``(rho, theta, half_width_deg,
+    radial_fwhm)``.  ``measure`` may take ``peak_xy`` (``measure.takes_peak_xy``), for the clean
+    ring through the injected source."""
     measure = measure or mawet_peak_snr
     rho = np.atleast_1d(np.asarray(rho, float))
     theta = np.atleast_1d(np.asarray(theta, float))
@@ -835,13 +846,17 @@ def sidelobe_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, sidel
     for i in range(n):
         others = src_arcs[:i] + src_arcs[i + 1:]
 
+        if only is not None and i != int(only):
+            dets.append({})
+            continue
+
         def run(own: float, with_known: bool = True, image=img, arcs=None, **over):
             if arcs is None:
                 arcs = ([(src_arcs[i][0], src_arcs[i][1], own, rad)] if own > 0 else []) + others \
                     + (known_arcs if with_known else [])
             s_, d_ = measure(image, [rho[i]], [theta[i]], pxscale, fwhm, known=known, excl_arcs=arcs,
                              angle_convention=angle_convention, return_details=True, **dict(kw, **over))
-            return float(s_[0]), dict(d_[0])
+            return float(s_[0]), dict(d_[0], arcs=list(arcs))
         s, d = run(hw[i])
         d.update(arc_deg=hw[i], n_arcs=n_left(d), fallback=None)
         if not d.get("why") and int(d.get("nclean", 0)) < min_ap:
@@ -849,7 +864,8 @@ def sidelobe_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, sidel
                 # the clean ring through the injected source as located: a peak search of its
                 # own would settle on a noise peak up to search_px away, at another radius
                 over = ({"peak_xy": [(d["x"], d["y"])]}
-                        if measure is mawet_peak_snr and "x" in d and "y" in d else {})
+                        if (measure is mawet_peak_snr or getattr(measure, "takes_peak_xy", False))
+                        and "x" in d and "y" in d else {})
                 _, dc = run(0.0, image=img_clean, arcs=known_arcs, **over)
                 peak, sd = d.get("peak", np.nan), dc.get("sigma", -1.0)
                 if not dc.get("why") and int(dc.get("nclean", 0)) >= min_ap and sd > 0 and np.isfinite(peak):
@@ -868,13 +884,25 @@ def sidelobe_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, sidel
                     if int(d2.get("nclean", 0)) >= min_ap:
                         s, d, found = s2, dict(d2, arc_deg=own, n_arcs=d["n_arcs"], fallback="farthest"), True
                         break
-                if not found and known_arcs:
-                    s2, d2 = run(0.0, with_known=False)
-                    if not d2.get("why"):
-                        most = max(most, n_left(d2))
-                        if int(d2.get("nclean", 0)) >= min_ap:
-                            s, d, found = s2, dict(d2, arc_deg=0.0, n_arcs=d["n_arcs"],
-                                                   fallback="farthest, known arcs too"), True
+                gone: set = set()
+                for what in drop:
+                    if found:
+                        break
+                    if what not in ("known", "others"):
+                        raise ValueError(f"sidelobe_snr: drop={tuple(drop)!r}: 'known' and 'others'")
+                    if not (known_arcs if what == "known" else others):
+                        continue
+                    gone.add(what)
+                    arcs_ = ([] if "others" in gone else others) + ([] if "known" in gone else known_arcs)
+                    s2, d2 = run(0.0, arcs=arcs_)
+                    if d2.get("why"):
+                        continue
+                    most = max(most, n_left(d2))
+                    if int(d2.get("nclean", 0)) >= min_ap:
+                        how = ("farthest, known arcs too" if gone == {"known"} else
+                               "farthest, the other sources' arcs too" if gone == {"others"} else
+                               "farthest, every arc let in")
+                        s, d, found = s2, dict(d2, arc_deg=0.0, n_arcs=d["n_arcs"], fallback=how), True
                 if not found:
                     d.update(fallback_tried="farthest", n_fallback=most)
         snr[i] = s

@@ -160,10 +160,15 @@ def stitch_annuli(images: Sequence[np.ndarray], edges: Sequence[float], fwhm: fl
 
 def snr_map(img: np.ndarray, fwhm: float, kernel: Optional[np.ndarray] = None,
             exclude_xy: Sequence[Tuple[float, float]] = (), excl_fwhm: float = 1.5,
-            rmin: float = 1.0) -> np.ndarray:
+            rmin: float = 1.0, excl_arcs: Sequence[Tuple[float, float, float, float]] = (),
+            pxscale: Optional[float] = None, angle_convention: str = "pa") -> np.ndarray:
     """Matched-filter S/N map with a per-radius robust (MAD-floored) sigma and the
     Mawet small-sample penalty (``near2m_snrmap``).  A display/diagnostic quantity
-    -- NOT the search score (different noise convention)."""
+    -- NOT the search score (different noise convention).
+
+    ``excl_arcs`` (with ``pxscale``): ``(rho_arcsec, theta_deg, half_width_deg,
+    radial_fwhm)`` arcs whose pixels are left out of every ring's noise, as the known
+    companions' ADI sidelobes under the run's sidelobe rule."""
     img = np.asarray(img, float)
     ny, nx = img.shape
     cx, cy = star_center(img.shape)
@@ -176,6 +181,9 @@ def snr_map(img: np.ndarray, fwhm: float, kernel: Optional[np.ndarray] = None,
     keep = fin.copy()
     for ex, ey in exclude_xy:
         keep &= np.hypot(xx - ex, yy - ey) >= excl_fwhm * fwhm
+    if len(excl_arcs) and pxscale is not None:
+        from .metrics import _arc_regions, _in_arcs
+        keep &= ~_in_arcs(xx, yy, _arc_regions(excl_arcs, pxscale, fwhm, cx, cy, angle_convention), cx, cy)
     out = np.full(img.shape, np.nan)
     rmax = int(np.floor(rr[fin].max())) if fin.any() else 0
     for r in range(max(int(rmin), 1), rmax + 1):
