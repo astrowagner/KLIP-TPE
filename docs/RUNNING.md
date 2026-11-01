@@ -175,6 +175,22 @@ stopped run from that point on and writes the switch, with its time, into `klip_
 in the run directory, so every later resume keeps it.  `--klip-gram target` switches it back.
 The log says when a run uses `zone`.
 
+### The plate scale and the PSF library (`--pxscale`, `--psflib`)
+
+The astrometry of the 2026 cubes gives NEAR 0.04450"/px near the star, where klip-tpe used
+0.0456.  A new run takes 0.04450, and lambda/D (6.360 px), the FWHM (6.392 px) and the binning
+rule's FWHM (6.538 px) follow from it.  `run_setup.json` records the scale with the PSF library
+(the reducer's `provenance`), and `resume`, `extend`, `fit-chain` and `rereduce` read them back,
+so a run is always continued and reproduced at its own scale.  A run made before 2026-11-01
+recorded neither and was made at 0.0456, so it gets that.  `--pxscale` sets the scale for a new
+run, or changes it for a command on an old one, which then no longer reproduces it.
+
+`--psflib DIR` reads the PSF library from `DIR` instead of `ROOT/psflib`, for example the v2
+library.  The v2 index (`n4_psf_cube_index.csv`, the format with a `v1_grid_mas` column) gives
+each slice's separation, as do a header's `SEP00`.. keywords.  A library without them keeps
+the 75-mas grid of v1, so v1 runs inject where they always did.  The log gives the library's
+path, its stamps and their range.
+
 ### The card (`--gpu-share`, `--gpu-workers`)
 
 A share of the search's injected draws can be reduced on an NVIDIA card beside the CPU

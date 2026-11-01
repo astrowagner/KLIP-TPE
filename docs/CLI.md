@@ -47,7 +47,7 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--no-clean-subtract] [--ladder-pair]
                         [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                         [--bin-min N] [--bin-max N] [--known RHO PA]
-                        [--cube-name NAME]
+                        [--psflib DIR] [--cube-name NAME]
                         [--drop-frames NIGHT:INDEX[,INDEX...]]
                         [--subtract-sources FILE] [--subtract-line FILE]
                         [--inject-sources FILE] [--metric {mawet,fmmf}]
@@ -166,6 +166,10 @@ options:
                         nframes / 8). A winner sitting on it
                         (distance_to_bounds bin = 0) wants it higher
   --known RHO PA
+  --psflib DIR          near: the PSF library's directory (default
+                        ROOT/psflib), e.g. psflib_v2. Recorded in
+                        run_setup.json and kept on resume, extend and rereduce
+                        when not typed
   --cube-name NAME      near: the cube read in each night's directory (default
                         AB_cube_skysub_cen_clean.fits, or AB_cube_crop150.fits
                         where only that is there), e.g. a reduction's
@@ -392,7 +396,12 @@ generic cubes (--instrument generic / klip-tpe generic):
                         star flux per cube, in the science frames' own units
                         and in the template's normalisation aperture; omit it
                         and the contrast axis is in template units
-  --pxscale PXSCALE     arcsec / px
+  --pxscale PXSCALE     arcsec / px. generic: the cubes' scale. near: the
+                        plate scale the pixel constants follow (lambda/D, the
+                        FWHM). A new run takes 0.0445, the scale of the 2026
+                        astrometry. A run keeps the scale it was made with
+                        (run_setup.json), and one made before 2026-11-01,
+                        which did not record it, 0.0456
   --lam LAM             wavelength (m)
   --diam DIAM           aperture diameter (m) for lambda/D
   --angle-sign ANGLE_SIGN
@@ -550,7 +559,8 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--no-clean-subtract] [--ladder-pair]
                      [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                      [--bin-min N] [--bin-max N] [--known RHO PA]
-                     [--cube-name NAME] [--drop-frames NIGHT:INDEX[,INDEX...]]
+                     [--psflib DIR] [--cube-name NAME]
+                     [--drop-frames NIGHT:INDEX[,INDEX...]]
                      [--subtract-sources FILE] [--subtract-line FILE]
                      [--inject-sources FILE] [--metric {mawet,fmmf}]
                      [--run-dir RUN_DIR]
@@ -665,6 +675,10 @@ options:
                         nframes / 8). A winner sitting on it
                         (distance_to_bounds bin = 0) wants it higher
   --known RHO PA
+  --psflib DIR          near: the PSF library's directory (default
+                        ROOT/psflib), e.g. psflib_v2. Recorded in
+                        run_setup.json and kept on resume, extend and rereduce
+                        when not typed
   --cube-name NAME      near: the cube read in each night's directory (default
                         AB_cube_skysub_cen_clean.fits, or AB_cube_crop150.fits
                         where only that is there), e.g. a reduction's
@@ -891,7 +905,12 @@ generic cubes (--instrument generic / klip-tpe generic):
                         star flux per cube, in the science frames' own units
                         and in the template's normalisation aperture; omit it
                         and the contrast axis is in template units
-  --pxscale PXSCALE     arcsec / px
+  --pxscale PXSCALE     arcsec / px. generic: the cubes' scale. near: the
+                        plate scale the pixel constants follow (lambda/D, the
+                        FWHM). A new run takes 0.0445, the scale of the 2026
+                        astrometry. A run keeps the scale it was made with
+                        (run_setup.json), and one made before 2026-11-01,
+                        which did not record it, 0.0456
   --lam LAM             wavelength (m)
   --diam DIAM           aperture diameter (m) for lambda/D
   --angle-sign ANGLE_SIGN
@@ -1049,7 +1068,7 @@ usage: klip-tpe resume [-h] [--instrument {near,nomic,generic,ales}]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                        [--bin-min N] [--bin-max N] [--known RHO PA]
-                       [--cube-name NAME]
+                       [--psflib DIR] [--cube-name NAME]
                        [--drop-frames NIGHT:INDEX[,INDEX...]]
                        [--subtract-sources FILE] [--subtract-line FILE]
                        [--inject-sources FILE] [--metric {mawet,fmmf}]
@@ -1135,6 +1154,10 @@ options:
                         nframes / 8). A winner sitting on it
                         (distance_to_bounds bin = 0) wants it higher
   --known RHO PA
+  --psflib DIR          near: the PSF library's directory (default
+                        ROOT/psflib), e.g. psflib_v2. Recorded in
+                        run_setup.json and kept on resume, extend and rereduce
+                        when not typed
   --cube-name NAME      near: the cube read in each night's directory (default
                         AB_cube_skysub_cen_clean.fits, or AB_cube_crop150.fits
                         where only that is there), e.g. a reduction's
@@ -1209,7 +1232,12 @@ generic cubes (--instrument generic / klip-tpe generic):
                         star flux per cube, in the science frames' own units
                         and in the template's normalisation aperture; omit it
                         and the contrast axis is in template units
-  --pxscale PXSCALE     arcsec / px
+  --pxscale PXSCALE     arcsec / px. generic: the cubes' scale. near: the
+                        plate scale the pixel constants follow (lambda/D, the
+                        FWHM). A new run takes 0.0445, the scale of the 2026
+                        astrometry. A run keeps the scale it was made with
+                        (run_setup.json), and one made before 2026-11-01,
+                        which did not record it, 0.0456
   --lam LAM             wavelength (m)
   --diam DIAM           aperture diameter (m) for lambda/D
   --angle-sign ANGLE_SIGN
@@ -1367,7 +1395,7 @@ usage: klip-tpe extend [-h] [--instrument {near,nomic,generic,ales}]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                        [--bin-min N] [--bin-max N] [--known RHO PA]
-                       [--cube-name NAME]
+                       [--psflib DIR] [--cube-name NAME]
                        [--drop-frames NIGHT:INDEX[,INDEX...]]
                        [--subtract-sources FILE] [--subtract-line FILE]
                        [--inject-sources FILE] [--metric {mawet,fmmf}]
@@ -1450,6 +1478,10 @@ options:
                         nframes / 8). A winner sitting on it
                         (distance_to_bounds bin = 0) wants it higher
   --known RHO PA
+  --psflib DIR          near: the PSF library's directory (default
+                        ROOT/psflib), e.g. psflib_v2. Recorded in
+                        run_setup.json and kept on resume, extend and rereduce
+                        when not typed
   --cube-name NAME      near: the cube read in each night's directory (default
                         AB_cube_skysub_cen_clean.fits, or AB_cube_crop150.fits
                         where only that is there), e.g. a reduction's
@@ -1517,7 +1549,12 @@ generic cubes (--instrument generic / klip-tpe generic):
                         star flux per cube, in the science frames' own units
                         and in the template's normalisation aperture; omit it
                         and the contrast axis is in template units
-  --pxscale PXSCALE     arcsec / px
+  --pxscale PXSCALE     arcsec / px. generic: the cubes' scale. near: the
+                        plate scale the pixel constants follow (lambda/D, the
+                        FWHM). A new run takes 0.0445, the scale of the 2026
+                        astrometry. A run keeps the scale it was made with
+                        (run_setup.json), and one made before 2026-11-01,
+                        which did not record it, 0.0456
   --lam LAM             wavelength (m)
   --diam DIAM           aperture diameter (m) for lambda/D
   --angle-sign ANGLE_SIGN
@@ -1679,7 +1716,7 @@ usage: klip-tpe fit-chain [-h] [--instrument {near,nomic,generic,ales}]
                           [--no-clean-subtract] [--ladder-pair]
                           [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                           [--bin-min N] [--bin-max N] [--known RHO PA]
-                          [--cube-name NAME]
+                          [--psflib DIR] [--cube-name NAME]
                           [--drop-frames NIGHT:INDEX[,INDEX...]]
                           [--subtract-sources FILE] [--subtract-line FILE]
                           [--inject-sources FILE] [--metric {mawet,fmmf}]
@@ -1766,6 +1803,10 @@ options:
                         nframes / 8). A winner sitting on it
                         (distance_to_bounds bin = 0) wants it higher
   --known RHO PA
+  --psflib DIR          near: the PSF library's directory (default
+                        ROOT/psflib), e.g. psflib_v2. Recorded in
+                        run_setup.json and kept on resume, extend and rereduce
+                        when not typed
   --cube-name NAME      near: the cube read in each night's directory (default
                         AB_cube_skysub_cen_clean.fits, or AB_cube_crop150.fits
                         where only that is there), e.g. a reduction's
@@ -1859,7 +1900,12 @@ generic cubes (--instrument generic / klip-tpe generic):
                         star flux per cube, in the science frames' own units
                         and in the template's normalisation aperture; omit it
                         and the contrast axis is in template units
-  --pxscale PXSCALE     arcsec / px
+  --pxscale PXSCALE     arcsec / px. generic: the cubes' scale. near: the
+                        plate scale the pixel constants follow (lambda/D, the
+                        FWHM). A new run takes 0.0445, the scale of the 2026
+                        astrometry. A run keeps the scale it was made with
+                        (run_setup.json), and one made before 2026-11-01,
+                        which did not record it, 0.0456
   --lam LAM             wavelength (m)
   --diam DIAM           aperture diameter (m) for lambda/D
   --angle-sign ANGLE_SIGN
@@ -2020,7 +2066,7 @@ usage: klip-tpe rereduce [-h] [--instrument {near,nomic,generic,ales}]
                          [--no-clean-subtract] [--ladder-pair]
                          [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                          [--bin-min N] [--bin-max N] [--known RHO PA]
-                         [--cube-name NAME]
+                         [--psflib DIR] [--cube-name NAME]
                          [--drop-frames NIGHT:INDEX[,INDEX...]]
                          [--subtract-sources FILE] [--subtract-line FILE]
                          [--inject-sources FILE] [--metric {mawet,fmmf}]
@@ -2104,6 +2150,10 @@ options:
                         nframes / 8). A winner sitting on it
                         (distance_to_bounds bin = 0) wants it higher
   --known RHO PA
+  --psflib DIR          near: the PSF library's directory (default
+                        ROOT/psflib), e.g. psflib_v2. Recorded in
+                        run_setup.json and kept on resume, extend and rereduce
+                        when not typed
   --cube-name NAME      near: the cube read in each night's directory (default
                         AB_cube_skysub_cen_clean.fits, or AB_cube_crop150.fits
                         where only that is there), e.g. a reduction's
@@ -2178,7 +2228,12 @@ generic cubes (--instrument generic / klip-tpe generic):
                         star flux per cube, in the science frames' own units
                         and in the template's normalisation aperture; omit it
                         and the contrast axis is in template units
-  --pxscale PXSCALE     arcsec / px
+  --pxscale PXSCALE     arcsec / px. generic: the cubes' scale. near: the
+                        plate scale the pixel constants follow (lambda/D, the
+                        FWHM). A new run takes 0.0445, the scale of the 2026
+                        astrometry. A run keeps the scale it was made with
+                        (run_setup.json), and one made before 2026-11-01,
+                        which did not record it, 0.0456
   --lam LAM             wavelength (m)
   --diam DIAM           aperture diameter (m) for lambda/D
   --angle-sign ANGLE_SIGN
@@ -2366,7 +2421,7 @@ usage: klip-tpe replay [-h] [--instrument {near,nomic,generic,ales}]
                        [--no-clean-subtract] [--ladder-pair]
                        [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                        [--bin-min N] [--bin-max N] [--known RHO PA]
-                       [--cube-name NAME]
+                       [--psflib DIR] [--cube-name NAME]
                        [--drop-frames NIGHT:INDEX[,INDEX...]]
                        [--subtract-sources FILE] [--subtract-line FILE]
                        [--inject-sources FILE] [--metric {mawet,fmmf}]
@@ -2452,6 +2507,10 @@ options:
                         nframes / 8). A winner sitting on it
                         (distance_to_bounds bin = 0) wants it higher
   --known RHO PA
+  --psflib DIR          near: the PSF library's directory (default
+                        ROOT/psflib), e.g. psflib_v2. Recorded in
+                        run_setup.json and kept on resume, extend and rereduce
+                        when not typed
   --cube-name NAME      near: the cube read in each night's directory (default
                         AB_cube_skysub_cen_clean.fits, or AB_cube_crop150.fits
                         where only that is there), e.g. a reduction's
@@ -2525,7 +2584,12 @@ generic cubes (--instrument generic / klip-tpe generic):
                         star flux per cube, in the science frames' own units
                         and in the template's normalisation aperture; omit it
                         and the contrast axis is in template units
-  --pxscale PXSCALE     arcsec / px
+  --pxscale PXSCALE     arcsec / px. generic: the cubes' scale. near: the
+                        plate scale the pixel constants follow (lambda/D, the
+                        FWHM). A new run takes 0.0445, the scale of the 2026
+                        astrometry. A run keeps the scale it was made with
+                        (run_setup.json), and one made before 2026-11-01,
+                        which did not record it, 0.0456
   --lam LAM             wavelength (m)
   --diam DIAM           aperture diameter (m) for lambda/D
   --angle-sign ANGLE_SIGN
@@ -2685,7 +2749,7 @@ usage: klip-tpe compare [-h] [--instrument {near,nomic,generic,ales}]
                         [--no-clean-subtract] [--ladder-pair]
                         [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                         [--bin-min N] [--bin-max N] [--known RHO PA]
-                        [--cube-name NAME]
+                        [--psflib DIR] [--cube-name NAME]
                         [--drop-frames NIGHT:INDEX[,INDEX...]]
                         [--subtract-sources FILE] [--subtract-line FILE]
                         [--inject-sources FILE] [--metric {mawet,fmmf}]
@@ -2776,6 +2840,10 @@ options:
                         nframes / 8). A winner sitting on it
                         (distance_to_bounds bin = 0) wants it higher
   --known RHO PA
+  --psflib DIR          near: the PSF library's directory (default
+                        ROOT/psflib), e.g. psflib_v2. Recorded in
+                        run_setup.json and kept on resume, extend and rereduce
+                        when not typed
   --cube-name NAME      near: the cube read in each night's directory (default
                         AB_cube_skysub_cen_clean.fits, or AB_cube_crop150.fits
                         where only that is there), e.g. a reduction's
@@ -2860,7 +2928,12 @@ generic cubes (--instrument generic / klip-tpe generic):
                         star flux per cube, in the science frames' own units
                         and in the template's normalisation aperture; omit it
                         and the contrast axis is in template units
-  --pxscale PXSCALE     arcsec / px
+  --pxscale PXSCALE     arcsec / px. generic: the cubes' scale. near: the
+                        plate scale the pixel constants follow (lambda/D, the
+                        FWHM). A new run takes 0.0445, the scale of the 2026
+                        astrometry. A run keeps the scale it was made with
+                        (run_setup.json), and one made before 2026-11-01,
+                        which did not record it, 0.0456
   --lam LAM             wavelength (m)
   --diam DIAM           aperture diameter (m) for lambda/D
   --angle-sign ANGLE_SIGN

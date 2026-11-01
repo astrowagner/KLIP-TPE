@@ -33,12 +33,17 @@ from ..reducer import Dataset, KLIPReducer, PartitionedReducer, reducer_class
 from ..space import Param, SearchSpace, kgrid
 
 __all__ = ["NEAR", "load_night", "N4Library", "make_reducer", "make_space", "make_guard",
-           "default_config", "production_defaults", "legacy_masks"]
+           "default_config", "production_defaults", "legacy_masks", "near_constants"]
 
 
 class NEAR:
-    """Instrument constants."""
-    pxscale = 0.0456                 # arcsec / px
+    """Instrument constants.  The pixel constants follow ``pxscale``: a new run takes this
+    class's, and a run keeps the scale it was made with (:func:`near_constants`,
+    ``PartitionedReducer.provenance``)."""
+    #: arcsec / px, from the astrometry of the 2026 cubes (NEAR2 note, 2026-10-31): 0.04450
+    #: +/- 0.00003 near the star.  Runs before 2026-11-01 used :attr:`legacy_pxscale`.
+    pxscale = 0.04450
+    legacy_pxscale = 0.0456          # the scale of every run made before 2026-11-01
     lam_klip = 11.25e-6              # m, used for lambda/D (angsep unit, binning rule)
     lam_metric = 11.0e-6             # m, the optimizer's FWHM (6.24 px)
     diam = 8.2                       # m
@@ -47,9 +52,20 @@ class NEAR:
     shsize = 75                      # KLIP crop half size (150 px)
     n4_refpa = -93.9                 # deg, distortion axis of the PSF library
     b_to_a = 129.0 / 57.0            # contrast is relative to alpha Cen A; template is B
-    lam_over_d_px = (lam_klip / diam) * 206265.0 / pxscale          # 6.206
-    fwhm_px = 1.028 * (lam_metric / diam) * 206265.0 / pxscale       # 6.238
-    fwhm_bin_px = 1.028 * lam_over_d_px                              # 6.380
+    lam_over_d_px = (lam_klip / diam) * 206265.0 / pxscale          # 6.359 (6.206 at 0.0456)
+    fwhm_px = 1.028 * (lam_metric / diam) * 206265.0 / pxscale       # 6.392 (6.238)
+    fwhm_bin_px = 1.028 * lam_over_d_px                              # 6.537 (6.380)
+
+
+def near_constants(pxscale: Optional[float] = None) -> Dict[str, float]:
+    """NEAR's pixel constants at a plate scale (arcsec/px), by :class:`NEAR`'s own formulas, so
+    the scale a run was made with gives it its constants to the bit.  None:
+    :attr:`NEAR.pxscale`."""
+    ps = float(NEAR.pxscale if pxscale is None else pxscale)
+    lod = (NEAR.lam_klip / NEAR.diam) * 206265.0 / ps
+    return {"pxscale": ps, "lam_over_d_px": lod,
+            "fwhm_px": 1.028 * (NEAR.lam_metric / NEAR.diam) * 206265.0 / ps,
+            "fwhm_bin_px": 1.028 * lod}
 
 
 # ----------------------------------------------------------------------------
@@ -226,6 +242,32 @@ def legacy_masks(aa: int = 0, bb: int = 0, ab: int = 0, ba: int = 0, block_airy:
 # ----------------------------------------------------------------------------
 # injection model
 # ----------------------------------------------------------------------------
+def _library_separations(psflib: str, hdr, n: int) -> Tuple[Optional[List[float]], str]:
+    """Each of a library's ``n`` slices' separation (arcsec) and where it came from: the v2
+    index ``n4_psf_cube_index.csv`` (column ``sep_arcsec``, ordered by ``slice``), else the
+    header's ``SEP00``.. keywords, else None (the caller's 75-mas grid).
+
+    The v1 library's index has a ``sep_arcsec`` column too, with other values that klip-tpe
+    never read, so reading it would change every run made with v1.  Only an index of the v2
+    format, which records v1's grid beside the new values (``v1_grid_mas``), is read."""
+    idx = os.path.join(psflib, "n4_psf_cube_index.csv")
+    if os.path.exists(idx):
+        with open(idx) as f:
+            reader = csv.DictReader(f)
+            v2 = "v1_grid_mas" in (reader.fieldnames or [])
+            rows = [r for r in reader if (r.get("sep_arcsec") or "").strip()]
+        if v2:
+            if "slice" in (rows[0] if rows else {}):
+                rows.sort(key=lambda r: int(float(r["slice"])))
+            if len(rows) != n:
+                raise ValueError(f"{idx}: {len(rows)} rows with sep_arcsec for {n} slices")
+            return [float(r["sep_arcsec"]) for r in rows], "n4_psf_cube_index.csv"
+    keys = [f"SEP{k:02d}" for k in range(n)]
+    if all(k in hdr for k in keys):
+        return [float(hdr[k]) for k in keys], "header SEPnn"
+    return None, "75-mas grid (v1)"
+
+
 def _throughput_table(psflib: str) -> Optional[Callable]:
     p = os.path.join(psflib, "throughput_merged.csv")
     if not os.path.exists(p):
@@ -274,28 +316,46 @@ class N4Library:
         self.platescale = float(hdr.get("PLATESCL", 0.0453))
         self.lambdad_mas = float(hdr.get("LAMBDAD", 283.0))
         self.rap = (self.lambdad_mas / 1000.0) / self.platescale    # 6.25 library px
-        # slices 12 and 13 share the final offset -> average; 13 slices at 0.150..1.050"
+        # slices 12 and 13 share the final offset -> average them
         sl = list(cube[:12]) + [0.5 * (cube[12] + cube[13])] if cube.shape[0] >= 14 else list(cube)
         stamps = []
         for s in sl:
             st = shift_bilinear(np.where(np.isfinite(s), s, 0.0), -0.5, -0.5)[:40, :40]   # star (20,20)->(19.5,19.5)
             stamps.append(st)
-        self.seps = (np.arange(len(stamps)) + 2) * 0.075
+        # each slice's separation: the library's index, else its header, else the 75-mas grid
+        # of v1 (0.150..1.050", which put the slices from the 4th on one step too far out)
+        per, self.sep_source = _library_separations(psflib, hdr, cube.shape[0])
+        if per is None:
+            self.seps = (np.arange(len(stamps)) + 2) * 0.075
+        else:
+            per = list(per)
+            self.seps = np.asarray(per[:12] + [0.5 * (per[12] + per[13])] if cube.shape[0] >= 14 else per, float)
+        if np.any(np.diff(self.seps) <= 0):
+            raise ValueError(f"{psflib}: the slices' separations do not increase ({self.sep_source}): {self.seps}")
         self.stamps = np.array(stamps)
         self.throughput = _throughput_table(psflib) or analytic_throughput
+
+    def describe(self) -> Dict[str, Any]:
+        """What a run records of the library: its path, the stamps' separations and their
+        source."""
+        return {"path": os.path.abspath(self.dir), "n_stamps": int(len(self.seps)),
+                "seps_arcsec": [round(float(v), 4) for v in self.seps], "sep_source": self.sep_source,
+                "platescale": self.platescale, "throughput": "throughput_merged.csv"
+                if os.path.exists(os.path.join(self.dir, "throughput_merged.csv")) else "analytic"}
 
     def model(self, flux_unit: float = 1.0) -> LibraryPSF:
         return LibraryPSF(self.stamps, self.seps, center=(19.5, 19.5), ee_radius_px=self.rap,
                           throughput_fn=self.throughput, refpa_deg=NEAR.n4_refpa, flux_unit=flux_unit)
 
 
-def template_flux_unit(psf_template: np.ndarray) -> float:
+def template_flux_unit(psf_template: np.ndarray, lam_over_d_px: Optional[float] = None) -> float:
     """Flux unit for a contrast relative to alpha Cen A: ``(129/57) * EE_B(1 lambda/D)`` of
-    the B-star template (16x16, centre 7.5, 7.5)."""
+    the B-star template (16x16, centre 7.5, 7.5), within ``lam_over_d_px`` (default
+    :attr:`NEAR.lam_over_d_px`; the run's own, from :func:`near_constants`)."""
     t = np.where(np.isfinite(psf_template), psf_template, 0.0)
     yy, xx = np.mgrid[0:t.shape[0], 0:t.shape[1]]
     c = ((t.shape[1] - 1) / 2.0, (t.shape[0] - 1) / 2.0)
-    m = np.hypot(xx - c[0], yy - c[1]) <= NEAR.lam_over_d_px
+    m = np.hypot(xx - c[0], yy - c[1]) <= (NEAR.lam_over_d_px if lam_over_d_px is None else float(lam_over_d_px))
     return NEAR.b_to_a * float(t[m].sum())
 
 
@@ -317,7 +377,8 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
                  backend: str = "klip", cube_name: Optional[str] = None,
                  subtract_sources: Optional[Sequence[Any]] = None,
                  inject_sources: Optional[Sequence[Any]] = None,
-                 drop_frames: Optional[Dict[Any, Sequence[int]]] = None) -> PartitionedReducer:
+                 drop_frames: Optional[Dict[Any, Sequence[int]]] = None,
+                 pxscale: Optional[float] = None, psflib: Optional[str] = None) -> PartitionedReducer:
     """Build the per-night :class:`PartitionedReducer` for the NEAR campaign.
     ``backend``: ``'klip'`` (built-in) | ``'pyklip'`` | ``'vip'`` PSF subtraction.
     ``use_rdi``/``rdi_mode`` use ``n<seq>/AB_cube_refstar_clean.fits`` when present
@@ -331,7 +392,12 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
     ``drop_frames``: frames left out of a night at load, ``{"n4": [551]}``, by their index in
     the night's cube counted from 0 (:func:`load_night`), before the subtraction and anything
     else.  Each night named has to be among ``nights``.  All four go into the reducer's
-    ``data_edits``."""
+    ``data_edits``.
+
+    ``pxscale`` (arcsec/px, default :attr:`NEAR.pxscale`) sets the pixel constants
+    (:func:`near_constants`), and ``psflib`` the PSF library's directory (default
+    ``root/psflib``).  Both go into the reducer's ``provenance``, which ``run_setup.json``
+    records and a resume reads back."""
     drop = _drop_spec(drop_frames)
     labels = [f"n{int(seq)}" for seq in nights]
     extra = [k for k in drop if k not in labels]
@@ -342,10 +408,13 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
     if pre:
         raise DropFramesError(f"frames are dropped at load, and the dataset given for {' '.join(pre)} is loaded "
                               f"already: load it with load_night(..., drop_frames=...)")
-    lib = None
+    const = near_constants(pxscale)
+    lib, lib_dir = None, (psflib or os.path.join(root, "psflib"))
     if use_library:
         try:
-            lib = N4Library(os.path.join(root, "psflib"))
+            lib = N4Library(lib_dir)
+            log(f"  psflib: {lib_dir}, {len(lib.seps)} stamps at {lib.seps[0]:.3f}-{lib.seps[-1]:.3f}\" "
+                f"(separations from the {lib.sep_source})")
         except Exception as exc:
             log(f"  psflib unavailable ({exc!r}); using the B template + analytic throughput")
     reducers = {}
@@ -354,14 +423,14 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
                                                                              cube_name=cube_name,
                                                                              drop_frames=drop.get(f"n{seq}"))
         psf = ds.meta.get("psf_template")
-        fu = template_flux_unit(psf) if psf is not None else 1.0
+        fu = template_flux_unit(psf, const["lam_over_d_px"]) if psf is not None else 1.0
         thru = lib.throughput if lib is not None else analytic_throughput
-        fallback = TemplatePSF(psf, center=(7.5, 7.5), ee_radius_px=NEAR.lam_over_d_px,
+        fallback = TemplatePSF(psf, center=(7.5, 7.5), ee_radius_px=const["lam_over_d_px"],
                                star_flux=fu, throughput_fn=thru) if psf is not None else None
         model = lib.model(flux_unit=fu) if lib is not None else fallback
-        red = reducer_class(backend)(ds, pxscale=NEAR.pxscale, lam_m=NEAR.lam_klip, diam_m=NEAR.diam,
+        red = reducer_class(backend)(ds, pxscale=const["pxscale"], lam_m=NEAR.lam_klip, diam_m=NEAR.diam,
                           injection_model=model, fallback_model=fallback, truenorth=NEAR.truenorth,
-                          fwhm_px=NEAR.fwhm_px, zone_pad=2.0, outrad_cap=70.0,
+                          fwhm_px=const["fwhm_px"], zone_pad=2.0, outrad_cap=70.0,
                           defaults={"fast": fast, "n_min_ref": n_min_ref, "comb_type": "nwadi",
                                     "use_rdi": bool(use_rdi), "rdi_mode": rdi_mode,
                                     "do_destripe": bool(do_destripe)},
@@ -383,6 +452,10 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
                     f"there")
     pr = PartitionedReducer(reducers, weighting=weighting, max_workers=max_workers, pool=pool, log=log)
     pr.name = "near"
+    pr.provenance = {"instrument": "NEAR", **const, "psflib": None if lib is None else lib.describe()}
+    if const["pxscale"] != NEAR.pxscale:
+        log(f"  pixel scale {const['pxscale']:g}\"/px (lambda/D {const['lam_over_d_px']:.3f} px, FWHM "
+            f"{const['fwhm_px']:.3f} px), not the default {NEAR.pxscale:g}")
     if cube_name:
         pr.data_edits = dict(getattr(pr, "data_edits", None) or {}, cube_name=str(cube_name))
         for r in reducers.values():
@@ -551,8 +624,9 @@ def make_guard(reducer: PartitionedReducer, n_min_ref: int = 10, ref_frac: float
                k_max: int = 100, frame_selection: bool = True):
     """Feasibility projection: frame-selection no-cut snapping (addendum 2) followed
     by the reference-count guardrail evaluated on the executed frame set."""
+    const = near_constants(getattr(reducer, "pxscale", None))
     ref = ReferenceCountGuard(angles_fn=reducer.frame_angles, tags_fn=reducer.frame_tags,
-                              fwhm_px=NEAR.fwhm_bin_px, lam_over_d_px=NEAR.lam_over_d_px,
+                              fwhm_px=const["fwhm_bin_px"], lam_over_d_px=const["lam_over_d_px"],
                               n_min_ref=n_min_ref, ref_frac=ref_frac, k_max=k_max)
     if not frame_selection:
         return ref
@@ -573,7 +647,8 @@ def default_config(reducer: PartitionedReducer, clean_subtract: bool = True, kno
     the noise apertures, e.g. :func:`klip_tpe.metrics.line_mask` for the A-B line.  Use the
     two together, as :func:`klip_tpe.instruments.generic.default_config` explains."""
     kfn = reducer.matched_filter_kernel if measured_kernel else None
-    kw = dict(pxscale=NEAR.pxscale, fwhm=NEAR.fwhm_px, kernel_fn=kfn, known=list(known))
+    const = near_constants(getattr(reducer, "pxscale", None))       # the reducer's scale
+    kw = dict(pxscale=const["pxscale"], fwhm=const["fwhm_px"], kernel_fn=kfn, known=list(known))
     if pixel_mask is not None:
         kw["pixel_mask"] = np.asarray(pixel_mask, bool)
     if str(metric).lower() == "fmmf":
@@ -582,6 +657,6 @@ def default_config(reducer: PartitionedReducer, clean_subtract: bool = True, kno
     else:
         metric = MawetPeakSNR(**kw)
     objective = Objective(metric, clean_subtract=clean_subtract)
-    sampler = PositionSampler(fwhm_as=NEAR.fwhm_px * NEAR.pxscale, known=list(known),
+    sampler = PositionSampler(fwhm_as=const["fwhm_px"] * const["pxscale"], known=list(known),
                               forbidden_pa=[tuple(float(v) for v in b) for b in forbidden_pa])
     return objective, sampler

@@ -5037,6 +5037,8 @@ class Runner:
                "verify_sources": None if verify_sources is None else [s.as_tuple() for s in vs],
                "annuli": per_ann, "files": dict((stitched or {}).get("files") or {}),
                "verify_report": None if ver is None else ver.get("report"),
+               # the instrument's constants this re-reduction used (the plate scale, the PSF library)
+               "provenance": getattr(self.reducer, "provenance", None),
                "seconds": round(time.time() - t0, 1)}
         _atomic_write(os.path.join(out_dir, "rereduce.json"), json.dumps(rec, indent=1, default=_json_default))
         log(f"  wrote {out_dir} ({rec['seconds']:.0f} s)")
