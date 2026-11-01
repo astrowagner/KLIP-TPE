@@ -44,7 +44,12 @@ so the evaluation loop never waits for it.
 **Second row — S/N maps** of the same five images.  Circles mark the injected positions
 with `raw/corr` S/N: *raw* is the S/N in the injected image, *corr* the clean-subtracted
 score (`s_inj − max(s_clean, 0)`) the optimizer maximises.  The panel title carries the
-aggregate (`Test SNR = median`, `Best median S/N orig / corr`).
+evaluation's score, `orig / corr`.  A draw scores the median of its sources' values (the mean
+of two), and the title names that statistic when a draw has more than one source (`Best median
+S/N`).  Under `--n-remeasure` an evaluation scores the mean of its draws, and the images and
+their labels are the last draw's.  The title then says so on two lines (`Test S/N, mean of 3
+draws` above `orig 6.33 / corr 3.62`), and the cell's top left names the draw shown with its
+own score in the labels' `raw/corr` form (`shown: draw 3 of 3, 2.8/1.5`).
 
 **Third row**
 

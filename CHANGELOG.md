@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — 2026-11-01 (the live panel says what each S/N is)
+
+- **Under `--n-remeasure` the S/N titles say they are a mean of draws** (ALES note,
+  2026-11-01).  An evaluation scores the mean of its draws, and its images and per-source labels
+  are the last draw's, so a title of corr 3.62 sat beside a label of 1.5.  The Test and Best S/N
+  cells now read `Test S/N, mean of 3 draws` above `orig 6.33 / corr 3.62`, with `' medians` or
+  `' means` when a draw has more than one source, and name the draw they show with its own score
+  (`shown: draw 3 of 3, 2.8/1.5`).  With one draw the titles keep their one line, and name the
+  median or mean only over more than one source (it read `Best median S/N` for one source).
+  The classic panel's titles add `(mean of 3 draws, last shown)`.
+- The display keeps each draw's raw score (`draw_raw_scores`) beside its score.
+- Test in `tests/test_display_labels.py`.
+
 ## Unreleased — 2026-11-01 (each frame's own true north)
 
 - **NEAR reads each frame's true north** from a night's `AB_truenorth_clean.txt` (NEAR2 note,
