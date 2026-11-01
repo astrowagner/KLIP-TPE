@@ -151,3 +151,39 @@ def test_a_forward_model_metric_hands_over_the_kernel_it_falls_back_to():
     assert np.array_equal(k, gaussian_kernel(5.0))
     box = np.ones((3, 3)) / 9.0
     assert ring_rules(FMMFSNR(pxscale=PX, fwhm=FWHM, kernel_fn=lambda r: box))["kernel_at"](RHO) is box
+
+
+def test_the_s_n_map_widens_a_band_the_mask_starves():
+    """A mask over whole rings left the S/N map blank there (dd433e7).  The band of such a
+    radius widens past the mask until it holds products.SNR_BAND_MIN pixels, and the map says
+    which radii borrowed (Kevin Wagner, 2026-11-01)."""
+    from klip_tpe.products import snr_widened_header, snr_widened_note
+    rng = np.random.default_rng(1)
+    img = rng.standard_normal((N, N))
+    cx, cy = star_center(img.shape)
+    yy, xx = np.mgrid[0:N, 0:N]
+    rr = np.hypot(xx - cx, yy - cy)
+    img[rr < 4] = np.nan
+    mask = (rr > 10.5) & (rr < 15.5)
+    mask |= (rr > 15.5) & (rr < 17.5) & (xx < cx)
+    info = {}
+    m = snr_map(img, FWHM, pixel_mask=mask, info=info)
+
+    def ring(r):
+        return (np.abs(rr - r) <= 0.5) & np.isfinite(img)
+
+    assert all(np.isfinite(m[ring(r)]).all() for r in range(11, 18))
+    assert set(range(11, 16)) <= set(info["widened"]) and not {16, 17} & set(info["widened"])
+    plain = snr_map(img, FWHM)
+    for r in (6, 8, 25):                          # bands the mask leaves alone are as before
+        assert np.array_equal(m[ring(r)], plain[ring(r)])
+    info0 = {}
+    assert np.array_equal(snr_map(img, FWHM, info=info0), plain, equal_nan=True) and info0["widened"] == {}
+    hdr = snr_widened_header(info)
+    assert hdr["SNRWIDEN"] == len(info["widened"]) and hdr["SNRWIDR"].startswith("11-")
+    assert snr_widened_note(info, PX).startswith("noise band widened past the mask at 0.55-")
+    # the display's S/N cell carries the note
+    ad = D.annulus_from_records([], {}, {}, 0, PX, FWHM, pixel_mask=mask)
+    got = D._snr_map(img, ad)
+    assert np.array_equal(np.asarray(got), m, equal_nan=True) and "wider noise band" in got.snr_note
+    assert getattr(D._snr_map(img, D.annulus_from_records([], {}, {}, 0, PX, FWHM)), "snr_note", "") == ""

@@ -374,7 +374,10 @@ Since 2026-11-01 every ring and map of a run leaves the mask out, not the search
 contrast grid, the verify (Path A, the subsets, the STIM annulus and the solved contrasts), the
 candidate search, param_verify, the S/N maps, the noise and contrast curves and the stitch
 weights.  The run writes it as `pixel_mask.fits` beside `run_setup.json`, and the panels drawn
-from a run directory read it there, or the script's `disk_mask.fits`.
+from a run directory read it there, or the script's `disk_mask.fits`.  Where the mask covers
+whole rings, as MWC 758's does from 0.24" to 0.41", the S/N maps take those radii's noise
+from a band widened past the mask, and `klip_stitched_snr.fits` names them in `SNRWIDR`.  A
+run saved before 2026-11-01 keeps the verify and the maps it had (`RunConfig.verify_snr`).
 
 Build the mask from an image of the disk made before the search (a disk-preserving reduction,
 another epoch or instrument), never from a search's winner, and look at it: it masks whatever

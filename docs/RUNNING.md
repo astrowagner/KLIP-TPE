@@ -123,12 +123,18 @@ in order:
   noise where the ring keeps fewer than 6 apertures, and a floor under the ring's scatter),
   small-sample correction and pixel mask.  Before, they measured as the IDL verify does
   (`near2v_snrfap`), with a Gaussian kernel, no despike or band and the keep-out around the
-  located peak.  The bootstrap reads the peak of the same matched filter.
+  located peak.  The bootstrap reads the peak of the same matched filter.  A run keeps the
+  verify it was made with (`RunConfig.verify_snr`).  A run saved before 2026-11-01 resumes,
+  re-reduces and verifies as before (`idl`), and so does a `--from-idl-setup` run.
+  `--verify-snr search` or `idl` picks one for a new run, and for `klip-tpe rereduce`.
 * Every ring and map leaves the run's pixel mask out (the disk, `docs/ALES.md` section 9): the
   search's and the contrast grid's, the verify's Path A, subsets, STIM annulus and solved
   contrasts, the candidate search, param_verify, the S/N maps, the noise and contrast curves
   and the stitch weights.  The run writes the mask as `pixel_mask.fits` beside
-  `run_setup.json`.
+  `run_setup.json`.  Where the mask leaves a radius' 1 px band fewer than 20 pixels, the S/N
+  map widens the band a pixel each side at a time until it holds 20, up to 3 FWHM each side,
+  so the map has values over the mask.  The stitched S/N maps name those radii in their
+  headers (`SNRWIDEN`, `SNRWIDR`, `SNRWIDHW`), and the log names them for the final stitch.
 * The contrast grid measures as the IDL contrast generators do (`contrastcurve_*.pro`, the
   defaults `--cg-snr aperture` and `--cg-sidelobe off` since 2026-11-01).  A FWHM/2 aperture at
   the injected position is set against a ring of round(2 pi r / FWHM) - 1 positions, which
@@ -480,7 +486,9 @@ and kind instead of a new search.
   `klip_stitched.fits` and `klip_stitched_inj.fits`, rather than on the mean of the per-night
   stitches, and the report adds TABLE 3, each injection's contrasts solved on its own image.
   The candidate list measures its S/N there too.  Since 2026-11-01 every S/N of the verify is
-  the search's under the run's rules, the pixel mask included (the noise rings, above).
+  the search's under the run's rules, the pixel mask included (the noise rings, above), for a
+  run made since then.  A run saved before keeps its own verify, and `--verify-snr search`
+  gives it the new one.
 * `--known RHO PA` puts a position into the verify as a candidate, a planet added with
   `--inject-sources` say, and keeps it out of the noise apertures.
 

@@ -73,7 +73,9 @@ Deliberate deviations from the IDL (each also flagged at the call site):
   convolved a Gaussian kernel, kept ``exr`` around the located peak and had no band.  The
   bootstrap reads the peak of the same matched filter, the STIM annulus leaves the pixel mask
   out, and the FAP counts the ring samples used.  Without ``rules`` the search metric's
-  defaults apply.
+  defaults apply.  A run saved before 2026-11-01 keeps the verify it had
+  (``RunConfig.verify_snr = "idl"``, :data:`~klip_tpe.metrics.VERIFY_IDL`): the IDL's
+  ``near2v_snrfap`` with its Gaussian maps, and no pixel mask.
 * Under the run's sidelobe rule (``sidelobes=``, :class:`~klip_tpe.metrics.Sidelobes`)
   every ring of Path A and of the subsets also leaves out the ADI arcs of the source, of
   the known companions and of the injection block's other sources, the STIM annulus
@@ -94,7 +96,7 @@ from scipy.stats import t as _student_t
 from . import metrics as _metrics
 from .metrics import (_arc_regions, _in_arcs, gaussian_kernel, matched_filter, mawet_peak_snr, nanmedian_even,
                       radprof, rule_kwargs, sidelobe_snr, source_xy,
-                      star_center)
+                      star_center, verify_idl)
 
 __all__ = ["t_fap", "t_thresh", "contrast_limit", "contrast_limit_image", "mf_convolve",
            "snr_fap", "solved_contrasts", "combine_nights", "night_stim", "stim_fap", "bootstrap_nights",
@@ -189,6 +191,115 @@ def mf_convolve(img: np.ndarray, fwhm: float, kernel: Optional[np.ndarray] = Non
     return ndimage.convolve(np.where(np.isfinite(img), img, 0.0), k, mode="nearest")
 
 
+def _snr_fap_idl(img: np.ndarray, rho: float, theta: float, pxscale: float, fwhm: float,
+                 exr: Optional[float] = None, srad: float = 1.5, *,
+                 exclude_xy: Sequence[Tuple[float, float]] = (), mfmap: Optional[np.ndarray] = None,
+                 angle_convention: str = "pa", excl_arcs: Sequence[Tuple[float, float, float, float]] = (),
+                 peak_xy: Optional[Tuple[float, float]] = None) -> Dict[str, float]:
+    """:func:`snr_fap` as it measured before 2026-11-01, for runs that keep that verify
+    (``RunConfig.verify_snr = "idl"``, :data:`~klip_tpe.metrics.VERIFY_IDL`): the matched-filter
+    Mawet S/N and small-sample FAP of the IDL verify (``near2v_snrfap``, verify 122-154).
+
+    1. ``A`` = ``mfmap`` if given (same shape) else :func:`mf_convolve` (127).
+    2. Peak search on the disc ``dx^2+dy^2 <= srad^2`` around the rounded nominal
+       position; the pixel with max ``A`` where ``img`` is finite wins (131-136).
+    3. ``r = |peak - centre|``, ``nap = floor(2 pi r / fwhm)``; ``r < fwhm`` or
+       ``nap < 5`` -> NaN (137-138).
+    4. Ring samples at ``th0 + q 2pi/nap``, ``q = 1..nap-1``, skipping pixels
+       within ``exr`` of the peak (radial exclusion) or of any ``exclude_xy``
+       coordinate, out of bounds or non-finite (139-148).
+    5. ``nv < 3`` or ``sd <= 0`` -> NaN; ``snr = (A_pk - mean) / (sd sqrt(1+1/nv))``
+       with the sample (N-1) std (150-152); ``fap = t_fap(snr, nv)`` (153).
+
+    Returns ``{'snr', 'fap', 'nap', 'peak', 'x', 'y', 'r'}`` where ``nap`` is the
+    number of ring samples actually used (``nv``) on success, the nominal count
+    on the early exits (as in the IDL return vector).  With samples, ``n_left`` is their
+    count and ``bg`` and ``sigma`` their mean and standard deviation.
+
+    ``excl_arcs`` (``(rho_arcsec, theta_deg, half_width_deg, radial_fwhm)``, as
+    :func:`~klip_tpe.metrics.mawet_peak_snr` takes them) leaves out the samples in those
+    arcs: ADI sidelobes, under the sidelobe rule (:func:`ring_snr`).  ``peak_xy`` places the
+    peak there instead of searching for it.
+    """
+    img = np.asarray(img, float)
+    ny, nx = img.shape
+    cx, cy = star_center(img.shape)
+    if exr is None:
+        exr = 1.5 * fwhm
+    A = mfmap if (mfmap is not None and np.shape(mfmap) == img.shape) else mf_convolve(img, fwhm)
+    xs, ys = source_xy(rho, theta, pxscale, cx, cy, angle_convention)
+    xs, ys = float(xs[0]), float(ys[0])
+    px0, py0 = int(round(xs)), int(round(ys))
+    px, py, pkv = px0, py0, -1e30
+    isr = int(np.ceil(srad))
+    if peak_xy is not None:
+        px, py = int(round(float(peak_xy[0]))), int(round(float(peak_xy[1])))
+        if 0 <= px < nx and 0 <= py < ny and np.isfinite(img[py, px]):
+            pkv = float(A[py, px])
+        isr = -1
+    for dy in range(-isr, isr + 1):
+        for dx in range(-isr, isr + 1):
+            if dx * dx + dy * dy > srad * srad:
+                continue
+            qx, qy = px0 + dx, py0 + dy
+            if 0 <= qx < nx and 0 <= qy < ny and np.isfinite(img[qy, qx]) and A[qy, qx] > pkv:
+                pkv, px, py = float(A[qy, qx]), qx, qy
+    peak = pkv if pkv > -1e30 else float("nan")
+    r = float(np.hypot(px - cx, py - cy))
+    nap = int(np.floor(2 * np.pi * r / fwhm))
+    out = {"snr": np.nan, "fap": np.nan, "nap": nap, "peak": peak, "x": px, "y": py, "r": r, "nclean": 0}
+    if r < fwhm or nap < 5:
+        out["why"] = "fewer than 5 apertures on its ring"
+        return out
+    th0 = np.arctan2(py - cy, px - cx)
+    regions = _arc_regions(excl_arcs, pxscale, fwhm, cx, cy, angle_convention) if len(excl_arcs) else None
+    vals: List[float] = []
+    ring: Optional[List[List[Any]]] = [] if _metrics._RING_RECORDER is not None else None
+    for q in range(1, nap):
+        th = th0 + q * 2 * np.pi / nap
+        xk, yk = int(round(cx + r * np.cos(th))), int(round(cy + r * np.sin(th)))
+        if np.hypot(xk - px, yk - py) < exr:
+            if ring is not None:
+                ring.append([xk, yk, "source"])
+            continue
+        if any(np.hypot(xk - ex, yk - ey) < exr for ex, ey in exclude_xy):
+            if ring is not None:
+                ring.append([xk, yk, "excluded"])
+            continue
+        if not (0 <= xk < nx and 0 <= yk < ny) or not np.isfinite(img[yk, xk]):
+            if ring is not None:
+                ring.append([xk, yk, "off"])
+            continue
+        if regions and bool(_in_arcs(xk, yk, regions, cx, cy)):
+            if ring is not None:
+                ring.append([xk, yk, "arc"])
+            continue
+        vals.append(float(A[yk, xk]))
+        if ring is not None:
+            ring.append([xk, yk, "used"])
+    nv = len(vals)
+    out["nap"] = nv
+    out["n_left"] = nv
+    out["nclean"] = nv
+    if ring is not None:
+        if nv < 3:
+            ring = [[a, b, "unused" if w == "used" else w] for a, b, w in ring]
+        _metrics._ring_emit(_metrics._ring_rec(
+            "snr_fap", img.shape, cx, cy, dict(out, nap=nap, nclean=nv), fwhm, exr, ring, [px], [py],
+            [e[0] for e in exclude_xy], [e[1] for e in exclude_xy], excl_arcs,
+            noise="ring" if nv >= 3 else None, excluded_label="excluded"))
+    if nv < 3:
+        return out
+    use = np.array(vals)
+    sd = float(np.std(use, ddof=1))
+    out.update(bg=float(np.mean(use)), sigma=sd)
+    if sd <= 0:
+        return out
+    snr = (float(A[py, px]) - float(np.mean(use))) / (sd * np.sqrt(1.0 + 1.0 / nv))
+    out.update(snr=float(snr), fap=t_fap(snr, nv), peak=float(A[py, px]))
+    return out
+
+
 def snr_fap(img: np.ndarray, rho: float, theta: float, pxscale: float, fwhm: float,
             exr: Optional[float] = None, srad: float = 1.5, *,
             exclude_xy: Sequence[Tuple[float, float]] = (), mfmap: Optional[np.ndarray] = None,
@@ -210,13 +321,18 @@ def snr_fap(img: np.ndarray, rho: float, theta: float, pxscale: float, fwhm: flo
     Since 2026-11-01 (Kevin Wagner) the verify and the candidate search measure as the search
     does.  Before, this function ported the IDL's ``near2v_snrfap`` (verify 122-154): a Gaussian
     kernel, no despike, ``exr`` kept around the located peak, the samples used counted in the
-    small-sample correction and no radial band.
+    small-sample correction and no radial band.  A run saved before then keeps that verify
+    (``RunConfig.verify_snr = "idl"``), whose ``rules``
+    (:data:`~klip_tpe.metrics.VERIFY_IDL`) hand the measure to :func:`_snr_fap_idl`.
 
     Returns ``{'snr', 'fap', 'nap', 'peak', 'x', 'y', 'r'}`` where ``nap`` is the ``n`` of the
     FAP on success and the ring's count on the early exits, with ``nclean`` the ring samples
     kept, ``n_left`` those left after the exclusions, ``noise`` (``"ring"`` or ``"band"``) and,
     with samples, ``bg`` and ``sigma``.
     """
+    if verify_idl(rules):
+        return _snr_fap_idl(img, rho, theta, pxscale, fwhm, exr, srad, exclude_xy=exclude_xy, mfmap=mfmap,
+                            angle_convention=angle_convention, excl_arcs=excl_arcs, peak_xy=peak_xy)
     img = np.asarray(img, float)
     # a map made already needs no kernel
     kw = rule_kwargs(rules if mfmap is None else {k: v for k, v in (rules or {}).items() if k != "kernel_at"},
@@ -335,13 +451,21 @@ class _ScaledImage:
         both = np.isfinite(cl) & np.isfinite(ij)
         self.img0 = np.where(both, cl, np.nan)
         self.img1 = np.where(both, ij, np.nan)
+        self._both = both
         self.fwhm, self.rules = float(fwhm), rules
         self._maps: Dict[Any, Tuple[np.ndarray, np.ndarray]] = {}
         # each (a, source) measured once: the thresholds' searches step through the same values
         self._snr: Dict[Any, Tuple[float, int]] = {}
 
     def maps(self, rho: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray]:
-        """``(mf(clean), mf(inj) - mf(clean))`` with the kernel at ``rho``."""
+        """``(mf(clean), mf(inj) - mf(clean))`` with the kernel at ``rho``.  Under the measures of
+        before 2026-11-01 (:data:`~klip_tpe.metrics.VERIFY_IDL`) the Gaussian maps of the clean
+        image and of ``inj - clean``, as they were made then."""
+        if verify_idl(self.rules):
+            if "idl" not in self._maps:
+                self._maps["idl"] = (mf_convolve(self.img0, self.fwhm),
+                                     mf_convolve(np.where(self._both, self.img1 - self.img0, np.nan), self.fwhm))
+            return self._maps["idl"]
         k = rule_kwargs(self.rules, rho if rho is not None else 0.0, self.img0.shape).get("kernel")
         key = None if k is None else np.asarray(k, float).tobytes()
         if key not in self._maps:
@@ -616,7 +740,7 @@ def bootstrap_nights(stack: np.ndarray, weights: np.ndarray, rho: float, theta: 
     for b in range(int(n_boot)):
         idx = rng.integers(0, nn, nn)
         cb = combine_nights(stack, weights, idx)
-        A = matched_filter(cb, fwhm, rules, rho)
+        A = mf_convolve(cb, fwhm) if verify_idl(rules) else matched_filter(cb, fwhm, rules, rho)
         vals[b] = snr_fap(cb, rho, theta, pxscale, fwhm, exr=srad, srad=srad, mfmap=A,
                           angle_convention=angle_convention, rules=rules)["peak"]
     g = vals[np.isfinite(vals)]

@@ -78,10 +78,11 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--stitch-every STITCH_EVERY] [--verify] [--no-verify]
                         [--verify-n-boot VERIFY_N_BOOT] [--param-verify]
                         [--no-param-verify] [--n-remeasure N]
-                        [--score-floor S] [--n-sources N [N ...]]
-                        [--min-r-fwhm X] [--n-pv N_PV] [--pv-divmin PV_DIVMIN]
-                        [--candidates] [--write-setup-files]
-                        [--no-setup-files] [--legacy-stitch] [--batch BATCH]
+                        [--score-floor S] [--verify-snr {search,idl}]
+                        [--n-sources N [N ...]] [--min-r-fwhm X] [--n-pv N_PV]
+                        [--pv-divmin PV_DIVMIN] [--candidates]
+                        [--write-setup-files] [--no-setup-files]
+                        [--legacy-stitch] [--batch BATCH]
                         [--batch-mode {pipeline,sync}]
                         [--edge-padding {between,all}] [--display]
                         [--no-display] [--display-every DISPLAY_EVERY]
@@ -365,6 +366,14 @@ options:
                         ranks the trials, so a floor of 0 changes the search
                         only where most trials score below 0. off sets no
                         floor, as before 2026-11-01 and with --from-idl-setup
+  --verify-snr {search,idl}
+                        how the verify, the candidate search and param_verify
+                        measure (default search: with the search's own S/N
+                        under the run's rules, and every ring and map without
+                        the pixel mask). idl measures as before 2026-11-01,
+                        with the IDL verify's S/N (a Gaussian kernel, no
+                        despike or radial band) and the pixel mask in the
+                        search's rings alone, as --from-idl-setup does
   --n-sources N [N ...]
                         injected sources per annulus, the last value repeating
                         (default: klip-tpe's rule by the annulus' outer edge,
@@ -632,9 +641,10 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--k-scan-max K_SCAN_MAX] [--stitch-every STITCH_EVERY]
                      [--verify] [--no-verify] [--verify-n-boot VERIFY_N_BOOT]
                      [--param-verify] [--no-param-verify] [--n-remeasure N]
-                     [--score-floor S] [--n-sources N [N ...]]
-                     [--min-r-fwhm X] [--n-pv N_PV] [--pv-divmin PV_DIVMIN]
-                     [--candidates] [--write-setup-files] [--no-setup-files]
+                     [--score-floor S] [--verify-snr {search,idl}]
+                     [--n-sources N [N ...]] [--min-r-fwhm X] [--n-pv N_PV]
+                     [--pv-divmin PV_DIVMIN] [--candidates]
+                     [--write-setup-files] [--no-setup-files]
                      [--legacy-stitch] [--batch BATCH]
                      [--batch-mode {pipeline,sync}]
                      [--edge-padding {between,all}] [--display] [--no-display]
@@ -918,6 +928,14 @@ options:
                         ranks the trials, so a floor of 0 changes the search
                         only where most trials score below 0. off sets no
                         floor, as before 2026-11-01 and with --from-idl-setup
+  --verify-snr {search,idl}
+                        how the verify, the candidate search and param_verify
+                        measure (default search: with the search's own S/N
+                        under the run's rules, and every ring and map without
+                        the pixel mask). idl measures as before 2026-11-01,
+                        with the IDL verify's S/N (a Gaussian kernel, no
+                        despike or radial band) and the pixel mask in the
+                        search's rings alone, as --from-idl-setup does
   --n-sources N [N ...]
                         injected sources per annulus, the last value repeating
                         (default: klip-tpe's rule by the annulus' outer edge,
@@ -2191,7 +2209,8 @@ usage: klip-tpe rereduce [-h] [--instrument {near,nomic,generic,ales}]
                          [--subtract-sources FILE] [--subtract-line FILE]
                          [--inject-sources FILE] [--metric {mawet,fmmf}]
                          [--run-dir RUN_DIR] [--verify-sources FILE]
-                         [--no-verify] [--out DIR] [--overwrite]
+                         [--no-verify] [--verify-snr {search,idl}] [--out DIR]
+                         [--overwrite]
 
 options:
   -h, --help            show this help message and exit
@@ -2337,6 +2356,12 @@ options:
                         annulus' injected reduction (default: the winners' own
                         validation injections, as in the run)
   --no-verify           the stitch and its S/N map only
+  --verify-snr {search,idl}
+                        how the verify and the S/N map measure (default: as
+                        the run did, idl for a run saved before 2026-11-01).
+                        search: the search's own S/N under the run's rules and
+                        the pixel mask in every ring and map. idl: the IDL
+                        verify's S/N and no mask outside the search
   --out DIR             output directory (default <run>_rereduce beside the
                         run, which is left as it is)
   --overwrite           write over an earlier re-reduction in --out

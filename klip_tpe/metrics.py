@@ -30,7 +30,8 @@ __all__ = ["radprof", "declip", "gaussian_kernel", "source_xy", "mawet_peak_snr"
            "injection_difference_snr", "aperture_mawet_snr", "clip0", "MawetPeakSNR",
            "InjectionDifferenceSNR", "Objective", "Source", "nanmedian_even", "pa_wedge_mask", "line_mask",
            "disk_mask_from_image", "why_failed", "WHY_GUARD", "WHY_RING", "WHY_NOISE", "Sidelobes",
-           "sidelobe_snr", "RingRecorder", "ring_role", "ring_rules", "rule_kwargs", "matched_filter"]
+           "sidelobe_snr", "RingRecorder", "ring_role", "ring_rules", "rule_kwargs", "matched_filter",
+           "VERIFY_IDL", "verify_idl"]
 
 
 # ----------------------------------------------------------------------------
@@ -798,6 +799,17 @@ def _ring_rec(fn: str, shape, cx: float, cy: float, det: Dict[str, Any], fwhm: f
 #: takes (:func:`ring_rules`): the search's, the verify's and the candidate search's
 RING_RULE_KEYS = ("search_px", "excl_fwhm", "declip_nsig", "band_fwhm", "min_ring", "penalty", "pixel_mask",
                   "inner_fwhm")
+
+#: the rules of a run that measures as before 2026-11-01 (``RunConfig.verify_snr = "idl"``): the
+#: verify and the candidate search take the IDL verify's S/N (``near2v_snrfap``, a Gaussian
+#: kernel, no despike or band), param_verify the metric's defaults, and no ring or map outside
+#: the search the pixel mask
+VERIFY_IDL: Dict[str, Any] = {"verify": "idl"}
+
+
+def verify_idl(rules: Optional[Dict[str, Any]]) -> bool:
+    """Do ``rules`` keep the measures of before 2026-11-01 (:data:`VERIFY_IDL`)?"""
+    return bool(rules) and str(rules.get("verify", "")).lower() == "idl"
 
 
 def ring_rules(metric) -> Dict[str, Any]:

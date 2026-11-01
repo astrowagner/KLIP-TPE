@@ -37,9 +37,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .metrics import matched_filter, nanmedian_even, radprof, rule_kwargs, source_xy, star_center
+from .metrics import matched_filter, nanmedian_even, radprof, rule_kwargs, source_xy, star_center, verify_idl
 from .products import snr_map
-from .verify import _noise, _without_self, ring_snr, snr_fap, verify_candidates
+from .verify import _noise, _without_self, mf_convolve, ring_snr, snr_fap, verify_candidates
 
 __all__ = ["detect_peaks", "psf_correlation", "candidate_metrics", "score_candidates",
            "find_candidates", "write_candidates", "coverage_rim"]
@@ -201,15 +201,21 @@ def candidate_metrics(px: np.ndarray, py: np.ndarray, snr0: np.ndarray, stack: n
     else:
         s1 = s2 = comb
     # each image's matched-filter map under the run's rules, made once per kernel (a measured
-    # kernel changes with separation)
-    maps: Dict[Tuple[int, Any], np.ndarray] = {}
+    # kernel changes with separation), or its Gaussian map under the measures of before
+    # 2026-11-01 (RunConfig.verify_snr = "idl").  The nights are held as one list, so each keeps
+    # its own object, and the cache keeps the image it was made from: a view made anew for each
+    # peak can take the address of one freed before it, and was handed that one's map
+    nights = [slices[j] for j in range(nn)]
+    maps: Dict[Tuple[int, Any], Tuple[np.ndarray, np.ndarray]] = {}
+    idl = verify_idl(rules)
 
     def _mf(img_: np.ndarray, rho_: float) -> np.ndarray:
-        k = rule_kwargs(rules, rho_, img_.shape).get("kernel")
+        k = None if idl else rule_kwargs(rules, rho_, img_.shape).get("kernel")
         key = (id(img_), None if k is None else np.asarray(k, float).tobytes())
-        if key not in maps:
-            maps[key] = matched_filter(img_, fwhm, rules, rho_)
-        return maps[key]
+        hit = maps.get(key)
+        if hit is None or hit[0] is not img_:
+            hit = maps[key] = (img_, mf_convolve(img_, fwhm) if idl else matched_filter(img_, fwhm, rules, rho_))
+        return hit[1]
     yy, xx = np.mgrid[0:ny, 0:nx]
     kx, ky = source_xy([k[0] for k in known], [k[1] for k in known], pxscale, cx, cy, angle_convention) \
         if len(known) else (np.zeros(0), np.zeros(0))
@@ -238,7 +244,7 @@ def candidate_metrics(px: np.ndarray, py: np.ndarray, snr0: np.ndarray, stack: n
         else:
             def _fap(img_):
                 return snr_fap(img_, *args, mfmap=_mf(img_, rho), **kw)
-        pn = np.array([_fap(slices[j])["snr"] for j in range(nn)])
+        pn = np.array([_fap(nights[j])["snr"] for j in range(nn)])
         if not np.any(np.isfinite(pn)):
             pn[:] = 0.0
         n_nights = int(np.sum(pn >= 2.0))

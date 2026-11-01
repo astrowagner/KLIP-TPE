@@ -4,7 +4,7 @@ matched-filter S/N maps (ports of ``near2m_noiseprof``, ``near2m_kfit``, the
 contrast-curve block, the final stitch and ``near2m_snrmap``)."""
 from __future__ import annotations
 
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy import ndimage
@@ -167,11 +167,16 @@ def stitch_annuli(images: Sequence[np.ndarray], edges: Sequence[float], fwhm: fl
     return out, w
 
 
+#: the pixels a radius' noise band takes before the S/N map widens it past the pixel mask
+SNR_BAND_MIN = 20
+
+
 def snr_map(img: np.ndarray, fwhm: float, kernel: Optional[np.ndarray] = None,
             exclude_xy: Sequence[Tuple[float, float]] = (), excl_fwhm: float = 1.5,
             rmin: float = 1.0, excl_arcs: Sequence[Tuple[float, float, float, float]] = (),
             pxscale: Optional[float] = None, angle_convention: str = "pa",
-            pixel_mask: Optional[np.ndarray] = None) -> np.ndarray:
+            pixel_mask: Optional[np.ndarray] = None, band_min: int = SNR_BAND_MIN,
+            info: Optional[Dict[str, Any]] = None) -> np.ndarray:
     """Matched-filter S/N map with a per-radius robust (MAD-floored) sigma and the
     Mawet small-sample penalty (``near2m_snrmap``).  A display/diagnostic quantity
     -- NOT the search score (different noise convention).
@@ -180,7 +185,14 @@ def snr_map(img: np.ndarray, fwhm: float, kernel: Optional[np.ndarray] = None,
     radial_fwhm)`` arcs whose pixels are left out of every ring's noise, as the known
     companions' ADI sidelobes under the run's sidelobe rule.  ``pixel_mask`` (True = left
     out, the run's disk mask): its pixels are left out of every ring's noise, as the search's
-    rings leave them out.  The map still has a value there."""
+    rings leave them out.  The map still has a value there.
+
+    Where the mask leaves a radius' 1 px band fewer than ``band_min`` pixels, the band widens
+    a pixel each side at a time until it holds that many, up to 3 FWHM each side (Kevin
+    Wagner, 2026-11-01: a mask over whole rings left the map blank there).  The pixels at that
+    radius take their S/N from the wider band, and ``info`` (a dict), when given, gets
+    ``widened``, each such radius (px) with the half-width its band took.  A band the mask
+    does not touch is never widened."""
     img = np.asarray(img, float)
     ny, nx = img.shape
     cx, cy = star_center(img.shape)
@@ -196,7 +208,9 @@ def snr_map(img: np.ndarray, fwhm: float, kernel: Optional[np.ndarray] = None,
     if len(excl_arcs) and pxscale is not None:
         from .metrics import _arc_regions, _in_arcs
         keep &= ~_in_arcs(xx, yy, _arc_regions(excl_arcs, pxscale, fwhm, cx, cy, angle_convention), cx, cy)
-    if pixel_mask is not None and np.shape(pixel_mask) == img.shape:
+    keep_open = keep.copy()                       # the noise pixels without the mask
+    masked = pixel_mask is not None and np.shape(pixel_mask) == img.shape
+    if masked:
         keep &= ~np.asarray(pixel_mask, bool)
     if _metrics._RING_RECORDER is not None:
         _metrics._ring_emit({"fn": "snr_map", "shape": tuple(img.shape), "center": (float(cx), float(cy)),
@@ -207,8 +221,19 @@ def snr_map(img: np.ndarray, fwhm: float, kernel: Optional[np.ndarray] = None,
                              "why": None, "x": float("nan"), "y": float("nan"), "r": float("nan"), "nclean": 0})
     out = np.full(img.shape, np.nan)
     rmax = int(np.floor(rr[fin].max())) if fin.any() else 0
+    hw_max = max(3.0 * float(fwhm), 1.5)
+    widened: Dict[int, float] = {}
     for r in range(max(int(rmin), 1), rmax + 1):
-        band = (np.abs(rr - r) <= 0.5) & keep
+        dist = np.abs(rr - r)
+        band = (dist <= 0.5) & keep
+        hw = 0.5
+        nb = int(band.sum())
+        if masked and nb < band_min and int(((dist <= 0.5) & keep_open).sum()) > nb:
+            # the mask starves this radius: its noise from a band widened past the mask
+            while nb < band_min and hw + 1.0 <= hw_max:
+                hw += 1.0
+                band = (dist <= hw) & keep
+                nb = int(band.sum())
         vals = A[band]
         if vals.size < 5:
             continue
@@ -217,10 +242,50 @@ def snr_map(img: np.ndarray, fwhm: float, kernel: Optional[np.ndarray] = None,
         sd = max(sd, mad)
         if sd <= 0:
             continue
+        if hw > 0.5:
+            widened[r] = hw
         nap = max(int(np.floor(2 * np.pi * r / fwhm)), 3)
-        ring = (np.abs(rr - r) <= 0.5) & fin
+        ring = (dist <= 0.5) & fin
         out[ring] = (A[ring] - np.mean(vals)) / (sd * np.sqrt(1.0 + 1.0 / nap))
+    if info is not None:
+        info["widened"] = widened
     return out
+
+
+def snr_widened_note(info: Optional[Dict[str, Any]], pxscale: Optional[float] = None, short: bool = False) -> str:
+    """The radii whose S/N came from a band widened past the pixel mask (:func:`snr_map`'s
+    ``info``), as one line, or a few words for a panel (``short``): ``""`` when there are none."""
+    w = (info or {}).get("widened") or {}
+    if not w:
+        return ""
+    rs = sorted(int(r) for r in w)
+    spans, a = [], rs[0]
+    for b0, b1 in zip(rs, rs[1:] + [None]):
+        if b1 is None or b1 != b0 + 1:
+            spans.append((a, b0))
+            a = b1
+    if pxscale:
+        txt = ", ".join(f'{x * pxscale:.2f}"' if x == y else f'{x * pxscale:.2f}-{y * pxscale:.2f}"' for x, y in spans)
+    else:
+        txt = ", ".join(f"{x} px" if x == y else f"{x}-{y} px" for x, y in spans)
+    if short:
+        return f"wider noise band at {txt} (mask)"
+    return f"noise band widened past the mask at {txt} (to +/-{max(w.values()):.1f} px)"
+
+
+def snr_widened_header(info: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """FITS keywords for :func:`snr_map`'s widened radii: ``SNRWIDEN``, their count, and
+    ``SNRWIDR``, the radii (px), ``SNRWIDHW`` the widest half-width (px).  Empty when none."""
+    w = (info or {}).get("widened") or {}
+    if not w:
+        return {}
+    rs = sorted(int(r) for r in w)
+    spans, a = [], rs[0]
+    for b0, b1 in zip(rs, rs[1:] + [None]):
+        if b1 is None or b1 != b0 + 1:
+            spans.append(f"{a}" if a == b0 else f"{a}-{b0}")
+            a = b1
+    return {"SNRWIDEN": len(rs), "SNRWIDR": ",".join(spans)[:68], "SNRWIDHW": float(max(w.values()))}
 
 
 # ----------------------------------------------------------------------------

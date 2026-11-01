@@ -166,7 +166,8 @@ def draw_scores_of(recs) -> List[Optional[List[float]]]:
 
 
 def draw_ranges(ax, x, draws, colors=None, color: str = "#8a8a8a", lw: float = 0.9,
-                alpha: float = 0.7, zorder: int = 2, label: Optional[str] = None) -> int:
+                alpha: float = 0.7, zorder: int = 2, label: Optional[str] = None,
+                floor: Optional[float] = None) -> int:
     """Vertical min-to-max bar for every trial that was scored over more than one draw.
 
     The observed range, not a parametric interval: with three draws a +/- sd would be a
@@ -185,6 +186,10 @@ def draw_ranges(ax, x, draws, colors=None, color: str = "#8a8a8a", lw: float = 0
 
     Returns the number of bars drawn, so the caller can leave the legend alone when a run
     had a single draw per trial and there is nothing to show.
+
+    ``floor``: the axis' lower limit, which the caller takes from the scores alone (Kevin
+    Wagner, 2026-11-01: one low draw squashed the scores).  A bar that reaches below it is cut
+    there, and a small downward triangle at the floor says the draw goes on below.
     """
     xx = np.atleast_1d(x)
     if colors is None:
@@ -194,6 +199,7 @@ def draw_ranges(ax, x, draws, colors=None, color: str = "#8a8a8a", lw: float = 0
     else:
         cols = list(colors) + [color] * max(0, len(xx) - len(list(colors)))
     groups: Dict[Any, Tuple[List[float], List[float], List[float]]] = {}
+    cut: Dict[Any, List[float]] = {}
     ns: List[int] = []
     for xi, vals, c in zip(xx, draws, cols):
         # sanitised here rather than trusted: a failed draw is recorded as None, and the
@@ -203,13 +209,20 @@ def draw_ranges(ax, x, draws, colors=None, color: str = "#8a8a8a", lw: float = 0
             continue
         g = groups.setdefault(c, ([], [], []))
         g[0].append(float(xi))
-        g[1].append(float(min(v)))
+        lo_v = float(min(v))
+        if floor is not None and lo_v < float(floor):
+            lo_v = float(floor)
+            cut.setdefault(c, []).append(float(xi))
+        g[1].append(lo_v)
         g[2].append(float(max(v)))
         ns.append(len(v))
     if not ns:
         return 0
     for c, (xs, lo, hi) in groups.items():
         ax.vlines(xs, lo, hi, color=c, lw=lw, alpha=alpha, zorder=zorder)
+    for c, xs in cut.items():
+        ax.scatter(xs, [float(floor)] * len(xs), marker="v", s=14, color=c, lw=0, alpha=alpha,
+                   zorder=zorder + 0.5, clip_on=False)
     if label is None:
         nmode = int(max(set(ns), key=ns.count))
         label = f"draw range (min-max of {nmode})"
@@ -235,15 +248,18 @@ def plot_trace(run_dir: str, annulus: int = 0, save: bool = True, ax=None) -> Fi
         n = np.array([int(r["index"]) + 1 for r in recs])
         y = np.array([_score(r) for r in recs])
         ph = [r.get("phase", "?") for r in recs]
+        fin = y[np.isfinite(y)]
+        # the bottom from the scores alone, 0 in a floored run, with the draws' bars cut there
+        lo = min(float(fin.min()), 0.0) if fin.size else None
         # under the points, in each point's own phase colour: what its draws spanned
-        draw_ranges(ax, n, draw_scores_of(recs),
-                    colors=[PHASE_COLORS.get(p, "#333333") for p in ph])
+        ds = draw_scores_of(recs)
+        draw_ranges(ax, n, ds, colors=[PHASE_COLORS.get(p, "#333333") for p in ph], floor=lo)
         for p in PHASE_ORDER + sorted(set(ph) - set(PHASE_ORDER)):
             m = np.array([q == p for q in ph])
             if not m.any():
                 continue
             ax.scatter(n[m], y[m], s=28 if p == "seed" else 14, marker="*" if p == "seed" else "o",
-                       color=PHASE_COLORS.get(p, "#333333"), label=p, zorder=3, alpha=0.9)
+                       color=PHASE_COLORS.get(p, "#333333"), label=p, zorder=3, alpha=0.9, clip_on=False)
         failed = ~np.isfinite(y)
         if failed.any():
             ax.scatter(n[failed], np.full(failed.sum(), np.nanmin(y) if np.isfinite(y).any() else 0), marker="x",
@@ -264,6 +280,12 @@ def plot_trace(run_dir: str, annulus: int = 0, save: bool = True, ax=None) -> Fi
             else:
                 ax.scatter([wi], [ws], marker="D", s=46, facecolor="none", edgecolor="#444444", lw=1.4, zorder=4,
                            label="winner (NOT validated; search score)")
+        if lo is not None:
+            ax.set_ylim(bottom=lo)
+            flat = [float(v) for d in ds for v in (d or []) if v is not None and np.isfinite(v)]
+            if flat and min(flat) < lo:
+                from matplotlib.lines import Line2D
+                ax.add_line(Line2D([], [], marker="v", ls="none", ms=4, color="#8a8a8a", label="draw below the axis"))
         ax.set_xlabel("evaluation")
         ax.set_ylabel(f"{SEARCH_LABEL}\n{_metric_name(run)}")
         cfg = _config(run)

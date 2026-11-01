@@ -31,7 +31,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .metrics import Source, mawet_peak_snr, nanmedian_even, radprof, rule_kwargs, source_xy, star_center
+from .metrics import (Source, mawet_peak_snr, nanmedian_even, radprof, rule_kwargs, source_xy, star_center,
+                      verify_idl)
 from .optimizers import History
 from .positions import PositionSampler
 from .products import snr_map
@@ -194,7 +195,9 @@ def param_verify_cubes(cclean: np.ndarray, cinj: np.ndarray, wts: Sequence[float
        inner guard (:func:`~klip_tpe.metrics.mawet_peak_snr`), the run's own.  ``rules``
        (:func:`~klip_tpe.metrics.ring_rules`) make ``ps`` the search's S/N, its matched filter,
        despike, band and pixel mask, and the maps leave the mask out of their noise.  The
-       ``known`` companions stay out of ``ps``' rings, as out of the search's.
+       ``known`` companions stay out of ``ps``' rings, as out of the search's.  Under the
+       measures of before 2026-11-01 (:data:`~klip_tpe.metrics.VERIFY_IDL`) ``ps`` takes the
+       metric's defaults and the companions stay in, as they did then.
 
     Writes ``paramverify_{stim,detfrac,recovery,combine,combsnr}_NN.fits`` and
     ``paramverify_calib_NN.txt`` into ``out_dir`` when given.  Returns a dict
@@ -260,8 +263,9 @@ def param_verify_cubes(cclean: np.ndarray, cinj: np.ndarray, wts: Sequence[float
 
     rkw = rule_kwargs(rules, float(np.median(rho)) if rho.size else 0.0, (ny, nx))
     rkw["inner_fwhm"] = inner_fwhm
+    # a run that keeps the measures of before 2026-11-01 left the companions in these rings
     ps = mawet_peak_snr(_flat(combj), rho, th, pxscale, fwhm, angle_convention=angle_convention,
-                        known=list(known), **rkw)
+                        known=[] if verify_idl(rules) else list(known), **rkw)
     reval = rlo + (rhi - rlo) * (np.arange(12) + 0.5) / 12.0
     rp_comb = _flat(comb)
     sig_r = radial_rms(rp_comb, reval)

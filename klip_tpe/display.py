@@ -737,7 +737,8 @@ def annulus_from_run(run_dir: str, ia: int, run: Optional[Dict[str, Any]] = None
         with open(cpath) as f:
             calib = json.load(f)
     ac = str(setup.get("angle_convention") or (setup.get("reducer") or {}).get("angle_convention") or "pa")
-    pm = _run_pixel_mask(run_dir)
+    # a run that keeps the measures of before 2026-11-01 drew its maps without the mask
+    pm = None if _run_verify_idl(setup) else _run_pixel_mask(run_dir)
     return annulus_from_records(recs, _space(run), _config(run), ia, px, fw, _metric_name(run),
                                 os.path.basename(os.path.abspath(run_dir)), run["winners"].get(ia),
                                 run["validation"].get(ia), calib, ac,
@@ -762,11 +763,24 @@ def _run_pixel_mask(run_dir: str) -> Optional[np.ndarray]:
     return None
 
 
+def _run_verify_idl(setup: Dict[str, Any]) -> bool:
+    """Does the run keep the measures of before 2026-11-01 (``RunConfig.verify_snr``, ``"idl"``
+    for a run saved before then)?"""
+    cfg = setup.get("config") or {}
+    if not isinstance(cfg, dict) or not cfg:
+        return False
+    return str(cfg.get("verify_snr", "idl") or "idl").lower() == "idl"
+
+
 def _run_rules(setup: Dict[str, Any], pixel_mask: Optional[np.ndarray] = None) -> Optional[Dict[str, Any]]:
     """The noise-ring rules a run measured with (:func:`~klip_tpe.metrics.ring_rules`), from the
     metric its setup saved, with its pixel mask.  None for a metric without rings.  A measured
-    matched-filter kernel is not saved, so the Gaussian of the metric's FWHM stands in for it."""
-    from .metrics import RING_RULE_KEYS, gaussian_kernel
+    matched-filter kernel is not saved, so the Gaussian of the metric's FWHM stands in for it.
+    A run that keeps the measures of before 2026-11-01 gets
+    :data:`~klip_tpe.metrics.VERIFY_IDL`."""
+    from .metrics import RING_RULE_KEYS, VERIFY_IDL, gaussian_kernel
+    if _run_verify_idl(setup):
+        return dict(VERIFY_IDL)
     m = (setup.get("objective") or {}).get("metric") or {}
     if not isinstance(m, dict) or "excl_fwhm" not in m:
         return None
@@ -781,6 +795,15 @@ def _run_rules(setup: Dict[str, Any], pixel_mask: Optional[np.ndarray] = None) -
     if pixel_mask is not None:
         out["pixel_mask"] = np.asarray(pixel_mask, bool)
     return out
+
+
+def _runner_pixel_mask(runner) -> Optional[np.ndarray]:
+    """The pixel mask the runner's products leave out (``Runner._pixel_mask``), else the metric's."""
+    f = getattr(runner, "_pixel_mask", None)
+    try:
+        return f() if callable(f) else getattr(getattr(runner.objective, "metric", None), "pixel_mask", None)
+    except Exception:                             # noqa: BLE001 - the panels do without it
+        return None
 
 
 def _runner_rules(runner) -> Optional[Dict[str, Any]]:
@@ -833,9 +856,7 @@ def annulus_from_runner(runner, records: Sequence[Dict[str, Any]]) -> AnnulusDat
                                 getattr(runner.reducer, "angle_convention",
                                         getattr(runner.objective.metric, "angle_convention", "pa")),
                                 getattr(runner.reducer, "partition_label", "night"),
-                                _runner_known(runner),
-                                getattr(getattr(runner.objective, "metric", None), "pixel_mask", None),
-                                _runner_rules(runner))
+                                _runner_known(runner), _runner_pixel_mask(runner), _runner_rules(runner))
 
 
 # ----------------------------------------------------------------------------
@@ -1009,6 +1030,10 @@ def draw_image(ax, img: Optional[np.ndarray], ad: AnnulusData, title: str, cmap:
                     va="center", fontweight="bold")
     if note:
         ax.text(0.02, 0.02, note, transform=ax.transAxes, fontsize=6.5, color="white", va="bottom")
+    if snr and getattr(img, "snr_note", ""):
+        # the radii whose noise came from a band widened past the pixel mask
+        ax.text(0.98, 0.02, img.snr_note, transform=ax.transAxes, fontsize=5.5, color="white", va="bottom",
+                ha="right")
     if snr and not getattr(ax, "_no_caption", False):
         ax.text(0.5, -0.30, SNR_CAPTION, transform=ax.transAxes, fontsize=6.5, ha="center", color="#555555")
 
@@ -1021,11 +1046,18 @@ def _fm_range(img: Optional[np.ndarray]) -> Optional[Tuple[float, float]]:
     return (0.0, hi) if hi > 0 else None
 
 
+class _NotedMap(np.ndarray):
+    """An S/N map that carries a line for its panel (``snr_note``): where the noise band was
+    widened past the pixel mask (:func:`klip_tpe.products.snr_map`)."""
+
+    snr_note = ""
+
+
 def _snr_map(img: Optional[np.ndarray], ad: AnnulusData, sources=None,
              flatten: bool = False) -> Optional[np.ndarray]:
     if img is None or np.ndim(img) != 2 or img.shape[0] < 8:
         return None
-    from .products import snr_map
+    from .products import snr_map, snr_widened_note
     try:
         ex = []
         if sources:
@@ -1035,8 +1067,14 @@ def _snr_map(img: Optional[np.ndarray], ad: AnnulusData, sources=None,
             xs, ys = source_xy(rho, th, ad.pxscale, cx, cy, ad.angle_convention)
             ex = list(zip(xs, ys))
         # the run's pixel mask, left out of the noise as every ring of the run leaves it out
-        return snr_map(radprof(img) if flatten else img, ad.fwhm, exclude_xy=ex,
-                       pixel_mask=(ad.extra or {}).get("pixel_mask") if isinstance(ad.extra, dict) else None)
+        info: Dict[str, Any] = {}
+        m = snr_map(radprof(img) if flatten else img, ad.fwhm, exclude_xy=ex,
+                    pixel_mask=(ad.extra or {}).get("pixel_mask") if isinstance(ad.extra, dict) else None, info=info)
+        note = snr_widened_note(info, ad.pxscale, short=True)
+        if note:
+            m = m.view(_NotedMap)
+            m.snr_note = note
+        return m
     except Exception:
         return None
 
@@ -1054,17 +1092,23 @@ def panel_trace(ax, ad: AnnulusData, current: Optional[int] = None, compact: boo
         return
     ev = np.arange(1, n + 1)
     y = ad.y
+    fin = y[np.isfinite(y)]
+    # the bottom from the scores alone, 0 in a floored run, with the draws' bars cut there
+    lo = min(float(fin.min()), 0.0) if fin.size else None
     # Under the points, when n_remeasure > 1: the min-to-max span of the draws the trial's
     # score is the mean of.  Without it a panel shows a mean as if it were a measurement,
     # and on this objective the draws span ~1.4 in S/N against a useful range of ~6.
+    dlo, dhi = np.inf, -np.inf
     try:
         from .plots import draw_ranges
         _dw = (ad.extra or {}).get("draws") or []
+        _ds = [(d or {}).get("draw_scores") if isinstance(d, dict) else None
+               for d in (_dw + [None] * max(0, n - len(_dw)))][:n]
         # _phase_color, not the marker facecolor: random phases draw open markers, so the
         # edge is the colour the eye reads for them.
-        draw_ranges(ax, ev, [(d or {}).get("draw_scores") if isinstance(d, dict) else None
-                             for d in (_dw + [None] * max(0, n - len(_dw)))][:n],
-                    colors=[_phase_color(p) for p in ad.phases])
+        if draw_ranges(ax, ev, _ds, colors=[_phase_color(p) for p in ad.phases], floor=lo):
+            flat = [float(v) for d in _ds for v in (d or []) if v is not None and np.isfinite(v)]
+            dlo, dhi = (min(flat), max(flat)) if flat else (np.inf, -np.inf)
     except Exception:
         pass
     for p in PHASE_ORDER + sorted(set(ad.phases) - set(PHASE_ORDER)):
@@ -1074,9 +1118,8 @@ def panel_trace(ax, ad: AnnulusData, current: Optional[int] = None, compact: boo
         rnd = _is_random_phase(p)
         ax.scatter(ev[m], y[m], s=30 if p == "seed" else 13, marker="*" if p == "seed" else "o",
                    facecolor="none" if (rnd and p != "seed") else _phase_color(p), edgecolor=_phase_color(p),
-                   lw=0.9, label=p, zorder=3)
+                   lw=0.9, label=p, zorder=3, clip_on=False)
     fail = ~np.isfinite(y)
-    fin = y[np.isfinite(y)]
     if fail.any():
         y0 = float(np.nanmin(fin)) if fin.size else 0.0
         ax.scatter(ev[fail], np.full(fail.sum(), y0), marker="x", color="#d62728", s=16, label="failed", zorder=3)
@@ -1099,8 +1142,14 @@ def panel_trace(ax, ad: AnnulusData, current: Optional[int] = None, compact: boo
         ax.axvline(ad.n_init + 0.5, color="#999999", ls="--", lw=0.7)
     ax.set_xlim(0.5, max(n, 1) + 0.5)                # IDL: xrange=[0.5, nev+0.5] -- grows with the evals done
     if fin.size:
-        lo, hi = float(min(fin.min(), 0.0)), float(fin.max())
-        ax.set_ylim(lo - 0.05 * (hi - lo + 1e-9), hi + 0.15 * (hi - lo + 1e-9))
+        hi = float(fin.max())
+        top = hi + 0.15 * (hi - lo + 1e-9)
+        if np.isfinite(dhi):            # the bars' tops stay in
+            top = max(top, dhi + 0.02 * (dhi - lo + 1e-9))
+        ax.set_ylim(lo, top)
+        if dlo < lo:
+            from matplotlib.lines import Line2D
+            ax.add_line(Line2D([], [], marker="v", ls="none", ms=4, color="#8a8a8a", label="draw below the axis"))
     ax.set_xlabel("evaluation")
     ax.set_ylabel(SEARCH_LABEL if not compact else "score (upward-biased)")
     ax.legend(loc="lower right", ncol=3 if compact else 4, handletextpad=0.2, columnspacing=0.8)
@@ -2593,6 +2642,14 @@ def _sma(y: np.ndarray, m: np.ndarray, w: int) -> np.ndarray:
     return out
 
 
+def _below_note(ax, color) -> None:
+    """One note on a convergence panel whose draw bars are cut at its bottom: the triangle
+    that marks each of them (:func:`klip_tpe.plots.draw_ranges`) and what it means."""
+    ax.scatter([0.015], [0.93], marker="v", s=9, color=color, lw=0, transform=ax.transAxes, clip_on=False, zorder=6)
+    ax.text(0.028, 0.93, "draw below the axis", transform=ax.transAxes, fontsize=5.5, color=color, va="center",
+            ha="left", zorder=6, bbox=dict(boxstyle="square,pad=0.15", fc=ax.get_facecolor(), ec="none", alpha=0.7))
+
+
 def panel_convergence_idl(ax, ad: AnnulusData, current: Optional[int] = None):
     """IDL convergence panel: grey hollow = warm-up/explore, TPE / local filled, running
     best (fg), SMA20/SMA50 of the guided evals, SMA20 of the random ones, best circled."""
@@ -2608,6 +2665,10 @@ def panel_convergence_idl(ax, ad: AnnulusData, current: Optional[int] = None):
     fg = _fg()
     n_bars, dlo, dhi = 0, np.inf, -np.inf
     if n:
+        fin = y[np.isfinite(y)]
+        # The bottom comes from the scores alone, 0 in a floored run (Kevin Wagner,
+        # 2026-11-01: one low draw squashed the scores), and the draws' bars are cut there.
+        lo = min(float(fin.min()), 0.0) if fin.size else 0.0
         # Under the points when n_remeasure > 1: the min-to-max span of the draws each
         # trial's score is the mean of.  This panel is the one render_step draws -- panel_trace
         # belongs to render_step_classic -- so the bars have to be added here too or the live
@@ -2618,7 +2679,7 @@ def panel_convergence_idl(ax, ad: AnnulusData, current: Optional[int] = None):
             _ds = [(d or {}).get("draw_scores") if isinstance(d, dict) else None
                    for d in (_dw + [None] * max(0, n - len(_dw)))][:n]
             _cols = [("#9a9a9a" if r else (c_loc if l else c_tpe)) for r, l in zip(rnd, loc)]
-            n_bars = draw_ranges(ax, ev, _ds, colors=_cols, label="")
+            n_bars = draw_ranges(ax, ev, _ds, colors=_cols, label="", floor=lo)
             flat = [float(v) for d in _ds for v in (d or []) if v is not None and np.isfinite(v)]
             if flat:
                 dlo, dhi = min(flat), max(flat)
@@ -2632,12 +2693,13 @@ def panel_convergence_idl(ax, ad: AnnulusData, current: Optional[int] = None):
             slope = np.polyfit(ev[idx], sma20[idx], 1)[0]
         sstr = "n/a" if not np.isfinite(slope) else f"{slope:+.3f}"
         ax.set_title(f"TPE convergence  (SMA20 slope {sstr}/eval)  [{ad.metric_name}]", fontsize=7.5)
+        # unclipped: a floored trial sits on the bottom edge
         if rnd.any():
-            ax.scatter(ev[rnd], y[rnd], s=12, facecolor="none", edgecolor="#9a9a9a", lw=0.7)
+            ax.scatter(ev[rnd], y[rnd], s=12, facecolor="none", edgecolor="#9a9a9a", lw=0.7, clip_on=False)
         if tpe.any():
-            ax.scatter(ev[tpe], y[tpe], s=12, color=c_tpe, lw=0)
+            ax.scatter(ev[tpe], y[tpe], s=12, color=c_tpe, lw=0, clip_on=False)
         if loc.any():
-            ax.scatter(ev[loc], y[loc], s=12, color=c_loc, lw=0)
+            ax.scatter(ev[loc], y[loc], s=12, color=c_loc, lw=0, clip_on=False)
         ax.plot(ev, ad.running_best(), color=fg, lw=1.6)
         ax.plot(ev, smag, color="#777777", lw=1.4, ls="--")
         ax.plot(ev, sma20, color=c_s20, lw=1.4)
@@ -2647,13 +2709,14 @@ def panel_convergence_idl(ax, ad: AnnulusData, current: Optional[int] = None):
             ax.scatter([bi], [bs], s=110, facecolor="none", edgecolor="#00d000", lw=1.6, zorder=5)
         if current is not None and 0 <= current < n and np.isfinite(y[current]):
             ax.scatter([current], [y[current]], s=60, marker="s", facecolor="none", edgecolor=CUR_COLOR, lw=1.0, zorder=5)
-        fin = y[np.isfinite(y)]
-        lo, hi = (min(float(fin.min()), 0.0), float(fin.max()) * 1.1) if fin.size else (0.0, 1.0)
-        if n_bars:                      # a clipped error bar is worse than none
-            lo, hi = min(lo, float(dlo)), max(hi, float(dhi) * 1.02)
+        hi = float(fin.max()) * 1.1 if fin.size else 1.0
+        if n_bars:                      # the bars' tops stay in
+            hi = max(hi, float(dhi) * 1.02)
         if hi <= lo:
             hi = lo + 1.0
         ax.set_ylim(lo, hi)
+        if n_bars and dlo < lo:
+            _below_note(ax, fg)
         if ad.n_init and n > ad.n_init:
             ax.axvline(ad.n_init - 0.5, color="#777777", ls=":", lw=0.7)
     else:

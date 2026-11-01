@@ -332,6 +332,16 @@ class RunConfig:
     #: floor.  Runs saved before 2026-11-01 resume without one, and ``--from-idl-setup`` runs
     #: go without one, as the IDL does.
     score_floor: Optional[float] = 0.0
+    #: How the verify, the candidate search and param_verify measure.  ``"search"`` (since
+    #: 2026-11-01, Kevin Wagner): with the search's own S/N
+    #: (:func:`~klip_tpe.metrics.mawet_peak_snr`) under the rules of the run's metric, its
+    #: matched filter, despike, radial band and pixel mask included, and with every ring and map
+    #: of the run leaving the pixel mask out.  ``"idl"``: as before, with the IDL verify's S/N
+    #: (``near2v_snrfap``: a Gaussian kernel, no despike or band, the keep-out around the
+    #: located peak), and with the pixel mask in the search's rings and the grid's matched
+    #: filter alone.  Runs saved before 2026-11-01 resume, re-reduce and verify with ``"idl"``,
+    #: and so do ``--from-idl-setup`` runs.
+    verify_snr: str = "search"
     inject_inset_fwhm: float = 1.0        # injection band inset from the annulus edges
     pair_area_midpoint: bool = True       # 2 sources -> both at sqrt((r_in^2+r_out^2)/2), 180 deg apart (IDL 2026-09-05)
     #: Every injection of every stage (search, k-scan re-score, calibration, validation,
@@ -512,8 +522,9 @@ class RunConfig:
                               else ContrastGridConfig(mode="off"))
         # a run saved before the noise rings left the sidelobes out keeps its rings
         d.setdefault("sidelobes", "off")
-        # and one saved before 2026-11-01 its negative scores
+        # and one saved before 2026-11-01 its negative scores, and its verify
         d.setdefault("score_floor", None)
+        d.setdefault("verify_snr", "idl")
         return _from_dict_filtered(cls, d)
 
 
@@ -1375,11 +1386,20 @@ class Runner:
         search's: its matched filter, despike, keep-outs, radial band, small-sample correction
         and pixel mask (Kevin Wagner, 2026-11-01).  The S/N maps, noise curves and contrast
         curves take its pixel mask (:meth:`_pixel_mask`)."""
-        from .metrics import ring_rules
+        from .metrics import VERIFY_IDL, ring_rules
+        if self._verify_idl():
+            return dict(VERIFY_IDL)
         return ring_rules(getattr(self.objective, "metric", None))
 
+    def _verify_idl(self) -> bool:
+        """Does the run keep the measures of before 2026-11-01 (``RunConfig.verify_snr``)?"""
+        return str(getattr(self.cfg, "verify_snr", "search") or "search").lower() == "idl"
+
     def _pixel_mask(self) -> Optional[np.ndarray]:
-        """The search metric's pixel mask (the disk), which every ring and map leaves out."""
+        """The search metric's pixel mask (the disk), which every ring and map leaves out.  None
+        for a run that keeps the measures of before 2026-11-01, whose products did without it."""
+        if self._verify_idl():
+            return None
         return getattr(getattr(self.objective, "metric", None), "pixel_mask", None)
 
     def _verify_rule(self):
@@ -1407,6 +1427,14 @@ class Runner:
             kw.update(excl_arcs=arcs, pxscale=self.pxscale, angle_convention=self.reducer.angle_convention)
         kw.setdefault("pixel_mask", self._pixel_mask())
         return snr_map(img, self.fwhm, **kw)
+
+    def _snr_product(self, img: np.ndarray, hdr: Dict[str, Any], **kw) -> Tuple[np.ndarray, Dict[str, Any], Dict]:
+        """:meth:`_snr_map` of a product and its FITS header, which names the radii whose noise
+        band was widened past the pixel mask (:func:`~klip_tpe.products.snr_widened_header`)."""
+        from .products import snr_widened_header
+        info: Dict[str, Any] = {}
+        snr = self._snr_map(img, info=info, **kw)
+        return snr, dict(hdr, **snr_widened_header(info)), info
 
     def _fit_inner_guard(self, smp) -> None:
         """Lower the metric's inner guard (``inner_fwhm``, no S/N inside it) to the injection
@@ -1811,7 +1839,7 @@ class Runner:
         if rule is not None:
             if geo["aperture"]:
                 kw: Dict[str, Any] = dict(excl_fwhm=float(mget("excl_fwhm", 1.5)), measure=aperture_mawet_snr,
-                                          pixel_mask=mget("pixel_mask", None))
+                                          pixel_mask=self._pixel_mask())
                 cln = None if clean is None else np.asarray(clean, float)
             else:
                 flat = bool(mget("flatten", False))
@@ -1831,7 +1859,7 @@ class Runner:
         if geo["aperture"]:
             snr, det = aperture_mawet_snr(img, [rho], [theta], pxscale, fwhm, excl_fwhm=float(mget("excl_fwhm", 1.5)),
                                           angle_convention=geo["conv"], known=geo["known"], excl_arcs=arcs,
-                                          return_details=True, pixel_mask=mget("pixel_mask", None))
+                                          return_details=True, pixel_mask=self._pixel_mask())
         else:
             kern = metric.kernel(rho) if callable(getattr(metric, "kernel", None)) else None
             im = radprof(img) if mget("flatten", False) else img
@@ -4542,9 +4570,9 @@ class Runner:
         st = self._maybe_flatten(stitch_tiles(cleans, tiles, pads=pads))
         files = {"clean": os.path.join(self.run_dir, "klip_stitched_running.fits")}
         _write_fits(files["clean"], st, hdr)
-        snr = self._snr_map(st)
+        snr, hs, _ = self._snr_product(st, dict(hdr, IMGTYPE="running stitched S/N map (Mawet)"))
         files["snr"] = os.path.join(self.run_dir, "klip_stitched_running_snr.fits")
-        _write_fits(files["snr"], snr, dict(hdr, IMGTYPE="running stitched S/N map (Mawet)"))
+        _write_fits(files["snr"], snr, hs)
         out = {"clean": st, "snr": snr, "zones": zones, "tiles": tiles}
         if any(i is not None for i in injs):
             sti = self._maybe_flatten(stitch_tiles([i if i is not None else c for i, c in zip(injs, cleans)], tiles,
@@ -4555,8 +4583,9 @@ class Runner:
             files["inj"] = os.path.join(self.run_dir, "klip_stitched_running_inj.fits")
             _write_fits(files["inj"], sti, hi)
             files["snr_inj"] = os.path.join(self.run_dir, "klip_stitched_running_snr_inj.fits")
-            _write_fits(files["snr_inj"], self._snr_map(sti, exclude_xy=self._inj_xy(sources, sti.shape)),
-                        dict(hi, IMGTYPE="running stitched S/N map (injected)"))
+            si, hs, _ = self._snr_product(sti, dict(hi, IMGTYPE="running stitched S/N map (injected)"),
+                                          exclude_xy=self._inj_xy(sources, sti.shape))
+            _write_fits(files["snr_inj"], si, hs)
             out["inj"] = sti
         if at_end and any(s is not None for s in stacks):
             w = self._stitch_weights(cleans, zones)
@@ -5073,9 +5102,12 @@ class Runner:
         hdr.update(extra_header or {})
         files = {"clean": os.path.join(self.run_dir, "klip_stitched.fits")}
         _write_fits(files["clean"], st_f, hdr, hist)
-        snr = self._snr_map(st_f)
+        snr, hs, sinfo = self._snr_product(st_f, dict(hdr, IMGTYPE="final stitched S/N map (per-pixel Mawet)"))
         files["snr"] = os.path.join(self.run_dir, "klip_stitched_snr.fits")
-        _write_fits(files["snr"], snr, dict(hdr, IMGTYPE="final stitched S/N map (per-pixel Mawet)"), hist)
+        _write_fits(files["snr"], snr, hs, hist)
+        from .products import snr_widened_note
+        if snr_widened_note(sinfo, self.pxscale):
+            self.log(f"  stitched S/N map: {snr_widened_note(sinfo, self.pxscale)}")
         out: Dict[str, Any] = {"clean": st_f, "snr": snr, "weights": w, "zones": zones, "tiles": tiles, "files": files}
         # validated-winner injected stitch
         allsrc = []
@@ -5092,8 +5124,9 @@ class Runner:
             files["inj"] = os.path.join(self.run_dir, "klip_stitched_inj.fits")
             _write_fits(files["inj"], sti, hi, hist)
             files["snr_inj"] = os.path.join(self.run_dir, "klip_stitched_snr_inj.fits")
-            _write_fits(files["snr_inj"], self._snr_map(sti, exclude_xy=self._inj_xy(allsrc, sti.shape)),
-                        dict(hi, IMGTYPE="validated injected stitched S/N map (per-pixel Mawet)"), hist)
+            si, hs, _ = self._snr_product(sti, dict(hi, IMGTYPE="validated injected stitched S/N map (per-pixel Mawet)"),
+                                          exclude_xy=self._inj_xy(allsrc, sti.shape))
+            _write_fits(files["snr_inj"], si, hs, hist)
             out["inj"] = sti
         # per-partition stacks on the union of partition ids
         for key, fname, label in (("clean_stack", "klip_stitched_nights.fits.gz", "nights"),

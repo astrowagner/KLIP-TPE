@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased — 2026-11-01 (a saved run keeps its verify, the S/N maps over the mask, and the convergence panels from 0)
+
+- **A run keeps the verify it was made with** (`RunConfig.verify_snr`, `--verify-snr`, the
+  NEAR2 session's question of 2026-11-01).  New runs measure as the search does (`search`).  A
+  run saved before 2026-11-01, and a `--from-idl-setup` run, keeps the IDL verify's S/N, the
+  candidate search and param_verify as they measured, and the pixel mask in the search's rings
+  and the grid's matched filter alone (`idl`, `metrics.VERIFY_IDL`).  On a synthetic stack the
+  `idl` path gives d104527's verify rows, candidate list, solved contrasts and param_verify
+  curve to the bit.  `klip-tpe rereduce --verify-snr search` gives an old run the new verify,
+  and the display reads the setting from the run's setup.
+- **The candidate search measures each night on its own image again.**  dd433e7 cached each
+  night's matched-filter map under the address of a view made anew for every peak, and an
+  address freed before came back, so every night took one night's S/N.  On a planted source
+  the tier-A candidate fell to tier B with no night above 2.  The nights are now one list, and
+  the cache holds the image it was made from.
+- **The S/N maps have values where the pixel mask covers whole rings** (the MWC 758 session,
+  Kevin Wagner).  Where the mask leaves a radius' 1 px band fewer than 20 pixels
+  (`products.SNR_BAND_MIN`), the band widens a pixel each side at a time until it holds 20,
+  up to 3 FWHM each side.  MWC 758's mask had left the maps blank from 0.24" to 0.41".  The
+  stitched S/N maps name those radii in `SNRWIDEN`, `SNRWIDR` and `SNRWIDHW`, the log names
+  them for the final stitch, and the panels' S/N cells in a corner.  A band the mask does not
+  touch is as before.
+- **The convergence panels start at 0** (Kevin Wagner).  `panel_convergence_idl`,
+  `panel_trace` and `plots.plot_trace` take the bottom from the scores alone, the lowest score
+  or 0, whichever is lower, and cut the draw bars there (`plots.draw_ranges(floor=)`).  A small
+  triangle at the bottom marks a cut bar, and one note on the panel says what it means.
+- Tests in `tests/test_verify_idl.py`, `tests/test_convergence_floor.py` and
+  `tests/test_mask_everywhere.py`.
+
 ## Unreleased — 2026-11-01 (the verify and the candidate search measure as the search, and every ring and map leaves the disk out)
 
 - **The verify, the candidate search and param_verify measure with the search's S/N**
