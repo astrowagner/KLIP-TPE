@@ -30,7 +30,7 @@ __all__ = ["radprof", "declip", "gaussian_kernel", "source_xy", "mawet_peak_snr"
            "injection_difference_snr", "aperture_mawet_snr", "clip0", "MawetPeakSNR",
            "InjectionDifferenceSNR", "Objective", "Source", "nanmedian_even", "pa_wedge_mask", "line_mask",
            "disk_mask_from_image", "why_failed", "WHY_GUARD", "WHY_RING", "WHY_NOISE", "Sidelobes",
-           "sidelobe_snr", "RingRecorder", "ring_role"]
+           "sidelobe_snr", "RingRecorder", "ring_role", "ring_rules", "rule_kwargs", "matched_filter"]
 
 
 # ----------------------------------------------------------------------------
@@ -539,7 +539,8 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                    pixel_mask: Optional[np.ndarray] = None, inner_fwhm: float = 1.0,
                    angle_convention: str = "pa", return_details: bool = False,
                    excl_arcs: Sequence[Tuple[float, float, float, float]] = (),
-                   peak_xy: Optional[Sequence[Tuple[float, float]]] = None):
+                   peak_xy: Optional[Sequence[Tuple[float, float]]] = None,
+                   exclude_xy: Sequence[Tuple[float, float]] = (), mfmap: Optional[np.ndarray] = None):
     """Matched-filter Mawet et al. (2014) detection S/N of each source.
 
     * optional single-pixel de-spiking, then convolution with ``kernel`` (default
@@ -577,7 +578,11 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
 
     ``peak_xy`` = ``[(x, y), ...]``, one pixel per source, takes the peak there instead of
     searching for it: the clean reduction's ring through an injected source as the injected
-    image located it (:func:`sidelobe_snr`).  The details' ``n_left`` counts the ring's
+    image located it (:func:`sidelobe_snr`).  ``exclude_xy`` (px): more positions whose
+    ``excl_fwhm`` keep-out the ring and the band skip, as the verify's other sources and known
+    companions (:func:`klip_tpe.verify.snr_fap`).  ``mfmap``: the matched-filter map, made
+    already, for every source instead of the convolutions of ``img`` (the verify's solved
+    contrasts, :func:`matched_filter`).  The details' ``n_left`` counts the ring's
     apertures left after the exclusions; ``nclean`` is 0 when fewer than 3 are left.
 
     The IDL ``near2_snrpk`` asked the guard of the located peak instead.  On a clean
@@ -593,13 +598,24 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
     theta = np.atleast_1d(np.asarray(theta, float))
     nsrc = rho.size
     exr = excl_fwhm * fwhm
-    # the declip, the zero fill and each kernel's convolution, once per image and kernel
-    prep = _prepare(img, declip_nsig)
-    img, imz = prep["img"], prep["imz"]
-    kerns = _per_source_kernels(kernel, nsrc, fwhm)
+    if mfmap is not None:
+        img = np.asarray(img, float)
+        if np.shape(mfmap) != img.shape:
+            raise ValueError(f"mawet_peak_snr: mfmap {np.shape(mfmap)} is not the image's {img.shape}")
+        # the map is made already.  The despike leaves every pixel as finite as it was, so the
+        # image's own finite pixels are the prepared image's, and nothing is hashed or convolved
+        prep = {"img": img, "finite": np.isfinite(img)}
+        kerns = [None] * nsrc
+    else:
+        # the declip, the zero fill and each kernel's convolution, once per image and kernel
+        prep = _prepare(img, declip_nsig)
+        kerns = _per_source_kernels(kernel, nsrc, fwhm)
+    img, imz = prep["img"], prep.get("imz")
     _amaps: Dict[int, np.ndarray] = {}
 
     def amap(i: int) -> np.ndarray:
+        if mfmap is not None:
+            return mfmap
         k = kerns[i]
         if id(k) not in _amaps:
             kk = _digest(np.asarray(k))
@@ -612,6 +628,8 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
         return _amaps[id(k)]
 
     xs, ys = source_xy(rho, theta, pxscale, cx, cy, angle_convention)
+    ex = np.array([float(e[0]) for e in exclude_xy], float)
+    ey = np.array([float(e[1]) for e in exclude_xy], float)
     kx = ky = np.zeros(0)
     if len(known):
         kr = np.array([k[0] for k in known], float)
@@ -676,6 +694,10 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                 if ring is not None:
                     ring.append([xk, yk, "source"])
                 continue
+            if ex.size and np.any(np.hypot(xk - ex, yk - ey) < exr):
+                if ring is not None:
+                    ring.append([xk, yk, "excluded"])
+                continue
             if not (0 <= xk < nx and 0 <= yk < ny) or not finite[yk, xk]:
                 if ring is not None:
                     ring.append([xk, yk, "masked" if (pixel_mask is not None and 0 <= xk < nx and 0 <= yk < ny
@@ -701,6 +723,8 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                 keep &= (xx - xs[t]) ** 2 + (yy - ys[t]) ** 2 >= exr * exr
             for t in range(kx.size):
                 keep &= (xx - kx[t]) ** 2 + (yy - ky[t]) ** 2 >= exr * exr
+            for t in range(ex.size):
+                keep &= (xx - ex[t]) ** 2 + (yy - ey[t]) ** 2 >= exr * exr
             if arc_px is not None:
                 keep &= ~arc_px
             bvals = A[keep] if keep.sum() >= 5 else A[bnd]
@@ -749,7 +773,8 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                 ring = [[xk, yk, "unused" if why.startswith("used") else why] for xk, yk, why in ring]
             _ring_emit(_ring_rec("mawet_peak_snr", (ny, nx), cx, cy, det, fwhm, exr, ring, xs, ys, kx, ky,
                                  excl_arcs, band_fwhm=band_fwhm, snr=float(snr[s]), noise=noise,
-                                 min_ring=int(min_ring), band_floor=bool(used and sd_band > sd_ring > 0)))
+                                 min_ring=int(min_ring), band_floor=bool(used and sd_band > sd_ring > 0),
+                                 excluded_xy=[(float(a), float(b)) for a, b in zip(ex, ey)]))
     if return_details:
         return snr, details
     return snr
@@ -769,13 +794,75 @@ def _ring_rec(fn: str, shape, cx: float, cy: float, det: Dict[str, Any], fwhm: f
     return rec
 
 
+#: the keywords of :func:`mawet_peak_snr` a run's metric sets, which every ring S/N of the run
+#: takes (:func:`ring_rules`): the search's, the verify's and the candidate search's
+RING_RULE_KEYS = ("search_px", "excl_fwhm", "declip_nsig", "band_fwhm", "min_ring", "penalty", "pixel_mask",
+                  "inner_fwhm")
+
+
+def ring_rules(metric) -> Dict[str, Any]:
+    """The noise-ring rules of a run's metric (:class:`MawetPeakSNR`), for the S/N the verify
+    and the candidate search measure (:func:`klip_tpe.verify.snr_fap`): its matched filter
+    (``kernel_at``, its kernel at a separation), the peak search, the keep-outs, the despike,
+    the radial band, the shortest ring, the small-sample correction, the pixel mask, the inner
+    guard and ``flatten``.  Empty without such a metric, which leaves
+    :func:`mawet_peak_snr`'s own defaults.  A forward-model metric
+    (:class:`~klip_tpe.fmmf.FMMFSNR`) gives the kernel it falls back to, its measured one or the
+    Gaussian, since the verify has no forward model."""
+    if metric is None or not hasattr(metric, "excl_fwhm"):
+        return {}
+    out: Dict[str, Any] = {k: getattr(metric, k) for k in RING_RULE_KEYS if hasattr(metric, k)}
+    if callable(getattr(metric, "kernel", None)):
+        out["kernel_at"] = metric.kernel
+    elif callable(getattr(metric, "kernel_fn", None)) or getattr(metric, "mf_fwhm", None):
+        kf = getattr(metric, "kernel_fn", None)
+        fw = float(getattr(metric, "mf_fwhm", None) or getattr(metric, "fwhm"))
+
+        def _at(rho, kf=kf, fw=fw):
+            k = kf(float(rho)) if callable(kf) else None
+            return gaussian_kernel(fw) if k is None else k
+        out["kernel_at"] = _at
+    if getattr(metric, "flatten", False):
+        out["flatten"] = True
+    return out
+
+
+def rule_kwargs(rules: Optional[Dict[str, Any]], rho: float, shape) -> Dict[str, Any]:
+    """:func:`mawet_peak_snr`'s keywords from :func:`ring_rules` for a source at ``rho``
+    (arcsec) in an image of ``shape``: the kernel there, and the pixel mask where it is the
+    image's size."""
+    kw = {k: v for k, v in (rules or {}).items() if k in RING_RULE_KEYS}
+    m = kw.get("pixel_mask")
+    if m is not None and np.shape(m) != tuple(shape):
+        kw.pop("pixel_mask")
+    ka = (rules or {}).get("kernel_at")
+    if callable(ka):
+        kw["kernel"] = ka(float(rho))
+    return kw
+
+
+def matched_filter(img: np.ndarray, fwhm: float, rules: Optional[Dict[str, Any]] = None,
+                   rho: Optional[float] = None) -> np.ndarray:
+    """The matched-filter map :func:`mawet_peak_snr` measures ``img`` on, under ``rules``
+    (:func:`ring_rules`): despiked, zero-filled and convolved with the kernel at ``rho``."""
+    kw = rule_kwargs(rules, rho if rho is not None else 0.0, np.shape(img)) if rules else {}
+    prep = _prepare(np.asarray(img, float), kw.get("declip_nsig", 6.0))
+    k = kw.get("kernel")
+    k = gaussian_kernel(fwhm) if k is None else np.asarray(k, float)
+    return ndimage.convolve(prep["imz"], k, mode="nearest")
+
+
 def _ring_fluxes(img, cx, cy, sep, phi0, nap, aprad, excl_xy, exr, known_xy, skip=None, trace=None,
-                 n_src=None, skip_k=()):
+                 n_src=None, skip_k=(), pixel_mask=None):
     """The ring's aperture sums.  ``trace``: a list that gets ``[x, y, what]`` for every
     aperture (:class:`RingRecorder`), ``n_src`` the leading entries of ``excl_xy`` that are
     sources (the rest are known companions).  ``skip_k``: ring positions left out by their
-    index, the source's neighbours in the IDL contrast generators."""
+    index, the source's neighbours in the IDL contrast generators.  ``pixel_mask``: an
+    aperture whose centre pixel it holds is left out, as :func:`mawet_peak_snr` leaves out a
+    sample there."""
     ref, ok = [], []
+    ny, nx = np.shape(img)
+    mask = None if pixel_mask is None or np.shape(pixel_mask) != (ny, nx) else np.asarray(pixel_mask, bool)
     for k in range(1, nap):
         phik = phi0 + k * 2 * np.pi / nap
         xk, yk = cx + sep * np.cos(phik), cy + sep * np.sin(phik)
@@ -783,6 +870,12 @@ def _ring_fluxes(img, cx, cy, sep, phi0, nap, aprad, excl_xy, exr, known_xy, ski
             if trace is not None:
                 trace.append([xk, yk, "source"])
             continue
+        if mask is not None:
+            ix, iy = int(round(xk)), int(round(yk))
+            if 0 <= ix < nx and 0 <= iy < ny and mask[iy, ix]:
+                if trace is not None:
+                    trace.append([xk, yk, "masked"])
+                continue
         hit = [j for j, (ex, ey) in enumerate(excl_xy) if np.hypot(xk - ex, yk - ey) < exr]
         if hit:
             if trace is not None:
@@ -848,7 +941,7 @@ def aperture_mawet_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float,
                        excl_fwhm: float = 1.5, angle_convention: str = "pa",
                        known: Sequence[Tuple[float, float]] = (),
                        excl_arcs: Sequence[Tuple[float, float, float, float]] = (),
-                       return_details: bool = False):
+                       return_details: bool = False, pixel_mask: Optional[np.ndarray] = None):
     """Plain aperture Mawet S/N of the IDL contrast generators (``contrastcurve_*.pro``):
     ``(f_src - mean(ring)) / (std(ring) sqrt(1+1/n))`` with FWHM/2 apertures, the source's at
     the given position (no peak search), ``n`` the apertures kept.  As there, the ring holds
@@ -857,10 +950,11 @@ def aperture_mawet_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float,
     ``near2_snr`` placed ``floor(2 pi r / FWHM)`` and skipped 1.5 FWHM around the source, which
     left the same ring but for a position now and then (to 2026-11-01).
 
-    The other sources, the ``known`` companions (1.5 FWHM, ``excl_fwhm``) and ``excl_arcs`` (see
-    :func:`mawet_peak_snr`) leave apertures out of the ring.  ``return_details`` adds each
-    source's ``nclean``, the apertures used, and ``peak``, ``bg`` and ``sigma``, the source's
-    flux and the ring's mean and scatter."""
+    The other sources, the ``known`` companions (1.5 FWHM, ``excl_fwhm``), ``excl_arcs`` (see
+    :func:`mawet_peak_snr`) and the ``pixel_mask`` (an aperture centred on it, as the run's
+    disk mask leaves out the search's samples) leave apertures out of the ring.
+    ``return_details`` adds each source's ``nclean``, the apertures used, and ``peak``, ``bg``
+    and ``sigma``, the source's flux and the ring's mean and scatter."""
     img = np.asarray(img, float)
     cx, cy = star_center(img.shape)
     rho = np.atleast_1d(np.asarray(rho, float))
@@ -887,7 +981,7 @@ def aperture_mawet_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float,
         trace: Optional[List[List[Any]]] = [] if recording else None
         others = excl[:s] + excl[s + 1:]               # the other sources, then the known companions
         ref, _ = _ring_fluxes(img, cx, cy, sep, phi[s], nap, aprad, others, exr, [], skip=skip, trace=trace,
-                              n_src=int(rho.size) - 1, skip_k=near)
+                              n_src=int(rho.size) - 1, skip_k=near, pixel_mask=pixel_mask)
         details.append({"nclean": int(ref.size), "n_left": int(ref.size), "nap": nap, "peak": float(f_src)})
         if trace is not None:
             kxy = excl[int(rho.size):]

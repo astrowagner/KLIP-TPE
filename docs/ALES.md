@@ -370,6 +370,12 @@ draws it for a look, and `run_mwc758_ales_clike.py --disk-mask MASK.fits` runs w
 setup file records the masked pixel counts (`objective.metric.pixel_mask_px`,
 `sampler.forbidden_mask_px`).
 
+Since 2026-11-01 every ring and map of a run leaves the mask out, not the search's alone: the
+contrast grid, the verify (Path A, the subsets, the STIM annulus and the solved contrasts), the
+candidate search, param_verify, the S/N maps, the noise and contrast curves and the stitch
+weights.  The run writes it as `pixel_mask.fits` beside `run_setup.json`, and the panels drawn
+from a run directory read it there, or the script's `disk_mask.fits`.
+
 Build the mask from an image of the disk made before the search (a disk-preserving reduction,
 another epoch or instrument), never from a search's winner, and look at it: it masks whatever
 is bright, and a bright speckle group masked with the disk biases the noise estimate down.  It

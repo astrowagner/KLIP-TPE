@@ -15,6 +15,12 @@ from klip_tpe import param_verify as PV
 FWHM = 4.0
 PX = 0.05
 N = 96
+# The verify measures with the run's rules, and without them with the search metric's defaults,
+# which despike at 6 sigma.  The noise here is smooth, with no white part, so a planted source's
+# core stands out of its 3x3 median by more than 6 of the image's own robust sigmas and the
+# despike takes about 11 % off its matched-filter peak.  The tests of the verify's other
+# workings keep the spikes, as the ALES runs do.
+KEEP_SPIKES = {"declip_nsig": None}
 
 
 def _gauss(ny, nx, x0, y0, fwhm, amp):
@@ -80,7 +86,8 @@ def test_verify_planted_source_detected():
     rho, theta = 0.8, 40.0
     stack = _planted_stack(nn, rho, theta, 8.0)
     rows, maps = V.verify_candidates(stack, list(range(nn)), [(rho, theta)], FWHM, PX,
-                                     n_boot=100, rng=np.random.default_rng(3), return_maps=True)
+                                     n_boot=100, rng=np.random.default_rng(3), return_maps=True,
+                                     rules=KEEP_SPIKES)
     r = rows[0]
     assert r["kind"] == "candidate"
     assert r["snr"] > 6.0
@@ -92,6 +99,33 @@ def test_verify_planted_source_detected():
     assert r["persistence"] > 2.0
     assert set(r["subsets"]) == set(V.SUBSET_NAMES)
     assert maps["stim"].shape == (N, N)
+
+
+def test_verify_measures_as_the_search_does():
+    """The verify's S/N is the search's (``metrics.mawet_peak_snr``) under the run's rules, and
+    under the search metric's defaults without them, the despike with them (Kevin Wagner,
+    2026-11-01)."""
+    from klip_tpe.metrics import MawetPeakSNR, mawet_peak_snr, ring_rules
+    rho, theta = 0.8, 40.0
+    comb = np.nanmean(_planted_stack(6, rho, theta, 8.0), axis=0)
+    for rules, kw in ((None, {}), (KEEP_SPIKES, {"declip_nsig": None})):
+        s = V.snr_fap(comb, rho, theta, PX, FWHM, rules=rules)
+        assert s["snr"] == pytest.approx(float(mawet_peak_snr(comb, [rho], [theta], PX, FWHM, **kw)[0]), rel=1e-12)
+    # the despike takes the planted core down in this smooth noise
+    kept = V.snr_fap(comb, rho, theta, PX, FWHM, rules=KEEP_SPIKES)["snr"]
+    assert V.snr_fap(comb, rho, theta, PX, FWHM)["snr"] < 0.9 * kept
+    # a run's metric hands over all of its rules: the kernel, the despike, the band, the
+    # shortest ring and the pixel mask, here over two of the ring's apertures
+    mask = np.zeros(comb.shape, bool)
+    xs, ys = source_xy(rho, theta + 180.0, PX, *star_center(comb.shape))
+    x0, y0 = int(round(xs[0])), int(round(ys[0]))
+    mask[y0 - 3:y0 + 4, x0 - 3:x0 + 4] = True
+    m = MawetPeakSNR(pxscale=PX, fwhm=FWHM, declip_nsig=None, band_fwhm=0.8, min_ring=8, pixel_mask=mask,
+                     mf_fwhm=4.5)
+    s = V.snr_fap(comb, rho, theta, PX, FWHM, rules=ring_rules(m))
+    assert s["snr"] == pytest.approx(float(m.per_source(comb, None, [rho], [theta])[0]), rel=1e-12)
+    assert s["snr"] != pytest.approx(kept, rel=1e-6)
+    assert s["nclean"] < V.snr_fap(comb, rho, theta, PX, FWHM, rules=KEEP_SPIKES)["nclean"]
 
 
 def test_verify_empty_field_and_report(tmp_path):
@@ -193,14 +227,19 @@ def test_solved_contrasts_scale_the_source_not_the_noise():
     xs, ys = source_xy(rho, pa, PX, c, c)
     unit = _gauss(n, n, float(xs[0]), float(ys[0]), FWHM, sig / resp)     # matched-filter S/N ~1 per unit
     clean = clean + 3.0 * unit            # a noise excursion of +3 sigma at the source, in the clean image
-    sc, lin = {}, {}
+    sc, lin, spk = {}, {}, {}
     for f in (1.0, 10.0):
         inj = clean + 7.0 * f * unit
         con = 1e-5 * f
-        sc[f] = V.solved_contrasts(clean, inj, rho, pa, con, PX, FWHM)
-        s1 = V.snr_fap(inj, rho, pa, PX, FWHM)
+        sc[f] = V.solved_contrasts(clean, inj, rho, pa, con, PX, FWHM, rules=KEEP_SPIKES)
+        s1 = V.snr_fap(inj, rho, pa, PX, FWHM, rules=KEEP_SPIKES)
         assert sc[f]["snr1"] == pytest.approx(s1["snr"], rel=1e-9)        # a = 1: the injected image's S/N
         lin[f] = V.contrast_limit(2.87e-7, 0.90, [con], [s1["snr"]], [s1["nap"]])
+        # with the despike the map is the line through the two despiked maps: the injected
+        # image's own S/N at a = 1, and the solved contrast close to the same either way
+        spk[f] = V.solved_contrasts(clean, inj, rho, pa, con, PX, FWHM)
+        assert spk[f]["snr1"] == pytest.approx(V.snr_fap(inj, rho, pa, PX, FWHM)["snr"], rel=1e-9)
+    assert spk[1.0]["c_det"] == pytest.approx(spk[10.0]["c_det"], rel=0.03)
     a, b = sc[1.0], sc[10.0]
     assert a["c_det"] == pytest.approx(b["c_det"], rel=1e-6)
     assert all(x == pytest.approx(y, rel=1e-6) for x, y in zip(a["c_tap"], b["c_tap"]))
@@ -210,8 +249,8 @@ def test_solved_contrasts_scale_the_source_not_the_noise():
     assert lin[10.0] / lin[1.0] > 1.08
     # at the solved contrast the source is just detected
     ad = a["c_det"] / 1e-5
-    up = V.snr_fap(clean + 7.0 * ad * (1 + 1e-6) * unit, rho, pa, PX, FWHM)
-    dn = V.snr_fap(clean + 7.0 * ad * (1 - 1e-4) * unit, rho, pa, PX, FWHM)
+    up = V.snr_fap(clean + 7.0 * ad * (1 + 1e-6) * unit, rho, pa, PX, FWHM, rules=KEEP_SPIKES)
+    dn = V.snr_fap(clean + 7.0 * ad * (1 - 1e-4) * unit, rho, pa, PX, FWHM, rules=KEEP_SPIKES)
     assert up["fap"] < 2.87e-7 <= dn["fap"]
     # out of reach and no contrast
     assert np.isinf(V.solved_contrasts(clean, clean, rho, pa, 1e-5, PX, FWHM)["c_det"])
@@ -327,7 +366,7 @@ def test_candidates_tier_A_when_present_all_nights(tmp_path):
     rho, theta = 0.9, 300.0
     stack = _planted_stack(nn, rho, theta, 8.0, seed=1)
     rows = C.find_candidates(None, stack, FWHM, PX, night_ids=list(range(nn)), verify_top=1,
-                             verify_kwargs={"n_boot": 20})
+                             verify_kwargs={"n_boot": 20}, rules=KEEP_SPIKES)
     assert rows, "no candidates found"
     top = rows[0]
     assert top["tier"] == "A"

@@ -117,6 +117,18 @@ in order:
   sources' arcs are let in, then the known companions'.  The report says which ring took
   which.  The S/N maps (`klip_stitched_snr.fits` and the blind candidate search) leave out the
   known companions' arcs alone.
+* The verify, the candidate search and param_verify measure each source with the search's own
+  S/N (`metrics.mawet_peak_snr`) and the rules of the run's metric, since 2026-11-01 (Kevin
+  Wagner).  The rules are its matched filter, despike, peak search, keep-outs, radial band (the
+  noise where the ring keeps fewer than 6 apertures, and a floor under the ring's scatter),
+  small-sample correction and pixel mask.  Before, they measured as the IDL verify does
+  (`near2v_snrfap`), with a Gaussian kernel, no despike or band and the keep-out around the
+  located peak.  The bootstrap reads the peak of the same matched filter.
+* Every ring and map leaves the run's pixel mask out (the disk, `docs/ALES.md` section 9): the
+  search's and the contrast grid's, the verify's Path A, subsets, STIM annulus and solved
+  contrasts, the candidate search, param_verify, the S/N maps, the noise and contrast curves
+  and the stitch weights.  The run writes the mask as `pixel_mask.fits` beside
+  `run_setup.json`.
 * The contrast grid measures as the IDL contrast generators do (`contrastcurve_*.pro`, the
   defaults `--cg-snr aperture` and `--cg-sidelobe off` since 2026-11-01).  A FWHM/2 aperture at
   the injected position is set against a ring of round(2 pi r / FWHM) - 1 positions, which
@@ -467,7 +479,8 @@ and kind instead of a new search.
   candidates and the injections, and the limit tables) is measured on the stitched images,
   `klip_stitched.fits` and `klip_stitched_inj.fits`, rather than on the mean of the per-night
   stitches, and the report adds TABLE 3, each injection's contrasts solved on its own image.
-  The candidate list measures its S/N there too.
+  The candidate list measures its S/N there too.  Since 2026-11-01 every S/N of the verify is
+  the search's under the run's rules, the pixel mask included (the noise rings, above).
 * `--known RHO PA` puts a position into the verify as a candidate, a planet added with
   `--inject-sources` say, and keeps it out of the noise apertures.
 

@@ -1364,6 +1364,19 @@ class Runner:
         if hasattr(smp, "sidelobes"):
             smp.sidelobes = rule
 
+    def _ring_rules(self) -> Dict[str, Any]:
+        """The search's noise-ring rules (:func:`klip_tpe.metrics.ring_rules`), which the verify,
+        the candidate search and the parameter verify take, so their rings are measured as the
+        search's: its matched filter, despike, keep-outs, radial band, small-sample correction
+        and pixel mask (Kevin Wagner, 2026-11-01).  The S/N maps, noise curves and contrast
+        curves take its pixel mask (:meth:`_pixel_mask`)."""
+        from .metrics import ring_rules
+        return ring_rules(getattr(self.objective, "metric", None))
+
+    def _pixel_mask(self) -> Optional[np.ndarray]:
+        """The search metric's pixel mask (the disk), which every ring and map leaves out."""
+        return getattr(getattr(self.objective, "metric", None), "pixel_mask", None)
+
     def _verify_rule(self):
         """The sidelobe rule of the verify, the candidate search and the products' S/N maps:
         the objective's (``RunConfig.sidelobes``, at the data's PA coverage), None when the
@@ -1381,12 +1394,13 @@ class Runner:
                  float(rule.radial_fwhm)) for k in known]
 
     def _snr_map(self, img: np.ndarray, **kw) -> np.ndarray:
-        """:func:`~klip_tpe.products.snr_map` of a product, its noise without the known
-        companions' ADI arcs under the sidelobe rule."""
+        """:func:`~klip_tpe.products.snr_map` of a product, its noise without the pixel mask and,
+        under the sidelobe rule, without the known companions' ADI arcs."""
         from .products import snr_map
         arcs = self._known_arcs()
         if arcs:
             kw.update(excl_arcs=arcs, pxscale=self.pxscale, angle_convention=self.reducer.angle_convention)
+        kw.setdefault("pixel_mask", self._pixel_mask())
         return snr_map(img, self.fwhm, **kw)
 
     def _fit_inner_guard(self, smp) -> None:
@@ -1694,7 +1708,7 @@ class Runner:
         clean = ev.image if clean_img is None else clean_img
         cc = fm_contrast_curve(fm_image, clean, contrast, self.fwhm, self.pxscale, rin, float(a_out), srcs,
                                kernel_fn=kfn, angle_convention=conv, flatten=self.flatten_products,
-                               known=self._known(), resp=resp)
+                               known=self._known(), resp=resp, pixel_mask=self._pixel_mask())
         curve = {k: [None if not np.isfinite(v) else float(v) for v in np.atleast_1d(np.asarray(v_, float))]
                  for k, v_ in cc.items()}
         out = {"images": ev, "fm_image": fm_image, "clean": clean, "sources": srcs, "curve": curve,
@@ -1791,7 +1805,8 @@ class Runner:
         rule = geo.get("rule")
         if rule is not None:
             if geo["aperture"]:
-                kw: Dict[str, Any] = dict(excl_fwhm=float(mget("excl_fwhm", 1.5)), measure=aperture_mawet_snr)
+                kw: Dict[str, Any] = dict(excl_fwhm=float(mget("excl_fwhm", 1.5)), measure=aperture_mawet_snr,
+                                          pixel_mask=mget("pixel_mask", None))
                 cln = None if clean is None else np.asarray(clean, float)
             else:
                 flat = bool(mget("flatten", False))
@@ -1811,7 +1826,7 @@ class Runner:
         if geo["aperture"]:
             snr, det = aperture_mawet_snr(img, [rho], [theta], pxscale, fwhm, excl_fwhm=float(mget("excl_fwhm", 1.5)),
                                           angle_convention=geo["conv"], known=geo["known"], excl_arcs=arcs,
-                                          return_details=True)
+                                          return_details=True, pixel_mask=mget("pixel_mask", None))
         else:
             kern = metric.kernel(rho) if callable(getattr(metric, "kernel", None)) else None
             im = radprof(img) if mget("flatten", False) else img
@@ -4269,7 +4284,8 @@ class Runner:
             try:
                 cc = contrast_curve(clean_img, winner["samples_r"], winner["samples_s"], self.contrast,
                                     self.fwhm, self.pxscale, max(a_in, self.fwhm), a_out,
-                                    self.throughput_fn, self.cfg.kfit_order, known=self._known())
+                                    self.throughput_fn, self.cfg.kfit_order, known=self._known(),
+                                    pixel_mask=self._pixel_mask())
                 curve = {k: [None if not np.isfinite(v) else float(v) for v in np.atleast_1d(v_)]
                          for k, v_ in cc.items() for v in [np.asarray(v_, float)]}
                 self._durable_later(os.path.join(d, "contrast_curve.txt"))
@@ -4449,7 +4465,7 @@ class Runner:
         if self.cfg.legacy_stitch or n <= 1:
             return w
         for ia, (img, (rin, rout)) in enumerate(zip(images, zones)):
-            sig, rp = noise_profile(img, self.fwhm, rin, rout)
+            sig, rp = noise_profile(img, self.fwhm, rin, rout, pixel_mask=self._pixel_mask())
             gi = (rp >= rin + self.fwhm) & (rp <= rout - self.fwhm) & np.isfinite(sig) & (sig > 0)
             if gi.sum() == 0:
                 gi = np.isfinite(sig) & (sig > 0)
@@ -4603,7 +4619,7 @@ class Runner:
                                            excl_fwhm=self._excl_fwhm(), return_maps=True,
                                            combined=ev_c.image, combined_inj=ev_i.image,
                                            path_a="the annulus' combined image (best_clean.fits, injected best_inj.fits)",
-                                           sidelobes=self._verify_rule())
+                                           sidelobes=self._verify_rule(), rules=self._ring_rules())
             path = os.path.join(d, "verify_report.txt")
             write_verify_table(path, rows, maps.get("limits"), header={"run": os.path.abspath(self.run_dir)})
             self._durable_later(path)              # the hook's checkpoint records it as done
@@ -4682,6 +4698,7 @@ class Runner:
                            nsrc=self._nsrc(ia), rng=rng, known=list(getattr(self.sampler, "known", ()) or ()),
                            angle_convention=self.reducer.angle_convention,
                            flatten=self.flatten_products, log=self.log, inner_fwhm=self._inner_fwhm(),
+                           rules=self._ring_rules(),
                            # several configurations in flight, each its clean + injected pair
                            run_calls=lambda cs: self._run_ordered(
                                cs, max(1, self._reduction_window(len(cfg_w.selected)) // 2)))
@@ -4751,7 +4768,8 @@ class Runner:
             if dj:
                 allsrc.extend(dj.get("sources") or [])
         kw = dict(iwa_px=iwa, owa_px=owa, snrmin=float(self.cfg.cand_snrmin), known=known, persistence_map=pmap,
-                  angle_convention=self.reducer.angle_convention, sidelobes=self._verify_rule())
+                  angle_convention=self.reducer.angle_convention, sidelobes=self._verify_rule(),
+                  rules=self._ring_rules())
         results = {}
         for label, img_key, snr_key, inj_key in (("", "clean", "snr", None), ("inj_blind_", "inj", "snr_inj", "inj")):
             img = st.get(img_key)
@@ -4789,6 +4807,15 @@ class Runner:
             json.dump(d, f, indent=1, default=_json_default)
         # written once: a resume does not write them again, so on disk with the first checkpoint
         self._durable_later(os.path.join(self.run_dir, "run_setup.json"), os.path.join(self.run_dir, "run_setup.txt"))
+        # the pixel mask every ring and map leaves out, for the products drawn after the run
+        mask = self._pixel_mask()
+        if mask is not None and np.ndim(mask) == 2:
+            try:
+                from astropy.io import fits
+                fits.writeto(os.path.join(self.run_dir, "pixel_mask.fits"), np.asarray(mask, np.uint8), overwrite=True)
+                self._durable_later(os.path.join(self.run_dir, "pixel_mask.fits"))
+            except Exception as exc:              # noqa: BLE001 - the drawings do without it
+                self.log(f"  pixel_mask.fits not written ({exc!r})")
         with open(os.path.join(self.run_dir, "run_setup.txt"), "w") as f:
             f.write(f"# KLIP-TPE run setup -- {time.ctime()}  (klip_tpe {__version__})\n")
             for k, v in self.cfg.to_dict().items():
@@ -5156,7 +5183,7 @@ class Runner:
                                        combined=clean_img, combined_inj=None if injected is None else inj_img,
                                        path_a=None if clean_img is None else
                                        "the stitched image (klip_stitched.fits, injected klip_stitched_inj.fits)",
-                                       sidelobes=self._verify_rule())
+                                       sidelobes=self._verify_rule(), rules=self._ring_rules())
         path = os.path.join(self.run_dir, "stitched_verify_report.txt")
         write_verify_table(path, rows, maps.get("limits"), header=dict({"run": os.path.abspath(self.run_dir)},
                                                                        **(header or {})))

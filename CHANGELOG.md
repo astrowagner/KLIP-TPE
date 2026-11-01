@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased — 2026-11-01 (the verify and the candidate search measure as the search, and every ring and map leaves the disk out)
+
+- **The verify, the candidate search and param_verify measure with the search's S/N**
+  (`metrics.mawet_peak_snr`) under the rules of the run's metric (Kevin Wagner).
+  `verify.snr_fap` keeps its keywords and returns and now calls it with the run's matched
+  filter (a measured kernel too), despike, peak search, keep-outs, radial band (the noise where
+  the ring keeps fewer than `min_ring` apertures, and a floor under the ring's scatter),
+  small-sample correction and pixel mask.  Before, it ported the IDL's `near2v_snrfap`, with a
+  Gaussian kernel, no despike or band, the keep-out around the located peak and the samples
+  used in the correction.  The bootstrap reads the peak of the same matched filter, and the
+  solved contrasts scale the run's two maps.  The FAP still counts the ring samples used.  An
+  FMMF run's verify takes the kernel the metric falls back to, having no forward model.
+  Without the run's rules the search metric's defaults apply.  Their 6 sigma despike takes
+  about 3 % off a S/N 8 source at NEAR's 6.2 px FWHM in noise smoothed to the FWHM, and
+  nothing once a third of the noise variance is white.  The ALES scripts despike nothing.
+- **Every ring and map leaves the run's pixel mask out** (the disk, Kevin Wagner), not the
+  search's alone: the contrast grid, the verify's Path A, subsets, STIM annulus and solved
+  contrasts, the candidate search, param_verify, the S/N maps, the noise and contrast curves
+  (the KLIP-FM curve too) and the stitch weights.  On MWC 758 the verify, the STIM map, the
+  candidate search and the S/N maps used apertures on the masked disk before.  The run writes
+  the mask as `pixel_mask.fits` beside `run_setup.json`, and the panels drawn from a run
+  directory read it there or from an ALES script's `disk_mask.fits`.
+- **param_verify's rings leave the known companions out**, as the search's do.
+- The display measures the known companions' S/N and draws its verify pages with the run's
+  rules, read back from the setup for a run directory, where the Gaussian of the metric's FWHM
+  stands in for a measured kernel.
+- New: `metrics.ring_rules`, `metrics.rule_kwargs`, `metrics.matched_filter` and
+  `metrics.RING_RULE_KEYS`, `exclude_xy` and `mfmap` in `mawet_peak_snr`, `pixel_mask` in
+  `aperture_mawet_snr`, `verify.stim_fap`, `products.snr_map`, `noise_profile`,
+  `contrast_curve`, `fm_contrast_curve` and `stitch_annuli`, and `rules` in the verify's, the
+  candidate search's and param_verify's functions.  `snr_fap` adds `nclean`, `noise` and
+  `why` to its returns.  `klip_tpe.ringplot` draws the verify's rings from `mawet_peak_snr`'s
+  records.
+- Tests in `tests/test_mask_everywhere.py` and `tests/test_verify_stack.py`.  The verify tests
+  of its other workings keep the spikes (`rules={"declip_nsig": None}`), since their noise is
+  smooth with no white part, where a 6 sigma despike takes about 11 % off a 4 px source.
+
 ## Unreleased — 2026-11-01 (the noise rings of before 2026-10-31 again, the IDL generators' grid, and diagrams of every phase's rings)
 
 - **New runs keep the sidelobes in their noise rings again** (`RunConfig.sidelobes` and

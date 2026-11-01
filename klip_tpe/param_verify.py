@@ -31,7 +31,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .metrics import Source, mawet_peak_snr, nanmedian_even, radprof, source_xy, star_center
+from .metrics import Source, mawet_peak_snr, nanmedian_even, radprof, rule_kwargs, source_xy, star_center
 from .optimizers import History
 from .positions import PositionSampler
 from .products import snr_map
@@ -172,7 +172,8 @@ def param_verify_cubes(cclean: np.ndarray, cinj: np.ndarray, wts: Sequence[float
                        rlo: float, rhi: float, out_dir: Optional[str] = None, tag: str = "01",
                        snr_thr: float = 3.0, angle_convention: str = "pa",
                        flatten: bool = False, write_fits: bool = True,
-                       inner_fwhm: float = 1.0) -> Dict[str, Any]:
+                       inner_fwhm: float = 1.0, rules: Optional[Dict[str, Any]] = None,
+                       known: Sequence[Tuple[float, float]] = ()) -> Dict[str, Any]:
     """``near2m_paramverify`` (param_verify 135-249) on ``(N, ny, nx)`` clean and
     injected cubes of the ensemble.
 
@@ -190,7 +191,10 @@ def param_verify_cubes(cclean: np.ndarray, cinj: np.ndarray, wts: Sequence[float
     5. Contrast curve (221-229): ``ps = mawet_peak_snr(radprof(combj), sources)``;
        ``reval = rlo + (rhi-rlo)(i+0.5)/12``; ``K_s = ps_s sigma(r_s) / ccal``;
        ``Kc = median(K > 0)``; ``c5 = 5 sigma(r) / Kc``.  ``inner_fwhm`` is the metric's
-       inner guard (:func:`~klip_tpe.metrics.mawet_peak_snr`), the run's own.
+       inner guard (:func:`~klip_tpe.metrics.mawet_peak_snr`), the run's own.  ``rules``
+       (:func:`~klip_tpe.metrics.ring_rules`) make ``ps`` the search's S/N, its matched filter,
+       despike, band and pixel mask, and the maps leave the mask out of their noise.  The
+       ``known`` companions stay out of ``ps``' rings, as out of the search's.
 
     Writes ``paramverify_{stim,detfrac,recovery,combine,combsnr}_NN.fits`` and
     ``paramverify_calib_NN.txt`` into ``out_dir`` when given.  Returns a dict
@@ -209,8 +213,11 @@ def param_verify_cubes(cclean: np.ndarray, cinj: np.ndarray, wts: Sequence[float
     nf = rho.size
 
     _flat = radprof if flatten else (lambda a: np.asarray(a, float))
-    sncl = np.stack([snr_map(_flat(cclean[i]), fwhm) for i in range(nn)])
-    snij = np.stack([snr_map(_flat(cinj[i]), fwhm, exclude_xy=ex_xy) for i in range(nn)])
+    # the run's ring rules (Kevin Wagner, 2026-11-01): the maps' noise leaves the pixel mask
+    # out, and the curve's S/N is the search's
+    mask = (rules or {}).get("pixel_mask")
+    sncl = np.stack([snr_map(_flat(cclean[i]), fwhm, pixel_mask=mask) for i in range(nn)])
+    snij = np.stack([snr_map(_flat(cinj[i]), fwhm, exclude_xy=ex_xy, pixel_mask=mask) for i in range(nn)])
 
     stim = param_stim(sncl)
     fin = np.isfinite(sncl)
@@ -249,10 +256,12 @@ def param_verify_cubes(cclean: np.ndarray, cinj: np.ndarray, wts: Sequence[float
         return num / np.where(den > 0, den, np.nan)
     comb = _wsum(cclean)
     combj = _wsum(cinj)
-    combsnr = snr_map(_flat(comb), fwhm)
+    combsnr = snr_map(_flat(comb), fwhm, pixel_mask=mask)
 
-    ps = mawet_peak_snr(_flat(combj), rho, th, pxscale, fwhm, inner_fwhm=inner_fwhm,
-                        angle_convention=angle_convention)
+    rkw = rule_kwargs(rules, float(np.median(rho)) if rho.size else 0.0, (ny, nx))
+    rkw["inner_fwhm"] = inner_fwhm
+    ps = mawet_peak_snr(_flat(combj), rho, th, pxscale, fwhm, angle_convention=angle_convention,
+                        known=list(known), **rkw)
     reval = rlo + (rhi - rlo) * (np.arange(12) + 0.5) / 12.0
     rp_comb = _flat(comb)
     sig_r = radial_rms(rp_comb, reval)
@@ -313,7 +322,7 @@ def param_verify(history: History, space: SearchSpace, reduce_fn: Callable[..., 
                  rng: Optional[np.random.Generator] = None, known: Sequence[Tuple[float, float]] = (),
                  snr_thr: float = 3.0, angle_convention: str = "pa", flatten: bool = False,
                  log: Callable[[str], None] = print, run_calls: Optional[Callable] = None,
-                 inner_fwhm: float = 1.0) -> Optional[Dict[str, Any]]:
+                 inner_fwhm: float = 1.0, rules: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """Run the param_verify stage for one annulus (opt 7781-7935 + ``near2m_paramverify``).
 
     Parameters
@@ -386,7 +395,7 @@ def param_verify(history: History, space: SearchSpace, reduce_fn: Callable[..., 
         return None
     out = param_verify_cubes(np.stack(cclean), np.stack(cinj), wts, fixed_sources, ccal, pxscale, fwhm,
                              rlo, rhi, out_dir, tag, snr_thr, angle_convention, flatten=flatten,
-                             inner_fwhm=inner_fwhm)
+                             inner_fwhm=inner_fwhm, rules=rules, known=known)
     out["eval_indices"] = kept
     out["X"] = history.X[kept].copy()
     log(f"param_verify annulus {tag}: {len(kept)} configs; combine K~{out['Kc']:.3E}")
