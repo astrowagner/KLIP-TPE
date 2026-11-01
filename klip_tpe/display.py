@@ -690,7 +690,8 @@ def annulus_from_records(records: Sequence[Dict[str, Any]], space: Dict[str, Any
         # that its score is a mean of n and how far the draws sat apart, or the number beside
         # a single displayed image reads as that image's measurement.
         extra={"draws": [{k: (r.get("meta") or {}).get(k)
-                          for k in ("draw_scores", "draw_n", "draw_sd", "draw_spread", "draw_failed")}
+                          for k in ("draw_scores", "draw_raw_scores", "draw_n", "draw_sd", "draw_spread",
+                                    "draw_failed")}
                          for r in recs],
                # dispatch until the last reduction was back (EvalRecord.reduce_s, NaN in older runs)
                "reduce": np.array([np.nan if r.get("reduce_s") is None else float(r["reduce_s"]) for r in recs])})
@@ -2365,10 +2366,15 @@ def render_step_classic(ad: AnnulusData, i: int, images: StepImages, out_png: Op
         k_best = known_snr(ad, images.best_clean)
         draw_image(fig.add_subplot(gs[0, 0]), images.cur_clean, ad, f"{cl}: clean (no injection)", cmap,
                    sources=cur_src, labels=cur_cps, note=note, known_labels=k_cur)
+        d_i = _eval_draws(ad, i) if 0 <= i < ad.n else None
+        d_b = _eval_draws(ad, bi) if (0 <= bi < ad.n and images.best_sources is None) else None
+        mean_i = f" (mean of {d_i[0]} draws, last shown)" if d_i else ""
+        mean_b = f" (mean of {d_b[0]} draws, last shown)" if d_b else ""
         draw_image(fig.add_subplot(gs[0, 1]), images.cur_inj, ad,
-                   f"{cl}: injected  score {_fnum(y_i)}", cmap, sources=cur_src, labels=cur_ps, note=note)
+                   f"{cl}: injected  score {_fnum(y_i)}{mean_i}", cmap, sources=cur_src, labels=cur_ps, note=note)
         draw_image(fig.add_subplot(gs[0, 2]), images.best_inj, ad,
-                   f"best (eval {bi + 1}): injected  score {_fnum(y_b)}", cmap, sources=best_src, labels=best_ps, note=note)
+                   f"best (eval {bi + 1}): injected  score {_fnum(y_b)}{mean_b}", cmap, sources=best_src, labels=best_ps,
+                   note=note)
         draw_image(fig.add_subplot(gs[0, 3]), images.best_clean, ad, f"best (eval {bi + 1}): clean", cmap,
                    note=note, known_labels=k_best)
         # row 2: S/N maps + trace
@@ -2432,6 +2438,51 @@ def _lbl(v, raw=None) -> Optional[str]:
     if raw is not None and np.isfinite(raw):
         return f"{raw:.1f}/{v:.1f}"
     return f"{v:.1f}"
+
+
+def _eval_draws(ad, k: int) -> Optional[Tuple[int, Optional[float], Optional[float]]]:
+    """Evaluation ``k``'s draws when its score is the mean of more than one
+    (``RunConfig.n_remeasure``): ``(n, raw, score)``, the count and the last draw's own raw and
+    corrected scores.  The panel's images and per-source labels are the last draw's.  None for
+    an evaluation of one draw."""
+    ex = ad.extra if isinstance(getattr(ad, "extra", None), dict) else {}
+    dws = ex.get("draws") or []
+    if not 0 <= k < len(dws) or not isinstance(dws[k], dict):
+        return None
+    ds = list(dws[k].get("draw_scores") or [])
+    if len(ds) < 2:
+        return None
+    dr = list(dws[k].get("draw_raw_scores") or [])
+    raw = dr[-1] if len(dr) == len(ds) else None
+    return len(ds), (None if raw is None else float(raw)), (None if ds[-1] is None else float(ds[-1]))
+
+
+def _snr_title(who: str, raw: float, y: float, nsrc: int, draws) -> str:
+    """A S/N cell's title.  A draw's score is the median of its sources' values (the mean of
+    two), and an evaluation of several draws (:func:`_eval_draws`) scores the mean of its
+    draws' scores, so the title says which, the values on a second line.  The images are the
+    last draw's, which :func:`_draw_caption` names in the cell."""
+    stat = ("mean" if nsrc == 2 else "median") if nsrc > 1 else ""
+    both = np.isfinite(raw) and np.isfinite(y)
+    if draws is None:
+        head = f"{who} {stat} S/N" if stat else f"{who} S/N"
+        if both:
+            return f"{head}  orig {raw:.2f} / corr {y:.2f}"
+        return f"{head} = {y:.2f}" if np.isfinite(y) else f"{who} SNR"
+    head = f"{who} S/N, mean of {draws[0]} draws" + (f"' {stat}s" if stat else "")
+    if both:
+        return f"{head}\norig {raw:.2f} / corr {y:.2f}"
+    return f"{head}\n{y:.2f}" if np.isfinite(y) else head
+
+
+def _draw_caption(draws) -> Optional[str]:
+    """``shown: draw 3 of 3, 2.8/1.5``: which draw the cell's image and labels are, and its own
+    score (raw/corr, as the labels), for an evaluation of several draws."""
+    if draws is None:
+        return None
+    n, raw, y = draws
+    lab = _lbl(y, raw) if y is not None else None
+    return f"shown: draw {n} of {n}" + (f", {lab}" if lab else "")
 
 
 def _sma(y: np.ndarray, m: np.ndarray, w: int) -> np.ndarray:
@@ -2774,14 +2825,19 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
         # ---- row 2: S/N maps -------------------------------------------------------
         cur_lab = [_lbl(v, r) for v, r in zip(cur_ps, cur_rps or [None] * len(cur_ps))]
         best_lab = [_lbl(v, r) for v, r in zip(best_ps, best_rps or [None] * len(best_ps))]
-        tt = f"Test S/N  orig {raw_i:.2f} / corr {y_i:.2f}" if np.isfinite(raw_i) and np.isfinite(y_i) else (
-            f"Test SNR = {y_i:.2f}" if np.isfinite(y_i) else "Test SNR")
-        tb = f"Best {stat} S/N  orig {raw_b:.2f} / corr {y_b:.2f}" if np.isfinite(raw_b) and np.isfinite(y_b) else (
-            f"Best {stat} S/N = {y_b:.2f}" if np.isfinite(y_b) else "Best SNR")
-        cell(xs[0], st_y0, st_y1, _snr_map(images.cur_inj, ad, cur_src), tt, sources=cur_src, labels=cur_lab, snr=True)
+        # an evaluation of several draws scores their mean, and its images are the last draw's
+        d_i = None if (images.cur_override or not n_ok) else _eval_draws(ad, i)
+        d_b = None if (images.best_sources is not None or not b_ok) else _eval_draws(ad, bi)
+        tt = _snr_title("Test", raw_i, y_i, len(cur_src), d_i)
+        tb = _snr_title("Best", raw_b, y_b, len(best_src), d_b)
+        for x0, d, img_, src_, lab_, title_ in ((xs[0], d_i, images.cur_inj, cur_src, cur_lab, tt),
+                                                 (xs[2], d_b, images.best_inj, best_src, best_lab, tb)):
+            ax_ = cell(x0, st_y0, st_y1, _snr_map(img_, ad, src_), title_, sources=src_, labels=lab_, snr=True)
+            cap = _draw_caption(d)
+            if cap and img_ is not None:
+                ax_.text(0.03, 0.97, cap, transform=ax_.transAxes, fontsize=6, color=SRC_COLOR, va="top", ha="left")
         cell(xs[1], st_y0, st_y1, _snr_map(images.cur_clean, ad, cur_src), "Test S/N (no inj)", sources=cur_src,
              labels=[_lbl(None if c is None else float(c)) for c in cur_cps] or None, snr=True)
-        cell(xs[2], st_y0, st_y1, _snr_map(images.best_inj, ad, best_src), tb, sources=best_src, labels=best_lab, snr=True)
         cell(xs[3], st_y0, st_y1, _snr_map(st_clean, ad, None), "Stitched SNR (no inj)", snr=True)
         cell(xs[4], st_y0, st_y1, _snr_map(st_inj, ad, st_src), "Stitched SNR (with inj)", sources=st_src, labels=st_lab, snr=True)
         cax = _box(fig, cbx0, st_y0 + 0.012, cbx0 + cbw, st_y1 - 0.012)
