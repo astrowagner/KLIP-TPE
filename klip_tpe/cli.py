@@ -1653,11 +1653,12 @@ def _add_run_args(p):
     p.add_argument("--cg-sidelobe-fwhm", type=float, default=2.0, metavar="FWHM",
                    help="the sidelobes' least half-width, in FWHM of arc (default 2)")
     p.add_argument("--sidelobes", default=None, choices=["farthest", "clean", "off"],
-                   help="every S/N's noise ring (search, validation, the grid) leaves out the ADI sidelobes of the "
-                        "injected sources and known companions, +/- the data's PA coverage, and the source count "
-                        "keeps 4 apertures outside them. Where fewer than 4 are left: the 4 farthest from the source "
-                        "(farthest, the default) or the clean reduction's ring (clean). off: the rings as before "
-                        "2026-10-31")
+                   help="every S/N's noise ring (search, validation, the grid, the verify and the candidates) leaves "
+                        "out the ADI sidelobes of the injected sources and known companions, +/- the data's PA "
+                        "coverage, and the source count keeps 4 apertures outside them. Where fewer than 4 are "
+                        "left, farthest (the default) takes the 4 farthest from the source and clean the clean "
+                        "reduction's ring (the verify and the candidates take the farthest). The S/N maps leave out "
+                        "the known companions' sidelobes. off: the rings as before 2026-10-31")
     p.add_argument("--global-block", action="store_true", help="one parameter block for all nights")
     p.add_argument("--no-framesel", action="store_true")
     p.add_argument("--no-selection", action="store_true", help="no drop1/drop2 night-selection dims")

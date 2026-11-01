@@ -3300,6 +3300,12 @@ def render_verify_books(run_dir: str, ia: int, out_dir: Optional[str] = None,
     setup = run.get("setup") or run.get("checkpoint") or {}
     excl = float(((setup.get("objective") or {}).get("metric") or {}).get("excl_fwhm") or 1.5)
     vkw = dict(known=[tuple(k) for k in (ad.known or ())], angle_convention=ad.angle_convention, excl_fwhm=excl)
+    # the run's sidelobe rule, as its verify_report took it (the objective records it)
+    sl = (setup.get("objective") or {}).get("sidelobes")
+    if isinstance(sl, dict):
+        from .metrics import Sidelobes
+        vkw["sidelobes"] = Sidelobes(**{k: sl[k] for k in ("rotation_deg", "mode", "min_apertures", "floor_fwhm",
+                                                            "radial_fwhm") if k in sl})
     # Path A on the annulus' combined images, when both are there and fit the stacks
     fr = np.shape(istack)[-2:]
     own = (comb_c is not None and comb_i is not None and np.ndim(comb_c) == 2 and np.shape(comb_c) == fr

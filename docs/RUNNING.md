@@ -108,6 +108,14 @@ in order:
   source keeps 4 apertures outside all the arcs and none sits in another's arc, so on NEAR, with
   about 150 deg of rotation, a pair on one ring becomes one source.  A run saved before
   2026-10-31 resumes with its old rings (`off`).
+* The verify and the candidate search take the same arcs: Path A and the subsets, the STIM
+  annulus and the solved contrasts of `verify_report.txt` and `stitched_verify_report.txt`
+  (with `rereduce --verify-sources` too), and each candidate's S/N.  Their sources are given,
+  not counted, so where the arcs leave fewer than 4 samples the source's own arc narrows to let
+  in the farthest, then the other sources' arcs are let in, then the known companions'.  The
+  report says which ring took which.  The S/N maps (`klip_stitched_snr.fits` and the blind
+  candidate search) leave out the known companions' arcs alone.  With `off` all of these are
+  the rings of before 2026-11-01.
 * The contrast grid reduces its test positions several at a time, one injected source in
   each, a wave per iteration.  On HD 95086 (tutorial 02's annulus) its 79 test positions take
   about 150 reductions.

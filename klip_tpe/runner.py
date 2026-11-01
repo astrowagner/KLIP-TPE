@@ -238,8 +238,11 @@ class RunConfig:
         apertures remain, ``"farthest"`` (default) takes the 4 or more farthest from the source
         and ``"clean"`` measures the noise on the clean reduction's ring through the source.  The source count is
         capped so that every source keeps 4 apertures outside all the arcs, and no source sits
-        in another's arc.  ``"off"``: the rings of runs saved before 2026-10-31, which resume
-        with it.
+        in another's arc.  The verify (Path A, the subsets, the STIM annulus, the solved
+        contrasts) and the candidate search take the same arcs, with the farthest fallback and
+        then the other sources' arcs let in (:func:`klip_tpe.verify.ring_snr`), and the S/N maps
+        leave out the known companions' arcs.  ``"off"``: the rings of runs saved before
+        2026-10-31, which resume with it.
     fm_one_at_a_time
         the cross-check's test sources each on a forward-model pass of their own, so that
         no source's response is read through another's self-subtraction lobes.  A
@@ -1227,6 +1230,31 @@ class Runner:
         smp = getattr(self.sampler, "base", None) or self.sampler
         if hasattr(smp, "sidelobes"):
             smp.sidelobes = rule
+
+    def _verify_rule(self):
+        """The sidelobe rule of the verify, the candidate search and the products' S/N maps:
+        the objective's (``RunConfig.sidelobes``, at the data's PA coverage), None when the
+        run's rings keep the sidelobes."""
+        return getattr(self.objective, "sidelobes", None)
+
+    def _known_arcs(self) -> List[Tuple[float, float, float, float]]:
+        """The known companions' ADI arcs under the sidelobe rule, which the products' S/N maps
+        leave out of their noise.  None when the rule is off or there is no known companion."""
+        rule = self._verify_rule()
+        known = [tuple(k) for k in getattr(self.sampler, "known", ()) or ()]
+        if rule is None or not known:
+            return []
+        return [(float(k[0]), float(k[1]), rule.half_width(float(k[0]) / self.pxscale, self.fwhm),
+                 float(rule.radial_fwhm)) for k in known]
+
+    def _snr_map(self, img: np.ndarray, **kw) -> np.ndarray:
+        """:func:`~klip_tpe.products.snr_map` of a product, its noise without the known
+        companions' ADI arcs under the sidelobe rule."""
+        from .products import snr_map
+        arcs = self._known_arcs()
+        if arcs:
+            kw.update(excl_arcs=arcs, pxscale=self.pxscale, angle_convention=self.reducer.angle_convention)
+        return snr_map(img, self.fwhm, **kw)
 
     def _fit_inner_guard(self, smp) -> None:
         """Lower the metric's inner guard (``inner_fwhm``, no S/N inside it) to the injection
@@ -4293,7 +4321,6 @@ class Runner:
         ``klip_stitched_running_nights.fits.gz`` at annulus end) and returns the arrays."""
         if not self.cfg.save_fits:
             return None
-        from .products import snr_map
         from .stitch import stitch_tiles, stitch_stacks
         cleans, injs, zones, stacks, istacks, parts, sources = [], [], [], [], [], [], []
         for ja in range(ia + (1 if at_end else 0)):
@@ -4321,7 +4348,7 @@ class Runner:
         st = self._maybe_flatten(stitch_tiles(cleans, zones, pads=pads))
         files = {"clean": os.path.join(self.run_dir, "klip_stitched_running.fits")}
         _write_fits(files["clean"], st, hdr)
-        snr = snr_map(st, self.fwhm)
+        snr = self._snr_map(st)
         files["snr"] = os.path.join(self.run_dir, "klip_stitched_running_snr.fits")
         _write_fits(files["snr"], snr, dict(hdr, IMGTYPE="running stitched S/N map (Mawet)"))
         out = {"clean": st, "snr": snr, "zones": zones}
@@ -4334,7 +4361,7 @@ class Runner:
             files["inj"] = os.path.join(self.run_dir, "klip_stitched_running_inj.fits")
             _write_fits(files["inj"], sti, hi)
             files["snr_inj"] = os.path.join(self.run_dir, "klip_stitched_running_snr_inj.fits")
-            _write_fits(files["snr_inj"], snr_map(sti, self.fwhm, exclude_xy=self._inj_xy(sources, sti.shape)),
+            _write_fits(files["snr_inj"], self._snr_map(sti, exclude_xy=self._inj_xy(sources, sti.shape)),
                         dict(hi, IMGTYPE="running stitched S/N map (injected)"))
             out["inj"] = sti
         if at_end and any(s is not None for s in stacks):
@@ -4402,7 +4429,8 @@ class Runner:
                                            weights=ev_c.weights, angle_convention=self.reducer.angle_convention,
                                            excl_fwhm=self._excl_fwhm(), return_maps=True,
                                            combined=ev_c.image, combined_inj=ev_i.image,
-                                           path_a="the annulus' combined image (best_clean.fits, injected best_inj.fits)")
+                                           path_a="the annulus' combined image (best_clean.fits, injected best_inj.fits)",
+                                           sidelobes=self._verify_rule())
             path = os.path.join(d, "verify_report.txt")
             write_verify_table(path, rows, maps.get("limits"), header={"run": os.path.abspath(self.run_dir)})
             self._durable_later(path)              # the hook's checkpoint records it as done
@@ -4549,7 +4577,7 @@ class Runner:
             if dj:
                 allsrc.extend(dj.get("sources") or [])
         kw = dict(iwa_px=iwa, owa_px=owa, snrmin=float(self.cfg.cand_snrmin), known=known, persistence_map=pmap,
-                  angle_convention=self.reducer.angle_convention)
+                  angle_convention=self.reducer.angle_convention, sidelobes=self._verify_rule())
         results = {}
         for label, img_key, snr_key, inj_key in (("", "clean", "snr", None), ("inj_blind_", "inj", "snr_inj", "inj")):
             img = st.get(img_key)
@@ -4762,7 +4790,6 @@ class Runner:
         """The final stitch of the annuli' winner images.  ``weights`` replaces the
         sensitivity weights (:meth:`rereduce` keeps the run's), and ``extra_header`` goes into
         every FITS header."""
-        from .products import snr_map
         from .stitch import seam_pixels, stitch_stacks, stitch_tiles, write_params_table
         items = [(r, self._annulus_images(r.annulus)) for r in results]
         items = [(r, d) for r, d in items if d is not None and d.get("clean") is not None]
@@ -4828,7 +4855,7 @@ class Runner:
         hdr.update(extra_header or {})
         files = {"clean": os.path.join(self.run_dir, "klip_stitched.fits")}
         _write_fits(files["clean"], st_f, hdr, hist)
-        snr = snr_map(st_f, self.fwhm)
+        snr = self._snr_map(st_f)
         files["snr"] = os.path.join(self.run_dir, "klip_stitched_snr.fits")
         _write_fits(files["snr"], snr, dict(hdr, IMGTYPE="final stitched S/N map (per-pixel Mawet)"), hist)
         out: Dict[str, Any] = {"clean": st_f, "snr": snr, "weights": w, "zones": zones, "files": files}
@@ -4847,7 +4874,7 @@ class Runner:
             files["inj"] = os.path.join(self.run_dir, "klip_stitched_inj.fits")
             _write_fits(files["inj"], sti, hi, hist)
             files["snr_inj"] = os.path.join(self.run_dir, "klip_stitched_snr_inj.fits")
-            _write_fits(files["snr_inj"], snr_map(sti, self.fwhm, exclude_xy=self._inj_xy(allsrc, sti.shape)),
+            _write_fits(files["snr_inj"], self._snr_map(sti, exclude_xy=self._inj_xy(allsrc, sti.shape)),
                         dict(hi, IMGTYPE="validated injected stitched S/N map (per-pixel Mawet)"), hist)
             out["inj"] = sti
         # per-partition stacks on the union of partition ids
@@ -4940,7 +4967,8 @@ class Runner:
                                        excl_fwhm=self._excl_fwhm(), return_maps=True,
                                        combined=clean_img, combined_inj=None if injected is None else inj_img,
                                        path_a=None if clean_img is None else
-                                       "the stitched image (klip_stitched.fits, injected klip_stitched_inj.fits)")
+                                       "the stitched image (klip_stitched.fits, injected klip_stitched_inj.fits)",
+                                       sidelobes=self._verify_rule())
         path = os.path.join(self.run_dir, "stitched_verify_report.txt")
         write_verify_table(path, rows, maps.get("limits"), header=dict({"run": os.path.abspath(self.run_dir)},
                                                                        **(header or {})))
