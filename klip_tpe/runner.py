@@ -88,7 +88,9 @@ class CalibrationConfig:
         acceptable window for the default config's median S/N; ``aim`` is the value
         the contrast is rescaled toward (``fac = aim / S/N`` clipped to ``step_clip``).
     forced
-        per-annulus list; an entry > 0 bypasses calibration for that annulus.
+        per-annulus list; an entry > 0 bypasses calibration for that annulus.  An entry of 0,
+        and every annulus past the end of the list, is calibrated.  Unlike ``n_iter``, the list
+        does not repeat its last entry.
     ceiling
         upper bound on the calibrated contrast (``cmax_cal``); None = off.
     n_remeasure

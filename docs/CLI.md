@@ -241,7 +241,9 @@ options:
                         nearest centre (their tiles, in final_results.json and
                         klip_stitched_params.txt). The per-annulus lists of
                         --n-iter, --n-init, --n-sources and --use-contrast
-                        follow the numbering by centre
+                        follow the numbering by centre. The first three repeat
+                        their last entry past their end, and an annulus past
+                        the end of --use-contrast is calibrated
   --n-iter N_ITER [N_ITER ...]
   --n-init N_INIT [N_INIT ...]
   --mode {tpe,random,grid}
@@ -250,7 +252,11 @@ options:
   --seed SEED
   --contrast0 CONTRAST0
   --use-contrast USE_CONTRAST [USE_CONTRAST ...]
-                        forced contrast per annulus (0 = calibrate)
+                        forced contrast per annulus, in the annuli's order (by
+                        centre with --ann-extra). 0 calibrates that annulus,
+                        and so does every annulus past the end of the list.
+                        Unlike --n-iter, the list does not repeat its last
+                        entry
   --cmax-cal CMAX_CAL
   --k-max K_MAX
   --n-top N_TOP
@@ -774,7 +780,9 @@ options:
                         nearest centre (their tiles, in final_results.json and
                         klip_stitched_params.txt). The per-annulus lists of
                         --n-iter, --n-init, --n-sources and --use-contrast
-                        follow the numbering by centre
+                        follow the numbering by centre. The first three repeat
+                        their last entry past their end, and an annulus past
+                        the end of --use-contrast is calibrated
   --n-iter N_ITER [N_ITER ...]
   --n-init N_INIT [N_INIT ...]
   --mode {tpe,random,grid}
@@ -783,7 +791,11 @@ options:
   --seed SEED
   --contrast0 CONTRAST0
   --use-contrast USE_CONTRAST [USE_CONTRAST ...]
-                        forced contrast per annulus (0 = calibrate)
+                        forced contrast per annulus, in the annuli's order (by
+                        centre with --ann-extra). 0 calibrates that annulus,
+                        and so does every annulus past the end of the list.
+                        Unlike --n-iter, the list does not repeat its last
+                        entry
   --cmax-cal CMAX_CAL
   --k-max K_MAX
   --n-top N_TOP

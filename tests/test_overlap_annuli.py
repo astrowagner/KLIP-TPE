@@ -20,7 +20,7 @@ from astropy.io import fits
 from klip_tpe import cli
 from klip_tpe.display import _cfg_zones
 from klip_tpe.metrics import star_center
-from klip_tpe.runner import RunConfig, Runner, ValidationConfig
+from klip_tpe.runner import CalibrationConfig, RunConfig, Runner, ValidationConfig
 from klip_tpe.stitch import annulus_tiles
 
 from conftest import build_synthetic_run
@@ -90,9 +90,11 @@ def test_the_display_numbers_the_annuli_as_the_run_does():
 @pytest.fixture(scope="module")
 def overlap_run(tmp_path_factory):
     d = str(tmp_path_factory.mktemp("overlap"))
+    # one forced contrast for three annuli: the first is fixed, the two past the list's end calibrate
     red, space, obj, samp, cfg = build_synthetic_run(ann_edges=[8, 20, 32], ann_extra=[[14, 26]], n_iter=[5],
                                                      n_init=3, validation=ValidationConfig(n_top=1, n_valid=1),
-                                                     param_verify=False)
+                                                     param_verify=False,
+                                                     calibration=CalibrationConfig(forced=[2e-3], recal_check=6))
     logs = []
     r = Runner(red, space, obj, samp, cfg, d, log=logs.append)
     results = r.run()
@@ -148,3 +150,13 @@ def test_rereduce_keeps_the_runs_tiles_and_refuses_others(overlap_run, tmp_path)
             rr2.rereduce(str(tmp_path / "rr2"), verify=False, log=lambda s: None)
     finally:
         open(fr_path, "w").write(keep)
+
+
+@pytest.mark.slow
+def test_an_annulus_past_the_end_of_the_forced_list_is_calibrated(overlap_run):
+    """``--use-contrast`` does not repeat its last entry as ``--n-iter`` does: an annulus past
+    its end calibrates (NEAR2, 2026-10-31 20:40, who rely on it)."""
+    d, r, results, logs = overlap_run
+    forced = [json.load(open(os.path.join(d, f"annulus{k:02d}", "calibration.json")))["forced"] for k in (1, 2, 3)]
+    assert forced == [2e-3, 0.0, 0.0]
+    assert results[0].contrast == 2e-3
