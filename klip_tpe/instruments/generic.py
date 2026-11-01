@@ -47,7 +47,7 @@ from ..metrics import MawetPeakSNR, Objective
 from ..positions import PositionSampler
 from ..reducer import Dataset, PartitionedReducer, reducer_class
 from ..space import SearchSpace
-from . import near as _near
+from . import search_space as _space
 
 __all__ = ["load_cube", "quality_tags", "make_reducer", "make_space", "make_guard",
            "default_config", "injection_model_for", "aperture_sum",
@@ -309,19 +309,19 @@ def make_space(reducer: PartitionedReducer, min_bins: int = 8, **kw) -> SearchSp
 
     * frame-selection dims only when the data carry quality tags;
     * ``k_klip`` up to ``nframes / 5`` (capped at 100), as in
-      :func:`klip_tpe.instruments.near.make_space`;
+      :func:`klip_tpe.instruments.search_space.make_space`;
     * the temporal-binning range is ``1 .. nframes / min_bins`` (default: at least 8 bins
       survive, so KLIP always has references).  The NEAR production range (5-30 frames per
       bin) assumes sequences of thousands of frames and collapses a 61-frame cube to two
       bins; pass ``bin_range=(lo, hi)`` to set it yourself.
 
-    Other keywords: see :func:`klip_tpe.instruments.near.make_space`."""
+    Other keywords: see :func:`klip_tpe.instruments.search_space.make_space`."""
     has_tags = all(r.frame_tags() for r in reducer.reducers.values())
     kw.setdefault("opt_framesel", has_tags)
     if "bin_range" not in kw:
         nf = min(r.data.nframes for r in reducer.reducers.values())
         kw["bin_range"] = (1, max(int(nf // max(min_bins, 2)), 1))
-    space = _near.make_space(reducer, **kw)
+    space = _space.make_space(reducer, **kw)
     # A reducer carrying a searched reference library contributes one count per pool.
     # These are global dimensions, not per-partition ones: a pool is a pool whichever
     # partition is being reduced, and replicating them would let two partitions disagree
