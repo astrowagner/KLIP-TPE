@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased — 2026-11-01 (the noise rings of before 2026-10-31 again, the IDL generators' grid, and diagrams of every phase's rings)
+
+- **New runs keep the sidelobes in their noise rings again** (`RunConfig.sidelobes` and
+  `--sidelobes` default `off`, Kevin Wagner).  Every ring of the search, calibration,
+  validation, verify and candidate search skips the apertures within 1.5 FWHM of each injected
+  source and known companion, as every run before 2026-10-31 and the IDL did.  Under the rule
+  NEAR's rings kept 1 to 3 apertures inside 0.93" and one source a draw, since s6's rotation
+  reaches 153.6 deg and each arc covered 307 deg of the ring.  On MWC 758 one draw's scatter went
+  from 0.26 to 0.75, and draw noise was 41 % of the spread between trials at 3 draws, against
+  10 % with the old rings.  `farthest` and `clean` stay as options, and a run resumes with the
+  rings it was saved with.
+- **The contrast grid measures as the IDL contrast generators do** (`contrastcurve_*.pro`,
+  Kevin Wagner).  `ContrastGridConfig.snr` and `--cg-snr` default to `aperture`, a FWHM/2
+  aperture at the injected position, and `ContrastGridConfig.sidelobe` and `--cg-sidelobe` to
+  the new `off`, no arcs.  `metrics.aperture_mawet_snr` now lays its ring out as the generators
+  do: round(2 pi r / FWHM) - 1 positions from the source's, the source and the one each side
+  skipped (the source alone below 6), and any 2 or more apertures make a ring.  The optimizer's
+  `near2_snr`, which it ported before, placed floor(2 pi r / FWHM) and skipped 1.5 FWHM around
+  the source, the same ring but for a position now and then.  With no arcs NEAR's grid keeps its
+  positions inside 1" without a fallback.  `matched`, `rotation` and `fixed` stay as options,
+  `scripts/readme_panel.py` and `scripts/run_rxj0534.py` default to `aperture` too, and a run
+  saved before keeps its grid.
+- **`metrics.RingRecorder` keeps every noise ring the code measures** while it is active, one
+  record per source with what became of each aperture: used, or skipped for a source's or
+  companion's keep-out, a sidelobe arc, the pixel mask or the edge of the data.
+  `mawet_peak_snr`, `aperture_mawet_snr`, `sidelobe_snr` (the attempt it kept),
+  `verify.snr_fap`, `verify.stim_fap` and `products.snr_map` record.  Recording changes no S/N,
+  and nothing records by default.
+- **`scripts/plot_noise_rings.py` draws one panel per phase** (`klip_tpe.ringplot`).  A
+  synthetic run with NEAR s6's or MWC 758's geometry (FWHM, rotation, known companion, disk
+  mask) goes through the calibration, the search, the validation with its final round and
+  re-scored winner, the grid, param_verify, the verify, the candidate search and the stitched
+  S/N maps.  A second run adds the search under `--sidelobes farthest` for comparison.  Each
+  ring's phase comes from the call stack (`ringplot.phase_from_stack`).
+- Tests in `tests/test_ring_record.py` and `tests/test_sidelobe_rings.py`.
+
 ## Unreleased — 2026-11-01 (a trial's score is floored at 0)
 
 - **A search trial's score, the mean of its draws, is floored at 0 in new runs**

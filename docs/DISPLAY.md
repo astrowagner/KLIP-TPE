@@ -180,13 +180,16 @@ ones the live display skipped, into `steps_rebuilt/` with its own movie.
   validation, one injected source per reduction at the winner's configuration, at 12 position
   angles (`--cg-pa`) on separations a FWHM apart (`--cg-step`), each iterated on its contrast
   until its S/N is within 10 % (`--cg-precision`) of 5 (`--cg-target`).  It is the protocol of
-  the IDL contrast generators.  The S/N is the run's matched-filter Mawet S/N, or the IDL's
-  aperture photometry with `--cg-snr aperture`.  Each noise ring leaves out the injected
-  source, the known companions and their ADI sidelobes, the arc the field rotation sweeps
-  (up to `anglemax`, never under 2 FWHM of arc), and no test position goes on a companion's
-  sidelobes.  Where fewer than 4 apertures are left beside them, the 4 or more farthest from the
-  source stand in, or the clean reduction's ring through the source with `--sidelobes clean`, and
-  the log counts the positions measured so and the ones that failed, with the reason.  The final frame draws the median over position angle with its 16-84 % band.
+  the IDL contrast generators, and so is the S/N by default: a FWHM/2 aperture at the injected
+  position against a ring of apertures a FWHM apart, which skips the source, the aperture each
+  side of it and the known companions' keep-outs (`--cg-snr aperture`, `--cg-sidelobe off`).
+  `--cg-snr matched` takes the run's matched-filter Mawet S/N, and `--cg-sidelobe rotation`
+  also leaves out the arc the field rotation sweeps beside the source and the companions (up to
+  `anglemax`, never under 2 FWHM of arc).  No test position goes on a companion's keep-out.
+  Under arcs, where fewer than 4 apertures are left beside them, the 4 or more farthest from the
+  source stand in under `--sidelobes farthest`, or the clean reduction's ring through the source
+  under `--sidelobes clean`, and the log counts the positions measured so and the ones that
+  failed, with the reason.  The final frame draws the median over position angle with its 16-84 % band.
   `contrast_grid.json` keeps every position's trials, `contrast_grid.txt` the curve.  The
   KLIP-FM section is an independent forward-model estimate on the built-in engine.  Without
   the grid (`--contrast-grid off`, or a run saved before it) the curve is the fit to the

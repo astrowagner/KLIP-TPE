@@ -173,10 +173,13 @@ class ValidationConfig:
     n_final_draws: int = 200
 
 
-#: The default ``RunConfig.sidelobes`` of a new run.  The test suite sets it to ``"off"``
-#: (tests/conftest.py), so that its many runs keep the noise rings their expectations were
-#: written for, and a test of the sidelobe rings asks for them.
-_SIDELOBES_DEFAULT = {"mode": "farthest"}
+#: The default ``RunConfig.sidelobes`` of a new run: ``"off"``, the rings of every run before
+#: 2026-10-31 and of the IDL, again since 2026-11-01.  The rule (``"farthest"``) left NEAR's
+#: rings 1 to 3 apertures inside 0.93" and one source a draw, and tripled a draw's scatter on
+#: MWC 758 (Kevin Wagner, 2026-11-01).  The test suite sets it from
+#: ``KLIP_TPE_TEST_SIDELOBES`` (tests/conftest.py, ``"off"`` by default), and a test of the
+#: sidelobe rings asks for them.
+_SIDELOBES_DEFAULT = {"mode": "off"}
 
 
 @dataclass
@@ -233,18 +236,24 @@ class RunConfig:
         A second pass models the winner's own injections, the ones in ``best_inj.fits``
         (``annulusNN/best_fm_inj.fits``), for the finished annulus's KLIP-FM panel.
     sidelobes
-        the noise rings of every S/N the run measures with :class:`~klip_tpe.metrics.MawetPeakSNR`
-        (search, calibration, validation, the contrast grid) leave out the ADI sidelobes of
-        every injected source and known companion: ``+/- the data's PA coverage``, never less
-        than 2 FWHM of arc (:class:`~klip_tpe.metrics.Sidelobes`).  Where fewer than 4
-        apertures remain, ``"farthest"`` (default) takes the 4 or more farthest from the source
-        and ``"clean"`` measures the noise on the clean reduction's ring through the source.  The source count is
-        capped so that every source keeps 4 apertures outside all the arcs, and no source sits
-        in another's arc.  The verify (Path A, the subsets, the STIM annulus, the solved
-        contrasts) and the candidate search take the same arcs, with the farthest fallback and
-        then the other sources' arcs let in (:func:`klip_tpe.verify.ring_snr`), and the S/N maps
-        leave out the known companions' arcs.  ``"off"``: the rings of runs saved before
-        2026-10-31, which resume with it.
+        ``"off"`` (the default again since 2026-11-01): every noise ring skips the apertures
+        within 1.5 FWHM of an injected source or known companion, as every run before
+        2026-10-31 and the IDL did.  ``"farthest"`` and ``"clean"`` (the default from 2026-10-31
+        to 2026-11-01) also leave out the ADI sidelobes of every injected source and known
+        companion, ``+/- the data's PA coverage`` and never less than 2 FWHM of arc
+        (:class:`~klip_tpe.metrics.Sidelobes`), in the search, calibration, validation and the
+        contrast grid.  Where fewer than 4 apertures remain, ``"farthest"`` takes the 4 or more
+        farthest from the source and ``"clean"`` measures the noise on the clean reduction's
+        ring through the source.  The source count is then capped so that every source keeps 4
+        apertures outside all the arcs, and no source sits in another's arc.  The verify (Path
+        A, the subsets, the STIM annulus, the solved contrasts) and the candidate search take
+        the same arcs, with the farthest fallback and then the other sources' arcs let in
+        (:func:`klip_tpe.verify.ring_snr`), and the S/N maps leave out the known companions'
+        arcs.  On NEAR, with 154 deg of rotation, the rule left 1 to 3 apertures inside 0.93"
+        and one source a draw, and on MWC 758 it tripled a draw's scatter.  With ``"off"`` the
+        contrast grid takes its own rings (:class:`~klip_tpe.contrast_grid.ContrastGridConfig`,
+        the IDL contrast generators' by default).  A run resumes with the rings it was saved
+        with, ``"off"`` for one saved before 2026-10-31.
     fm_one_at_a_time
         the cross-check's test sources each on a forward-model pass of their own, so that
         no source's response is read through another's self-subtraction lobes.  A
@@ -1329,7 +1338,8 @@ class Runner:
         if m == "off":
             return None
         if m not in ("farthest", "clean"):
-            raise ValueError(f"RunConfig.sidelobes={self.cfg.sidelobes!r}: 'farthest', 'clean' or 'off'")
+            raise ValueError(f"sidelobes {m!r} (RunConfig.sidelobes={self.cfg.sidelobes!r}): "
+                             f"'farthest', 'clean' or 'off'")
         gc = self.cfg.contrast_grid
         rot = self._pa_coverage() if rotation_deg is None else rotation_deg
         return Sidelobes(rotation_deg=rot, mode=m, min_apertures=4, floor_fwhm=float(gc.sidelobe_fwhm),
@@ -1753,13 +1763,16 @@ class Runner:
         known = [(float(k[0]), float(k[1])) for k in self._known()]
         # the sidelobe rule (RunConfig.sidelobes) at this configuration's rotation: at least 4
         # noise apertures, the farthest from the source or the clean ring's where the arcs leave
-        # fewer.  "off": the arcs as before, and no S/N where they leave fewer than min_ring
+        # fewer.  "off": the grid's own arcs (ContrastGridConfig.sidelobe, none by default), and
+        # no S/N where they leave fewer than min_ring
         rule = self._sidelobe_rule(rotation_deg=rot if str(gc.sidelobe).lower() != "fixed" else float("nan"))
         return {"metric": metric, "mget": mget, "fwhm": fwhm, "pxscale": pxscale, "rot": rot, "hw": hw,
                 "inner": float(mget("inner_fwhm", 1.0)) * fwhm,
                 "conv": mget("angle_convention", None) or getattr(self.reducer, "angle_convention", "pa"),
                 "known": known, "known_arcs": [(rk, tk, hw(rk / pxscale), gc.known_radial_fwhm) for rk, tk in known],
-                "rule": rule, "min_ring": int(rule.min_apertures) if rule is not None else int(mget("min_ring", 6)),
+                # the aperture S/N takes the ring as the IDL contrast generators do, any 2 or more
+                "rule": rule, "min_ring": (int(rule.min_apertures) if rule is not None else
+                                           2 if str(gc.snr).lower() == "aperture" else int(mget("min_ring", 6))),
                 "aperture": str(gc.snr).lower() == "aperture"}
 
     def _grid_snr(self, geo: Dict[str, Any], img: np.ndarray, r_px: float, theta: float,
@@ -1792,7 +1805,9 @@ class Runner:
             snr, det = sidelobe_snr(img, [rho], [theta], pxscale, fwhm, rule, img_clean=cln, known=geo["known"],
                                     angle_convention=geo["conv"], **kw)
             return float(snr[0]), dict(det[0])
-        arcs = [(rho, float(theta), geo["hw"](float(r_px)), max(gc.known_radial_fwhm, 1.0))] + geo["known_arcs"]
+        # sidelobe "off" (the IDL contrast generators): no arcs, the S/N's own keep-outs alone
+        arcs = ([] if str(gc.sidelobe).lower() == "off" else
+                [(rho, float(theta), geo["hw"](float(r_px)), max(gc.known_radial_fwhm, 1.0))] + geo["known_arcs"])
         if geo["aperture"]:
             snr, det = aperture_mawet_snr(img, [rho], [theta], pxscale, fwhm, excl_fwhm=float(mget("excl_fwhm", 1.5)),
                                           angle_convention=geo["conv"], known=geo["known"], excl_arcs=arcs,

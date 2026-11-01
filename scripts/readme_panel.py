@@ -27,7 +27,8 @@ basis per zone from all the frames, the target included.
 
 The contrast curve at the end is the injection grid (:mod:`klip_tpe.contrast_grid`): one
 source per reduction at 12 position angles per separation (``--cg-pa``), each iterated to S/N 5
-(``--cg-target``) with the run's matched-filter S/N or aperture photometry (``--cg-snr``).
+(``--cg-target``) with the IDL contrast generators' aperture photometry or the run's
+matched-filter S/N (``--cg-snr``).
 
 The run writes to ``--run-dir`` (``~/klip_tpe_runs/rxj0534/readme``, or
 ``~/klip_tpe_runs/hd95086``), outside any synced folder.  Its last panel, the finished annulus
@@ -74,8 +75,9 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--cg-step", type=float, default=None,
                    help="contrast grid: separation step in FWHM (default 0.5 on RX J0534, 1 on HD 95086)")
     p.add_argument("--cg-target", type=float, default=5.0, help="contrast grid: target S/N (default 5)")
-    p.add_argument("--cg-snr", default="matched", choices=["matched", "aperture"],
-                   help="contrast grid: the run's matched-filter S/N (default) or aperture photometry")
+    p.add_argument("--cg-snr", default="aperture", choices=["aperture", "matched"],
+                   help="contrast grid: the IDL contrast generators' aperture photometry (default) or the "
+                        "run's matched-filter S/N")
     p.add_argument("--workers", default="auto", help="reduction workers (default auto)")
     p.add_argument("--no-show", action="store_true", help="no live window (the panels are still written)")
     hd = p.add_argument_group("HD 95086 only")

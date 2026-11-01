@@ -98,24 +98,34 @@ in order:
   batch at a time, so a copy of an earlier candidate is skipped before its trials go out.  The
   final round's trials (`--n-final`) and the elected winner's fresh draws go out together after
   the first round.
-* Every S/N the run measures (search, calibration, validation, the contrast grid) leaves the
-  ADI sidelobes out of its noise ring: the arc the field rotation sweeps beside each injected
-  source and known companion, +/- the data's PA coverage in the search and never under 2 FWHM
-  of arc (`--sidelobes`, `RunConfig.sidelobes`).  The arcs are the same for every
-  configuration, so no configuration gets more noise samples than another.  Where fewer than 4
-  apertures are left beside them, the 4 or more farthest from the source stand in (`farthest`,
-  the default) or the clean reduction's ring through the source (`clean`).  The source count goes down until every
-  source keeps 4 apertures outside all the arcs and none sits in another's arc, so on NEAR, with
-  about 150 deg of rotation, a pair on one ring becomes one source.  A run saved before
-  2026-10-31 resumes with its old rings (`off`).
-* The verify and the candidate search take the same arcs: Path A and the subsets, the STIM
-  annulus and the solved contrasts of `verify_report.txt` and `stitched_verify_report.txt`
-  (with `rereduce --verify-sources` too), and each candidate's S/N.  Their sources are given,
-  not counted, so where the arcs leave fewer than 4 samples the source's own arc narrows to let
-  in the farthest, then the other sources' arcs are let in, then the known companions'.  The
-  report says which ring took which.  The S/N maps (`klip_stitched_snr.fits` and the blind
-  candidate search) leave out the known companions' arcs alone.  With `off` all of these are
-  the rings of before 2026-11-01.
+* Every noise ring of the search, calibration and validation skips the apertures within 1.5
+  FWHM of an injected source or known companion (`--sidelobes off`, the default again since
+  2026-11-01), as every run before 2026-10-31 and the IDL did.  `--sidelobes farthest` or
+  `clean` also leaves out the ADI sidelobes, the arc the field rotation sweeps beside each
+  source and companion, +/- the data's PA coverage and never under 2 FWHM of arc.  Where fewer
+  than 4 apertures are left beside them, the 4 or more farthest from the source stand in
+  (`farthest`) or the clean reduction's ring through the source (`clean`).  The source count
+  then goes down until every source keeps 4 apertures outside all the arcs and none sits in
+  another's arc.  On NEAR, with 154 deg of rotation, that left 1 to 3 apertures inside 0.93"
+  and one source a draw, and on MWC 758 it tripled a draw's scatter, so the rule is an option
+  and not the default.  A run resumes with the rings it was saved with.
+* The verify and the candidate search follow the same switch.  Under the rule they take the
+  same arcs: Path A and the subsets, the STIM annulus and the solved contrasts of
+  `verify_report.txt` and `stitched_verify_report.txt` (with `rereduce --verify-sources` too),
+  and each candidate's S/N.  Their sources are given, not counted, so where the arcs leave
+  fewer than 4 samples the source's own arc narrows to let in the farthest, then the other
+  sources' arcs are let in, then the known companions'.  The report says which ring took
+  which.  The S/N maps (`klip_stitched_snr.fits` and the blind candidate search) leave out the
+  known companions' arcs alone.
+* The contrast grid measures as the IDL contrast generators do (`contrastcurve_*.pro`, the
+  defaults `--cg-snr aperture` and `--cg-sidelobe off` since 2026-11-01).  A FWHM/2 aperture at
+  the injected position is set against a ring of round(2 pi r / FWHM) - 1 positions, which
+  skips the source and the position each side of it, and the known companions' 1.5 FWHM
+  keep-outs.  `--cg-snr matched` takes the run's matched-filter S/N instead, and
+  `--cg-sidelobe rotation` or `fixed` leaves out each position's sidelobe arcs too.  Under
+  `--sidelobes farthest` or `clean` the grid takes that rule, with its fallback.
+* `scripts/plot_noise_rings.py` draws the noise apertures of every phase as the code measures
+  them, on a synthetic run with a chosen geometry (see the script's help).
 * The contrast grid reduces its test positions several at a time, one injected source in
   each, a wave per iteration.  On HD 95086 (tutorial 02's annulus) its 79 test positions take
   about 150 reductions.

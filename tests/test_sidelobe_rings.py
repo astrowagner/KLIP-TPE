@@ -201,13 +201,15 @@ def test_the_count_keeps_a_pair_out_of_each_others_sidelobes(tmp_path, monkeypat
 @pytest.mark.slow
 @pytest.mark.parametrize("mode", ["farthest", "off"])
 def test_the_grid_measures_inside_wide_sidelobes(tmp_path, monkeypatch, mode):
-    """+/-170 deg of rotation leaves a ring 1 or 2 apertures beside a source's arcs.  The grid
-    now measures there on the 4 or more farthest; with the rings as before it fails, and says why."""
+    """+/-170 deg of rotation leaves a ring 1 or 2 apertures beside a source's arcs.  Under the
+    run's rule the grid measures there on the 4 or more farthest.  With the run's rings off and
+    the grid's own rotation arcs it fails, and says why."""
     monkeypatch.setattr(Runner, "_rotation_deg", lambda self, cfg: 170.0)
     logs = []
     red, space, obj, samp, cfg = build_synthetic_run(sidelobes=mode, ann_edges=[8, 30], n_iter=[5], n_init=3,
                                                      validation=ValidationConfig(n_top=1, n_valid=1),
-                                                     contrast_grid=ContrastGridConfig(mode="grid", n_pa=4))
+                                                     contrast_grid=ContrastGridConfig(mode="grid", n_pa=4, snr="matched",
+                                                                                      sidelobe="rotation"))
     Runner(red, space, obj, samp, cfg, str(tmp_path), log=logs.append).run()
     pos = json.load(open(os.path.join(str(tmp_path), "annulus01", "contrast_grid.json")))["positions"]
     if mode == "farthest":
@@ -261,6 +263,43 @@ def test_the_command_line_takes_the_rule():
     assert cli._protocol_config(a)["sidelobes"] == "clean"
     a = p.parse_args(["near", "--root", "x"])
     assert "sidelobes" not in cli._protocol_config(a), "without the option the library's default stands"
+    g = cli._protocol_config(a)["contrast_grid"]
+    assert (g.snr, g.sidelobe) == ("aperture", "off"), "the IDL contrast generators' S/N and ring"
+
+
+def test_the_old_rings_are_the_default_again_and_the_grid_takes_the_idl_generators():
+    """Kevin Wagner, 2026-11-01: the rule left NEAR's rings 1 to 3 apertures inside 0.93" and one
+    source a draw, and the grid is to measure as the IDL contrast generators do.  Saved runs
+    resume as they were."""
+    import inspect
+    from klip_tpe import runner as runner_mod
+    # the suite pins the default itself (conftest), so the library's is read from its source
+    assert '_SIDELOBES_DEFAULT = {"mode": "off"}' in inspect.getsource(runner_mod)
+    assert (ContrastGridConfig().snr, ContrastGridConfig().sidelobe) == ("aperture", "off")
+    d = RunConfig(contrast_grid=ContrastGridConfig(snr="matched", sidelobe="rotation")).to_dict()
+    g = RunConfig.from_dict(d).contrast_grid
+    assert (g.snr, g.sidelobe) == ("matched", "rotation"), "a run saved with the old grid keeps it"
+    d["sidelobes"] = "farthest"
+    assert RunConfig.from_dict(d).sidelobes == "farthest", "a run saved under the rule keeps it"
+
+
+def test_the_aperture_ring_is_the_contrast_generators():
+    """contrastcurve_near.pro: ntheta = round(2 pi r / FWHM) - 1 positions from the source's, the
+    source and one each side skipped (ntheta >= 6), the source alone otherwise, and the source's
+    aperture where it was put."""
+    from klip_tpe.metrics import RingRecorder, aperture_mawet_snr
+    rng = np.random.default_rng(5)
+    img = rng.standard_normal((81, 81))
+    for rho in (0.9, 0.3, 0.25):
+        sep = rho / PX
+        ntheta = int(round(2 * np.pi * sep / FWHM)) - 1
+        with RingRecorder() as rec:
+            _, d = aperture_mawet_snr(img, [rho], [30.0], PX, FWHM, return_details=True)
+        ring = rec.records[0]["ring"]
+        assert len(ring) == ntheta - 1, (rho, ntheta, len(ring))
+        skipped = [k + 1 for k, a in enumerate(ring) if a[2] != "used"]
+        assert skipped == ([1, ntheta - 1] if ntheta >= 6 else []), (rho, skipped)
+        assert d[0]["nclean"] == (ntheta - 3 if ntheta >= 6 else ntheta - 1)
 
 
 def test_the_sampler_draws_no_source_in_anothers_sidelobe(tmp_path):

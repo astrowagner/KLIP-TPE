@@ -1079,8 +1079,8 @@ def _contrast_grid_config(a):
                               sep_step_fwhm=float(getattr(a, "cg_step", 1.0)),
                               target_snr=float(getattr(a, "cg_target", 5.0)),
                               precision=float(getattr(a, "cg_precision", 0.1)),
-                              snr=getattr(a, "cg_snr", "matched") or "matched",
-                              sidelobe=getattr(a, "cg_sidelobe", "rotation") or "rotation",
+                              snr=getattr(a, "cg_snr", "aperture") or "aperture",
+                              sidelobe=getattr(a, "cg_sidelobe", "off") or "off",
                               sidelobe_fwhm=float(getattr(a, "cg_sidelobe_fwhm", 2.0)))
 
 
@@ -1699,21 +1699,24 @@ def _add_run_args(p):
     p.add_argument("--cg-target", type=float, default=5.0, metavar="SNR", help="target S/N of the grid (default 5)")
     p.add_argument("--cg-precision", type=float, default=0.1, metavar="F",
                    help="how close to the target a position must come, as a fraction of it (default 0.1)")
-    p.add_argument("--cg-snr", default="matched", choices=["matched", "aperture"],
-                   help="the grid's S/N: the run's matched-filter Mawet S/N (matched, the default) or the aperture "
-                        "photometry of the IDL contrast generators (aperture)")
-    p.add_argument("--cg-sidelobe", default="rotation", choices=["rotation", "fixed"],
-                   help="a source's ADI sidelobes: the arc the field rotation sweeps, capped by anglemax and never "
-                        "under --cg-sidelobe-fwhm of arc (rotation, the default), or that width alone (fixed)")
+    p.add_argument("--cg-snr", default="aperture", choices=["aperture", "matched"],
+                   help="the grid's S/N: the IDL contrast generators' aperture photometry at the injected position "
+                        "(aperture, the default) or the run's matched-filter Mawet S/N (matched)")
+    p.add_argument("--cg-sidelobe", default="off", choices=["off", "rotation", "fixed"],
+                   help="the grid's noise ring. off (the default) skips the apertures within 1.5 FWHM of the source "
+                        "and the known companions, as the IDL contrast generators skip the source and the aperture "
+                        "each side. rotation also leaves out the arc the field rotation sweeps, capped by anglemax and "
+                        "never under --cg-sidelobe-fwhm of arc, and fixed that width alone")
     p.add_argument("--cg-sidelobe-fwhm", type=float, default=2.0, metavar="FWHM",
                    help="the sidelobes' least half-width, in FWHM of arc (default 2)")
     p.add_argument("--sidelobes", default=None, choices=["farthest", "clean", "off"],
-                   help="every S/N's noise ring (search, validation, the grid, the verify and the candidates) leaves "
-                        "out the ADI sidelobes of the injected sources and known companions, +/- the data's PA "
-                        "coverage, and the source count keeps 4 apertures outside them. Where fewer than 4 are "
-                        "left, farthest (the default) takes the 4 farthest from the source and clean the clean "
-                        "reduction's ring (the verify and the candidates take the farthest). The S/N maps leave out "
-                        "the known companions' sidelobes. off: the rings as before 2026-10-31")
+                   help="the noise rings of the search, calibration, validation, verify and candidates. off (the "
+                        "default) skips the apertures within 1.5 FWHM of each injected source and known companion, "
+                        "as every run before 2026-10-31 and the IDL did. farthest and clean also leave out the ADI "
+                        "sidelobes of the sources and companions, +/- the data's PA coverage, and the source count "
+                        "keeps 4 apertures outside them. Where fewer than 4 are left, farthest takes the 4 farthest "
+                        "from the source and clean the clean reduction's ring. On NEAR this left 1 to 3 apertures "
+                        "inside 0.93\" and one source a draw. The contrast grid has its own ring (--cg-sidelobe)")
     p.add_argument("--global-block", action="store_true", help="one parameter block for all nights")
     p.add_argument("--no-framesel", action="store_true")
     p.add_argument("--no-selection", action="store_true", help="no drop1/drop2 night-selection dims")

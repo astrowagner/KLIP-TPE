@@ -183,12 +183,17 @@ def test_a_run_makes_the_grid_one_source_at_a_time_and_leaves_its_draws_alone(tm
     done = [p for p in js["positions"] if p["status"] in ("converged", "accepted")]
     assert done and all(abs(p["trials"][-1][1] / 5.0 - 1) <= 0.1 for p in done if p["status"] == "converged")
     ex = [p for p in js["positions"] if p["status"] == "excluded"]
-    hw = max(js["rotation_deg"], np.rad2deg(2.0 * red.fwhm * red.pxscale / rho_k))
-    assert ex, "the positions on the companion's arc are left out"
-    for p in js["positions"]:                            # excluded exactly where its sidelobes are
+    # the grid's default ring (sidelobe "off", the IDL contrast generators'): no position within
+    # the companion's 1.5 FWHM keep-out, an angle at its separation
+    hw = CG.footprint_deg(rho_k / red.pxscale, red.fwhm, ContrastGridConfig(), js["rotation_deg"])
+    assert hw == pytest.approx(np.rad2deg(1.5 * red.fwhm * red.pxscale / rho_k))
+    on = []
+    for p in js["positions"]:                            # excluded exactly where its keep-out is
         dpa = abs((p["theta"] - 50.0 + 180) % 360 - 180)
         on_arc = abs(p["rho_as"] - rho_k) <= 1.5 * red.fwhm * red.pxscale + 1e-9 and dpa <= hw + 1e-9
+        on.append(on_arc)
         assert (p["status"] == "excluded") == on_arc
+    assert bool(ex) == any(on)
     assert "injection-recovery" in open(d / "annulus01" / "contrast_curve.txt").read()
     assert "Injection-recovery" in open(d / "contrast_curve.txt").read().splitlines()[0]
     assert os.path.exists(d / "annulus01" / "contrast_grid.txt")
@@ -223,7 +228,7 @@ def test_off_for_a_run_saved_before_and_the_options_parse():
     a = cli._build_parser().parse_args(["near", "--root", "/r"])
     g = cli._contrast_grid_config(a)
     assert g.mode == ContrastGridConfig().mode, "the library's default (grid; off inside this test suite)"
-    assert (g.n_pa, g.target_snr, g.snr, g.sidelobe) == (12, 5.0, "matched", "rotation")
+    assert (g.n_pa, g.target_snr, g.snr, g.sidelobe) == (12, 5.0, "aperture", "off")
     assert cli._contrast_grid_config(cli._build_parser().parse_args(["near", "--root", "/r", "--contrast-grid",
                                                                        "grid"])).mode == "grid"
     a = cli._build_parser().parse_args(["near", "--root", "/r", "--contrast-grid", "random", "--cg-pa", "72",
