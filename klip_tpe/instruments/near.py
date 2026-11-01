@@ -502,7 +502,8 @@ def make_space(reducer: PartitionedReducer, per_night: bool = True, k_klip_max: 
                max_drop: int = 2, bin_range: Optional[Tuple[int, int]] = None,
                zone_range: Optional[Tuple[float, float]] = None, search_post_hp: bool = False,
                pin: Optional[Dict[str, Any]] = None,
-               angsep_range: Optional[Tuple[float, float]] = None) -> SearchSpace:
+               angsep_range: Optional[Tuple[float, float]] = None,
+               corr_range: Optional[Tuple[float, float]] = None) -> SearchSpace:
     """The production search space: 9 parameters per night (+ drop1/drop2).
 
     ``width_range=(w0, w1)`` adds the searched global integer ``width`` dim of the
@@ -533,7 +534,15 @@ def make_space(reducer: PartitionedReducer, per_night: bool = True, k_klip_max: 
     positive ``angsep`` leaves the target out.  The bound is not a point of measure zero: a
     proposal past it is clipped onto it, and the reference-count guard projects onto 0 too, so
     a search lands there often and keeps it when it scores (MWC 758 with ALES: every winner, at
-    the cost of most of the spiral arms' flux).  The default is clipped into the range."""
+    the cost of most of the spiral arms' flux).  The default is clipped into the range.
+
+    ``corr_range=(lo, hi)`` replaces the 0-1 that ``corr_thresh`` is searched over.  Frame
+    correlations sit just below 1 (MWC 758's ALES frames: 0.944-0.999), so most of 0-1 cuts no
+    frame, and the frame-selection guard records every such proposal at the floor, the no-cut
+    corner: of the random draws only the few that land in the thin band where the cut acts try
+    a cut at all.  A range from just below the data's lowest correlation spends the draws there.
+    Its floor is then the no-cut value, so keep it at or below every partition's lowest
+    correlation.  The default is clipped into the range."""
     d = dict(production_defaults)
     d.update(defaults or {})
     if k_klip_max is None:
@@ -568,7 +577,10 @@ def make_space(reducer: PartitionedReducer, per_night: bool = True, k_klip_max: 
                             default=min(d["anglemax"], anglemax_hi),
                             doc="max reference field-rotation window (deg)")]
     if opt_framesel:
-        block += [Param("corr_thresh", 0.0, 1.0, "float", default=d["corr_thresh"]),
+        c_lo, c_hi = (0.0, 1.0) if corr_range is None else (float(corr_range[0]), float(corr_range[1]))
+        if not 0.0 <= c_lo <= c_hi <= 1.0:
+            raise ValueError(f"corr_range {tuple(corr_range)}: want 0 <= lo <= hi <= 1")
+        block += [Param("corr_thresh", c_lo, c_hi, "float", default=float(np.clip(float(d["corr_thresh"]), c_lo, c_hi))),
                   Param("noise_max", 0.3, 3.0, "float", default=d["noise_max"]),
                   Param("coronoise_max", 0.3, 3.0, "float", default=d["coronoise_max"])]
     if search_k:

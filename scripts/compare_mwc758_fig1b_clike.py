@@ -130,12 +130,24 @@ def c_on_ring(img):
             "z": float((c - e.mean()) / e.std()), "n_ring_at_or_above_c": int((e >= c).sum()), "n_ring": int(e.size)}
 
 
+def group_runs(pids):
+    """``g00, g02, g10, g12-g19`` for the partitions n2_g00, n2_g02, n2_g10, n2_g12 ... n2_g19."""
+    idx = sorted(int(str(p).split("_g")[1]) for p in pids)
+    runs, s = [], idx[0]
+    for p, q in zip(idx, idx[1:] + [None]):
+        if q != p + 1:
+            runs.append(f"g{s:02d}" if s == p else f"g{s:02d}-g{p:02d}")
+            s = q
+    return ", ".join(runs)
+
+
 ng = len(n2)
+gtxt = group_runs([kept[i] for i in n2])
 panels = [("Fig. 1b source: the paper's ASDI,\n3.8-4.14 um (2022-02-11 run)",
            fits.getdata(os.path.join(a.reduced, "MWC758_sdiklip_3.8-4.14.fits")).astype(float)),
           ("klip-tpe at the paper's ADI settings,\n3.8-4.15 um (g15-g19)", paper_kt),
-          ((f"the c-tuned winner on its\n{ng} groups ({kept[n2[0]].split('_')[1]}-{kept[n2[-1]].split('_')[1]}), held" if held else
-            f"the c-tuned winner, its {ng} Nov 14\ngroups ({kept[n2[0]].split('_')[1]}-{kept[n2[-1]].split('_')[1]})"), win_all)]
+          ((f"the c-tuned winner on its\n{ng} groups ({gtxt}), held" if held else
+            f"the c-tuned winner, its {ng} Nov 14\ngroups ({gtxt})"), win_all)]
 if win_red is not None and len(n2_red) < len(n2):
     panels.append((f"the c-tuned winner, its {len(n2_red)} groups\nat 3.8-4.15 um", win_red))
 stats = {name.replace("\n", " "): c_on_ring(im) for name, im in panels}

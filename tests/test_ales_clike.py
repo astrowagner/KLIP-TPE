@@ -306,6 +306,28 @@ def test_angsep_range_keeps_the_search_off_the_auto_fast_corner():
             ales.make_space(red, angsep_range=bad)
 
 
+def test_corr_range_searches_the_band_where_the_cut_acts():
+    red, _ = _reducer()
+    plain = ales.make_space(red, opt_framesel=True, defaults={"corr_thresh": 0.0})
+    sp = ales.make_space(red, opt_framesel=True, defaults={"corr_thresh": 0.0}, corr_range=(0.94, 1.0))
+    assert sp.names == plain.names
+    i = sp.index("corr_thresh")
+    assert (plain.params[i].lo, plain.params[i].hi) == (0.0, 1.0)
+    assert (sp.params[i].lo, sp.params[i].hi) == (0.94, 1.0)
+    # the default, and a proposal below the floor, come to the floor: the no-cut value
+    assert sp.decode(sp.default_vector()).params["corr_thresh"] == pytest.approx(0.94)
+    x = sp.default_vector()
+    x[i] = 0.5
+    assert sp.sanitize(x)[i] == pytest.approx(0.94) and plain.sanitize(x)[i] == pytest.approx(0.5)
+    # the other dimensions keep their ranges
+    for j, (q0, q1) in enumerate(zip(plain.params, sp.params)):
+        if j != i:
+            assert (q0.lo, q0.hi) == (q1.lo, q1.hi)
+    for bad in [(-0.1, 1.0), (0.99, 0.95), (0.9, 1.2)]:
+        with pytest.raises(ValueError, match="corr_range"):
+            ales.make_space(red, opt_framesel=True, corr_range=bad)
+
+
 def test_getzone2015_zones_are_the_paper_reductions_pixels():
     """The 2015 getzone (MWC758_ALES reduce_ales_mwc758_2.pro): dist_circle and angmask about (sc/2 - 1,
     sc/2 - 1) in single precision, ang = atan2 + pi, zone jj = [jj, jj + 1] * 360 / n_ang deg, both ends

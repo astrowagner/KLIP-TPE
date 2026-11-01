@@ -419,3 +419,63 @@ winner's other settings the arm flux is 1.09 with no cuts, 0.84 with the cut at 
 step 1.14): the cut is the whole of the gain.  A cap per route does not end:
 an objective that scores point sources alone trades the disk for them wherever it can, so a
 search for a planet in a disk has to score the disk too.
+
+With the noise and coronoise cuts and the residual high-pass held off as well, the search
+shortened the rotation window instead: `anglemax` 98 deg, which lifts the injections' S/N by 9 %
+over 127 deg and leaves 0.37 of the arm flux against 0.88, with c undetected (S/N 1.4).  The
+window costs the frames at the ends of the sequence a third of their references, the ones
+rotated furthest from them.  Each route the search has found narrows the references toward the
+frames nearest the target in time: the target itself, more modes, the ends of the sequence cut,
+a shorter window.  Those match the target's speckles best, so point sources gain; an arm lying
+along the direction of rotation needs references rotated past its own length, so it loses.
+
+Holding all of them (`--angsep-min 0.01 --k-max 15 --pin noise_max=3 --pin coronoise_max=3
+--pin post_hp=0 --pin anglemax=127`) leaves the search bin, the box, angsep, the correlation cut
+and k up to the cap.  It moved bin and the box, left angsep at its floor, the cut off and k at
+the cap, and kept the disk: its winner, 12-frame bins, a 20-px box and 15 modes, keeps the paper's arm flux
+and lifts the injections' S/N by about 30 % over the paper's settings.  c comes out at S/N 2.0,
+the brightest of the 32 positions on its ring (at the paper's settings 2.5, with 3 of the 31
+empty positions as bright).
+
+The correlation cut was in that space but searched over 0-1, and these frames correlate at
+0.944-0.999: a threshold below about 0.945 cuts nothing and is recorded at the floor, so only the
+random draws that fell in the thin band where it acts tried a cut (37 of 3000).  Searched over
+0.94-1 (`--corr-range 0.94 1`, `make_space(corr_range=...)`), every one of the top 50 cuts at
+0.993-0.995, which drops 11-32 % of the frames per group, from the ends of the sequence.  Its
+winner (5-frame bins, a 10-px box, 15 modes, the cut at 0.9933) keeps 0.93 of the paper's arm
+flux at an arm S/N of 0.82 (the paper's 0.58), and gives c S/N 4.0, z +3.7, the brightest of its
+ring, the strongest c of any reduction so far (Fig. 1b's image: 3.4, z +2.2).  Without the cut
+the same settings keep more of the disk (1.28) and give c 3.1.
+
+On all 20 groups, with the group flags searched too (`--max-excluded 19 --p-include 0.5`, the
+rest as above), the search kept those settings and 11 groups, g00, g02, g10 and g12-g19, and c
+rose to S/N 4.5, z +5.2.  The selection was settled at evaluation 222, while the other settings
+were still far from their final values, and it filled 2297 of the 3000 evaluations; at the final
+settings 1025 of 1027 evaluations used it, and no selection within g12-g19 was ever tried.  The
+partitions are reduced independently and averaged with equal weights, so one reduction of every
+group per draw scores every selection.  On eight common draws at the winner's settings the
+throughput S/N (each injected source's matched-filter peak in the injected-minus-clean image,
+over the clean image's noise) is 2.59 on the search's 11 groups, 2.71 on g12-g19 and 2.85 on
+g15-g19 (paired differences +0.11 and +0.25, ± 0.02-0.03), the objective ranks them the same
+way, and greedy selection from all 20 groups ends at g15-g19.  So the selection is where the
+search stopped looking, not where its objective peaks.  The best selection depends on the other
+settings.  Without the correlation cut, at the same bin, box and modes, the 11 groups beat
+g15-g19 (throughput S/N 1.72 against 1.55), as they do at the paper's settings (1.64 against
+1.40); the cut helps g15-g19 more (+1.30 against +0.87 for the 11 groups), since it drops more
+of their frames, a quarter against a fifth.  The 11 groups took over between evaluations 200 and
+500 (from 8 % to 60 % of the evaluations), while the median bin was 11-15 frames and a third or
+fewer of the evaluations cut at 0.99 or above.  With one flag per group the TPE settles the
+selection in its first few hundred evaluations, on the settings of that moment; a selection
+searched that way is worth checking on common draws at the final settings.
+
+c does not follow the injections.  At the same settings it has S/N 3.9, z +3.7, on g15-g19 and
+4.5 on the search's 11 groups.  In single groups it stands at z +2.0 to +5.8 at 3.63-3.83 um,
+at the paper's settings and at the winner's, and at +0.3 to +1.2 at 3.90-4.04 um, where the
+c-coloured injections are strongest; adjacent groups share residuals, so these are not
+independent detections.  If c is less red than the alpha = 6.76 the injections assume, groups
+the objective would drop carry its signal.  The arms come through the 11 groups whole: 0.99 of
+the paper's arm flux at an arm S/N of 1.03, the highest of any winner so far.  The cut acts
+unevenly across the band: it keeps 92-97 % of the frames at 3.50-3.76 um and 57-89 % toward
+both ends.
+
+Tutorial 7 goes through both searches, the routes above one setting at a time, and these checks.
