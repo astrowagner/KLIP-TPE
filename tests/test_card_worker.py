@@ -116,6 +116,10 @@ def test_the_card_takes_the_share_its_hash_picks_and_changes_no_score(tmp_path, 
     assert setup["reducer"]["card"] == {"share": SHARE, "workers": 2}
     card = json.load(open(os.path.join(run_dir, "final_results.json")))["card"]
     assert card["up"] and card["jobs"] == on and 0 < card["busy_fraction"] < 1
+    assert card["marked"] == on and card["refused"] == {}
+    # the annulus' line: the search's marked jobs, all reduced on the card
+    assert any(ln == f"  annulus 1: the card reduced {on} of the {on} jobs marked for it" for ln in logs), \
+        [ln for ln in logs if "the card reduced" in ln]
     assert any(ln.startswith("# card: share 50 %") for ln in open(os.path.join(run_dir, "bench_summary.txt")))
 
 

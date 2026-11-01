@@ -135,20 +135,29 @@ class GPUKLIPReducer(KLIPReducer):
     # -- what goes to the card ---------------------------------------------------
     def supports(self, req: ReductionRequest) -> bool:
         """Whether ``reduce`` runs this request on the card (otherwise on the CPU)."""
+        return self.refusal(req) is None
+
+    def refusal(self, req: ReductionRequest) -> Optional[str]:
+        """Why ``reduce`` would not run this request on the card, or None when it would: the
+        pool counts the jobs it turns away by this reason."""
         if str(getattr(req, "stage", "reduce")) != "reduce":
-            return False
-        if req.fm_sources or req.k_scan or req.extras or getattr(req, "siblings", None) is not None:
-            return False
+            return "an SDI prepare stage"
+        for what, on in (("KLIP-FM", req.fm_sources), ("k-scan", req.k_scan), ("extras", req.extras),
+                         ("SDI siblings", getattr(req, "siblings", None) is not None)):
+            if on:
+                return what
         p = dict(self.defaults)
         p.update({k: v for k, v in req.params.items() if v is not None})
         for key in ("fast", "spat_mean", "temp_mean", "use_rdi", "do_destripe"):
             if _flag(p.get(key, False)):
-                return False
+                return key
         if str(p.get("comb_type", "nwadi")) not in ("nwadi", "median", "mean"):
-            return False
-        if self._reflib_spec is not None or int(round(float(p.get("nkeep_sdi", 0) or 0))) > 0:
-            return False
-        return True
+            return f"comb_type {p.get('comb_type')}"
+        if self._reflib_spec is not None:
+            return "a searched reference library"
+        if int(round(float(p.get("nkeep_sdi", 0) or 0))) > 0:
+            return "an SDI pool"
+        return None
 
     def describe(self) -> Dict[str, Any]:
         d = super().describe()

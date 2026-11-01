@@ -1150,6 +1150,18 @@ class Runner:
                 self.log(f"  annulus {ia+1}: {asked} sources requested, {n} used -- more would leave "
                          f"some separation's Mawet ring fewer than {mr} clean apertures, and it would "
                          f"fall back to the radial band there")
+        elif n == asked and self._nsrc_warned.get(ia) != n:
+            # the count an annulus keeps is said too, so a log without the line above is not
+            # read as the cap having been skipped
+            self._nsrc_warned[ia] = n
+            src = "as asked" if ns is not None else "as the count for its separation gives"
+            if rule is not None:
+                self.log(f"  annulus {ia+1}: {n} source{'s' * (n != 1)} a draw, {src}, and each keeps at least "
+                         f"{mr} noise apertures outside the sources' ADI sidelobes (+/- "
+                         f"{rule.half_width(a_out, self.fwhm):.0f} deg at the outer edge)")
+            else:
+                self.log(f"  annulus {ia+1}: {n} source{'s' * (n != 1)} a draw, {src}, and each separation's "
+                         f"Mawet ring keeps at least {mr} clean apertures")
         # The count used can still starve a ring: one source close to the star, whose ring
         # holds only a handful of apertures, is never capped.  Asked at the sources themselves
         # and over more azimuths than the cap asks: where a source falls on the pixel grid
@@ -1173,6 +1185,31 @@ class Runner:
                             f" at some azimuths, and there its S/N comes from the radial band instead"))
         self._nsrc_cache[ia] = n
         return n
+
+    def _card_counts(self) -> Optional[Tuple[int, int, Dict[str, int]]]:
+        """The card's running counts, ``(marked, reduced, refused by reason)``, or None without
+        card workers (:meth:`klip_tpe.parallel.ProcessPool.card_summary`)."""
+        cs = getattr(self.reducer, "card_summary", lambda: None)()
+        if not cs:
+            return None
+        return int(cs.get("marked") or 0), int(cs.get("jobs") or 0), dict(cs.get("refused") or {})
+
+    def _card_note(self, ia: int) -> None:
+        """After an annulus' search: how many of its draws' jobs were marked for the card, how
+        many the card reduced, and how many its reducer turned away, by reason.  The counts
+        since the search started (:attr:`_card_mark`, set as the annulus starts)."""
+        now = self._card_counts()
+        if now is None:
+            return
+        m0, j0, r0 = getattr(self, "_card_mark", None) or (0, 0, {})
+        marked, done = now[0] - m0, now[1] - j0
+        refused = {k: v - r0.get(k, 0) for k, v in now[2].items() if v - r0.get(k, 0) > 0}
+        nref = sum(refused.values())
+        why = ", ".join(f"{k} {v}" for k, v in sorted(refused.items(), key=lambda kv: -kv[1]))
+        self.log(f"  annulus {ia+1}: the card reduced {done} of the {marked} jobs marked for it"
+                 + (f", and turned away {nref} ({why})" if nref else "")
+                 + (f"; {marked - nref - done} went back to the CPU workers" if marked - nref > done else ""))
+        self._card_mark = now
 
     def _apply_sampler_config(self) -> None:
         """``RunConfig.min_r_fwhm`` onto the run's sampler (the base of a replay), so the run
@@ -3818,6 +3855,7 @@ class Runner:
         replaces calibration, the contrast is frozen, and in ``continue`` mode the prior
         best is re-scored first before the search continues to the (new) ``n_iter``."""
         self.ia = ia
+        self._card_mark = self._card_counts()   # the card's counts at the start, for the annulus' line
         if resume_index is None:
             self._hooks_done.pop(ia, None)      # a fresh or extended pass re-runs its post-annulus hooks
         if resume_index is None or extend is not None:
@@ -3938,6 +3976,7 @@ class Runner:
             self.log(f"  note: {ntot - nok}/{ntot} evaluations failed")
         self._draw_note(ia)
         self.log(f"  search done: best {bs:.3f} at eval {bi+1}")
+        self._card_note(ia)
         self._memory_note()
         table, vwin, winner = ([], -1, {})
         if self.cfg.validation.n_valid >= 1 and self.cfg.validation.n_top >= 1:

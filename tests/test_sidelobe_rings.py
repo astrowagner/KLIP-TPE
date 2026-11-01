@@ -192,6 +192,10 @@ def test_the_count_keeps_a_pair_out_of_each_others_sidelobes(tmp_path, monkeypat
     assert r._nsrc(0) == want
     if want == 1:
         assert any("2 sources requested, 1 used" in l and "sidelobe" in l for l in logs), logs
+    else:
+        # an annulus the rule leaves alone says so too (NEAR2 s6 note, section 4)
+        assert any("annulus 1: 2 sources a draw, as asked, and each keeps at least 4 noise apertures outside "
+                   "the sources' ADI sidelobes (+/- 40 deg at the outer edge)" in l for l in logs), logs
 
 
 @pytest.mark.slow
