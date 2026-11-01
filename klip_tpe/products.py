@@ -9,6 +9,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 from scipy import ndimage
 
+from . import metrics as _metrics
 from .metrics import Source, gaussian_kernel, radprof, source_xy, star_center
 
 __all__ = ["noise_profile", "throughput_fit", "contrast_curve", "stitch_annuli", "snr_map", "fm_responses",
@@ -184,6 +185,13 @@ def snr_map(img: np.ndarray, fwhm: float, kernel: Optional[np.ndarray] = None,
     if len(excl_arcs) and pxscale is not None:
         from .metrics import _arc_regions, _in_arcs
         keep &= ~_in_arcs(xx, yy, _arc_regions(excl_arcs, pxscale, fwhm, cx, cy, angle_convention), cx, cy)
+    if _metrics._RING_RECORDER is not None:
+        _metrics._ring_emit({"fn": "snr_map", "shape": tuple(img.shape), "center": (float(cx), float(cy)),
+                             "fwhm": float(fwhm), "exr": float(excl_fwhm * fwhm), "keep": keep.copy(),
+                             "finite": fin.copy(), "band_px": 0.5, "ring": [],
+                             "sources_xy": [(float(a), float(b)) for a, b in exclude_xy], "known_xy": [],
+                             "arcs": [tuple(float(v) for v in a) for a in excl_arcs], "noise": "band",
+                             "why": None, "x": float("nan"), "y": float("nan"), "r": float("nan"), "nclean": 0})
     out = np.full(img.shape, np.nan)
     rmax = int(np.floor(rr[fin].max())) if fin.any() else 0
     for r in range(max(int(rmin), 1), rmax + 1):

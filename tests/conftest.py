@@ -96,10 +96,10 @@ def _never_skip_panels():
     # The injection-recovery grid is on by default and costs a hundred reductions or more an
     # annulus, which the suite's many short runs do not need.  A test of it asks for it.
     mp.setitem(contrast_grid._DEFAULT, "mode", "off")
-    # The noise rings leave the sources' ADI sidelobes out by default (RunConfig.sidelobes).
-    # The suite's runs keep the rings their expectations were written for, and the tests of
-    # the sidelobe rings ask for them (tests/test_sidelobe_rings.py).  KLIP_TPE_TEST_SIDELOBES
-    # runs the suite with another default.
+    # The suite's runs keep the rings their expectations were written for ("off", the
+    # library's default too since 2026-11-01), and the tests of the sidelobe rings ask for the
+    # rule (tests/test_sidelobe_rings.py).  KLIP_TPE_TEST_SIDELOBES runs the suite with another
+    # default.
     mp.setitem(runner._SIDELOBES_DEFAULT, "mode", os.environ.get("KLIP_TPE_TEST_SIDELOBES", "off"))
     yield
     mp.undo()

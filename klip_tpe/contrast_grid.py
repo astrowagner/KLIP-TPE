@@ -13,18 +13,19 @@ The protocol of the IDL contrast generators (``contrastcurve_*.pro``, e.g.
   target is accepted at its last contrast, and from the ``drop_after``-th (8th) one still
   short of ``(1 - precision) * target`` is dropped as blocked.  These are the IDL's two
   rules, ``runs gt 5`` and ``runs gt 7``;
-* the S/N is the run's matched-filter Mawet S/N (``snr="matched"``), or the IDL's aperture
-  photometry (``snr="aperture"``): FWHM/2 apertures, the ring a FWHM apart, the small-sample
-  correction of Mawet et al. (2014);
-* the noise ring leaves out the injected source and its ADI sidelobes, every known companion
-  and the companions' sidelobes on rings near their separation.  No position is placed in a
-  companion's sidelobes either.  A sidelobe is the arc ADI over-subtracts a source along:
-  ``+/- min(PA span of the data, the configuration's anglemax)`` (``sidelobe="rotation"``),
-  never less than ``sidelobe_fwhm`` FWHM of arc, the IDL's two apertures each side
-  (``sidelobe="fixed"``: that floor alone).  Where the arcs leave fewer than 4 apertures, the 4
-  farthest from the source are used, or the clean reduction's ring (``RunConfig.sidelobes``,
-  :func:`klip_tpe.metrics.sidelobe_snr`).  A ring the run's sidelobes setting leaves as it was
-  (``"off"``) gives no S/N below the metric's ``min_ring`` apertures;
+* the S/N is the IDL's aperture photometry (``snr="aperture"``, the default since
+  2026-11-01): FWHM/2 apertures, the source's at its injected position, the ring a FWHM apart,
+  the small-sample correction of Mawet et al. (2014).  ``snr="matched"`` takes the run's
+  matched-filter Mawet S/N instead;
+* the noise ring skips the apertures within 1.5 FWHM of the source and of every known
+  companion (``sidelobe="off"``, the default since 2026-11-01), as the IDL contrast generators
+  skip the source and the aperture each side.  ``sidelobe="rotation"`` also leaves out each
+  one's ADI sidelobes, ``+/- min(PA span of the data, the configuration's anglemax)`` and never
+  less than ``sidelobe_fwhm`` FWHM of arc, and ``"fixed"`` that floor alone.  No position is
+  placed in a companion's keep-out or sidelobes.  Under the arcs, where they leave fewer than 4
+  apertures, the 4 farthest from the source are used, or the clean reduction's ring
+  (``RunConfig.sidelobes``, :func:`klip_tpe.metrics.sidelobe_snr`).  Without the run's rule a
+  ring the arcs leave short gives no S/N below the metric's ``min_ring`` apertures;
 * the curve is the median over the converged positions at each separation, with the 16th and
   84th percentiles.
 
@@ -63,8 +64,15 @@ class ContrastGridConfig:
     edge_fwhm: float = 1.0
     target_snr: float = 5.0
     precision: float = 0.1
-    snr: str = "matched"
-    sidelobe: str = "rotation"
+    #: ``"aperture"`` (default since 2026-11-01): the IDL contrast generators' aperture
+    #: photometry at the injected position (:func:`~klip_tpe.metrics.aperture_mawet_snr`, the
+    #: IDL's ``near2_snr``).  ``"matched"``: the run's matched-filter Mawet S/N
+    snr: str = "aperture"
+    #: ``"off"`` (default since 2026-11-01): no arcs, the ring skips the apertures within 1.5
+    #: FWHM of the source and of each known companion, as the IDL contrast generators skip the
+    #: source and the aperture each side of it.  ``"rotation"``: also the arc the field rotation
+    #: sweeps, ``"fixed"``: ``sidelobe_fwhm`` FWHM of arc each side
+    sidelobe: str = "off"
     sidelobe_fwhm: float = 2.0
     known_radial_fwhm: float = 1.5
     accept_after: int = 6
@@ -149,7 +157,10 @@ def random_positions(seps: Sequence[float], step_px: float, n: int, rng: np.rand
 def footprint_deg(r_px: float, fwhm: float, cfg: ContrastGridConfig, rotation_deg: Optional[float]) -> float:
     """Half-width (deg) of a source's sidelobe arc at separation ``r_px``: the field
     rotation the references span (``rotation_deg``, ``sidelobe="rotation"``), never less than
-    ``sidelobe_fwhm`` FWHM of arc."""
+    ``sidelobe_fwhm`` FWHM of arc.  With ``sidelobe="off"`` there is no arc, and this is the
+    angle of the 1.5 FWHM keep-out, inside which no position goes beside a known companion."""
+    if str(cfg.sidelobe).lower() == "off":
+        return min(float(np.rad2deg(1.5 * fwhm / max(float(r_px), 1e-6))), 180.0)
     floor = float(np.rad2deg(cfg.sidelobe_fwhm * fwhm / max(float(r_px), 1e-6)))
     if str(cfg.sidelobe).lower() == "fixed" or rotation_deg is None or not np.isfinite(rotation_deg):
         return min(floor, 180.0)

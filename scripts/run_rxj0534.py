@@ -301,8 +301,9 @@ def main(argv=None):
                     help="contrast grid: separation step in FWHM (default 1). The default annulus is the "
                          "companion's separation +/- 2 FWHM, so 1 gives three separations and 0.5 five")
     ap.add_argument("--cg-target", type=float, default=5.0, help="contrast grid: target S/N (default 5)")
-    ap.add_argument("--cg-snr", default="matched", choices=["matched", "aperture"],
-                    help="contrast grid: the run's matched-filter S/N (default) or aperture photometry")
+    ap.add_argument("--cg-snr", default="aperture", choices=["aperture", "matched"],
+                    help="contrast grid: the IDL contrast generators' aperture photometry (default) or the "
+                         "run's matched-filter S/N")
     a = ap.parse_args(argv)
 
     out = a.out or os.path.join(os.getcwd(), f"rxj0534_p{a.partitions}")

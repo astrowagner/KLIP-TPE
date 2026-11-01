@@ -66,8 +66,8 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--n-final-draws M]
                         [--contrast-grid {grid,random,off}] [--cg-pa N]
                         [--cg-samples N] [--cg-step FWHM] [--cg-target SNR]
-                        [--cg-precision F] [--cg-snr {matched,aperture}]
-                        [--cg-sidelobe {rotation,fixed}]
+                        [--cg-precision F] [--cg-snr {aperture,matched}]
+                        [--cg-sidelobe {off,rotation,fixed}]
                         [--cg-sidelobe-fwhm FWHM]
                         [--sidelobes {farthest,clean,off}] [--global-block]
                         [--no-framesel] [--no-selection] [--max-drop MAX_DROP]
@@ -296,30 +296,36 @@ options:
   --cg-target SNR       target S/N of the grid (default 5)
   --cg-precision F      how close to the target a position must come, as a
                         fraction of it (default 0.1)
-  --cg-snr {matched,aperture}
-                        the grid's S/N: the run's matched-filter Mawet S/N
-                        (matched, the default) or the aperture photometry of
-                        the IDL contrast generators (aperture)
-  --cg-sidelobe {rotation,fixed}
-                        a source's ADI sidelobes: the arc the field rotation
-                        sweeps, capped by anglemax and never under --cg-
-                        sidelobe-fwhm of arc (rotation, the default), or that
-                        width alone (fixed)
+  --cg-snr {aperture,matched}
+                        the grid's S/N: the IDL contrast generators' aperture
+                        photometry at the injected position (aperture, the
+                        default) or the run's matched-filter Mawet S/N
+                        (matched)
+  --cg-sidelobe {off,rotation,fixed}
+                        the grid's noise ring. off (the default) skips the
+                        apertures within 1.5 FWHM of the source and the known
+                        companions, as the IDL contrast generators skip the
+                        source and the aperture each side. rotation also
+                        leaves out the arc the field rotation sweeps, capped
+                        by anglemax and never under --cg-sidelobe-fwhm of arc,
+                        and fixed that width alone
   --cg-sidelobe-fwhm FWHM
                         the sidelobes' least half-width, in FWHM of arc
                         (default 2)
   --sidelobes {farthest,clean,off}
-                        every S/N's noise ring (search, validation, the grid,
-                        the verify and the candidates) leaves out the ADI
-                        sidelobes of the injected sources and known
+                        the noise rings of the search, calibration,
+                        validation, verify and candidates. off (the default)
+                        skips the apertures within 1.5 FWHM of each injected
+                        source and known companion, as every run before
+                        2026-10-31 and the IDL did. farthest and clean also
+                        leave out the ADI sidelobes of the sources and
                         companions, +/- the data's PA coverage, and the source
                         count keeps 4 apertures outside them. Where fewer than
-                        4 are left, farthest (the default) takes the 4
-                        farthest from the source and clean the clean
-                        reduction's ring (the verify and the candidates take
-                        the farthest). The S/N maps leave out the known
-                        companions' sidelobes. off: the rings as before
-                        2026-10-31
+                        4 are left, farthest takes the 4 farthest from the
+                        source and clean the clean reduction's ring. On NEAR
+                        this left 1 to 3 apertures inside 0.93" and one source
+                        a draw. The contrast grid has its own ring (--cg-
+                        sidelobe)
   --global-block        one parameter block for all nights
   --no-framesel
   --no-selection        no drop1/drop2 night-selection dims
@@ -615,8 +621,8 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--n-final-draws M] [--contrast-grid {grid,random,off}]
                      [--cg-pa N] [--cg-samples N] [--cg-step FWHM]
                      [--cg-target SNR] [--cg-precision F]
-                     [--cg-snr {matched,aperture}]
-                     [--cg-sidelobe {rotation,fixed}]
+                     [--cg-snr {aperture,matched}]
+                     [--cg-sidelobe {off,rotation,fixed}]
                      [--cg-sidelobe-fwhm FWHM]
                      [--sidelobes {farthest,clean,off}] [--global-block]
                      [--no-framesel] [--no-selection] [--max-drop MAX_DROP]
@@ -843,30 +849,36 @@ options:
   --cg-target SNR       target S/N of the grid (default 5)
   --cg-precision F      how close to the target a position must come, as a
                         fraction of it (default 0.1)
-  --cg-snr {matched,aperture}
-                        the grid's S/N: the run's matched-filter Mawet S/N
-                        (matched, the default) or the aperture photometry of
-                        the IDL contrast generators (aperture)
-  --cg-sidelobe {rotation,fixed}
-                        a source's ADI sidelobes: the arc the field rotation
-                        sweeps, capped by anglemax and never under --cg-
-                        sidelobe-fwhm of arc (rotation, the default), or that
-                        width alone (fixed)
+  --cg-snr {aperture,matched}
+                        the grid's S/N: the IDL contrast generators' aperture
+                        photometry at the injected position (aperture, the
+                        default) or the run's matched-filter Mawet S/N
+                        (matched)
+  --cg-sidelobe {off,rotation,fixed}
+                        the grid's noise ring. off (the default) skips the
+                        apertures within 1.5 FWHM of the source and the known
+                        companions, as the IDL contrast generators skip the
+                        source and the aperture each side. rotation also
+                        leaves out the arc the field rotation sweeps, capped
+                        by anglemax and never under --cg-sidelobe-fwhm of arc,
+                        and fixed that width alone
   --cg-sidelobe-fwhm FWHM
                         the sidelobes' least half-width, in FWHM of arc
                         (default 2)
   --sidelobes {farthest,clean,off}
-                        every S/N's noise ring (search, validation, the grid,
-                        the verify and the candidates) leaves out the ADI
-                        sidelobes of the injected sources and known
+                        the noise rings of the search, calibration,
+                        validation, verify and candidates. off (the default)
+                        skips the apertures within 1.5 FWHM of each injected
+                        source and known companion, as every run before
+                        2026-10-31 and the IDL did. farthest and clean also
+                        leave out the ADI sidelobes of the sources and
                         companions, +/- the data's PA coverage, and the source
                         count keeps 4 apertures outside them. Where fewer than
-                        4 are left, farthest (the default) takes the 4
-                        farthest from the source and clean the clean
-                        reduction's ring (the verify and the candidates take
-                        the farthest). The S/N maps leave out the known
-                        companions' sidelobes. off: the rings as before
-                        2026-10-31
+                        4 are left, farthest takes the 4 farthest from the
+                        source and clean the clean reduction's ring. On NEAR
+                        this left 1 to 3 apertures inside 0.93" and one source
+                        a draw. The contrast grid has its own ring (--cg-
+                        sidelobe)
   --global-block        one parameter block for all nights
   --no-framesel
   --no-selection        no drop1/drop2 night-selection dims

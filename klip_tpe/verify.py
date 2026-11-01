@@ -80,6 +80,7 @@ import numpy as np
 from scipy import ndimage
 from scipy.stats import t as _student_t
 
+from . import metrics as _metrics
 from .metrics import (_arc_regions, _in_arcs, gaussian_kernel, nanmedian_even, radprof, sidelobe_snr, source_xy,
                       star_center)
 
@@ -237,21 +238,39 @@ def snr_fap(img: np.ndarray, rho: float, theta: float, pxscale: float, fwhm: flo
     th0 = np.arctan2(py - cy, px - cx)
     regions = _arc_regions(excl_arcs, pxscale, fwhm, cx, cy, angle_convention) if len(excl_arcs) else None
     vals: List[float] = []
+    ring: Optional[List[List[Any]]] = [] if _metrics._RING_RECORDER is not None else None
     for q in range(1, nap):
         th = th0 + q * 2 * np.pi / nap
         xk, yk = int(round(cx + r * np.cos(th))), int(round(cy + r * np.sin(th)))
         if np.hypot(xk - px, yk - py) < exr:
+            if ring is not None:
+                ring.append([xk, yk, "source"])
             continue
         if any(np.hypot(xk - ex, yk - ey) < exr for ex, ey in exclude_xy):
+            if ring is not None:
+                ring.append([xk, yk, "excluded"])
             continue
         if not (0 <= xk < nx and 0 <= yk < ny) or not np.isfinite(img[yk, xk]):
+            if ring is not None:
+                ring.append([xk, yk, "off"])
             continue
         if regions and bool(_in_arcs(xk, yk, regions, cx, cy)):
+            if ring is not None:
+                ring.append([xk, yk, "arc"])
             continue
         vals.append(float(A[yk, xk]))
+        if ring is not None:
+            ring.append([xk, yk, "used"])
     nv = len(vals)
     out["nap"] = nv
     out["n_left"] = nv
+    if ring is not None:
+        if nv < 3:
+            ring = [[a, b, "unused" if w == "used" else w] for a, b, w in ring]
+        _metrics._ring_emit(_metrics._ring_rec(
+            "snr_fap", img.shape, cx, cy, dict(out, nap=nap, nclean=nv), fwhm, exr, ring, [px], [py],
+            [e[0] for e in exclude_xy], [e[1] for e in exclude_xy], excl_arcs,
+            noise="ring" if nv >= 3 else None, excluded_label="excluded"))
     if nv < 3:
         return out
     use = np.array(vals)
@@ -561,6 +580,14 @@ def stim_fap(stim: np.ndarray, x: float, y: float, rho_px: float, fwhm: float,
         ann &= np.hypot(xx - ex, yy - ey) > keepout
     if len(excl_arcs) and pxscale is not None:
         ann &= ~_in_arcs(xx, yy, _arc_regions(excl_arcs, pxscale, fwhm, cx, cy, angle_convention), cx, cy)
+    if _metrics._RING_RECORDER is not None:
+        _metrics._ring_emit({"fn": "stim_fap", "shape": tuple(stim.shape), "center": (float(cx), float(cy)),
+                             "x": float(sx), "y": float(sy), "r": float(rho_px), "fwhm": float(fwhm),
+                             "exr": float(keepout), "band_px": float(fwhm), "mask": ann.copy(),
+                             "known_xy": [(float(a), float(b)) for a, b in exclude_xy],
+                             "arcs": [tuple(float(v) for v in a) for a in excl_arcs], "ring": [],
+                             "sources_xy": [(float(sx), float(sy))], "nclean": int(ann.sum()),
+                             "noise": "annulus", "why": None, "excluded_label": "excluded"})
     if not ann.any() or not np.isfinite(val):
         return val, float("nan")
     return val, float(np.mean(stim[ann] >= val))

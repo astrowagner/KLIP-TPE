@@ -30,7 +30,87 @@ __all__ = ["radprof", "declip", "gaussian_kernel", "source_xy", "mawet_peak_snr"
            "injection_difference_snr", "aperture_mawet_snr", "clip0", "MawetPeakSNR",
            "InjectionDifferenceSNR", "Objective", "Source", "nanmedian_even", "pa_wedge_mask", "line_mask",
            "disk_mask_from_image", "why_failed", "WHY_GUARD", "WHY_RING", "WHY_NOISE", "Sidelobes",
-           "sidelobe_snr"]
+           "sidelobe_snr", "RingRecorder", "ring_role"]
+
+
+# ----------------------------------------------------------------------------
+# a record of the noise rings, for diagrams (klip_tpe.ringplot, scripts/plot_noise_rings.py)
+# ----------------------------------------------------------------------------
+#: the active :class:`RingRecorder`, or None (the default: nothing is recorded)
+_RING_RECORDER: Optional["RingRecorder"] = None
+#: per thread: the image a ring is measured on (:func:`ring_role`) and the rings
+#: :func:`sidelobe_snr` holds back until it knows which attempt it kept
+_RING_LOCAL = threading.local()
+
+
+class RingRecorder:
+    """While active (``with RingRecorder() as rec:``), every noise ring an S/N is measured on
+    is kept in ``rec.records``, one dict per source: the ring's apertures with what became of
+    each (``"used"``, ``"source"`` within the keep-out of an injected source, ``"known"`` a
+    known companion's, ``"arc"`` in a sidelobe arc, ``"masked"`` on the pixel mask, ``"off"``
+    off the data), and whether the ring or the radial band gave the noise.
+    :func:`mawet_peak_snr`, :func:`aperture_mawet_snr`, :func:`sidelobe_snr` (the attempt it
+    kept), :func:`klip_tpe.verify.snr_fap`, :func:`klip_tpe.verify.stim_fap` and
+    :func:`klip_tpe.products.snr_map` record.  ``phase``: a callable naming the phase, asked
+    when a record is made (:func:`klip_tpe.ringplot.phase_from_stack`).  Recording changes no
+    S/N."""
+
+    def __init__(self, phase: Optional[Callable[[], Optional[str]]] = None, limit: int = 20000):
+        self.records: List[Dict[str, Any]] = []
+        self.phase = phase
+        self.limit = int(limit)
+        self._lock = threading.Lock()
+        self._prev: Optional["RingRecorder"] = None
+
+    def add(self, rec: Dict[str, Any]) -> None:
+        if "phase" not in rec and self.phase is not None:
+            try:
+                rec["phase"] = self.phase()
+            except Exception:                 # noqa: BLE001 - a label, never a failure
+                rec["phase"] = None
+        rec.setdefault("role", getattr(_RING_LOCAL, "role", None))
+        with self._lock:
+            if len(self.records) < self.limit:
+                self.records.append(rec)
+
+    def __enter__(self) -> "RingRecorder":
+        global _RING_RECORDER
+        self._prev, _RING_RECORDER = _RING_RECORDER, self
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        global _RING_RECORDER
+        _RING_RECORDER = self._prev
+        return False
+
+
+def _ring_emit(rec: Dict[str, Any]) -> None:
+    """A ring to the active recorder, or to the innermost :func:`sidelobe_snr` holding rings."""
+    held = getattr(_RING_LOCAL, "held", None)
+    if held:
+        held[-1].append(rec)
+        return
+    r = _RING_RECORDER
+    if r is not None:
+        r.add(rec)
+
+
+class ring_role:
+    """``with ring_role("clean"):`` marks the rings measured inside as on that image (the
+    objective's clean term).  Without it a ring's ``role`` is None, the injected image."""
+
+    def __init__(self, role: Optional[str]):
+        self.role = role
+        self._prev = None
+
+    def __enter__(self):
+        self._prev = getattr(_RING_LOCAL, "role", None)
+        _RING_LOCAL.role = self.role
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        _RING_LOCAL.role = self._prev
+        return False
 
 
 def line_mask(shape: Tuple[int, int], lines: Sequence[Tuple[float, float]], angle_convention: str = "pa",
@@ -544,6 +624,7 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
     arcs = _arc_regions(excl_arcs, pxscale, fwhm, cx, cy, angle_convention)
     arc_px = _in_arcs(xx, yy, arcs, cx, cy) if arcs else None
     isr = int(np.ceil(search_px))
+    recording = _RING_RECORDER is not None
 
     snr = np.full(nsrc, np.nan)
     details: List[Dict[str, float]] = []
@@ -574,25 +655,42 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
         if not r_req >= float(inner_fwhm) * fwhm * (1.0 - 1e-9):
             det["why"] = WHY_GUARD
             details.append(det)
+            if recording:
+                _ring_emit(_ring_rec("mawet_peak_snr", (ny, nx), cx, cy, det, fwhm, exr, [], xs, ys, kx, ky,
+                                     excl_arcs, band_fwhm=band_fwhm))
             continue
         if int(np.floor(2 * np.pi * r_req / fwhm)) < 5:
             det["why"] = WHY_RING
             details.append(det)
+            if recording:
+                _ring_emit(_ring_rec("mawet_peak_snr", (ny, nx), cx, cy, det, fwhm, exr, [], xs, ys, kx, ky,
+                                     excl_arcs, band_fwhm=band_fwhm))
             continue
         th0 = np.arctan2(py - cy, px - cx)
         vals, valok = [], []
+        ring: Optional[List[List[Any]]] = [] if recording else None
         for q in range(1, nap):
             th = th0 + q * 2 * np.pi / nap
             xk, yk = int(round(cx + r * np.cos(th))), int(round(cy + r * np.sin(th)))
             if np.any(np.hypot(xk - xs, yk - ys) < exr):
+                if ring is not None:
+                    ring.append([xk, yk, "source"])
                 continue
             if not (0 <= xk < nx and 0 <= yk < ny) or not finite[yk, xk]:
+                if ring is not None:
+                    ring.append([xk, yk, "masked" if (pixel_mask is not None and 0 <= xk < nx and 0 <= yk < ny
+                                                      and bool(np.asarray(pixel_mask)[yk, xk])
+                                                      and bool(prep["finite"][yk, xk])) else "off"])
                 continue
             if arcs and bool(_in_arcs(xk, yk, arcs, cx, cy)):
+                if ring is not None:
+                    ring.append([xk, yk, "arc"])
                 continue
             mok = not (kx.size and np.any(np.hypot(xk - kx, yk - ky) < exr))
             vals.append(A[yk, xk])
             valok.append(mok)
+            if ring is not None:
+                ring.append([xk, yk, "used" if mok else "known"])
         vals, valok = np.array(vals), np.array(valok, bool)
         # radial band statistics (sigma floor / fallback)
         sd_band, mn_band = -1.0, 0.0
@@ -640,24 +738,68 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
             det["why"] = WHY_NOISE
         det.update(sigma=sd, bg=bg, nclean=nclean, sd_band=sd_band)
         details.append(det)
+        if ring is not None:
+            if vals.size >= 3 and valok.sum() < 4:
+                # fewer than 4 apertures off the known companions: the ring keeps theirs too
+                ring = [[xk, yk, "used, known" if why == "known" else why] for xk, yk, why in ring]
+            used = bool(det.get("ring_used"))
+            noise = ("ring" if used else "band" if sd_band > 0 else
+                     f"ring, fewer than {min_ring}" if sd_ring > 0 else None)
+            if noise in ("band", None):
+                ring = [[xk, yk, "unused" if why.startswith("used") else why] for xk, yk, why in ring]
+            _ring_emit(_ring_rec("mawet_peak_snr", (ny, nx), cx, cy, det, fwhm, exr, ring, xs, ys, kx, ky,
+                                 excl_arcs, band_fwhm=band_fwhm, snr=float(snr[s]), noise=noise,
+                                 min_ring=int(min_ring), band_floor=bool(used and sd_band > sd_ring > 0)))
     if return_details:
         return snr, details
     return snr
 
 
-def _ring_fluxes(img, cx, cy, sep, phi0, nap, aprad, excl_xy, exr, known_xy, skip=None):
+def _ring_rec(fn: str, shape, cx: float, cy: float, det: Dict[str, Any], fwhm: float, exr: float, ring, xs, ys,
+              kx=(), ky=(), excl_arcs=(), **extra) -> Dict[str, Any]:
+    """One source's noise ring as :class:`RingRecorder` keeps it."""
+    rec = {"fn": fn, "shape": tuple(int(v) for v in shape), "center": (float(cx), float(cy)),
+           "x": float(det.get("x", np.nan)), "y": float(det.get("y", np.nan)), "r": float(det.get("r", np.nan)),
+           "nap": int(det.get("nap", 0) or 0), "fwhm": float(fwhm), "exr": float(exr),
+           "ring": [list(a) for a in ring], "sources_xy": [(float(a), float(b)) for a, b in zip(xs, ys)],
+           "known_xy": [(float(a), float(b)) for a, b in zip(kx, ky)],
+           "arcs": [tuple(float(v) for v in a) for a in excl_arcs], "why": det.get("why"),
+           "nclean": int(det.get("nclean", 0) or 0)}
+    rec.update(extra)
+    return rec
+
+
+def _ring_fluxes(img, cx, cy, sep, phi0, nap, aprad, excl_xy, exr, known_xy, skip=None, trace=None,
+                 n_src=None, skip_k=()):
+    """The ring's aperture sums.  ``trace``: a list that gets ``[x, y, what]`` for every
+    aperture (:class:`RingRecorder`), ``n_src`` the leading entries of ``excl_xy`` that are
+    sources (the rest are known companions).  ``skip_k``: ring positions left out by their
+    index, the source's neighbours in the IDL contrast generators."""
     ref, ok = [], []
     for k in range(1, nap):
         phik = phi0 + k * 2 * np.pi / nap
         xk, yk = cx + sep * np.cos(phik), cy + sep * np.sin(phik)
-        if any(np.hypot(xk - ex, yk - ey) < exr for ex, ey in excl_xy):
+        if k in skip_k:
+            if trace is not None:
+                trace.append([xk, yk, "source"])
+            continue
+        hit = [j for j, (ex, ey) in enumerate(excl_xy) if np.hypot(xk - ex, yk - ey) < exr]
+        if hit:
+            if trace is not None:
+                trace.append([xk, yk, "source" if n_src is None or min(hit) < n_src else "known"])
             continue
         if skip is not None and skip(xk, yk):
+            if trace is not None:
+                trace.append([xk, yk, "arc"])
             continue
         f = _aperture_sum(img, xk, yk, aprad)
         if np.isfinite(f):
             ref.append(f)
             ok.append(not any(np.hypot(xk - kx, yk - ky) < exr for kx, ky in known_xy))
+            if trace is not None:
+                trace.append([xk, yk, "used" if ok[-1] else "known"])
+        elif trace is not None:
+            trace.append([xk, yk, "off"])
     return np.array(ref), np.array(ok, bool)
 
 
@@ -707,14 +849,18 @@ def aperture_mawet_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float,
                        known: Sequence[Tuple[float, float]] = (),
                        excl_arcs: Sequence[Tuple[float, float, float, float]] = (),
                        return_details: bool = False):
-    """Plain aperture Mawet S/N (``near2_snr``): ``(f_src - mean(ring)) / (std(ring)
-    sqrt(1+1/n))`` with FWHM/2 apertures at the given position (no peak search), ring
-    apertures a FWHM apart, ``n`` the apertures kept.  It is the S/N of the IDL contrast
-    generators (``contrastcurve_*.pro``).
+    """Plain aperture Mawet S/N of the IDL contrast generators (``contrastcurve_*.pro``):
+    ``(f_src - mean(ring)) / (std(ring) sqrt(1+1/n))`` with FWHM/2 apertures, the source's at
+    the given position (no peak search), ``n`` the apertures kept.  As there, the ring holds
+    ``ntheta = round(2 pi r / FWHM) - 1`` positions from the source's, and skips the source and
+    the position each side of it, or the source alone when ``ntheta < 6``.  The optimizer's
+    ``near2_snr`` placed ``floor(2 pi r / FWHM)`` and skipped 1.5 FWHM around the source, which
+    left the same ring but for a position now and then (to 2026-11-01).
 
-    ``known`` companions and ``excl_arcs`` (see :func:`mawet_peak_snr`) leave apertures out
-    of the ring.  ``return_details`` adds each source's ``nclean``, the apertures used, and
-    ``peak``, ``bg`` and ``sigma``, the source's flux and the ring's mean and scatter."""
+    The other sources, the ``known`` companions (1.5 FWHM, ``excl_fwhm``) and ``excl_arcs`` (see
+    :func:`mawet_peak_snr`) leave apertures out of the ring.  ``return_details`` adds each
+    source's ``nclean``, the apertures used, and ``peak``, ``bg`` and ``sigma``, the source's
+    flux and the ring's mean and scatter."""
     img = np.asarray(img, float)
     cx, cy = star_center(img.shape)
     rho = np.atleast_1d(np.asarray(rho, float))
@@ -732,12 +878,23 @@ def aperture_mawet_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float,
     phi = np.deg2rad(theta + (90.0 if angle_convention == "pa" else 0.0))
     snr = np.full(rho.size, np.nan)
     details: List[Dict[str, Any]] = []
+    recording = _RING_RECORDER is not None
     for s in range(rho.size):
         sep = rho[s] / pxscale
-        nap = max(int(np.floor(2 * np.pi * sep / fwhm)), 4)
+        nap = max(int(round(2 * np.pi * sep / fwhm)) - 1, 2)
+        near = {1, nap - 1} if nap >= 6 else set()
         f_src = _aperture_sum(imz, xs[s], ys[s], aprad)
-        ref, _ = _ring_fluxes(img, cx, cy, sep, phi[s], nap, aprad, excl, exr, [], skip=skip)
+        trace: Optional[List[List[Any]]] = [] if recording else None
+        others = excl[:s] + excl[s + 1:]               # the other sources, then the known companions
+        ref, _ = _ring_fluxes(img, cx, cy, sep, phi[s], nap, aprad, others, exr, [], skip=skip, trace=trace,
+                              n_src=int(rho.size) - 1, skip_k=near)
         details.append({"nclean": int(ref.size), "n_left": int(ref.size), "nap": nap, "peak": float(f_src)})
+        if trace is not None:
+            kxy = excl[int(rho.size):]
+            _ring_emit(_ring_rec("aperture_mawet_snr", img.shape, cx, cy,
+                                 dict(details[-1], x=xs[s], y=ys[s], r=sep), fwhm, exr, trace, xs, ys,
+                                 [k[0] for k in kxy], [k[1] for k in kxy], excl_arcs,
+                                 noise="ring" if ref.size >= 2 else None, aperture_px=aprad))
         if ref.size < 2 or not np.isfinite(f_src):
             details[-1]["why"] = WHY_NOISE
             continue
@@ -839,10 +996,40 @@ def sidelobe_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, sidel
     retained = measure is not mawet_peak_snr or str(kw.get("penalty", "geometric")) != "geometric"
     snr = np.full(n, np.nan)
     dets: List[Dict[str, Any]] = []
+    # RingRecorder: each attempt's ring is held back, and the one the source kept is recorded
+    recording = _RING_RECORDER is not None
+    held: List[Dict[str, Any]] = []
+    emits: List[Dict[str, Any]] = []
+    all_xy: List[Tuple[float, float]] = []
+    if recording:
+        if getattr(_RING_LOCAL, "held", None) is None:
+            _RING_LOCAL.held = []
+        _RING_LOCAL.held.append(held)
+        cx0, cy0 = star_center(np.shape(img))
+        axs, ays = source_xy(rho, theta, pxscale, cx0, cy0, angle_convention)
+        all_xy = [(float(a), float(b)) for a, b in zip(axs, ays)]
 
     def n_left(d_: Dict[str, Any]) -> int:
         """The ring's apertures left after the exclusions (``nclean`` is 0 below 3)."""
         return int(d_.get("n_left", d_.get("nclean", 0)))
+    try:
+        _sidelobe_sources(n, only, src_arcs, rho, theta, hw, rad, known, known_arcs, img, img_clean, pxscale,
+                          fwhm, sidelobes, measure, angle_convention, kw, min_ap, retained, drop, snr, dets,
+                          held, emits, all_xy, n_left)
+    finally:
+        if recording:
+            _RING_LOCAL.held.pop()
+    for e in emits:
+        _ring_emit(e)
+    return snr, dets
+
+
+def _sidelobe_sources(n, only, src_arcs, rho, theta, hw, rad, known, known_arcs, img, img_clean, pxscale, fwhm,
+                      sidelobes, measure, angle_convention, kw, min_ap, retained, drop, snr, dets, held, emits,
+                      all_xy, n_left) -> None:
+    """:func:`sidelobe_snr`'s loop over the sources, filling ``snr`` and ``dets``.  ``held``:
+    the rings the measure recorded (a :class:`RingRecorder` is active), of which the attempt
+    each source kept goes into ``emits``."""
     for i in range(n):
         others = src_arcs[:i] + src_arcs[i + 1:]
 
@@ -854,9 +1041,15 @@ def sidelobe_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, sidel
             if arcs is None:
                 arcs = ([(src_arcs[i][0], src_arcs[i][1], own, rad)] if own > 0 else []) + others \
                     + (known_arcs if with_known else [])
+            n0 = len(held)
             s_, d_ = measure(image, [rho[i]], [theta[i]], pxscale, fwhm, known=known, excl_arcs=arcs,
                              angle_convention=angle_convention, return_details=True, **dict(kw, **over))
-            return float(s_[0]), dict(d_[0], arcs=list(arcs))
+            out = dict(d_[0], arcs=list(arcs))
+            if len(held) > n0:
+                out["_ring"] = held[-1]
+                del held[n0:]
+            return float(s_[0]), out
+        noise_ring = None
         s, d = run(hw[i])
         d.update(arc_deg=hw[i], n_arcs=n_left(d), fallback=None)
         if not d.get("why") and int(d.get("nclean", 0)) < min_ap:
@@ -867,11 +1060,14 @@ def sidelobe_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, sidel
                         if (measure is mawet_peak_snr or getattr(measure, "takes_peak_xy", False))
                         and "x" in d and "y" in d else {})
                 _, dc = run(0.0, image=img_clean, arcs=known_arcs, **over)
+                cring = dc.pop("_ring", None)
                 peak, sd = d.get("peak", np.nan), dc.get("sigma", -1.0)
                 if not dc.get("why") and int(dc.get("nclean", 0)) >= min_ap and sd > 0 and np.isfinite(peak):
                     n_pen = max(int(dc.get("nclean", 1)), 1) if retained else max(int(dc.get("nap", 3)), 3)
                     s = (float(peak) - float(dc.get("bg", 0.0))) / (float(sd) * np.sqrt(1.0 + 1.0 / n_pen))
                     d.update(fallback="clean", nclean=int(dc["nclean"]), sigma=float(sd), bg=float(dc.get("bg", 0.0)))
+                    if cring is not None:
+                        noise_ring = dict(cring, noise_image="clean")
                 else:
                     d.update(fallback_tried="clean", n_fallback=n_left(dc))
             else:
@@ -905,9 +1101,15 @@ def sidelobe_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, sidel
                         s, d, found = s2, dict(d2, arc_deg=0.0, n_arcs=d["n_arcs"], fallback=how), True
                 if not found:
                     d.update(fallback_tried="farthest", n_fallback=most)
+        ring = d.pop("_ring", None)
+        if noise_ring is not None:
+            ring = noise_ring
+        if ring is not None:
+            emits.append(dict(ring, rule=str(sidelobes.mode), fallback=d.get("fallback"),
+                              fallback_tried=d.get("fallback_tried"), arc_deg=d.get("arc_deg"),
+                              n_arcs=d.get("n_arcs"), all_sources_xy=list(all_xy), measured=int(i)))
         snr[i] = s
         dets.append(d)
-    return snr, dets
 
 
 # ----------------------------------------------------------------------------
@@ -1188,7 +1390,8 @@ class Objective:
             raise ValueError("clean_subtract objective needs the clean image")
         # the FM template is a property of the configuration, not of the injection, so the
         # clean term is filtered with exactly the same kernels
-        cl, wc = self._values(img_clean, None, rho, th, kw)
+        with ring_role("clean"):                   # RingRecorder: these rings are the clean image's
+            cl, wc = self._values(img_clean, None, rho, th, kw)
         corr = raw - clip0(cl)
         agg = self._agg(corr)
         return ScoreResult(agg, corr, raw, cl, why=None if np.isfinite(agg) else why_failed(raw, wr, cl, wc))
