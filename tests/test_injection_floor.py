@@ -88,5 +88,8 @@ def test_one_source_that_starves_its_ring_is_logged(tmp_path):
     said = [l for l in logs if "Mawet ring" in l]
     assert len(said) == 1 and "one source at 0.275\"" in said[0] and "radial band" in said[0], logs
     assert r._nsrc(0) == 1 and len([l for l in logs if "Mawet ring" in l]) == 1, "once per annulus"
+    # a roomy annulus starves no ring.  Its count line names the Mawet ring too (it keeps at
+    # least min_ring), so look for the warning itself, the line "in its Mawet ring"
     r2, logs2 = _klip_runner(tmp_path / "wide", [8, 30], 1.0)
-    assert r2._nsrc(0) == 1 and not [l for l in logs2 if "Mawet ring" in l]
+    assert r2._nsrc(0) == 1 and not [l for l in logs2 if "in its Mawet ring" in l]
+    assert any("each separation's Mawet ring keeps at least 6 clean apertures" in l for l in logs2), logs2
