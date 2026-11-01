@@ -261,6 +261,9 @@ class RunConfig:
     """
 
     ann_edges: List[float] = field(default_factory=lambda: [11.0, 44.0])   # px
+    #: annuli beside those of ``ann_edges``, ``[[inner, outer], ...]`` px, that may overlap them
+    #: (:attr:`zones`, :attr:`tiles`)
+    ann_extra: List[List[float]] = field(default_factory=list)
     n_iter: Any = 200                     # int or per-annulus list (total evaluations incl. seed)
     n_init: Any = 40                      # int or per-annulus list (random warm-up rows incl. seed)
     search_mode: str = "tpe"              # tpe | random | grid
@@ -421,7 +424,45 @@ class RunConfig:
 
     @property
     def nann(self) -> int:
+        if self.ann_extra:
+            return len(self.zones)
         return max(len(self.ann_edges) - 1, 1)
+
+    @property
+    def zones(self) -> List[Tuple[float, float]]:
+        """Every annulus' zone ``(inner, outer)`` px, numbered by centre: those between the
+        ``ann_edges`` and the ``ann_extra`` ones.  Refused when a zone is empty, when two are
+        the same, or when one holds another (the inner edges and the outer edges must both
+        grow with the centre), and with ``opt_width``."""
+        e = [float(v) for v in (self.ann_edges or [])]
+        base = [(e[i], e[i + 1]) for i in range(len(e) - 1)]
+        if not self.ann_extra:
+            return base if base else [(0.0, e[0] if e else 70.0)]
+        if self.opt_width:
+            raise ValueError("ann_extra (--ann-extra) does not go with opt_width: an adaptive run has no fixed zones")
+        extra = []
+        for z in self.ann_extra:
+            if len(z) != 2:
+                raise ValueError(f"ann_extra: {z!r} is not one (inner, outer) pair")
+            extra.append((float(z[0]), float(z[1])))
+        zs = sorted(base + extra, key=lambda z: (0.5 * (z[0] + z[1]), z[0]))
+        for a, b in zs:
+            if not b > a >= 0.0:
+                raise ValueError(f"annulus zone {a:g}-{b:g} px is empty or starts below 0")
+        for (a0, b0), (a1, b1) in zip(zs, zs[1:]):
+            if not (a1 > a0 and b1 > b0):
+                raise ValueError(f"annulus zones {a0:g}-{b0:g} and {a1:g}-{b1:g} px: "
+                                 + ("the same zone twice" if (a0, b0) == (a1, b1) else "one holds the other")
+                                 + ".  Each annulus needs inner and outer edges beyond the one before it")
+        return zs
+
+    @property
+    def tiles(self) -> List[Tuple[float, float]]:
+        """Each annulus' tile in the stitch (:func:`klip_tpe.stitch.annulus_tiles`): where
+        annuli overlap, each radius from the annulus with the nearest centre.  Without
+        ``ann_extra`` the tiles are the zones."""
+        from .stitch import annulus_tiles
+        return annulus_tiles(self.zones)
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -432,6 +473,7 @@ class RunConfig:
         d = dict(d)
         # a run saved before edge_padding existed padded every edge: it resumes that way
         d.setdefault("edge_padding", "all")
+        d.setdefault("ann_extra", [])
         # and one saved before batch_mode evaluated its batches whole
         d.setdefault("batch_mode", "sync")
         d["calibration"] = _from_dict_filtered(CalibrationConfig, d.get("calibration", {}))
@@ -964,6 +1006,11 @@ class Runner:
         if self.cfg.opt_width and "width" not in self.space.bases:
             raise ValueError("opt_width needs a searched 'width' dim in the space "
                              "(SearchSpace.add(Param('width', w0, w1, 'int')))")
+        if self.cfg.ann_extra:
+            zs, ts = self.cfg.zones, self.cfg.tiles        # refuses zones that cannot be tiled
+            self.log("annuli by centre, zone (tile) px: " + ", ".join(
+                f"{k + 1}: {z[0]:g}-{z[1]:g}" + ("" if tuple(z) == tuple(t) else f" ({t[0]:.2f}-{t[1]:.2f})")
+                for k, (z, t) in enumerate(zip(zs, ts))))
         if self.cfg.partition_weighting and isinstance(self.reducer, PartitionedReducer):
             self.reducer.weighting = self.cfg.partition_weighting
 
@@ -1028,6 +1075,9 @@ class Runner:
         """Nominal zone of annulus ``ia`` (px).  With ``opt_width`` the outer edge is the
         committed one when known, else the width-range midpoint default."""
         e = self.cfg.ann_edges
+        if self.cfg.ann_extra:
+            z = self.cfg.zones[ia]
+            return float(z[0]), float(z[1])
         if self.cfg.opt_width:
             a_in = float(e[min(ia, len(e) - 1)]) if e else 0.0
             if ia + 1 < len(e):
@@ -1059,10 +1109,23 @@ class Runner:
             lo = e[0] if e else 0.0
             w_lo = float(self.cfg.width_range[0]) if self.cfg.width_range else 0.0
             outer_end = a_out >= self.cfg.r_cap - 0.5 or self.cfg.r_cap - a_out < w_lo
+        elif self.cfg.ann_extra:
+            # the run's innermost and outermost edges, over every zone
+            zs = self.cfg.zones
+            lo, hi = min(z[0] for z in zs), max(z[1] for z in zs)
+            outer_end = a_out >= hi - 1e-6
         else:
             lo, hi = (e[0], e[-1]) if len(e) >= 2 else (0.0, e[0] if e else 70.0)
             outer_end = a_out >= hi - 1e-6
         return a_in > lo + 1e-6, not outer_end
+
+    def _tiles(self, zones: Sequence[Tuple[float, float]]) -> List[Tuple[float, float]]:
+        """The stitch's tiles for these annuli' zones (:func:`klip_tpe.stitch.annulus_tiles`):
+        the zones themselves unless annuli overlap (``RunConfig.ann_extra``)."""
+        from .stitch import annulus_tiles
+        if not self.cfg.ann_extra:
+            return [tuple(z) for z in zones]
+        return annulus_tiles(zones)
 
     def _tile_pads(self, zones: Sequence[Tuple[float, float]], pad: float = 2.0) -> List[Tuple[float, float]]:
         """``(pad_in, pad_out)`` in px for each stitch tile: ``pad`` on an edge between
@@ -4379,20 +4442,22 @@ class Runner:
         if not cleans:
             return None
         neval = 0 if self.history is None else len(self.history)
+        # the annuli done so far tile the image among themselves (nearest centre where they overlap)
+        tiles = self._tiles(zones)
         hdr = {"ANNULUS": ia + 1, "NEVAL": neval, "RUNNING": 1, "NANN": len(cleans), "PHASE": "final" if at_end else "eval",
-               "IMGTYPE": f"running equal-weight stitch{self._flat_tag}", "EDGES": ",".join(f"{z[0]:.1f}" for z in zones)
-               + f",{zones[-1][1]:.1f}"}
+               "IMGTYPE": f"running equal-weight stitch{self._flat_tag}", "EDGES": ",".join(f"{z[0]:.1f}" for z in tiles)
+               + f",{tiles[-1][1]:.1f}"}
         hdr.update(self._north_header())
-        pads = self._tile_pads(zones)
-        st = self._maybe_flatten(stitch_tiles(cleans, zones, pads=pads))
+        pads = self._tile_pads(tiles)
+        st = self._maybe_flatten(stitch_tiles(cleans, tiles, pads=pads))
         files = {"clean": os.path.join(self.run_dir, "klip_stitched_running.fits")}
         _write_fits(files["clean"], st, hdr)
         snr = self._snr_map(st)
         files["snr"] = os.path.join(self.run_dir, "klip_stitched_running_snr.fits")
         _write_fits(files["snr"], snr, dict(hdr, IMGTYPE="running stitched S/N map (Mawet)"))
-        out = {"clean": st, "snr": snr, "zones": zones}
+        out = {"clean": st, "snr": snr, "zones": zones, "tiles": tiles}
         if any(i is not None for i in injs):
-            sti = self._maybe_flatten(stitch_tiles([i if i is not None else c for i, c in zip(injs, cleans)], zones,
+            sti = self._maybe_flatten(stitch_tiles([i if i is not None else c for i, c in zip(injs, cleans)], tiles,
                                                    pads=pads))
             hi = dict(hdr, IMGTYPE="running equal-weight stitch (injected)", INJNSRC=len(sources))
             for j, s in enumerate(sources):
@@ -4405,7 +4470,7 @@ class Runner:
             out["inj"] = sti
         if at_end and any(s is not None for s in stacks):
             w = self._stitch_weights(cleans, zones)
-            cube, ids = stitch_stacks(stacks, parts, zones, w, pads=pads)
+            cube, ids = stitch_stacks(stacks, parts, tiles, w, pads=pads)
             if cube is not None:
                 hc = dict(hdr, IMGTYPE="running stitched per-partition cube (clean)", NNIGHT=len(ids))
                 for j, p in enumerate(ids):
@@ -4578,7 +4643,8 @@ class Runner:
             zones.append(tuple(pv.get("zone", (r.inrad, r.outrad))))
         if not maps:
             return None
-        return stitch_param_maps(maps, zones, out_dir=self.run_dir, pads=self._tile_pads(zones, pad=1.0))
+        tiles = self._tiles(zones)
+        return stitch_param_maps(maps, tiles, out_dir=self.run_dir, pads=self._tile_pads(tiles, pad=1.0))
 
     def _candidates_hook(self, ia: int, final: bool = False, stitched: Optional[Dict[str, Any]] = None
                          ) -> Optional[List[Dict[str, Any]]]:
@@ -4780,9 +4846,16 @@ class Runner:
             if stitched is not None and stitched.get("weights") is not None:
                 out["stitch_weights"] = [float(v) for v in stitched["weights"]]
                 out["stitch_files"] = stitched.get("files", {})
+        if self.cfg.ann_extra and results:
+            # the zones and the tiles the stitch took (rereduce checks its own against these)
+            zs = [(float(r.inrad), float(r.outrad)) for r in results]
+            out["zones"] = [list(z) for z in zs]
+            out["tiles"] = [list(t) for t in self._tiles(zs)]
         if results:
             from .stitch import write_contrast_curve
-            edges = [r.inrad for r in results] + [results[-1].outrad]
+            # each annulus' section over its tile (the zones themselves without overlaps)
+            tl = self._tiles([(float(r.inrad), float(r.outrad)) for r in results])
+            edges = [t[0] for t in tl] + [tl[-1][1]]
             self._guard("contrast_curve.txt", write_contrast_curve, os.path.join(self.run_dir, "contrast_curve.txt"),
                         [r.contrast_curve for r in results], edges, self.fwhm, self.pxscale,
                         legacy=self.cfg.legacy_stitch, contrasts=[r.contrast for r in results],
@@ -4836,10 +4909,13 @@ class Runner:
             return None
         cleans = [d["clean"] for _, d in items]
         zones = [tuple(d["zone"]) for _, d in items]
-        edges = [z[0] for z in zones] + [zones[-1][1]]
+        # the tiles: each radius from the annulus with the nearest centre where annuli overlap,
+        # the zones themselves where they do not (RunConfig.ann_extra)
+        tiles = self._tiles(zones)
+        edges = [t[0] for t in tiles] + [tiles[-1][1]]
         w = self._stitch_weights(cleans, zones) if weights is None else np.asarray(weights, float)
-        pads = self._tile_pads(zones)
-        st = stitch_tiles(cleans, zones, w, pads=pads)
+        pads = self._tile_pads(tiles)
+        st = stitch_tiles(cleans, tiles, w, pads=pads)
         # seam patching: pixels inside the searched span left NaN -> a re-run of that annulus'
         # winner, its zone padded by 3 px on each edge shared with another annulus
         seam = seam_pixels(st, edges[0], edges[-1])
@@ -4880,7 +4956,9 @@ class Runner:
             p = r.winner_config.get("params", {})
             ptxt = " ".join(f"{ab}{p[k]}" for k, ab in (("k_klip", "k"), ("bin", "b"), ("n_ang", "na"), ("filter", "f"),
                                                        ("angsep", "as"), ("anglemax", "am")) if p.get(k) is not None)
-            hist.append(f"  a{r.annulus+1} [{r.inrad:5.1f}-{r.outrad:5.1f}] {ptxt} "
+            t = tiles[[rr.annulus for rr, _ in items].index(r.annulus)]
+            ttxt = "" if tuple(t) == (float(r.inrad), float(r.outrad)) else f" tile [{t[0]:5.2f}-{t[1]:5.2f}]"
+            hist.append(f"  a{r.annulus+1} [{r.inrad:5.1f}-{r.outrad:5.1f}]{ttxt} {ptxt} "
                         f"SNR{r.winner_score:6.2f} c{r.contrast:.2E} n={','.join(r.partitions) or 'all'}")
         hdr = {"NANN": len(items), "PHASE": "final", "IMGTYPE": f"radially-optimized stitch{self._flat_tag}",
                "LEGACY": int(self.cfg.legacy_stitch), "NSEAM": int(seam.sum()), "NPATCH": npatch,
@@ -4897,14 +4975,14 @@ class Runner:
         snr = self._snr_map(st_f)
         files["snr"] = os.path.join(self.run_dir, "klip_stitched_snr.fits")
         _write_fits(files["snr"], snr, dict(hdr, IMGTYPE="final stitched S/N map (per-pixel Mawet)"), hist)
-        out: Dict[str, Any] = {"clean": st_f, "snr": snr, "weights": w, "zones": zones, "files": files}
+        out: Dict[str, Any] = {"clean": st_f, "snr": snr, "weights": w, "zones": zones, "tiles": tiles, "files": files}
         # validated-winner injected stitch
         allsrc = []
         for _, d in items:
             allsrc.extend(d.get("sources") or [])
         if any(d.get("inj") is not None for _, d in items):
             sti = self._maybe_flatten(stitch_tiles([d["inj"] if d.get("inj") is not None else d["clean"]
-                                                    for _, d in items], zones, w, pads=pads))
+                                                    for _, d in items], tiles, w, pads=pads))
             hi = dict(hdr, IMGTYPE=f"validated-winner injected stitch{self._flat_tag}", INJNSRC=len(allsrc))
             for j, s in enumerate(allsrc):
                 hi[f"INJRHO{j+1}"], hi[f"INJPA{j+1}"] = float(s[0]), float(s[1])
@@ -4922,7 +5000,7 @@ class Runner:
             stacks = [d.get(key) for _, d in items]
             if not any(s is not None for s in stacks):
                 continue
-            cube, ids = stitch_stacks(stacks, [d.get("parts") for _, d in items], zones, w, pads=pads)
+            cube, ids = stitch_stacks(stacks, [d.get("parts") for _, d in items], tiles, w, pads=pads)
             if cube is None:
                 continue
             hc = dict(hdr, IMGTYPE=f"stitched per-partition cube ({'injected' if 'inj' in key else 'clean'})",
@@ -4939,11 +5017,13 @@ class Runner:
             out["night_ids"] = ids
         # parameters table
         rows = []
-        for r, d in items:
+        overlap = any(tuple(t) != tuple(z) for t, z in zip(tiles, zones))
+        for (r, d), t in zip(items, tiles):
             rows.append({"ann": r.annulus + 1, "inner_px": r.inrad, "outer_px": r.outrad,
                          "params": r.winner_config.get("params", {}), "best_SNR": r.winner_score,
                          "partitions": r.partitions, "per_partition": r.winner_config.get("per_partition", {}),
-                         "validated": r.validated, "contrast": r.contrast})
+                         "validated": r.validated, "contrast": r.contrast,
+                         **({"tile_in_px": float(t[0]), "tile_out_px": float(t[1])} if overlap else {})})
         files["params"] = os.path.join(self.run_dir, "klip_stitched_params.txt")
         write_params_table(files["params"], rows)
         self._emit("on_stitch", "final", files)
@@ -5050,13 +5130,21 @@ class Runner:
             raise ValueError("an annulus' winner images are missing (the run kept no FITS products?)")
         zones = [tuple(float(v) for v in d["zone"]) for _, d in items]
         weights, w_from = None, ""
+        rec_tiles = None
         try:
             with open(os.path.join(src_run, "final_results.json")) as f:
-                wl = json.load(f).get("stitch_weights")
+                fr = json.load(f)
+            wl = fr.get("stitch_weights")
+            rec_tiles = fr.get("tiles")
             if wl is not None and len(wl) == len(items):
                 weights, w_from = [float(v) for v in wl], "final_results.json"
         except (OSError, ValueError):
             pass
+        tiles = self._tiles(zones)
+        if rec_tiles is not None and (len(rec_tiles) != len(tiles) or not np.allclose(
+                np.asarray(rec_tiles, float), np.asarray(tiles, float), rtol=0, atol=1e-9)):
+            raise ValueError(f"the run's tiles ({rec_tiles}, final_results.json) are not the ones its zones give now "
+                             f"({[list(t) for t in tiles]}): the stitch would not be the run's")
         if weights is None:
             weights = [float(v) for v in self._stitch_weights([d["clean"] for _, d in items], zones)]
             w_from = "the run's winner images"
@@ -5070,8 +5158,9 @@ class Runner:
             listed = {r.annulus: [] for r, _ in items}
             for s in vs:
                 rp = float(s.rho) / self.pxscale
-                hold = [r.annulus for (r, _), z in zip(items, zones) if z[0] <= rp < z[1]]
-                if not hold and abs(rp - zones[-1][1]) < 1e-6:
+                # listed under the annulus whose tile holds it (its zone, without overlaps)
+                hold = [r.annulus for (r, _), z in zip(items, tiles) if z[0] <= rp < z[1]]
+                if not hold and abs(rp - tiles[-1][1]) < 1e-6:
                     hold = [items[-1][0].annulus]
                 if not hold:
                     raise ValueError(f"verify source at rho={s.rho:g}\" ({rp:.1f} px) lies outside the run's annuli "
@@ -5103,7 +5192,9 @@ class Runner:
                     "parts": [str(p) for p in (ev_c.partitions or r.partitions or cfg.selected)],
                     "sources": [s.as_tuple() for s in listed[r.annulus]], "contrast": d.get("contrast"),
                     "weights": ev_c.weights}
-                per_ann.append({"annulus": r.annulus + 1, "zone_px": list(z), "winner_eval": int(r.winner_index) + 1,
+                per_ann.append({"annulus": r.annulus + 1, "zone_px": list(z),
+                                **({"tile_px": list(tiles[len(per_ann)])} if self.cfg.ann_extra else {}),
+                                "winner_eval": int(r.winner_index) + 1,
                                 "injected": len(src), "listed": len(listed[r.annulus]),
                                 "seconds": round(time.time() - t1, 1)})
                 log(f"  annulus {r.annulus + 1}: the winner (eval {r.winner_index + 1}) reduced clean"

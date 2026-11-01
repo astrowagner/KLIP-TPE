@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased — 2026-11-01 (overlapping annuli)
+
+- **`--ann-extra IN:OUT ...`** (`RunConfig.ann_extra`) adds annuli beside those of `--ann-edges`,
+  which may overlap them (NEAR2 s6 note, section 5).  All are numbered by centre radius
+  (`RunConfig.zones`), and each is searched, calibrated, validated, gridded and verified over its
+  own zone.
+- **The stitch takes each radius from the annulus with the nearest centre** where annuli
+  overlap (`RunConfig.tiles`, `stitch.annulus_tiles`).  The tile boundary is the midpoint between
+  the centres, kept within the overlap, with the 2 px blend of an edge between annuli.  Annuli
+  that meet keep their shared edge.  The running and final stitches, the per-night cubes, the
+  param maps, the seam patching, the contrast curve, `rereduce` (its verify sources listed by
+  tile) and `fit-chain`'s basis use the tiles.
+- `final_results.json` records the zones and tiles, `klip_stitched_params.txt` adds the tile
+  columns, the final stitch's history lines name each tile, and the log lists them at the start.
+  `rereduce` refuses a run whose recorded tiles are not those its zones give.  Zones that cannot
+  be tiled (one holding another, the same twice, empty) are refused, and so is `--opt-width`
+  with `--ann-extra`.
+- Without `--ann-extra` the tiles are the zones: a synthetic run before and after this change
+  writes the same images, curve and tables.
+- Tests in `tests/test_overlap_annuli.py`.
+
 ## Unreleased — 2026-11-01 (the count each annulus keeps, and what the card took)
 
 - **Every annulus logs the source count it keeps** (NEAR2 s6 note, section 4).  The line that

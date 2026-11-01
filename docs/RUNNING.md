@@ -221,6 +221,29 @@ no longer reproduces it.  The log has a line per night, and the stitched headers
 `compare` and a new `near --from-idl-setup` mirror IDL runs, so they take the IDL's 0.0456"/px
 and 36.5 deg unless told otherwise.
 
+### Overlapping annuli (`--ann-extra`)
+
+`--ann-extra IN:OUT ...` adds annuli beside those of `--ann-edges`, and they may overlap them.
+NEAR2's s6 adds three on the seams of its first edges:
+
+```
+--ann-edges 2.19 11.5 20.81 30.12 39.43 48.74 58.05 67.36 --ann-extra 6.85:16.16 16.16:25.47 25.47:34.78
+```
+
+All annuli are numbered by their centre radius, so this run has ten, from `annulus01` (2.19-11.5)
+to `annulus10` (58.05-67.36), and the per-annulus lists of `--n-iter`, `--n-init`,
+`--n-sources` and `--use-contrast` follow that order.  Each annulus is searched, calibrated, validated, gridded and verified over its own zone,
+as any annulus is.  Where two annuli overlap, the stitch takes each radius from the annulus whose
+centre is nearest.  The boundary between their tiles is the midpoint between the centres, with
+the same 2 px blend as an edge between annuli.  Where annuli meet without overlapping, the tile
+edge is their shared edge.  The run's stitch and its per-night cubes, the param maps, the seam
+patching, the contrast curve (each annulus' section over its tile, with the seam trim at the tile
+edges), `rereduce` and `fit-chain` all use the tiles.  The log lists the zones and tiles at the
+start.  `final_results.json` records both, and `klip_stitched_params.txt` adds the tile columns.
+`rereduce` refuses a run whose recorded tiles differ from those its zones give.  A zone that holds
+another, or the same zone twice, is refused, and so is `--ann-extra` with `--opt-width`.  Without
+`--ann-extra` the tiles are the zones and every product is as before.
+
 ### The card (`--gpu-share`, `--gpu-workers`)
 
 A share of the search's injected draws can be reduced on an NVIDIA card beside the CPU

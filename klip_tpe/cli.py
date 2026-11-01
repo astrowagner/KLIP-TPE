@@ -1077,9 +1077,23 @@ def _contrast_grid_config(a):
                               sidelobe_fwhm=float(getattr(a, "cg_sidelobe_fwhm", 2.0)))
 
 
+def _ann_extra(a) -> list:
+    """``--ann-extra IN:OUT ...`` as ``[[inner, outer], ...]`` px."""
+    out = []
+    for item in getattr(a, "ann_extra", None) or []:
+        parts = str(item).replace(",", ":").split(":")
+        try:
+            lo, hi = (float(v) for v in parts)
+        except ValueError:
+            raise SystemExit(f"--ann-extra {item}: each annulus is IN:OUT in px, e.g. 6.85:16.16") from None
+        out.append([lo, hi])
+    return out
+
+
 def _protocol_config(a) -> dict:
     ns = _n_sources(a)
     rmin = _min_r_fwhm(a)
+    extra = _ann_extra(a)
     return dict(contrast_grid=_contrast_grid_config(a), opt_width=a.opt_width, width_range=tuple(a.width_range), r_cap=a.r_cap, k_mode=a.k_mode,
                 k_scan_max=a.k_scan_max, stitch_every=a.stitch_every, verify=a.verify, verify_n_boot=a.verify_n_boot,
                 param_verify=a.param_verify, n_pv=a.n_pv, pv_divmin=a.pv_divmin, candidates=a.candidates,
@@ -1093,7 +1107,8 @@ def _protocol_config(a) -> dict:
                 **({"batch_mode": a.batch_mode} if getattr(a, "batch_mode", None) else {}),
                 **({"edge_padding": a.edge_padding} if getattr(a, "edge_padding", None) else {}),
                 **({"n_sources": ns} if ns is not None else {}),
-                **({"min_r_fwhm": rmin} if rmin is not None else {}))
+                **({"min_r_fwhm": rmin} if rmin is not None else {}),
+                **({"ann_extra": extra} if extra else {}))
 
 
 def build_near_space(red, a):
@@ -1173,10 +1188,16 @@ def cmd_near(a):
         r = Runner(red, space, objective, sampler, cfg, a.run_dir, throughput_fn=thr, callbacks=_callbacks(a))
         r.run()
         return
+    edges = list(a.ann_edges[:1]) if a.opt_width else list(a.ann_edges)
+    if _ann_extra(a):
+        # the annuli are checked before the data are loaded
+        try:
+            RunConfig(ann_edges=edges, ann_extra=_ann_extra(a), opt_width=a.opt_width).tiles
+        except ValueError as exc:
+            raise SystemExit(f"--ann-extra: {exc}") from None
     red, objective, sampler, guard, thr = _near_objects(a)
     space = build_near_space(red, a)
     space.project = guard
-    edges = list(a.ann_edges[:1]) if a.opt_width else list(a.ann_edges)
     cfg = RunConfig(ann_edges=edges, n_iter=a.n_iter, n_init=a.n_init, search_mode=a.mode,
                     seed=a.seed, contrast0=a.contrast0, blocks=a.blocks, bench_tag=a.tag,
                     calibration=CalibrationConfig(forced=a.use_contrast, ceiling=a.cmax_cal),
@@ -1599,6 +1620,12 @@ def _add_run_args(p):
                    help="output directory (default: <root>/comb/opt/run_YYYYMMDD_HHMMSS, the IDL layout; "
                         "generic and ales: ./runs/run_...)")
     p.add_argument("--ann-edges", type=float, nargs="+", default=[0.0, 20.0])
+    p.add_argument("--ann-extra", nargs="+", default=None, metavar="IN:OUT",
+                   help="annuli beside those of --ann-edges, each IN:OUT px, which may overlap them, e.g. 6.85:16.16 "
+                        "16.16:25.47. All are numbered by centre and searched, validated and verified over their own "
+                        "zones. Where annuli overlap, the stitch takes each radius from the annulus with the nearest "
+                        "centre (their tiles, in final_results.json and klip_stitched_params.txt). The per-annulus "
+                        "lists of --n-iter, --n-init, --n-sources and --use-contrast follow the numbering by centre")
     p.add_argument("--n-iter", type=int, nargs="+", default=[200])
     p.add_argument("--n-init", type=int, nargs="+", default=[50])
     p.add_argument("--mode", default="tpe", choices=["tpe", "random", "grid"])
