@@ -78,10 +78,10 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--stitch-every STITCH_EVERY] [--verify] [--no-verify]
                         [--verify-n-boot VERIFY_N_BOOT] [--param-verify]
                         [--no-param-verify] [--n-remeasure N]
-                        [--n-sources N [N ...]] [--min-r-fwhm X] [--n-pv N_PV]
-                        [--pv-divmin PV_DIVMIN] [--candidates]
-                        [--write-setup-files] [--no-setup-files]
-                        [--legacy-stitch] [--batch BATCH]
+                        [--score-floor S] [--n-sources N [N ...]]
+                        [--min-r-fwhm X] [--n-pv N_PV] [--pv-divmin PV_DIVMIN]
+                        [--candidates] [--write-setup-files]
+                        [--no-setup-files] [--legacy-stitch] [--batch BATCH]
                         [--batch-mode {pipeline,sync}]
                         [--edge-padding {between,all}] [--display]
                         [--no-display] [--display-every DISPLAY_EVERY]
@@ -351,6 +351,14 @@ options:
                         scatter is ~0.9 S/N on typical data, so N=3 divides it
                         by sqrt(3) and roughly halves the optimism of the
                         reported best; see docs/BUDGET.md
+  --score-floor S       the lowest score a trial takes (default 0). A trial's
+                        score is the mean of its draws, and a mean below the
+                        floor is recorded as the floor, with the mean beside
+                        it. The draws keep their own scores, and the
+                        calibration and the validation are not floored. TPE
+                        ranks the trials, so a floor of 0 changes the search
+                        only where most trials score below 0. off sets no
+                        floor, as before 2026-11-01 and with --from-idl-setup
   --n-sources N [N ...]
                         injected sources per annulus, the last value repeating
                         (default: klip-tpe's rule by the annulus' outer edge,
@@ -618,9 +626,9 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--k-scan-max K_SCAN_MAX] [--stitch-every STITCH_EVERY]
                      [--verify] [--no-verify] [--verify-n-boot VERIFY_N_BOOT]
                      [--param-verify] [--no-param-verify] [--n-remeasure N]
-                     [--n-sources N [N ...]] [--min-r-fwhm X] [--n-pv N_PV]
-                     [--pv-divmin PV_DIVMIN] [--candidates]
-                     [--write-setup-files] [--no-setup-files]
+                     [--score-floor S] [--n-sources N [N ...]]
+                     [--min-r-fwhm X] [--n-pv N_PV] [--pv-divmin PV_DIVMIN]
+                     [--candidates] [--write-setup-files] [--no-setup-files]
                      [--legacy-stitch] [--batch BATCH]
                      [--batch-mode {pipeline,sync}]
                      [--edge-padding {between,all}] [--display] [--no-display]
@@ -890,6 +898,14 @@ options:
                         scatter is ~0.9 S/N on typical data, so N=3 divides it
                         by sqrt(3) and roughly halves the optimism of the
                         reported best; see docs/BUDGET.md
+  --score-floor S       the lowest score a trial takes (default 0). A trial's
+                        score is the mean of its draws, and a mean below the
+                        floor is recorded as the floor, with the mean beside
+                        it. The draws keep their own scores, and the
+                        calibration and the validation are not floored. TPE
+                        ranks the trials, so a floor of 0 changes the search
+                        only where most trials score below 0. off sets no
+                        floor, as before 2026-11-01 and with --from-idl-setup
   --n-sources N [N ...]
                         injected sources per annulus, the last value repeating
                         (default: klip-tpe's rule by the annulus' outer edge,

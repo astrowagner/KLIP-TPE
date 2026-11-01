@@ -329,7 +329,8 @@ def matched_run_config(run_setup_path: str, seed: Optional[int] = None, **overri
               calibration=CalibrationConfig(forced=[v if v > 0 else 0.0 for v in uc[:max(len(edges) - 1, 1)]] if uc and any(v > 0 for v in uc) else None,
                                             ceiling=cmax[0] if cmax else None),
               bench_tag=f"match_{os.path.basename(os.path.dirname(os.path.abspath(run_setup_path)))}",
-              edge_padding="all")                   # the IDL pads every zone edge (--edge-padding overrides)
+              edge_padding="all",                   # the IDL pads every zone edge (--edge-padding overrides)
+              score_floor=None)                     # and does not floor its scores (--score-floor overrides)
     # keep only fields RunConfig knows (older/newer setup files may differ)
     import dataclasses
     fields = {f.name for f in dataclasses.fields(RunConfig)}

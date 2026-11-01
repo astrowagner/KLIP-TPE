@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -990,6 +991,12 @@ def _protocol_args(p):
                    help="score each trial as the MEAN of N independent injection draws (default 1). "
                         "The objective's per-draw scatter is ~0.9 S/N on typical data, so N=3 divides "
                         "it by sqrt(3) and roughly halves the optimism of the reported best; see docs/BUDGET.md")
+    p.add_argument("--score-floor", default=None, metavar="S",
+                   help="the lowest score a trial takes (default 0). A trial's score is the mean of its draws, and a "
+                        "mean below the floor is recorded as the floor, with the mean beside it. The draws keep "
+                        "their own scores, and the calibration and the validation are not floored. TPE ranks the "
+                        "trials, so a floor of 0 changes the search only where most trials score below 0. off sets "
+                        "no floor, as before 2026-11-01 and with --from-idl-setup")
     p.add_argument("--n-sources", type=int, nargs="+", default=None, metavar="N",
                    help="injected sources per annulus, the last value repeating (default: klip-tpe's rule "
                         "by the annulus' outer edge, and 0 asks for the rule in that annulus). The cap that "
@@ -1090,10 +1097,25 @@ def _ann_extra(a) -> list:
     return out
 
 
+def _score_floor(text):
+    """``--score-floor S`` as ``RunConfig.score_floor``: a number, or None for ``off``."""
+    t = str(text).strip().lower()
+    if t in ("off", "none"):
+        return None
+    try:
+        v = float(t)
+    except ValueError:
+        raise SystemExit(f"--score-floor takes a number or off, not {text}") from None
+    if not math.isfinite(v):
+        raise SystemExit(f"--score-floor takes a finite number or off, not {text}")
+    return v
+
+
 def _protocol_config(a) -> dict:
     ns = _n_sources(a)
     rmin = _min_r_fwhm(a)
     extra = _ann_extra(a)
+    sf = getattr(a, "score_floor", None)
     return dict(contrast_grid=_contrast_grid_config(a), opt_width=a.opt_width, width_range=tuple(a.width_range), r_cap=a.r_cap, k_mode=a.k_mode,
                 k_scan_max=a.k_scan_max, stitch_every=a.stitch_every, verify=a.verify, verify_n_boot=a.verify_n_boot,
                 param_verify=a.param_verify, n_pv=a.n_pv, pv_divmin=a.pv_divmin, candidates=a.candidates,
@@ -1108,7 +1130,8 @@ def _protocol_config(a) -> dict:
                 **({"edge_padding": a.edge_padding} if getattr(a, "edge_padding", None) else {}),
                 **({"n_sources": ns} if ns is not None else {}),
                 **({"min_r_fwhm": rmin} if rmin is not None else {}),
-                **({"ann_extra": extra} if extra else {}))
+                **({"ann_extra": extra} if extra else {}),
+                **({"score_floor": _score_floor(sf)} if sf is not None else {}))
 
 
 def build_near_space(red, a):
