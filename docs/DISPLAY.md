@@ -47,7 +47,9 @@ pixel mask.  For a run directory these come from its setup, and the Gaussian of 
 FWHM stands in for a measured kernel.
 
 **Second row — S/N maps** of the same five images, their noise without the run's pixel mask
-(the disk).  Circles mark the injected positions
+(the disk).  Where the mask leaves a radius fewer than 20 noise pixels, the radius takes its
+noise from a band widened past the mask, and the cell names those radii in its lower right
+corner.  Circles mark the injected positions
 with `raw/corr` S/N: *raw* is the S/N in the injected image, *corr* the clean-subtracted
 score (`s_inj − max(s_clean, 0)`) the optimizer maximises.  The panel title carries the
 evaluation's score, `orig / corr`.  A draw scores the median of its sources' values (the mean
@@ -61,7 +63,7 @@ own score in the labels' `raw/corr` form (`shown: draw 3 of 3, 2.8/1.5`).
 
 | cell | content |
 |---|---|
-| TPE convergence | score per evaluation: warm-up / explore grey, TPE blue, local white; SMA20 (green) and SMA50 (yellow) moving averages, dashed = the random-phase SMA20 baseline, the incumbent circled, the vertical dotted line = end of warm-up |
+| TPE convergence | score per evaluation: warm-up / explore grey, TPE blue, local white; SMA20 (green) and SMA50 (yellow) moving averages, dashed = the random-phase SMA20 baseline, the incumbent circled, the vertical dotted line = end of warm-up. The axis starts at 0, or at the lowest score when one is below 0, and a draw bar that reaches below it is cut there and ends in a small triangle |
 | S/N dist | histogram of scores (rotated, shares the y axis) |
 | KLIP-FM model (best) | the forward-modelled response of the incumbent to its injected companions, and on the finished annulus's frame of the winner to the injections in its best cells (built-in engine only; symlog) |
 | injected PSF (best) | the injected PSF model of the same injections, derotated to North-up |
@@ -127,7 +129,7 @@ run_dir/
     param_verify/                               injection-recovery over the top configurations (--param-verify)
     step_display_white.png                      the final panel on white (for papers)
   klip_stitched.fits, klip_stitched_inj.fits     sensitivity-weighted stitch over annuli (clean / injected)
-  klip_stitched_snr.fits, _snr_inj.fits          S/N maps of the stitches
+  klip_stitched_snr.fits, _snr_inj.fits          S/N maps of the stitches (SNRWIDR: the radii whose noise band was widened past the mask)
   klip_stitched_nights.fits.gz                   per-partition stitches
   klip_stitched_running*.fits                    the running stitch while later annuli are still searched
   klip_stitched_params.txt                       the winner parameters per annulus

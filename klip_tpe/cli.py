@@ -997,6 +997,11 @@ def _protocol_args(p):
                         "their own scores, and the calibration and the validation are not floored. TPE ranks the "
                         "trials, so a floor of 0 changes the search only where most trials score below 0. off sets "
                         "no floor, as before 2026-11-01 and with --from-idl-setup")
+    p.add_argument("--verify-snr", default=None, choices=["search", "idl"],
+                   help="how the verify, the candidate search and param_verify measure (default search: with the "
+                        "search's own S/N under the run's rules, and every ring and map without the pixel mask). idl "
+                        "measures as before 2026-11-01, with the IDL verify's S/N (a Gaussian kernel, no despike or "
+                        "radial band) and the pixel mask in the search's rings alone, as --from-idl-setup does")
     p.add_argument("--n-sources", type=int, nargs="+", default=None, metavar="N",
                    help="injected sources per annulus, the last value repeating (default: klip-tpe's rule "
                         "by the annulus' outer edge, and 0 asks for the rule in that annulus). The cap that "
@@ -1131,7 +1136,8 @@ def _protocol_config(a) -> dict:
                 **({"n_sources": ns} if ns is not None else {}),
                 **({"min_r_fwhm": rmin} if rmin is not None else {}),
                 **({"ann_extra": extra} if extra else {}),
-                **({"score_floor": _score_floor(sf)} if sf is not None else {}))
+                **({"score_floor": _score_floor(sf)} if sf is not None else {}),
+                **({"verify_snr": a.verify_snr} if getattr(a, "verify_snr", None) else {}))
 
 
 def build_near_space(red, a):
@@ -1542,6 +1548,10 @@ def cmd_rereduce(a):
                          f"--overwrite")
     red, objective, sampler, guard, thr = _near_objects(a)
     r = Runner.resume(a.run_dir, red, objective, sampler, project=guard, throughput_fn=thr, same_frames=False)
+    if getattr(a, "verify_snr", None):
+        # the re-reduction's verify, in place of the run's own (the run directory is only read)
+        print(f"  verify: --verify-snr {a.verify_snr}, the run's own is {r.cfg.verify_snr}")
+        r.cfg.verify_snr = a.verify_snr
     try:
         r.rereduce(out, verify_sources=vs, verify=not a.no_verify)
     except ValueError as exc:
@@ -1846,6 +1856,10 @@ def _build_parser():
                         "them in every annulus' injected reduction (default: the winners' own validation "
                         "injections, as in the run)")
     p.add_argument("--no-verify", action="store_true", help="the stitch and its S/N map only")
+    p.add_argument("--verify-snr", default=None, choices=["search", "idl"],
+                   help="how the verify and the S/N map measure (default: as the run did, idl for a run saved "
+                        "before 2026-11-01). search: the search's own S/N under the run's rules and the pixel mask "
+                        "in every ring and map. idl: the IDL verify's S/N and no mask outside the search")
     p.add_argument("--out", default=None, metavar="DIR",
                    help="output directory (default <run>_rereduce beside the run, which is left as it is)")
     p.add_argument("--overwrite", action="store_true", help="write over an earlier re-reduction in --out")
