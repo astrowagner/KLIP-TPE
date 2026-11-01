@@ -43,7 +43,7 @@ try:
 except ImportError:
     import klip_gpu as kg                 # standalone, in bench/gpu_reducer/
 
-VERSION = "0.7 (2026-11-01, per-frame true north, for klip_tpe/)"
+VERSION = "0.7.1 (2026-11-01, per-frame true north, memory held per worker, for klip_tpe/)"
 
 
 class GPUKLIPReducer(KLIPReducer):
@@ -131,6 +131,28 @@ class GPUKLIPReducer(KLIPReducer):
     def release(self) -> None:
         self._gpu = None
         self._zones = {}
+
+    # -- the card's memory, shared by the card workers ----------------------------------
+    def limit_memory(self, workers: int, fraction: float = 0.9) -> Optional[int]:
+        """Hold this process's CuPy memory pool to ``fraction`` of the card over ``workers``
+        processes (``MemoryPool.set_limit``), so one card worker's arrays and cache cannot take
+        what the others need.  An allocation past it raises ``OutOfMemoryError`` in this worker
+        alone, after the pool has given back its cached blocks.  Returns the limit in bytes, or
+        None with the NumPy backend.  The card worker calls it once, after ``warm()``."""
+        be = self._device()["be"]
+        if be.name != "cupy":
+            return None
+        free, total = be.cp.cuda.runtime.memGetInfo()
+        cap = int(float(fraction) * float(total) / max(int(workers), 1))
+        be.cp.get_default_memory_pool().set_limit(size=cap)
+        return cap
+
+    def after_job(self) -> None:
+        """Give the memory pool's cached blocks back to the card after a job, so every job
+        starts from the same memory, the cube and the zone indices: whether a job fits under
+        the worker's limit is then a property of the job, not of the jobs before it."""
+        if self._gpu is not None:
+            self._gpu["be"].free_pool()
 
     # -- what goes to the card ---------------------------------------------------
     def supports(self, req: ReductionRequest) -> bool:

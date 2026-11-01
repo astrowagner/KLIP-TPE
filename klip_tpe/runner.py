@@ -1251,13 +1251,14 @@ class Runner:
         self._nsrc_cache[ia] = n
         return n
 
-    def _card_counts(self) -> Optional[Tuple[int, int, Dict[str, int]]]:
-        """The card's running counts, ``(marked, reduced, refused by reason)``, or None without
-        card workers (:meth:`klip_tpe.parallel.ProcessPool.card_summary`)."""
+    def _card_counts(self) -> Optional[Tuple[int, int, Dict[str, int], int]]:
+        """The card's running counts, ``(marked, reduced, refused by reason, out of memory)``, or
+        None without card workers (:meth:`klip_tpe.parallel.ProcessPool.card_summary`)."""
         cs = getattr(self.reducer, "card_summary", lambda: None)()
         if not cs:
             return None
-        return int(cs.get("marked") or 0), int(cs.get("jobs") or 0), dict(cs.get("refused") or {})
+        return (int(cs.get("marked") or 0), int(cs.get("jobs") or 0), dict(cs.get("refused") or {}),
+                int(cs.get("memory") or 0))
 
     def _card_note(self, ia: int) -> None:
         """After an annulus' search: how many of its draws' jobs were marked for the card, how
@@ -1266,14 +1267,18 @@ class Runner:
         now = self._card_counts()
         if now is None:
             return
-        m0, j0, r0 = getattr(self, "_card_mark", None) or (0, 0, {})
-        marked, done = now[0] - m0, now[1] - j0
+        mark = tuple(getattr(self, "_card_mark", None) or (0, 0, {}, 0))
+        m0, j0, r0 = mark[0], mark[1], mark[2]
+        o0 = mark[3] if len(mark) > 3 else 0
+        marked, done, oom = now[0] - m0, now[1] - j0, now[3] - o0
         refused = {k: v - r0.get(k, 0) for k, v in now[2].items() if v - r0.get(k, 0) > 0}
         nref = sum(refused.values())
         why = ", ".join(f"{k} {v}" for k, v in sorted(refused.items(), key=lambda kv: -kv[1]))
+        back = marked - nref - done
         self.log(f"  annulus {ia+1}: the card reduced {done} of the {marked} jobs marked for it"
                  + (f", and turned away {nref} ({why})" if nref else "")
-                 + (f"; {marked - nref - done} went back to the CPU workers" if marked - nref > done else ""))
+                 + (f"; {back} went back to the CPU workers" if back > 0 else "")
+                 + (f" ({oom} needed more than a worker's share of its memory)" if back > 0 and oom > 0 else ""))
         self._card_mark = now
 
     def _apply_sampler_config(self) -> None:

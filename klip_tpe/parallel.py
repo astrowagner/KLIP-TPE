@@ -397,8 +397,10 @@ def describe_card(summary: Optional[dict]) -> str:
     k = int(summary.get("ready") or 0)
     n = int(summary.get("workers") or 0)
     who = f"{k} of {n} workers" if k != n else f"{n} worker{'s' * (n != 1)}"
+    cap = info.get("memory_cap_gb")
     return (f"{who} on {name}" + (f" (driver {drv})" if drv else "")
-            + f", {summary.get('share', 0):g} % of the search's injected draws")
+            + f", {summary.get('share', 0):g} % of the search's injected draws"
+            + (f", each worker held to {cap:g} GB of its memory" if cap else ""))
 
 
 class CardSpec:
@@ -415,14 +417,41 @@ class CardSpec:
         self.workers = max(int(workers), 1)
 
 
-#: card job failures after which the card is left out for the rest of the run
+#: card job failures after which the card is left out for the rest of the run.  A job that
+#: runs out of the worker's share of the card's memory (:class:`CardMemoryError`) does not
+#: count: it goes to the CPU workers, and the card stays in the run.
 CARD_MAX_ERRORS = 3
 
+#: the share of the card's memory the card workers' pools are held to, together
+#: (``GPUKLIPReducer.limit_memory``)
+CARD_MEMORY_FRACTION = 0.9
 
-def _card_worker_main(reducers, inq, outq, ppid: Optional[int] = None, index: int = 0):
-    """A card worker: ``warm()`` every reducer, report ``("card-ready", index, info)`` or
-    ``("card-failed", index, why)``, then ``(job_id, pid, request)`` ->
-    ``("card", job_id, result | exception, seconds)``."""
+
+class CardMemoryError(RuntimeError):
+    """A card job that needed more memory than its worker's share of the card (the CuPy
+    pool's limit).  Plain Python, so the parent unpickles it without CuPy."""
+
+    def __init__(self, tag: str, message: str):
+        super().__init__(tag, message)
+        self.tag, self.message = str(tag), str(message)
+
+    def __str__(self) -> str:
+        return f"{self.tag}: {self.message}"
+
+
+def _is_out_of_memory(exc: BaseException) -> bool:
+    """CuPy's ``OutOfMemoryError`` (by name: the parent need not import CuPy), or a
+    ``MemoryError``."""
+    return isinstance(exc, MemoryError) or (type(exc).__name__ in ("OutOfMemoryError", "CUDARuntimeError")
+                                            and "memory" in str(exc).lower())
+
+
+def _card_worker_main(reducers, inq, outq, ppid: Optional[int] = None, index: int = 0, workers: int = 1):
+    """A card worker: ``warm()`` every reducer, hold its memory pool to its share of the card
+    (``limit_memory(workers)``), report ``("card-ready", index, info)`` or ``("card-failed",
+    index, why)``, then ``(job_id, pid, request)`` -> ``("card", job_id, result | exception,
+    seconds)``.  After every job the reducer's ``after_job()`` gives the pool's cache back.  A job
+    that runs out of memory comes back as a :class:`CardMemoryError` naming its tag."""
     pin_blas()
     try:
         import signal as _sig
@@ -436,6 +465,15 @@ def _card_worker_main(reducers, inq, outq, ppid: Optional[int] = None, index: in
         for pid, r in reducers.items():
             w = getattr(r, "warm", None)
             info[str(pid)] = w() if callable(w) else {}
+        # one pool per process: the first reducer that can hold it does so for all of them
+        for r in reducers.values():
+            lim = getattr(r, "limit_memory", None)
+            if callable(lim):
+                cap = lim(workers, CARD_MEMORY_FRACTION)
+                if cap is not None:
+                    for v in info.values():
+                        v["memory_cap_gb"] = round(cap / 1e9, 2)
+                break
         outq.put(("card-ready", index, info))
     except BaseException as exc:          # noqa: BLE001 - no card, no CuPy, no memory: CPU-only
         try:
@@ -449,13 +487,22 @@ def _card_worker_main(reducers, inq, outq, ppid: Optional[int] = None, index: in
             return
         job_id, pid, req = item
         t = time.perf_counter()
+        red = reducers[pid]
         try:
-            res = reducers[pid].reduce(req)
+            res = red.reduce(req)
             meta = getattr(res, "meta", None)
             if isinstance(meta, dict):
                 meta["card"] = True
         except BaseException as exc:      # noqa: BLE001
-            res = exc
+            tag = str(getattr(req, "tag", "?"))
+            res = CardMemoryError(tag, f"{type(exc).__name__}: {exc}") if _is_out_of_memory(exc) else \
+                RuntimeError(f"{tag}: {type(exc).__name__}: {exc}")
+        after = getattr(red, "after_job", None)
+        if callable(after):
+            try:
+                after()
+            except Exception:             # noqa: BLE001 - the next job finds out
+                pass
         dt = time.perf_counter() - t
         try:
             outq.put(("card", job_id, res, dt))
@@ -513,13 +560,15 @@ class ProcessPool:
         self.card_jobs = 0
         self.card_marked = 0               # jobs marked for the card and in its share, while it was up
         self.card_refused: Dict[str, int] = {}   # of those, the ones supports() turned away, by reason
+        self.card_memory = 0               # jobs sent back to the CPU for want of the worker's memory
         self.card_why: Optional[str] = None
         self._card_t0 = time.time()
         self._notes: list = []             # log lines for the caller's thread (take_notes)
         if self.card is not None:
             self.card_inq = ctx.Queue()
             self.card_procs = [ctx.Process(target=_card_worker_main,
-                                           args=(self.card.reducers, self.card_inq, self.outq, me, i),
+                                           args=(self.card.reducers, self.card_inq, self.outq, me, i,
+                                                 self.card.workers),
                                            name=f"klip-card-{i}", daemon=True) for i in range(self.card.workers)]
         for p in self.procs + self.card_procs:
             p.start()
@@ -633,7 +682,7 @@ class ProcessPool:
                 "ready": self._card_ready, "why_down": self.card_why, "info": self.card_info,
                 "jobs": self.card_jobs, "busy_s": round(self.card_busy, 3),
                 "busy_fraction": round(self.card_busy / (wall * self.card.workers), 4),
-                "marked": self.card_marked, "refused": dict(self.card_refused)}
+                "marked": self.card_marked, "refused": dict(self.card_refused), "memory": self.card_memory}
 
     def _card_result(self, item) -> None:
         """A card worker's message (the collector's thread)."""
@@ -659,6 +708,17 @@ class ProcessPool:
             self.card_busy += float(dt)
             sent = self._card_out.pop(jid, None)
             f = self._futures.get(jid)
+            if isinstance(res, CardMemoryError) and sent is not None and f is not None:
+                # more than the worker's share of the card: a property of the job, so it goes
+                # to the CPU and the card stays in the run
+                self.card_memory += 1
+                heapq.heappush(self._waiting, (float("-inf"), jid, sent[0], sent[1]))
+                if self.card_memory <= 5:
+                    self._notes.append(f"  card: {res.tag} needed more than its worker's share of the card's "
+                                       f"memory ({res.message}); reduced on the CPU instead"
+                                       + ("  (further ones are counted, not listed)" if self.card_memory == 5 else ""))
+                self._dispatch()
+                return
             if isinstance(res, BaseException) and sent is not None and f is not None:
                 # a job the card failed is reduced on the CPU instead
                 self._card_errors += 1

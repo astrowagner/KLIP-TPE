@@ -69,6 +69,26 @@ class Dies(StandIn):
     die_on_job = 2
 
 
+class OutOfMemoryError(Exception):
+    """CuPy's name for it, which the worker recognizes without importing CuPy."""
+
+
+class Hungry(StandIn):
+    """A card whose workers are each held to a share of its memory, and on which the jobs in
+    the lowest fifth of the card's slots need more than that share."""
+
+    def limit_memory(self, workers, fraction=0.9):
+        return int(fraction * 96e9 / workers)
+
+    def after_job(self):
+        pass
+
+    def reduce(self, req):
+        if card_slot(req.tag) < SHARE * 0.4:
+            raise OutOfMemoryError("Out of memory allocating 22,155,776,512 bytes (allocated so far: 17 GB)")
+        return self.r.reduce(req)
+
+
 def _run(tmp_path, name, factory=None, share=SHARE):
     red, space, obj, samp, _ = build_synthetic_run()
     pr = PartitionedReducer(red.reducers, max_workers=4, pool="processes")
@@ -135,6 +155,29 @@ def test_without_the_card_the_run_goes_on_on_the_cpu(tmp_path, cpu_only, kind, w
     assert not card["up"] and why in card["why_down"]
     if kind is NoWarm:
         assert not any(r["meta"].get("card") or r["meta"].get("draw_card") for r in recs)
+
+
+@pytest.mark.slow
+def test_a_job_past_a_workers_memory_goes_to_the_cpu_and_the_card_stays(tmp_path, cpu_only):
+    """NEAR2's second s6 test run lost the card after three jobs ran out of memory in annulus 2.
+    A job past its worker's share now goes to the CPU workers, named in the log, and the card
+    stays in the run: the same jobs come back each time, and the scores are the CPU's."""
+    recs, logs, run_dir = _run(tmp_path, "hungry", Hungry.from_cpu)
+    assert _scores(recs) == _scores(cpu_only[0])
+    assert any("each worker held to 43.2 GB of its memory" in ln for ln in logs), logs
+    named = [ln for ln in logs if "needed more than its worker's share of the card's memory" in ln]
+    assert named and all("_inj_" in ln and "OutOfMemoryError" in ln for ln in named), named
+    assert not any("goes on without it" in ln for ln in logs)
+    card = json.load(open(os.path.join(run_dir, "final_results.json")))["card"]
+    assert card["up"] and card["memory"] > 0 and card["jobs"] > 0
+    assert any("needed more than a worker's share of its memory" in ln and "the card reduced" in ln for ln in logs), \
+        [ln for ln in logs if "the card reduced" in ln]
+    for r in recs:                     # every job past the share was reduced on the CPU
+        for j, got in enumerate(r["meta"].get("draw_card") or []):
+            for pid in r["meta"]["selected"]:
+                ev = r["phase"] if r["phase"] in ("seed", "reseed") else f"e{r['index'] + 1}"
+                tag = f"a{r['annulus'] + 1}_{ev}_d{j + 1}_inj_{pid}"
+                assert (pid in got) == (SHARE * 0.4 <= card_slot(tag) < SHARE), tag
 
 
 def test_the_card_reducer_runs_in_the_card_workers():
