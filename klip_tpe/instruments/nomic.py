@@ -68,7 +68,7 @@ from ..metrics import MawetPeakSNR, Objective
 from ..positions import PositionSampler
 from ..reducer import Dataset, KLIPReducer, PartitionedReducer, reducer_class
 from ..space import SearchSpace
-from . import near as _near
+from . import search_space as _space
 
 __all__ = ["NOMIC", "read_frames", "datasets_from_arrays", "load_pynomic", "image_groups", "group_labels",
            "make_reducer", "make_space",
@@ -87,7 +87,7 @@ class NOMIC:
     outrad_cap = 70.0
 
 
-production_defaults = dict(_near.production_defaults)
+production_defaults = dict(_space.production_defaults)
 
 
 # ----------------------------------------------------------------------------
@@ -427,8 +427,8 @@ def make_reducer(datasets: Dict[str, Dataset], weighting: str = "equal", max_wor
 
 def make_space(reducer: PartitionedReducer, **kw) -> SearchSpace:
     """Same parameterisation as the NEAR production space (9 per partition + drop dims);
-    see :func:`klip_tpe.instruments.near.make_space` for the keywords."""
-    return _near.make_space(reducer, **kw)
+    see :func:`klip_tpe.instruments.search_space.make_space` for the keywords."""
+    return _space.make_space(reducer, **kw)
 
 
 def make_guard(reducer: PartitionedReducer, n_min_ref: int = 10, ref_frac: float = 0.95, k_max: int = 100,

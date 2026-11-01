@@ -680,7 +680,7 @@ def make_space(reducer: PartitionedReducer, defaults: Optional[Dict[str, Any]] =
     The defaults are the ALES reduction's baseline (:data:`BASELINE`); the NEAR production
     seed (bin 29, corr_thresh 0.907) is wrong for these data.
 
-    ``zone_range=(lo, hi)`` and ``search_post_hp=True`` (:func:`klip_tpe.instruments.near.make_space`)
+    ``zone_range=(lo, hi)`` and ``search_post_hp=True`` (:func:`klip_tpe.instruments.search_space.make_space`)
     search the KLIP zone's reach beyond the annulus (``zone_in``, ``zone_out``, px) and the
     residuals' second high-pass (``post_hp``).  The ALES paper reduction of MWC 758 fits
     one 5-27 spaxel zone and derotates the residuals without a second high-pass: in a

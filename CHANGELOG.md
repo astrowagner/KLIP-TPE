@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — 2026-11-01 (the production search space in a module of its own)
+
+- **`make_space`, `pa_span_max` and `production_defaults` move to
+  `klip_tpe.instruments.search_space`.**  NEAR, the generic adapter, NOMIC and ALES all build their
+  spaces with them, and they lived in `instruments/near.py`, so a change to the ALES space edited
+  NEAR's module.  `near.make_space`, `near.pa_span_max` and `near.production_defaults` name the same
+  objects, so every script and tutorial that builds a space through `near` works unchanged.
+  `generic` and `nomic` import the new module.  Test in `tests/test_search_space_module.py`.
+
 ## Unreleased — 2026-11-01 (NEAR's plate scale per run, and the PSF library's own separations)
 
 - **NEAR's plate scale is 0.04450"/px for a new run** (NEAR2 note, 2026-10-31: the astrometry of
