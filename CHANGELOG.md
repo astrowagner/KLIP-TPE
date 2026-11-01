@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased — 2026-11-01 (a trial's score is floored at 0)
+
+- **A search trial's score, the mean of its draws, is floored at 0 in new runs**
+  (`RunConfig.score_floor`, `--score-floor`, Kevin Wagner: a negative S/N is not physical and
+  tells the search nothing).  A mean below the floor goes into the history, the log line and
+  `results.jsonl` as the floor, and the mean itself into `meta['score_unfloored']` and the
+  history's flags.  The log line reads `score=0.0 (floored from -0.416, mean of 3, sd 1.20)`,
+  and the live panel gives the mean beside the score.
+- The draws keep their own scores.  The calibration's revisit reads the means
+  (`Runner._unfloored_y`), so a contrast it resets is the one it was.  The validation's medians
+  are not floored.
+- TPE ranks the trials, so a floor of 0 changes a proposal only when more than `1 - gamma` of
+  them score below 0.  Where trials are ranked, ties at the floor go by evaluation order.
+- `--score-floor off` keeps the means.  Runs saved before 2026-11-01 resume without a floor, and
+  `--from-idl-setup` runs go without one, as the IDL does.
+- Tests in `tests/test_score_floor.py`.
+- **The source count line stays off a starved ring.**  The line of b7c903c said each ring keeps
+  at least 6 apertures even where the next line said one source's ring keeps fewer.  Over a
+  starved ring only that line is logged now, and `tests/test_injection_floor.py` holds both cases.
+
 ## Unreleased — 2026-11-01 (the card's memory, shared among its workers)
 
 - **Each card worker holds its CuPy pool to its share of the card** (NEAR2's second s6 test

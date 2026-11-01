@@ -246,6 +246,22 @@ start.  `final_results.json` records both, and `klip_stitched_params.txt` adds t
 another, or the same zone twice, is refused, and so is `--ann-extra` with `--opt-width`.  Without
 `--ann-extra` the tiles are the zones and every product is as before.
 
+### The score floor (`--score-floor`)
+
+A trial's score is the mean of its `--n-remeasure` draws.  In a new run a mean below 0 is
+recorded as 0, since a negative S/N is not physical and tells the search nothing.  The log line
+gives the mean, as in `score=0.0 (floored from -0.416, mean of 3, sd 1.20)`.  `results.jsonl`
+keeps it in `meta['score_unfloored']`, and the live panel shows it beside the score.  The draws
+keep their own scores, in `meta['draw_scores']`, on the log's draw lines and in the panel's bars.
+The calibration and its revisit after `recal_check` trials read the means, and the validation's
+medians are not floored.  TPE ranks the trials, so the floor changes a proposal only when more
+than `1 - gamma` of them (three quarters by default) score below 0.  In a typical run the top
+quarter scores well above 0 and the search goes as it would have.  Where trials are ranked (TPE's
+good set, the best so far, the validation candidates), ties at 0 go by evaluation order.
+`--score-floor off` keeps the means, as runs did before 2026-11-01 and as `--from-idl-setup` runs
+do, since the IDL does not floor its scores.  A run saved before 2026-11-01 resumes without a
+floor.
+
 ### The card (`--gpu-share`, `--gpu-workers`)
 
 A share of the search's injected draws can be reduced on an NVIDIA card beside the CPU

@@ -311,6 +311,18 @@ class RunConfig:
     #: since one reduction serves every source; a fresh draw additionally re-randomises the
     #: azimuth anchor, which extra sources in a single draw do not.
     n_remeasure: int = 1
+    #: The lowest score a search trial takes.  The trial's score is the mean of its draws
+    #: (``n_remeasure``).  A mean below the floor goes into the history, the log line and
+    #: ``results.jsonl`` as the floor, and the mean itself into ``meta['score_unfloored']``
+    #: (Kevin Wagner, 2026-11-01: a negative S/N is not physical and tells the search
+    #: nothing).  The draws keep their own scores.  The calibration's revisit reads the means
+    #: as before, and the validation's medians are not floored.  TPE ranks the trials, so a
+    #: floor of 0 changes a proposal only when more than ``1 - gamma`` of them score below 0.
+    #: Wherever trials are ranked (TPE's good set, the best so far, the validation
+    #: candidates), ties at the floor go by evaluation order.  With ``None`` there is no
+    #: floor.  Runs saved before 2026-11-01 resume without one, and ``--from-idl-setup`` runs
+    #: go without one, as the IDL does.
+    score_floor: Optional[float] = 0.0
     inject_inset_fwhm: float = 1.0        # injection band inset from the annulus edges
     pair_area_midpoint: bool = True       # 2 sources -> both at sqrt((r_in^2+r_out^2)/2), 180 deg apart (IDL 2026-09-05)
     #: Every injection of every stage (search, k-scan re-score, calibration, validation,
@@ -491,6 +503,8 @@ class RunConfig:
                               else ContrastGridConfig(mode="off"))
         # a run saved before the noise rings left the sidelobes out keeps its rings
         d.setdefault("sidelobes", "off")
+        # and one saved before 2026-11-01 its negative scores
+        d.setdefault("score_floor", None)
         return _from_dict_filtered(cls, d)
 
 
@@ -1204,6 +1218,12 @@ class Runner:
                 break
         mr = self._min_ring()
         rule = getattr(self.objective, "sidelobes", None)
+        # The count used can still starve a ring: one source close to the star, whose ring
+        # holds only a handful of apertures, is never capped.  Asked at the sources themselves
+        # and over more azimuths than the cap asks: where a source falls on the pixel grid
+        # moves its count by one.
+        got = self._ring_clean(ia, n, ndraw=12, at_sources=True)
+        starved = got is not None and got[0] < mr
         if n < asked and self._nsrc_warned.get(ia) != n:
             self._nsrc_warned[ia] = n
             if rule is not None:
@@ -1217,22 +1237,18 @@ class Runner:
                          f"fall back to the radial band there")
         elif n == asked and self._nsrc_warned.get(ia) != n:
             # the count an annulus keeps is said too, so a log without the line above is not
-            # read as the cap having been skipped
+            # read as the cap having been skipped.  Not over a starved ring, whose own line
+            # follows and where the line's "at least" would not hold.
             self._nsrc_warned[ia] = n
             src = "as asked" if ns is not None else "as the count for its separation gives"
-            if rule is not None:
+            if not starved and rule is not None:
                 self.log(f"  annulus {ia+1}: {n} source{'s' * (n != 1)} a draw, {src}, and each keeps at least "
                          f"{mr} noise apertures outside the sources' ADI sidelobes (+/- "
                          f"{rule.half_width(a_out, self.fwhm):.0f} deg at the outer edge)")
-            else:
+            elif not starved:
                 self.log(f"  annulus {ia+1}: {n} source{'s' * (n != 1)} a draw, {src}, and each separation's "
                          f"Mawet ring keeps at least {mr} clean apertures")
-        # The count used can still starve a ring: one source close to the star, whose ring
-        # holds only a handful of apertures, is never capped.  Asked at the sources themselves
-        # and over more azimuths than the cap asks: where a source falls on the pixel grid
-        # moves its count by one.
-        got = self._ring_clean(ia, n, ndraw=12, at_sources=True)
-        if got is not None and got[0] < mr:
+        if starved:
             few, rho, most = got
             who = "one source" if n == 1 else f"with {n} sources, the one"
             keeps = f"{few}" if most == few else f"{few} to {most}"
@@ -2878,11 +2894,35 @@ class Runner:
         return contrast, kdef, info
 
     # ----------------------------------------------------------------- search
+    def _floor_score(self, rec: EvalRecord) -> EvalRecord:
+        """:attr:`RunConfig.score_floor` on a trial's score, the mean of its draws.  Below the
+        floor the score becomes the floor and the mean goes into ``meta['score_unfloored']``.
+        The draws' own scores are left as they are.  A record is floored once."""
+        f = getattr(self.cfg, "score_floor", None)
+        s = rec.score
+        if f is None or s is None or not np.isfinite(s) or s >= f or "score_unfloored" in rec.meta:
+            return rec
+        rec.meta["score_unfloored"] = float(s)
+        rec.score = float(f)
+        return rec
+
+    def _unfloored_y(self) -> np.ndarray:
+        """The history's scores before :attr:`RunConfig.score_floor`: the means of the
+        trials' draws, which the calibration's revisit (:meth:`_recal_check`) reads."""
+        y = self.history.y.copy()
+        for j, fl in enumerate(self.history.flags[:y.size]):
+            u = fl.get("unfloored") if isinstance(fl, dict) else None
+            if u is not None:
+                y[j] = float(u)
+        return y
+
     def _append(self, rec: EvalRecord) -> int:
+        self._floor_score(rec)
         rec.index = len(self.history)
-        i = self.history.append(np.array(rec.x), np.nan if rec.score is None else rec.score,
-                                {"phase": rec.phase, "raw": rec.raw_score, "wall": rec.wall_s,
-                                 "sources": rec.sources, "k": rec.k_used})
+        fl = {"phase": rec.phase, "raw": rec.raw_score, "wall": rec.wall_s, "sources": rec.sources, "k": rec.k_used}
+        if rec.meta.get("score_unfloored") is not None:
+            fl["unfloored"] = float(rec.meta["score_unfloored"])
+        i = self.history.append(np.array(rec.x), np.nan if rec.score is None else rec.score, fl)
         self._log_row(rec)
         if self.cfg.write_setup_files and not rec.meta.get("failed"):
             cfg = self._config_from_dict(rec.config)
@@ -3077,9 +3117,12 @@ class Runner:
         _sd = rec.meta.get("draw_sd")
         _dn = rec.meta.get("draw_n")
         _df = int(rec.meta.get("draw_failed") or 0)
+        _uf = rec.meta.get("score_unfloored")
+        _how = ([f"floored from {_uf:.3f}"] if _uf is not None else []) + (
+            [f"mean of {_dn}"] + ([f"sd {_sd:.2f}"] if _sd is not None else []) + ([f"{_df} failed"] if _df else [])
+            if _dn else [])
         self.log(f"[ann {ia+1}] eval {i+1}/{n_iter} {phase:<7s} score={rec.score if rec.score is None else round(rec.score,3)}"
-                 + (f" (mean of {_dn}" + (f", sd {_sd:.2f}" if _sd is not None else "")
-                    + (f", {_df} failed" if _df else "") + ")" if _dn else "")
+                 + (f" ({', '.join(_how)})" if _how else "")
                  + (f" [{rec.meta['why']}]" if rec.score is None and rec.meta.get("why") else "")
                  + f" raw={rec.raw_score if rec.raw_score is None else round(rec.raw_score,3)}"
                  f" best={bs:.3f}@{bi+1}  contrast={self.contrast:.2e}"
@@ -3130,7 +3173,8 @@ class Runner:
                 and cc.recal_budget > 0
                 and not (cc.forced and len(cc.forced) > ia and cc.forced[ia] and cc.forced[ia] > 0)):
             return None
-        yv = self.history.y[1:cc.recal_check] if c.seed_default else self.history.y[:cc.recal_check]
+        y = self._unfloored_y()                 # the means, as before RunConfig.score_floor
+        yv = y[1:cc.recal_check] if c.seed_default else y[:cc.recal_check]
         yv = yv[np.isfinite(yv)]
         if yv.size < 3:
             return None
@@ -3950,9 +3994,11 @@ class Runner:
                     if inj.image is not None and inj.image.ndim == 2:
                         self._set_best_images(rec, inj, clean)
                     nb, nbs = self.history.best()
+                    _uf = rec.meta.get("score_unfloored")
                     self.log(f"[ann {ia+1}] eval {len(self.history)}/{n_iter} reseed  "
                              f"score={rec.score if rec.score is None else round(rec.score,3)}"
-                             f" raw={rec.raw_score if rec.raw_score is None else round(rec.raw_score,3)}"
+                             + (f" (floored from {_uf:.3f})" if _uf is not None else "")
+                             + f" raw={rec.raw_score if rec.raw_score is None else round(rec.raw_score,3)}"
                              f" best={nbs:.3f}@{nb+1}  (prior best eval {bi+1} re-scored)  {rec.wall_s:.0f}s")
                     self.checkpoint(routine=True)
                     self._save_eval_images(rec, inj, clean)
@@ -4008,6 +4054,7 @@ class Runner:
             rec, inj, clean = self.evaluate(self.history.X[bi].copy(), str(fl.get("phase", "tpe")),
                                             contrast=contrast, sources=srcs, tag=f"a{ia+1}_e{bi+1}_rebest")
             rec.index = int(bi)
+            self._floor_score(rec)                         # as the logged score was
             if fl.get("k") is not None:
                 rec.k_used = fl["k"]
             if inj.image is not None and inj.image.ndim == 2 and not rec.meta.get("failed"):

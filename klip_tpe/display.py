@@ -706,7 +706,7 @@ def annulus_from_records(records: Sequence[Dict[str, Any]], space: Dict[str, Any
         # a single displayed image reads as that image's measurement.
         extra={"draws": [{k: (r.get("meta") or {}).get(k)
                           for k in ("draw_scores", "draw_raw_scores", "draw_n", "draw_sd", "draw_spread",
-                                    "draw_failed")}
+                                    "draw_failed", "score_unfloored")}
                          for r in recs],
                # dispatch until the last reduction was back (EvalRecord.reduce_s, NaN in older runs)
                "reduce": np.array([np.nan if r.get("reduce_s") is None else float(r["reduce_s"]) for r in recs])})
@@ -3029,16 +3029,19 @@ def _step_text(ad: AnnulusData, i: int, bi: int, elapsed_s: float, eta_s: float,
         kstr = " ".join(f"{p}={_fmtval(v)}" for p, v in kd.items())
     else:
         kstr = _fmtval(kd) if kd is not None else ("searched" if "k_klip" in ad.bases else "--")
+    _dw = (ad.extra.get("draws") or [None] * ad.n)[i] if isinstance(ad.extra, dict) else None
+    # RunConfig.score_floor: the score is the floor and the mean of the draws lies below it
+    _uf = _dw.get("score_unfloored") if isinstance(_dw, dict) else None
     lines = [
         f"eval {i + 1}/{ad.n_iter}   phase {ph}   [{ad.search_mode}]",
-        f"score      {_fnum(y)}   (search, upward-biased)",
+        f"score      {_fnum(y)}   (search, upward-biased"
+        + (f", floored from {_fnum(float(_uf))}" if _uf is not None else "") + ")",
     ]
-    _dw = (ad.extra.get("draws") or [None] * ad.n)[i] if isinstance(ad.extra, dict) else None
     if _dw and _dw.get("draw_n"):
         _ds = _dw.get("draw_scores") or []
         _txt = ", ".join("--" if v is None else f"{float(v):.2f}" for v in _ds)
         _sd = _dw.get("draw_sd")
-        lines.append(f"  = mean of {int(_dw['draw_n'])} draws [{_txt}]"
+        lines.append(("  mean of" if _uf is not None else "  = mean of") + f" {int(_dw['draw_n'])} draws [{_txt}]"
                      + (f"   sd {float(_sd):.2f}" if _sd is not None else "")
                      + ("   (image is the last draw)" if len(_ds) > 1 else ""))
     lines += [
