@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — 2026-11-01 (the card's memory, shared among its workers)
+
+- **Each card worker holds its CuPy pool to its share of the card** (NEAR2's second s6 test
+  run, 2026-10-31: three jobs ran out of memory in annulus 2 and the card left the run).
+  `GPUKLIPReducer.limit_memory` sets `MemoryPool.set_limit` to 90 % of the card over the workers
+  (`parallel.CARD_MEMORY_FRACTION`), and the card line in the log gives the limit.
+- **After every job the worker gives the pool's cache back** (`GPUKLIPReducer.after_job`), so
+  each job starts from the same memory.
+- **A job past its worker's share goes to the CPU, and the card stays.**  The worker sends it
+  back as a `parallel.CardMemoryError` with the job's tag, plain Python so the parent needs no
+  CuPy.  It does not count toward `CARD_MAX_ERRORS`, and the log names the first five.  With the
+  limit fixed, the same jobs go to the CPU when the run is made again.  The per-annulus card line
+  counts them, and `final_results.json` keeps the total in `card.memory`.  Other failures now
+  name the job's tag too.
+- `gpu_reducer` version 0.7.1.  The step that asked for 22 GB is the GPU session's to split.
+- Tests in `tests/test_card_worker.py` and `tests/test_card_counts.py`.
+
 ## Unreleased — 2026-11-01 (`--use-contrast` past its end, in the docs)
 
 - The help of `--use-contrast` and `--ann-extra`, `docs/RUNNING.md` and `CalibrationConfig`'s

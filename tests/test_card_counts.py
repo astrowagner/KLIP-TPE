@@ -49,3 +49,25 @@ def test_the_annulus_line_counts_the_jobs_since_the_search_started():
     Runner._card_note(types.SimpleNamespace(reducer=types.SimpleNamespace(), log=logs.append,
                                             _card_counts=lambda: None), 0)
     assert logs == [], "no card workers, no line"
+
+
+def test_the_card_reducers_memory_hooks_do_nothing_on_the_host():
+    """``limit_memory`` holds a CuPy pool and ``after_job`` empties it.  With the NumPy backend
+    (the tests) there is no pool: no limit, and nothing to free."""
+    from klip_tpe.gpu_reducer import GPUKLIPReducer
+    from klip_tpe.parallel import CardMemoryError, _is_out_of_memory
+    g = GPUKLIPReducer.from_cpu(synthetic_night("memory", 30, seed=5))
+    g.backend_name = "numpy"
+    assert g.limit_memory(3) is None
+    g.after_job()
+    g.warm()
+    g.after_job()
+
+    class OutOfMemoryError(Exception):
+        pass
+    assert _is_out_of_memory(OutOfMemoryError("Out of memory allocating 22,155,776,512 bytes"))
+    assert _is_out_of_memory(MemoryError()) and not _is_out_of_memory(ValueError("no memory of it"))
+    e = CardMemoryError("a2_e11_d1_inj_n6", "OutOfMemoryError: Out of memory")
+    import pickle
+    e2 = pickle.loads(pickle.dumps(e))
+    assert e2.tag == "a2_e11_d1_inj_n6" and str(e2) == "a2_e11_d1_inj_n6: OutOfMemoryError: Out of memory"

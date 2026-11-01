@@ -278,6 +278,15 @@ were marked for the card, how many the card reduced, and how many its reducer tu
 why, such as `extras` or `KLIP-FM` (`GPUKLIPReducer.refusal`).  `final_results.json` keeps the
 totals (`marked`, `refused`).
 
+The card workers share the card's memory.  Each holds its CuPy pool to 90 % of the card over
+the number of workers (`GPUKLIPReducer.limit_memory`), so one worker's arrays and cache cannot
+take what the others need, and the card line in the log gives the limit.  After every job a
+worker gives the pool's cached blocks back, so each job starts from the same memory.  A job that
+needs more than its worker's share goes to the CPU workers, and the log names it.  It does not
+count toward the 3 failures that leave the card out, so the card stays in the run, and since
+the limit is fixed, the same jobs go to the CPU when the run is made again.  The per-annulus
+line counts them, and `final_results.json` keeps the total (`memory`).
+
 The card's images agree with the CPU's to about 1e-5 of the image noise, not to the bit, and the
 same job on the card twice gives the same bits.  `tests/test_gpu_reducer.py` compares the two on
 synthetic nights, on NumPy everywhere and on the card where there is one.
