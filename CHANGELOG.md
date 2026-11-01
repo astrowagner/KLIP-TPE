@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — 2026-11-01 (NEAR's plate scale per run, and the PSF library's own separations)
+
+- **NEAR's plate scale is 0.04450"/px for a new run** (NEAR2 note, 2026-10-31: the astrometry of
+  the 2026 cubes).  lambda/D, the FWHM and the binning rule's FWHM follow
+  (`instruments.near.near_constants`).  The reducer records them in its `provenance`, which
+  `run_setup.json` keeps.  `resume`, `extend`, `fit-chain` and `rereduce` read them back, and a run
+  that recorded none, made before today, gets 0.0456 (`NEAR.legacy_pxscale`), so every old run
+  reproduces to the bit.  `--pxscale` (the generic option, now for NEAR too) sets it.
+- **`--psflib DIR`**, the PSF library's directory (default `ROOT/psflib`), recorded the same way.
+  A recorded library that is not on the machine is refused rather than replaced.
+- **The library's own separations.**  `N4Library` reads each slice's separation from the v2
+  index (`n4_psf_cube_index.csv` with `v1_grid_mas`), else from the header's `SEP00`.., else the
+  75-mas grid.  v1's index has a `sep_arcsec` column klip-tpe never read, so v1 keeps the grid.
+  The averaged last pair is labelled with its mean.  The log gives the library's path, stamps and
+  range, and `rereduce.json` records the constants it used.
+- `make_guard` and `default_config` take the reducer's scale instead of the class's.
+- Tests in `tests/test_near_scale.py`.
+
 ## Unreleased — 2026-10-31 (each draw scored where it was reduced)
 
 - **Each draw's search score is made in the thread that ran its reduction** (`Runner.SCORE_EARLY`),

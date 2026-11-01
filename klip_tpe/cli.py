@@ -40,7 +40,8 @@ def _near_objects(a, log=print):
                                 weighting=a.weighting, max_workers=a.workers, pool=a.pool, fast=a.fast, log=log,
                                 n_min_ref=a.n_min_ref, backend=getattr(a, "backend", "klip"),
                                 cube_name=getattr(a, "cube_name", None) or None,
-                                drop_frames=_drop_frames(a) or None)
+                                drop_frames=_drop_frames(a) or None,
+                                pxscale=getattr(a, "pxscale", None), psflib=getattr(a, "psflib", None))
     except near.DropFramesError as exc:
         raise SystemExit(f"--drop-frames: {exc}")
     _subtract(red, a, log)
@@ -259,6 +260,50 @@ def _line_mask(red, a, log=print):
     log(f"  noise apertures: {int(m.sum())} pixels along "
         + ", ".join(f"PA {pa:g} deg (+-{hw:g} px)" for pa, hw in lines) + " left out (--mask-line)")
     return m
+
+
+def _constants_for_run(a) -> None:
+    """Settle ``--pxscale`` and ``--psflib`` for a NEAR command on a run directory: what this
+    command line says, else what the run was made with (``run_setup.json``'s reducer
+    ``provenance``), else, for a run made before 2026-11-01, which recorded neither,
+    ``NEAR.legacy_pxscale`` and ``ROOT/psflib``.  A new run takes ``NEAR.pxscale``.
+
+    The constants decide where every source is injected and how every S/N is measured, so a
+    resume, an extension, a re-reduction and a check reproduce the run only with its own.  A
+    recorded library that is not on this machine is refused rather than replaced."""
+    import json
+    from .instruments.near import NEAR
+    if getattr(a, "instrument", "near") not in (None, "near"):
+        return
+    given = _explicit_dests(getattr(a, "_argv", None))
+    run_dir = getattr(a, "run_dir", None)
+    setup = os.path.join(run_dir, "run_setup.json") if run_dir else None
+    existed = bool(setup and os.path.exists(setup))
+    prov = None
+    if existed:
+        try:
+            with open(setup) as f:
+                prov = (json.load(f).get("reducer") or {}).get("provenance") or None
+        except (OSError, ValueError):
+            prov = None
+    prov = prov if isinstance(prov, dict) and prov.get("instrument") == "NEAR" else None
+    if "pxscale" not in given:
+        if prov is not None and prov.get("pxscale") is not None:
+            a.pxscale = float(prov["pxscale"])
+        elif existed:
+            a.pxscale = float(NEAR.legacy_pxscale)
+            print(f"  --pxscale {a.pxscale:g}: the run predates the recorded scale (run_setup.json)")
+        else:
+            a.pxscale = None
+    if "psflib" not in given:
+        lib = (prov or {}).get("psflib")
+        path = lib.get("path") if isinstance(lib, dict) else None
+        if path and not os.path.isdir(path):
+            raise SystemExit(f"the run was made with the PSF library {path}, which is not on this machine: "
+                             f"give --psflib")
+        a.psflib = path or None
+    if existed and ("pxscale" in given or "psflib" in given):
+        print("  --pxscale / --psflib differ from the run's record: this command does not reproduce the run")
 
 
 def _data_edits_for_run(a) -> None:
@@ -710,7 +755,11 @@ def _add_near_args(p):
                     help="star flux per cube, in the science frames' own units and in the "
                          "template's normalisation aperture; omit it and the contrast axis is "
                          "in template units")
-    gg.add_argument("--pxscale", type=float, default=None, help="arcsec / px")
+    gg.add_argument("--pxscale", type=float, default=None,
+                    help="arcsec / px. generic: the cubes' scale. near: the plate scale the pixel constants follow "
+                         "(lambda/D, the FWHM). A new run takes 0.0445, the scale of the 2026 astrometry. A run keeps "
+                         "the scale it was made with (run_setup.json), and one made before 2026-11-01, which did not "
+                         "record it, 0.0456")
     gg.add_argument("--lam", type=float, default=None, help="wavelength (m)")
     gg.add_argument("--diam", type=float, default=8.4, help="aperture diameter (m) for lambda/D")
     gg.add_argument("--angle-sign", type=float, default=1.0, help="-1 flips the derotation-angle sign")
@@ -847,6 +896,9 @@ def _add_near_args(p):
                    help="generic / ales: top of the searched temporal-bin range, frames per bin (default: ales 30, "
                         "generic nframes / 8). A winner sitting on it (distance_to_bounds bin = 0) wants it higher")
     p.add_argument("--known", type=float, nargs=2, action="append", metavar=("RHO", "PA"))
+    p.add_argument("--psflib", default=None, metavar="DIR",
+                   help="near: the PSF library's directory (default ROOT/psflib), e.g. psflib_v2. Recorded in "
+                        "run_setup.json and kept on resume, extend and rereduce when not typed")
     p.add_argument("--cube-name", default=None, metavar="NAME",
                    help="near: the cube read in each night's directory (default AB_cube_skysub_cen_clean.fits, "
                         "or AB_cube_crop150.fits where only that is there), e.g. a reduction's "
@@ -1061,6 +1113,7 @@ def cmd_near(a):
     _klip_gram_for_run(a)
     _card_for_run(a)
     _data_edits_for_run(a)                 # a near command on a check-pointed directory resumes it
+    _constants_for_run(a)
     if getattr(a, "from_idl_setup", None):
         # mirror an IDL run: nights, annulus, budget, contrast, validation and TPE settings
         from .idl_compare import matched_run_config
@@ -1316,6 +1369,7 @@ def cmd_resume(a):
     _klip_gram_for_run(a)
     _card_for_run(a)
     _data_edits_for_run(a)
+    _constants_for_run(a)
     red, objective, sampler, guard, thr = _near_objects(a)
     r = Runner.resume(a.run_dir, red, objective, sampler, project=guard, throughput_fn=thr)
     r.callbacks = _callbacks(a)
@@ -1328,6 +1382,7 @@ def cmd_extend(a):
     _klip_gram_for_run(a)
     _card_for_run(a)
     _data_edits_for_run(a)
+    _constants_for_run(a)
     red, objective, sampler, guard, thr = _near_objects(a)
     Runner.extend(a.run_dir, red, objective, sampler, a.n_iter, project=guard, throughput_fn=thr)
 
@@ -1346,6 +1401,7 @@ def cmd_fit_chain(a):
     _resolve_run_dir(a)
     _klip_gram_for_run(a, record=False)    # the run directory is only read
     _data_edits_for_run(a)
+    _constants_for_run(a)
     if bool(a.chain) == bool(a.line_nodes):
         raise SystemExit("fit-chain needs one of --chain FILE and --line-nodes FILE")
     spec = None
@@ -1397,6 +1453,7 @@ def cmd_rereduce(a):
     _resolve_run_dir(a)
     _klip_gram_for_run(a, record=False)    # the run directory is only read
     _data_edits_for_rereduce(a)
+    _constants_for_run(a)
     vs = _sources_file(a.verify_sources, "--verify-sources") if a.verify_sources else None
     out = os.path.abspath(a.out or (os.path.abspath(a.run_dir).rstrip(os.sep) + "_rereduce"))
     if os.path.exists(os.path.join(out, "rereduce.json")) and not a.overwrite:
