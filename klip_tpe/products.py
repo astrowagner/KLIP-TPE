@@ -18,14 +18,16 @@ __all__ = ["noise_profile", "throughput_fit", "contrast_curve", "stitch_annuli",
 
 def noise_profile(img: np.ndarray, fwhm: float, rmin: float, rmax: float,
                   kernel: Optional[np.ndarray] = None, known: Sequence[Tuple[float, float]] = (),
-                  pxscale: Optional[float] = None, excl_fwhm: float = 1.5) -> Tuple[np.ndarray, np.ndarray]:
+                  pxscale: Optional[float] = None, excl_fwhm: float = 1.5,
+                  pixel_mask: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
     """Small-sample-corrected 1-sigma noise vs integer radius (px) from ``nap =
     floor(2 pi r / fwhm)`` apertures per ring.  Default aperture = tophat sum of
     radius ``fwhm/2`` (``near2m_noiseprof``); pass ``kernel`` to measure the
     matched-filter noise instead.  ``known`` = [(rho_arcsec, pa_deg), ...] real companions
     whose apertures (within ``excl_fwhm * fwhm``) are left out of the ring statistics, so a
     detected planet does not inflate its own contrast limit (needs ``pxscale``).
-    Returns ``(sigma, radii)``."""
+    ``pixel_mask`` (True = left out, the run's disk mask): no sample on it, as no ring of the
+    run takes one there.  Returns ``(sigma, radii)``."""
     img = np.asarray(img, float)
     cx, cy = star_center(img.shape)
     if kernel is None:
@@ -36,6 +38,8 @@ def noise_profile(img: np.ndarray, fwhm: float, rmin: float, rmax: float,
         kernel = ((xx - kc) ** 2 + (yy - kc) ** 2 <= rad * rad).astype(float)
     A = ndimage.convolve(np.where(np.isfinite(img), img, 0.0), kernel, mode="nearest")
     fin = np.isfinite(img)
+    if pixel_mask is not None and np.shape(pixel_mask) == img.shape:
+        fin = fin & ~np.asarray(pixel_mask, bool)
     kn = []
     if len(known) and pxscale:
         for rho, pa in known:                       # (arcsec, deg east of north) -> pixels
@@ -91,7 +95,8 @@ def contrast_curve(clean_img: np.ndarray, sample_r_as: Sequence[float], sample_s
                    contrast: float, fwhm: float, pxscale: float, rin_px: float, rout_px: float,
                    throughput_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
                    kfit_order: int = 2, nsigma: float = 5.0,
-                   known: Sequence[Tuple[float, float]] = ()) -> Dict[str, np.ndarray]:
+                   known: Sequence[Tuple[float, float]] = (),
+                   pixel_mask: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
     """Injection-calibrated ``nsigma`` contrast curve.
 
     ``K(r) = SNR_inj * sigma(r) / contrast`` measures the recovered throughput at
@@ -105,7 +110,8 @@ def contrast_curve(clean_img: np.ndarray, sample_r_as: Sequence[float], sample_s
     s_s = np.asarray(sample_snr, float)
     g = np.isfinite(r_s) & np.isfinite(s_s) & (s_s > 0)
     r_s, s_s = r_s[g], s_s[g]
-    sig, rprof = noise_profile(clean_img, fwhm, max(rin_px, fwhm), rout_px, known=known, pxscale=pxscale)
+    sig, rprof = noise_profile(clean_img, fwhm, max(rin_px, fwhm), rout_px, known=known, pxscale=pxscale,
+                               pixel_mask=pixel_mask)
     r_as = rprof * pxscale
     out = {"r_as": r_as, "sigma": sig, "sample_r": r_s, "sample_c": nsigma * contrast / np.where(s_s > 0, s_s, np.nan)}
     if r_s.size < 3:
@@ -124,12 +130,14 @@ def contrast_curve(clean_img: np.ndarray, sample_r_as: Sequence[float], sample_s
 
 
 def stitch_annuli(images: Sequence[np.ndarray], edges: Sequence[float], fwhm: float,
-                  legacy: bool = False, pad: float = 2.0, pad_ends: bool = False) -> Tuple[np.ndarray, np.ndarray]:
+                  legacy: bool = False, pad: float = 2.0, pad_ends: bool = False,
+                  pixel_mask: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
     """Sensitivity-weighted stitch of per-annulus images.  Weight of annulus ``ia`` =
     ``1 / median(sigma(r))^2`` over its interior ``[in+fwhm, out-fwhm]`` (normalised
     to the max), tile mask ``edge_ia - pad <= r <= edge_ia+1 + pad``; overlaps are
     weighted means.  The first inner edge and the last outer edge are not padded unless
-    ``pad_ends`` (the IDL pads them).  ``legacy=True`` uses equal weights."""
+    ``pad_ends`` (the IDL pads them).  ``legacy=True`` uses equal weights.  ``pixel_mask``
+    (True = left out, the run's disk mask) stays out of the noise behind the weights."""
     n = len(images)
     if n == 0:
         raise ValueError("no images")
@@ -140,7 +148,7 @@ def stitch_annuli(images: Sequence[np.ndarray], edges: Sequence[float], fwhm: fl
     w = np.ones(n)
     if not legacy and n > 1:
         for ia, img in enumerate(images):
-            sig, rp = noise_profile(img, fwhm, edges[ia], edges[ia + 1])
+            sig, rp = noise_profile(img, fwhm, edges[ia], edges[ia + 1], pixel_mask=pixel_mask)
             gi = (rp >= edges[ia] + fwhm) & (rp <= edges[ia + 1] - fwhm) & np.isfinite(sig) & (sig > 0)
             if gi.sum() == 0:
                 gi = np.isfinite(sig) & (sig > 0)
@@ -162,14 +170,17 @@ def stitch_annuli(images: Sequence[np.ndarray], edges: Sequence[float], fwhm: fl
 def snr_map(img: np.ndarray, fwhm: float, kernel: Optional[np.ndarray] = None,
             exclude_xy: Sequence[Tuple[float, float]] = (), excl_fwhm: float = 1.5,
             rmin: float = 1.0, excl_arcs: Sequence[Tuple[float, float, float, float]] = (),
-            pxscale: Optional[float] = None, angle_convention: str = "pa") -> np.ndarray:
+            pxscale: Optional[float] = None, angle_convention: str = "pa",
+            pixel_mask: Optional[np.ndarray] = None) -> np.ndarray:
     """Matched-filter S/N map with a per-radius robust (MAD-floored) sigma and the
     Mawet small-sample penalty (``near2m_snrmap``).  A display/diagnostic quantity
     -- NOT the search score (different noise convention).
 
     ``excl_arcs`` (with ``pxscale``): ``(rho_arcsec, theta_deg, half_width_deg,
     radial_fwhm)`` arcs whose pixels are left out of every ring's noise, as the known
-    companions' ADI sidelobes under the run's sidelobe rule."""
+    companions' ADI sidelobes under the run's sidelobe rule.  ``pixel_mask`` (True = left
+    out, the run's disk mask): its pixels are left out of every ring's noise, as the search's
+    rings leave them out.  The map still has a value there."""
     img = np.asarray(img, float)
     ny, nx = img.shape
     cx, cy = star_center(img.shape)
@@ -185,6 +196,8 @@ def snr_map(img: np.ndarray, fwhm: float, kernel: Optional[np.ndarray] = None,
     if len(excl_arcs) and pxscale is not None:
         from .metrics import _arc_regions, _in_arcs
         keep &= ~_in_arcs(xx, yy, _arc_regions(excl_arcs, pxscale, fwhm, cx, cy, angle_convention), cx, cy)
+    if pixel_mask is not None and np.shape(pixel_mask) == img.shape:
+        keep &= ~np.asarray(pixel_mask, bool)
     if _metrics._RING_RECORDER is not None:
         _metrics._ring_emit({"fn": "snr_map", "shape": tuple(img.shape), "center": (float(cx), float(cy)),
                              "fwhm": float(fwhm), "exr": float(excl_fwhm * fwhm), "keep": keep.copy(),
@@ -288,7 +301,8 @@ def fm_contrast_curve(fm_image: np.ndarray, clean_image: np.ndarray, contrast: f
                       nsigma: float = 5.0, search_px: float = 1.5,
                       angle_convention: str = "pa", flatten: bool = False,
                       known: Sequence[Tuple[float, float]] = (),
-                      resp: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
+                      resp: Optional[np.ndarray] = None,
+                      pixel_mask: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
     """KLIP-FM ``nsigma`` contrast curve (A_main_procedure.md section 9.1, L7655-7677).
 
     ``resp = fm_response(fm_image, sources)``; ``K_fm = resp / contrast``;
@@ -334,7 +348,7 @@ def fm_contrast_curve(fm_image: np.ndarray, clean_image: np.ndarray, contrast: f
     if kern is None:
         kern = gaussian_kernel(fwhm)
     sig, rprof = noise_profile(_flat(clean_image), fwhm, rin_px, rout_px, kernel=np.asarray(kern, float),
-                               known=known, pxscale=pxscale)
+                               known=known, pxscale=pxscale, pixel_mask=pixel_mask)
     out["sigma_mf"], out["r_sigma_px"] = sig, rprof
     ok = np.isfinite(sig)
     if ok.sum() < 2:

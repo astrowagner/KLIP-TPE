@@ -37,9 +37,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .metrics import radprof, source_xy, star_center, nanmedian_even
+from .metrics import matched_filter, nanmedian_even, radprof, rule_kwargs, source_xy, star_center
 from .products import snr_map
-from .verify import _noise, _without_self, mf_convolve, ring_snr, snr_fap, verify_candidates
+from .verify import _noise, _without_self, ring_snr, snr_fap, verify_candidates
 
 __all__ = ["detect_peaks", "psf_correlation", "candidate_metrics", "score_candidates",
            "find_candidates", "write_candidates", "coverage_rim"]
@@ -146,7 +146,8 @@ def candidate_metrics(px: np.ndarray, py: np.ndarray, snr0: np.ndarray, stack: n
                       pxscale: float, iwa: float, owa: float, *, known: Sequence[Tuple[float, float]] = (),
                       injected: Sequence[Tuple[float, ...]] = (), excl_fwhm: float = 1.5, srad: float = 1.5,
                       angle_convention: str = "pa", flatten: bool = False,
-                      image: Optional[np.ndarray] = None, sidelobes=None) -> List[Dict[str, Any]]:
+                      image: Optional[np.ndarray] = None, sidelobes=None,
+                      rules: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Per-peak metrics from the per-night stack ``(nn, ny, nx)`` (unflattened).
 
     Precomputed once (227-247): ``slices[j] = radprof(stack[j])``, ``comb =
@@ -167,7 +168,9 @@ def candidate_metrics(px: np.ndarray, py: np.ndarray, snr0: np.ndarray, stack: n
     even / odd and combined) leaves out the peak's own ADI arc and the known companions',
     with the farthest fallback (:func:`klip_tpe.verify.ring_snr`).  A peak at a known
     companion is not left out of its own ring as a companion.  Each row adds ``noise``, how
-    the combined ring came out."""
+    the combined ring came out.  ``rules``: the run's ring rules
+    (:func:`~klip_tpe.metrics.ring_rules`), so every S/N is the search's, its matched filter
+    and pixel mask included (:func:`klip_tpe.verify.snr_fap`)."""
     stack = np.asarray(stack, float)
     if stack.ndim == 2:
         stack = stack[None]
@@ -197,8 +200,16 @@ def candidate_metrics(px: np.ndarray, py: np.ndarray, snr0: np.ndarray, stack: n
         s2 = _flat(_nanmean(i2)) if i2.any() else comb
     else:
         s1 = s2 = comb
-    mf_comb, mf_s1, mf_s2 = (mf_convolve(a, fwhm) for a in (comb, s1, s2))
-    mf_slices = [mf_convolve(slices[j], fwhm) for j in range(nn)]
+    # each image's matched-filter map under the run's rules, made once per kernel (a measured
+    # kernel changes with separation)
+    maps: Dict[Tuple[int, Any], np.ndarray] = {}
+
+    def _mf(img_: np.ndarray, rho_: float) -> np.ndarray:
+        k = rule_kwargs(rules, rho_, img_.shape).get("kernel")
+        key = (id(img_), None if k is None else np.asarray(k, float).tobytes())
+        if key not in maps:
+            maps[key] = matched_filter(img_, fwhm, rules, rho_)
+        return maps[key]
     yy, xx = np.mgrid[0:ny, 0:nx]
     kx, ky = source_xy([k[0] for k in known], [k[1] for k in known], pxscale, cx, cy, angle_convention) \
         if len(known) else (np.zeros(0), np.zeros(0))
@@ -216,18 +227,18 @@ def candidate_metrics(px: np.ndarray, py: np.ndarray, snr0: np.ndarray, stack: n
             pa = np.degrees(np.arctan2(dy, dx)) % 360.0
         pa = float(pa)
         args = (rho, pa, pxscale, fwhm, exr, srad)
-        kw = dict(exclude_xy=kxy, angle_convention=angle_convention)
+        kw = dict(exclude_xy=kxy, angle_convention=angle_convention, rules=rules)
         if sidelobes is not None:
             # the sidelobe rule: the peak's own arc and the other known companions'
-            rk = dict(exr=exr, srad=srad, exclude_xy=kxy, angle_convention=angle_convention,
+            rk = dict(exr=exr, srad=srad, exclude_xy=kxy, angle_convention=angle_convention, rules=rules,
                       known=_without_self(known, rho, pa, pxscale, fwhm, exr, angle_convention))
 
-            def _fap(img_, mf_):
-                return ring_snr(img_, 0, [rho], [pa], pxscale, fwhm, sidelobes, mfmap=mf_, **rk)
+            def _fap(img_):
+                return ring_snr(img_, 0, [rho], [pa], pxscale, fwhm, sidelobes, mfmap=_mf(img_, rho), **rk)
         else:
-            def _fap(img_, mf_):
-                return snr_fap(img_, *args, mfmap=mf_, **kw)
-        pn = np.array([_fap(slices[j], mf_slices[j])["snr"] for j in range(nn)])
+            def _fap(img_):
+                return snr_fap(img_, *args, mfmap=_mf(img_, rho), **kw)
+        pn = np.array([_fap(slices[j])["snr"] for j in range(nn)])
         if not np.any(np.isfinite(pn)):
             pn[:] = 0.0
         n_nights = int(np.sum(pn >= 2.0))
@@ -236,10 +247,10 @@ def candidate_metrics(px: np.ndarray, py: np.ndarray, snr0: np.ndarray, stack: n
                        for j in range(nn)])
         gav = av[np.isfinite(av)]
         stim = float(np.mean(gav) / np.std(gav, ddof=1)) if (gav.size >= 2 and np.std(gav, ddof=1) > 0) else float("nan")
-        sub1 = _fap(s1, mf_s1)["snr"]
-        sub2 = _fap(s2, mf_s2)["snr"] if nn >= 2 else float("nan")
+        sub1 = _fap(s1)["snr"]
+        sub2 = _fap(s2)["snr"] if nn >= 2 else float("nan")
         psfc = psf_correlation(comb, int(px[c]), int(py[c]), fwhm)
-        cf = _fap(comb, mf_comb)
+        cf = _fap(comb)
         csnr = float(cf["snr"]) if np.isfinite(cf["snr"]) else float(snr0[c])
         fap = float(min(1.0 - (1.0 - cf["fap"]) ** nresel, 1.0)) if np.isfinite(cf["fap"]) else float("nan")
         flag = ""
@@ -319,7 +330,8 @@ def find_candidates(image: Optional[np.ndarray], stack: np.ndarray, fwhm: float,
                     persistence_map: Optional[np.ndarray] = None, night_ids: Optional[Sequence[Any]] = None,
                     weights: Optional[Sequence[float]] = None, verify_top: int = 0,
                     verify_kwargs: Optional[Dict[str, Any]] = None, angle_convention: str = "pa",
-                    flatten: bool = False, sidelobes=None) -> List[Dict[str, Any]]:
+                    flatten: bool = False, sidelobes=None,
+                    rules: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Blind candidate search (``near2_candidates``).
 
     Parameters
@@ -352,6 +364,10 @@ def find_candidates(image: Optional[np.ndarray], stack: np.ndarray, fwhm: float,
         out of its noise (a map given is used as it is), each peak's S/N leaves out its own
         arc and the known companions' (:func:`candidate_metrics`), and the verify of the top
         peaks takes the rule (:func:`klip_tpe.verify.verify_candidates`).
+    rules
+        the run's ring rules (:func:`~klip_tpe.metrics.ring_rules`): the S/N map made here
+        leaves the pixel mask out of its noise, and every peak's S/N and the verify are the
+        search's.
 
     Returns the ranked rows (dicts) with the fields written by
     :func:`write_candidates`; an empty list when no peak reaches ``snrmin``.
@@ -369,7 +385,7 @@ def find_candidates(image: Optional[np.ndarray], stack: np.ndarray, fwhm: float,
         arcs = [] if sidelobes is None else [(float(k[0]), float(k[1]), sidelobes.half_width(float(k[0]) / pxscale, fwhm),
                                               float(sidelobes.radial_fwhm)) for k in known]
         snrmap = snr_map(radprof(im) if flatten else im, fwhm, excl_arcs=arcs, pxscale=pxscale,
-                         angle_convention=angle_convention)
+                         angle_convention=angle_convention, pixel_mask=(rules or {}).get("pixel_mask"))
     snrmap = np.asarray(snrmap, float)
     iwa = 1.2 * fwhm if iwa_px is None else float(iwa_px)
     owa = (min(nx, ny) / 2.0 - fwhm) if owa_px is None else float(owa_px)
@@ -378,7 +394,8 @@ def find_candidates(image: Optional[np.ndarray], stack: np.ndarray, fwhm: float,
     if px.size == 0:
         return []
     rows = candidate_metrics(px, py, ps, stack, fwhm, pxscale, iwa, owa, known=known, injected=injected,
-                             angle_convention=angle_convention, flatten=flatten, image=given, sidelobes=sidelobes)
+                             angle_convention=angle_convention, flatten=flatten, image=given, sidelobes=sidelobes,
+                             rules=rules)
     rows = score_candidates(rows, nn, persistence_map)
     meta = {"nights": list(range(nn)) if night_ids is None else [str(v) for v in night_ids],
             "snrmin": snrmin, "sep": sep, "iwa": iwa, "owa": owa,
@@ -388,7 +405,7 @@ def find_candidates(image: Optional[np.ndarray], stack: np.ndarray, fwhm: float,
         r["meta"] = meta
     if verify_top and verify_top > 0:
         top = rows[: min(len(rows), int(verify_top))]
-        kw = dict(known=known, weights=weights, angle_convention=angle_convention, sidelobes=sidelobes)
+        kw = dict(known=known, weights=weights, angle_convention=angle_convention, sidelobes=sidelobes, rules=rules)
         vk = dict(verify_kwargs or {})
         if given is not None and (vk.get("injected") is None or vk.get("combined_inj") is not None):
             kw.update(combined=given, path_a="the source image")

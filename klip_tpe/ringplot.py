@@ -176,8 +176,11 @@ def _summary(rec: Dict[str, Any], n_other: int = 0) -> str:
 
 
 def _notes(rec: Dict[str, Any]) -> List[str]:
-    """The fallback and the band floor, for the panel's last line."""
+    """The fallback and the band floor, for the panel's last line.  The bootstrap reads the
+    peak alone, so its ring's noise is no part of it."""
     out = []
+    if rec.get("phase") == "verify, bootstrap":
+        return out
     if rec.get("fallback"):
         out.append(f"fallback {rec['fallback']}")
     elif rec.get("fallback_tried"):
@@ -270,16 +273,27 @@ def plot_rings(records: Sequence[Dict[str, Any]], path: str, title: str, *, pxsc
             ax.add_patch(Circle((x, y), aprad, fc=fc if filled else "none", ec=ec, lw=1.1, ls=ls,
                                 alpha=0.75 if filled else 1.0))
         srcs = list(rec.get("all_sources_xy") or rec.get("sources_xy") or [])
-        # the known companions in this image's pixels; the verify's other left-out positions
-        # (snr_fap's exclude_xy, kept as known_xy) are the other injected sources
+        # the known companions in this image's pixels.  The positions a ring left out as given
+        # (the verify's and candidate search's exclude_xy, kept as excluded_xy, or as known_xy
+        # with excluded_label in snr_fap's records before 2026-11-01) are companions where the
+        # geometry has one and the other injected sources elsewhere
         kpx = []
         if len(known):
             kx_, ky_ = source_xy([k[0] for k in known], [k[1] for k in known], pxscale, cx, cy, angle_convention)
             kpx = list(zip(kx_, ky_))
-        comp, others = [], []
-        for kx, ky in rec.get("known_xy") or []:
-            is_known = (not rec.get("excluded_label")) or any(np.hypot(kx - a, ky - b) <= 1.5 for a, b in kpx)
-            (comp if is_known else others).append((kx, ky))
+        given = list(rec.get("excluded_xy") or [])
+        comp = []
+        if rec.get("excluded_label"):
+            given += list(rec.get("known_xy") or [])
+        else:
+            comp = [tuple(k) for k in rec.get("known_xy") or []]
+        others = []
+        for kx, ky in given:
+            if any(np.hypot(kx - a, ky - b) <= 1.5 for a, b in kpx):
+                if not any(np.hypot(kx - a, ky - b) <= 0.5 for a, b in comp):
+                    comp.append((kx, ky))
+            else:
+                others.append((kx, ky))
         for sx, sy in srcs + others:
             ax.add_patch(Circle((sx, sy), exr, fill=False, ec="#E69F00", lw=0.7, ls=":"))
             ax.add_patch(Circle((sx, sy), aprad, fc="#E69F00", ec="#8a5a00", lw=0.8, alpha=0.9))

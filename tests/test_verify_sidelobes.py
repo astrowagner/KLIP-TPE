@@ -188,6 +188,7 @@ def test_the_runner_hands_its_rule_to_the_products():
                                  reducer=types.SimpleNamespace(angle_convention="pa"))
     stub._verify_rule = lambda: Runner._verify_rule(stub)
     stub._known_arcs = lambda: Runner._known_arcs(stub)
+    stub._pixel_mask = lambda: None
     arcs = Runner._known_arcs(stub)
     assert arcs == [(0.8, 200.0, rule.half_width(0.8 / PX, FWHM), rule.radial_fwhm)]
     img = _stack(0.8, [60.0]).mean(axis=0)

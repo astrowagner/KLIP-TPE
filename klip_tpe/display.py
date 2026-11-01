@@ -651,8 +651,14 @@ def annulus_from_records(records: Sequence[Dict[str, Any]], space: Dict[str, Any
                          calibration: Optional[Dict[str, Any]] = None,
                          angle_convention: str = "pa",
                          partition_label: str = "night",
-                         known: Sequence[Tuple[float, float]] = ()) -> AnnulusData:
-    """Normalise ``results.jsonl``-style records (one annulus, one restart segment)."""
+                         known: Sequence[Tuple[float, float]] = (),
+                         pixel_mask: Optional[np.ndarray] = None,
+                         rules: Optional[Dict[str, Any]] = None) -> AnnulusData:
+    """Normalise ``results.jsonl``-style records (one annulus, one restart segment).
+    ``pixel_mask``: the run's, which the S/N maps leave out of their noise
+    (``extra['pixel_mask']``).  ``rules``: the run's noise-ring rules
+    (:func:`~klip_tpe.metrics.ring_rules`, ``extra['rules']``), which the known companions'
+    S/N and the verify pages measure with."""
     params = _params_from_space(space)
     ndim = len(params)
     recs = list(records)
@@ -709,7 +715,9 @@ def annulus_from_records(records: Sequence[Dict[str, Any]], space: Dict[str, Any
                                     "draw_failed", "score_unfloored")}
                          for r in recs],
                # dispatch until the last reduction was back (EvalRecord.reduce_s, NaN in older runs)
-               "reduce": np.array([np.nan if r.get("reduce_s") is None else float(r["reduce_s"]) for r in recs])})
+               "reduce": np.array([np.nan if r.get("reduce_s") is None else float(r["reduce_s"]) for r in recs]),
+               "pixel_mask": None if pixel_mask is None else np.asarray(pixel_mask, bool),
+               "rules": rules})
 
 
 def annulus_from_run(run_dir: str, ia: int, run: Optional[Dict[str, Any]] = None,
@@ -729,13 +737,59 @@ def annulus_from_run(run_dir: str, ia: int, run: Optional[Dict[str, Any]] = None
         with open(cpath) as f:
             calib = json.load(f)
     ac = str(setup.get("angle_convention") or (setup.get("reducer") or {}).get("angle_convention") or "pa")
+    pm = _run_pixel_mask(run_dir)
     return annulus_from_records(recs, _space(run), _config(run), ia, px, fw, _metric_name(run),
                                 os.path.basename(os.path.abspath(run_dir)), run["winners"].get(ia),
                                 run["validation"].get(ia), calib, ac,
                                 str(setup.get("partition_label") or "night"),
                                 ((setup.get("sampler") or {}).get("known")
                                  or ((setup.get("objective") or {}).get("metric") or {}).get("known")
-                                 or ()))
+                                 or ()),
+                                pm, _run_rules(setup, pm))
+
+
+def _run_pixel_mask(run_dir: str) -> Optional[np.ndarray]:
+    """The pixel mask a run left out of its noise: ``pixel_mask.fits`` (written since
+    2026-11-01) or the ALES script's ``disk_mask.fits``, else None."""
+    for name in ("pixel_mask.fits", "disk_mask.fits"):
+        path = os.path.join(run_dir, name)
+        if os.path.exists(path):
+            try:
+                from astropy.io import fits
+                return np.asarray(fits.getdata(path)).astype(bool)
+            except Exception:                     # noqa: BLE001 - the maps do without it
+                return None
+    return None
+
+
+def _run_rules(setup: Dict[str, Any], pixel_mask: Optional[np.ndarray] = None) -> Optional[Dict[str, Any]]:
+    """The noise-ring rules a run measured with (:func:`~klip_tpe.metrics.ring_rules`), from the
+    metric its setup saved, with its pixel mask.  None for a metric without rings.  A measured
+    matched-filter kernel is not saved, so the Gaussian of the metric's FWHM stands in for it."""
+    from .metrics import RING_RULE_KEYS, gaussian_kernel
+    m = (setup.get("objective") or {}).get("metric") or {}
+    if not isinstance(m, dict) or "excl_fwhm" not in m:
+        return None
+    # a saved None is a rule too: declip_nsig None keeps the spikes
+    out: Dict[str, Any] = {k: m[k] for k in RING_RULE_KEYS if k in m and k != "pixel_mask"
+                           and (m[k] is not None or k == "declip_nsig")}
+    if m.get("mf_fwhm"):
+        fw = float(m["mf_fwhm"])
+        out["kernel_at"] = lambda rho, fw=fw: gaussian_kernel(fw)
+    if m.get("flatten"):
+        out["flatten"] = True
+    if pixel_mask is not None:
+        out["pixel_mask"] = np.asarray(pixel_mask, bool)
+    return out
+
+
+def _runner_rules(runner) -> Optional[Dict[str, Any]]:
+    """The runner's noise-ring rules (``Runner._ring_rules``), None when it has none."""
+    f = getattr(runner, "_ring_rules", None)
+    try:
+        return f() if callable(f) else None
+    except Exception:                             # noqa: BLE001 - the panels do without them
+        return None
 
 
 def _record_dict(rec) -> Dict[str, Any]:
@@ -779,7 +833,9 @@ def annulus_from_runner(runner, records: Sequence[Dict[str, Any]]) -> AnnulusDat
                                 getattr(runner.reducer, "angle_convention",
                                         getattr(runner.objective.metric, "angle_convention", "pa")),
                                 getattr(runner.reducer, "partition_label", "night"),
-                                _runner_known(runner))
+                                _runner_known(runner),
+                                getattr(getattr(runner.objective, "metric", None), "pixel_mask", None),
+                                _runner_rules(runner))
 
 
 # ----------------------------------------------------------------------------
@@ -834,18 +890,39 @@ def known_snr(ad: AnnulusData, img) -> Optional[List[float]]:
 
     The objective never scores these -- that is what makes them an honest check -- so this
     is the only place the number is produced.  Measured on a clean (un-injected) reduction,
-    with the other known sources excluded from the noise ring exactly as the metric does.
+    with the other known sources excluded from the noise ring exactly as the metric does, and
+    with the run's ring rules (``extra['rules']``: its matched filter, despike, band and pixel
+    mask) when the panel has them.
     """
     known = getattr(ad, "known", None)
     if not known or img is None or np.ndim(img) != 2:
         return None
-    key = (id(img), float(ad.fwhm), float(ad.pxscale), tuple(map(tuple, known)))
+    ex = ad.extra if isinstance(ad.extra, dict) else {}
+    try:
+        from .metrics import RING_RULE_KEYS, MawetPeakSNR, _digest
+        r = ex.get("rules") or {}
+        pm = r.get("pixel_mask", ex.get("pixel_mask"))
+        pm = pm if (pm is not None and np.shape(pm) == np.shape(img)) else None
+        kw = {k: v for k, v in r.items() if k in RING_RULE_KEYS and k != "pixel_mask"}
+        # the metric's kernel, which it takes at the companions' median separation
+        ka = r.get("kernel_at")
+        kmed = ka(float(np.nanmedian([float(k[0]) for k in known]))) if callable(ka) else None
+        kmed = None if kmed is None else np.asarray(kmed, float)
+        # the rules enter the key by value, never by reference: a rule set holds the metric, and
+        # through its kernel the reducer and its frames, which the cache must not keep alive
+        sig = (tuple(sorted((k, repr(v)) for k, v in kw.items())), bool(r.get("flatten", False)),
+               None if pm is None else _digest(np.asarray(pm, bool)),
+               None if kmed is None else _digest(kmed))
+    except Exception:
+        return None
+    key = (id(img), float(ad.fwhm), float(ad.pxscale), tuple(map(tuple, known)), sig)
     hit = _KNOWN_SNR_CACHE.get(key)
     if hit is not None and hit[0] is img:
         return hit[1]
     try:
-        from .metrics import MawetPeakSNR
-        m = MawetPeakSNR(pxscale=ad.pxscale, fwhm=ad.fwhm, known=list(known))
+        m = MawetPeakSNR(pxscale=ad.pxscale, fwhm=ad.fwhm, known=list(known), pixel_mask=pm,
+                         kernel_fn=None if kmed is None else (lambda rho, k=kmed: k),
+                         flatten=bool(r.get("flatten", False)), **kw)
         out = [float(v) for v in m.per_source(np.asarray(img, float), None,
                                               [float(k[0]) for k in known],
                                               [float(k[1]) for k in known])]
@@ -957,7 +1034,9 @@ def _snr_map(img: Optional[np.ndarray], ad: AnnulusData, sources=None,
             th = [s[1] for s in sources]
             xs, ys = source_xy(rho, th, ad.pxscale, cx, cy, ad.angle_convention)
             ex = list(zip(xs, ys))
-        return snr_map(radprof(img) if flatten else img, ad.fwhm, exclude_xy=ex)
+        # the run's pixel mask, left out of the noise as every ring of the run leaves it out
+        return snr_map(radprof(img) if flatten else img, ad.fwhm, exclude_xy=ex,
+                       pixel_mask=(ad.extra or {}).get("pixel_mask") if isinstance(ad.extra, dict) else None)
     except Exception:
         return None
 
@@ -2317,12 +2396,13 @@ def _live_curve_info(clean: Optional[np.ndarray], ad: AnnulusData, i: int) -> Tu
             return None, f"injection contrast not positive ({c:g})"
         rin, rout = max(ad.inrad, ad.fwhm), max(ad.outrad, ad.inrad + 2 * ad.fwhm)
         known = [tuple(k) for k in (getattr(ad, "known", None) or ())]
-        cc = contrast_curve(clean, r, s, c, ad.fwhm, ad.pxscale, rin, rout, known=known)
+        pm = (ad.extra or {}).get("pixel_mask") if isinstance(ad.extra, dict) else None
+        cc = contrast_curve(clean, r, s, c, ad.fwhm, ad.pxscale, rin, rout, known=known, pixel_mask=pm)
         curve = np.asarray(cc.get("curve"), float)
         if not np.isfinite(curve).any():
             # 2 positive samples: median-K throughput instead of the polynomial fit
             g = np.isfinite(r) & np.isfinite(s) & (s > 0)
-            sig, rprof = noise_profile(clean, ad.fwhm, rin, rout, known=known, pxscale=ad.pxscale)
+            sig, rprof = noise_profile(clean, ad.fwhm, rin, rout, known=known, pxscale=ad.pxscale, pixel_mask=pm)
             ok = np.isfinite(sig)
             if ok.sum() < 2:
                 return None, "noise profile undefined in this annulus"
@@ -3320,7 +3400,8 @@ def render_verify_books(run_dir: str, ia: int, out_dir: Optional[str] = None,
     fwhm, px = float(ad.fwhm), float(ad.pxscale)
     setup = run.get("setup") or run.get("checkpoint") or {}
     excl = float(((setup.get("objective") or {}).get("metric") or {}).get("excl_fwhm") or 1.5)
-    vkw = dict(known=[tuple(k) for k in (ad.known or ())], angle_convention=ad.angle_convention, excl_fwhm=excl)
+    vkw = dict(known=[tuple(k) for k in (ad.known or ())], angle_convention=ad.angle_convention, excl_fwhm=excl,
+               rules=(ad.extra or {}).get("rules") if isinstance(ad.extra, dict) else None)
     # the run's sidelobe rule, as its verify_report took it (the objective records it)
     sl = (setup.get("objective") or {}).get("sidelobes")
     if isinstance(sl, dict):

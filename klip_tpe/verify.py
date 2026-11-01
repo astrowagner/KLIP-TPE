@@ -2,9 +2,10 @@
 
 Two independent "paths" are evaluated for every candidate ``(rho, theta)``:
 
-* **Path A** -- matched-filter Mawet et al. (2014) S/N on the combined image with
-  the small-sample false-alarm probability (Student-t, ``df = n_ap - 2``;
-  ``near2v_snrfap`` / ``near2v_tfap``).  The decision is ``fap < fap_op``.
+* **Path A** -- matched-filter Mawet et al. (2014) S/N on the combined image, the
+  search's (:func:`snr_fap`), with the small-sample false-alarm probability
+  (Student-t, ``df = n_ap - 2``; ``near2v_snrfap`` / ``near2v_tfap``).  The decision
+  is ``fap < fap_op``.
 * **Path B** -- night-to-night consistency: the night-STIM map
   (``near2v_stim``) with an empirical FAP from the same-radius annulus, a
   bootstrap over nights of the matched-filter peak (``near2v_boot``), and the
@@ -63,6 +64,16 @@ Deliberate deviations from the IDL (each also flagged at the call site):
   the ``combined`` subset is Path A's image.
 * ``median`` of the per-bin S/N uses ``numpy.median`` (mean of the two middle
   values) rather than IDL's upper-middle default.
+* Since 2026-11-01 (Kevin Wagner) every S/N of the verify is the search's
+  (:func:`~klip_tpe.metrics.mawet_peak_snr`, through :func:`snr_fap`) under the run's rules
+  (``rules=``, :func:`~klip_tpe.metrics.ring_rules`): its matched filter (a measured kernel
+  too), its despike (6 sigma unless the run turns it off), the keep-outs around the sources
+  as given, its radial band (the noise of a ring shorter than ``min_ring``, and a floor under
+  the ring's scatter), its small-sample correction and its pixel mask.  ``near2v_snrfap``
+  convolved a Gaussian kernel, kept ``exr`` around the located peak and had no band.  The
+  bootstrap reads the peak of the same matched filter, the STIM annulus leaves the pixel mask
+  out, and the FAP counts the ring samples used.  Without ``rules`` the search metric's
+  defaults apply.
 * Under the run's sidelobe rule (``sidelobes=``, :class:`~klip_tpe.metrics.Sidelobes`)
   every ring of Path A and of the subsets also leaves out the ADI arcs of the source, of
   the known companions and of the injection block's other sources, the STIM annulus
@@ -81,7 +92,8 @@ from scipy import ndimage
 from scipy.stats import t as _student_t
 
 from . import metrics as _metrics
-from .metrics import (_arc_regions, _in_arcs, gaussian_kernel, nanmedian_even, radprof, sidelobe_snr, source_xy,
+from .metrics import (_arc_regions, _in_arcs, gaussian_kernel, matched_filter, mawet_peak_snr, nanmedian_even,
+                      radprof, rule_kwargs, sidelobe_snr, source_xy,
                       star_center)
 
 __all__ = ["t_fap", "t_thresh", "contrast_limit", "contrast_limit_image", "mf_convolve",
@@ -181,122 +193,72 @@ def snr_fap(img: np.ndarray, rho: float, theta: float, pxscale: float, fwhm: flo
             exr: Optional[float] = None, srad: float = 1.5, *,
             exclude_xy: Sequence[Tuple[float, float]] = (), mfmap: Optional[np.ndarray] = None,
             angle_convention: str = "pa", excl_arcs: Sequence[Tuple[float, float, float, float]] = (),
-            peak_xy: Optional[Tuple[float, float]] = None) -> Dict[str, float]:
-    """Matched-filter Mawet S/N and small-sample FAP at one source
-    (``near2v_snrfap``, verify 122-154).
+            peak_xy: Optional[Tuple[float, float]] = None, rules: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
+    """The verify's S/N and its small-sample FAP at one source: the search's matched-filter
+    Mawet S/N (:func:`~klip_tpe.metrics.mawet_peak_snr`) under the run's ring rules (``rules``,
+    :func:`~klip_tpe.metrics.ring_rules`: its matched filter, despike, radial band, shortest
+    ring, small-sample correction, pixel mask and inner guard), or that function's defaults.
 
-    1. ``A`` = ``mfmap`` if given (same shape) else :func:`mf_convolve` (127).
-    2. Peak search on the disc ``dx^2+dy^2 <= srad^2`` around the rounded nominal
-       position; the pixel with max ``A`` where ``img`` is finite wins (131-136).
-    3. ``r = |peak - centre|``, ``nap = floor(2 pi r / fwhm)``; ``r < fwhm`` or
-       ``nap < 5`` -> NaN (137-138).
-    4. Ring samples at ``th0 + q 2pi/nap``, ``q = 1..nap-1``, skipping pixels
-       within ``exr`` of the peak (radial exclusion) or of any ``exclude_xy``
-       coordinate, out of bounds or non-finite (139-148).
-    5. ``nv < 3`` or ``sd <= 0`` -> NaN; ``snr = (A_pk - mean) / (sd sqrt(1+1/nv))``
-       with the sample (N-1) std (150-152); ``fap = t_fap(snr, nv)`` (153).
+    The source is the matched-filter peak within ``srad`` px of the nominal position, the ring
+    runs through it and skips ``exr`` (default 1.5 FWHM) around the source as given and around
+    every ``exclude_xy`` position (the other sources and the known companions), the pixel mask
+    and ``excl_arcs``.  ``peak_xy`` places the peak there instead of searching for it, and
+    ``mfmap`` is the matched-filter map made already (:func:`~klip_tpe.metrics.matched_filter`).
+    ``fap = t_fap(snr, n)`` with ``n`` the ring samples used, or the ring's count when the
+    radial band gave the noise.
 
-    Returns ``{'snr', 'fap', 'nap', 'peak', 'x', 'y', 'r'}`` where ``nap`` is the
-    number of ring samples actually used (``nv``) on success, the nominal count
-    on the early exits (as in the IDL return vector).  With samples, ``n_left`` is their
-    count and ``bg`` and ``sigma`` their mean and standard deviation.
+    Since 2026-11-01 (Kevin Wagner) the verify and the candidate search measure as the search
+    does.  Before, this function ported the IDL's ``near2v_snrfap`` (verify 122-154): a Gaussian
+    kernel, no despike, ``exr`` kept around the located peak, the samples used counted in the
+    small-sample correction and no radial band.
 
-    ``excl_arcs`` (``(rho_arcsec, theta_deg, half_width_deg, radial_fwhm)``, as
-    :func:`~klip_tpe.metrics.mawet_peak_snr` takes them) leaves out the samples in those
-    arcs: ADI sidelobes, under the sidelobe rule (:func:`ring_snr`).  ``peak_xy`` places the
-    peak there instead of searching for it.
+    Returns ``{'snr', 'fap', 'nap', 'peak', 'x', 'y', 'r'}`` where ``nap`` is the ``n`` of the
+    FAP on success and the ring's count on the early exits, with ``nclean`` the ring samples
+    kept, ``n_left`` those left after the exclusions, ``noise`` (``"ring"`` or ``"band"``) and,
+    with samples, ``bg`` and ``sigma``.
     """
     img = np.asarray(img, float)
-    ny, nx = img.shape
-    cx, cy = star_center(img.shape)
-    if exr is None:
-        exr = 1.5 * fwhm
-    A = mfmap if (mfmap is not None and np.shape(mfmap) == img.shape) else mf_convolve(img, fwhm)
-    xs, ys = source_xy(rho, theta, pxscale, cx, cy, angle_convention)
-    xs, ys = float(xs[0]), float(ys[0])
-    px0, py0 = int(round(xs)), int(round(ys))
-    px, py, pkv = px0, py0, -1e30
-    isr = int(np.ceil(srad))
-    if peak_xy is not None:
-        px, py = int(round(float(peak_xy[0]))), int(round(float(peak_xy[1])))
-        if 0 <= px < nx and 0 <= py < ny and np.isfinite(img[py, px]):
-            pkv = float(A[py, px])
-        isr = -1
-    for dy in range(-isr, isr + 1):
-        for dx in range(-isr, isr + 1):
-            if dx * dx + dy * dy > srad * srad:
-                continue
-            qx, qy = px0 + dx, py0 + dy
-            if 0 <= qx < nx and 0 <= qy < ny and np.isfinite(img[qy, qx]) and A[qy, qx] > pkv:
-                pkv, px, py = float(A[qy, qx]), qx, qy
-    peak = pkv if pkv > -1e30 else float("nan")
-    r = float(np.hypot(px - cx, py - cy))
-    nap = int(np.floor(2 * np.pi * r / fwhm))
-    out = {"snr": np.nan, "fap": np.nan, "nap": nap, "peak": peak, "x": px, "y": py, "r": r}
-    if r < fwhm or nap < 5:
-        return out
-    th0 = np.arctan2(py - cy, px - cx)
-    regions = _arc_regions(excl_arcs, pxscale, fwhm, cx, cy, angle_convention) if len(excl_arcs) else None
-    vals: List[float] = []
-    ring: Optional[List[List[Any]]] = [] if _metrics._RING_RECORDER is not None else None
-    for q in range(1, nap):
-        th = th0 + q * 2 * np.pi / nap
-        xk, yk = int(round(cx + r * np.cos(th))), int(round(cy + r * np.sin(th)))
-        if np.hypot(xk - px, yk - py) < exr:
-            if ring is not None:
-                ring.append([xk, yk, "source"])
-            continue
-        if any(np.hypot(xk - ex, yk - ey) < exr for ex, ey in exclude_xy):
-            if ring is not None:
-                ring.append([xk, yk, "excluded"])
-            continue
-        if not (0 <= xk < nx and 0 <= yk < ny) or not np.isfinite(img[yk, xk]):
-            if ring is not None:
-                ring.append([xk, yk, "off"])
-            continue
-        if regions and bool(_in_arcs(xk, yk, regions, cx, cy)):
-            if ring is not None:
-                ring.append([xk, yk, "arc"])
-            continue
-        vals.append(float(A[yk, xk]))
-        if ring is not None:
-            ring.append([xk, yk, "used"])
-    nv = len(vals)
-    out["nap"] = nv
-    out["n_left"] = nv
-    if ring is not None:
-        if nv < 3:
-            ring = [[a, b, "unused" if w == "used" else w] for a, b, w in ring]
-        _metrics._ring_emit(_metrics._ring_rec(
-            "snr_fap", img.shape, cx, cy, dict(out, nap=nap, nclean=nv), fwhm, exr, ring, [px], [py],
-            [e[0] for e in exclude_xy], [e[1] for e in exclude_xy], excl_arcs,
-            noise="ring" if nv >= 3 else None, excluded_label="excluded"))
-    if nv < 3:
-        return out
-    use = np.array(vals)
-    sd = float(np.std(use, ddof=1))
-    out.update(bg=float(np.mean(use)), sigma=sd)
-    if sd <= 0:
-        return out
-    snr = (float(A[py, px]) - float(np.mean(use))) / (sd * np.sqrt(1.0 + 1.0 / nv))
-    out.update(snr=float(snr), fap=t_fap(snr, nv), peak=float(A[py, px]))
+    # a map made already needs no kernel
+    kw = rule_kwargs(rules if mfmap is None else {k: v for k, v in (rules or {}).items() if k != "kernel_at"},
+                     rho, img.shape)
+    kw["excl_fwhm"] = (float(exr) / float(fwhm)) if exr is not None else float(kw.get("excl_fwhm", 1.5))
+    kw["search_px"] = float(srad)
+    if (rules or {}).get("flatten") and mfmap is None:
+        img = radprof(img)
+    snr, det = mawet_peak_snr(img, [float(rho)], [float(theta)], pxscale, fwhm, exclude_xy=list(exclude_xy),
+                              mfmap=mfmap, angle_convention=angle_convention, excl_arcs=excl_arcs,
+                              peak_xy=None if peak_xy is None else [tuple(peak_xy)], return_details=True, **kw)
+    d = det[0]
+    s = float(snr[0])
+    nap = int(d.get("nap", 0) or 0)
+    used = bool(d.get("ring_used"))
+    n = int(d.get("nclean", 0)) if used else nap
+    out = {"snr": s, "fap": t_fap(s, n) if (np.isfinite(s) and n >= 3) else float("nan"),
+           "nap": n if np.isfinite(s) else nap, "peak": float(d.get("peak", np.nan)), "x": d["x"], "y": d["y"],
+           "r": float(d["r"]), "nclean": int(d.get("nclean", 0) or 0), "n_left": int(d.get("n_left", 0) or 0),
+           "noise": ("ring" if used else "band") if np.isfinite(s) else None}
+    if d.get("why"):
+        out["why"] = d["why"]
+    if "sigma" in d and float(d.get("sigma", -1.0)) > 0:
+        out.update(bg=float(d["bg"]), sigma=float(d["sigma"]))
     return out
 
 
 def _fap_measure(img, rho, theta, pxscale, fwhm, *, known=(), excl_arcs=(), angle_convention="pa",
-                 return_details=True, exr=None, srad=1.5, exclude_xy=(), mfmap=None, peak_xy=None, **_):
+                 return_details=True, exr=None, srad=1.5, exclude_xy=(), mfmap=None, peak_xy=None, rules=None,
+                 **_):
     """:func:`snr_fap` in the form :func:`~klip_tpe.metrics.sidelobe_snr` asks of a measure:
-    one source, ``(snr array, [details])`` with ``nclean`` the samples used and ``nap`` the
+    one source, ``(snr array, [details])`` with ``nclean`` the ring samples used and ``nap`` the
     ring's apertures.  The known companions' keep-outs come in ``exclude_xy``."""
     s = snr_fap(img, float(rho[0]), float(theta[0]), pxscale, fwhm, exr, srad, exclude_xy=exclude_xy, mfmap=mfmap,
                 angle_convention=angle_convention, excl_arcs=excl_arcs,
-                peak_xy=None if peak_xy is None else peak_xy[0])
+                peak_xy=None if peak_xy is None else peak_xy[0], rules=rules)
     nominal = int(np.floor(2 * np.pi * float(s["r"]) / fwhm)) if np.isfinite(s["r"]) else 0
-    d = dict(s, nap=nominal, nclean=int(s.get("n_left", 0)), n_left=int(s.get("n_left", 0)))
+    d = dict(s, nap=nominal, nclean=int(s.get("nclean", 0)), n_left=int(s.get("n_left", 0)))
     if not np.isfinite(s["peak"]):
         d["why"] = "no finite pixel at the source"
-    elif s["r"] < fwhm or nominal < 5:
-        d["why"] = "fewer than 5 apertures on its ring"
+    elif s.get("why"):
+        d["why"] = s["why"]
     return np.array([s["snr"]], float), [d]
 
 
@@ -306,7 +268,8 @@ _fap_measure.takes_peak_xy = True
 def ring_snr(img: np.ndarray, i: int, rhos: Sequence[float], thetas: Sequence[float], pxscale: float,
              fwhm: float, sidelobes, *, exr: Optional[float] = None, srad: float = 1.5,
              exclude_xy: Sequence[Tuple[float, float]] = (), known: Sequence[Tuple[float, float]] = (),
-             mfmap: Optional[np.ndarray] = None, angle_convention: str = "pa") -> Dict[str, Any]:
+             mfmap: Optional[np.ndarray] = None, angle_convention: str = "pa",
+             rules: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """:func:`snr_fap` of source ``i`` of ``(rhos, thetas)`` under the run's sidelobe rule
     (:class:`~klip_tpe.metrics.Sidelobes`, :func:`~klip_tpe.metrics.sidelobe_snr`): its ring
     leaves out its own ADI arc, the other sources' and the ``known`` companions'.  Where fewer
@@ -320,10 +283,13 @@ def ring_snr(img: np.ndarray, i: int, rhos: Sequence[float], thetas: Sequence[fl
         exr = 1.5 * fwhm
     rule = sidelobes if str(getattr(sidelobes, "mode", "farthest")) == "farthest" else _replace(sidelobes,
                                                                                                 mode="farthest")
+    # the run's ring rules, with the rule's shortest ring: where fewer are left the rule's fallback
+    # takes over, not the radial band
+    rk = dict(rules or {}, min_ring=int(rule.min_apertures))
     _, det = sidelobe_snr(img, list(rhos), list(thetas), pxscale, fwhm, rule, known=list(known),
                           measure=_fap_measure, angle_convention=angle_convention, only=int(i),
                           drop=("others", "known"), exr=exr, srad=srad, exclude_xy=list(exclude_xy),
-                          mfmap=mfmap)
+                          mfmap=mfmap, rules=rk)
     d = dict(det[int(i)])
     d["nap"] = int(d.get("nclean", 0)) if np.isfinite(d.get("snr", np.nan)) else int(d.get("nap", 0))
     return d
@@ -355,23 +321,57 @@ def _noise(d: Dict[str, Any]) -> Dict[str, Any]:
 class _ScaledImage:
     """The S/N of injected sources on ``clean + a (inj - clean)``, with the clean image's noise as
     it is and the sources' response scaled by ``a``.  Pixels not finite in both images are left
-    out of both.  The matched filter is linear, so ``mf(clean + a D) = mf(clean) + a mf(D)``."""
+    out of both.  The map is the line through the run's two maps, ``mf(clean) + a (mf(inj) -
+    mf(clean))``, each made as the run's rules make it (:func:`~klip_tpe.metrics.matched_filter`,
+    at each source's separation for a measured kernel).  At ``a = 0`` and ``a = 1`` it is the
+    search's own map of each image.  The convolution is linear, and only the despike, where it
+    replaces a pixel, bends the map off that line in between."""
 
-    def __init__(self, clean_img: np.ndarray, inj_img: np.ndarray, fwhm: float):
+    def __init__(self, clean_img: np.ndarray, inj_img: np.ndarray, fwhm: float,
+                 rules: Optional[Dict[str, Any]] = None):
         cl, ij = np.asarray(clean_img, float), np.asarray(inj_img, float)
         if cl.shape != ij.shape:
             raise ValueError(f"clean image {cl.shape} and injected image {ij.shape} differ in shape")
         both = np.isfinite(cl) & np.isfinite(ij)
         self.img0 = np.where(both, cl, np.nan)
-        self.mf0 = mf_convolve(self.img0, fwhm)
-        self.mf1 = mf_convolve(np.where(both, ij - cl, np.nan), fwhm)
+        self.img1 = np.where(both, ij, np.nan)
+        self.fwhm, self.rules = float(fwhm), rules
+        self._maps: Dict[Any, Tuple[np.ndarray, np.ndarray]] = {}
+        # each (a, source) measured once: the thresholds' searches step through the same values
+        self._snr: Dict[Any, Tuple[float, int]] = {}
+
+    def maps(self, rho: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray]:
+        """``(mf(clean), mf(inj) - mf(clean))`` with the kernel at ``rho``."""
+        k = rule_kwargs(self.rules, rho if rho is not None else 0.0, self.img0.shape).get("kernel")
+        key = None if k is None else np.asarray(k, float).tobytes()
+        if key not in self._maps:
+            m0 = matched_filter(self.img0, self.fwhm, self.rules, rho)
+            m1 = matched_filter(self.img1, self.fwhm, self.rules, rho) - m0
+            self._maps[key] = (m0, m1)
+        return self._maps[key]
+
+    @property
+    def mf0(self) -> np.ndarray:
+        return self.maps()[0]
+
+    @property
+    def mf1(self) -> np.ndarray:
+        return self.maps()[1]
 
     def snr(self, a: float, rho: float, theta: float, pxscale: float, fwhm: float, exr: float, srad: float,
             exclude_xy: Sequence[Tuple[float, float]] = (), angle_convention: str = "pa",
             excl_arcs: Sequence[Tuple[float, float, float, float]] = ()) -> Tuple[float, int]:
-        s = snr_fap(self.img0, rho, theta, pxscale, fwhm, exr, srad, exclude_xy=exclude_xy,
-                    mfmap=self.mf0 + a * self.mf1, angle_convention=angle_convention, excl_arcs=excl_arcs)
-        return float(s["snr"]), int(s["nap"])
+        key = (float(a), float(rho), float(theta), float(pxscale), float(fwhm), float(exr), float(srad),
+               tuple((float(x), float(y)) for x, y in exclude_xy), str(angle_convention),
+               tuple(tuple(float(v) for v in arc) for arc in excl_arcs))
+        hit = self._snr.get(key)
+        if hit is not None:
+            return hit
+        m0, m1 = self.maps(rho)
+        s = snr_fap(self.img0, rho, theta, pxscale, fwhm, exr, srad, exclude_xy=exclude_xy, mfmap=m0 + a * m1,
+                    angle_convention=angle_convention, excl_arcs=excl_arcs, rules=self.rules)
+        self._snr[key] = out = (float(s["snr"]), int(s["nap"]))
+        return out
 
 
 def _first_crossing(cond, lo: float, hi: float, n_grid: int) -> float:
@@ -413,7 +413,8 @@ def solved_contrasts(clean_img: np.ndarray, inj_img: np.ndarray, rho: float, the
                      taps: Sequence[float] = DEFAULT_TAP_LIST, angle_convention: str = "pa",
                      a_range: Tuple[float, float] = (1e-3, 1e3), n_grid: int = 121,
                      _scaled: Optional["_ScaledImage"] = None,
-                     excl_arcs: Sequence[Tuple[float, float, float, float]] = ()) -> Dict[str, Any]:
+                     excl_arcs: Sequence[Tuple[float, float, float, float]] = (),
+                     rules: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The contrasts at which an injected source reaches the verify's thresholds, solved on
     its own image.
 
@@ -443,7 +444,7 @@ def solved_contrasts(clean_img: np.ndarray, inj_img: np.ndarray, rho: float, the
         return out
     if exr is None:
         exr = 1.5 * fwhm
-    sc = _scaled if _scaled is not None else _ScaledImage(clean_img, inj_img, fwhm)
+    sc = _scaled if _scaled is not None else _ScaledImage(clean_img, inj_img, fwhm, rules=rules)
     args = (rho, theta, pxscale, fwhm, exr, srad, exclude_xy, angle_convention, excl_arcs)
     lo, hi = float(a_range[0]), float(a_range[1])
     a_det = _first_crossing(lambda a: _detected(*sc.snr(a, *args), fap), lo, hi, n_grid)
@@ -558,13 +559,14 @@ def stim_fap(stim: np.ndarray, x: float, y: float, rho_px: float, fwhm: float,
              keepout: Optional[float] = None, *,
              exclude_xy: Sequence[Tuple[float, float]] = (),
              excl_arcs: Sequence[Tuple[float, float, float, float]] = (), pxscale: Optional[float] = None,
-             angle_convention: str = "pa") -> Tuple[float, float]:
+             angle_convention: str = "pa", pixel_mask: Optional[np.ndarray] = None) -> Tuple[float, float]:
     """Empirical STIM FAP (verify 594-602): the value at the rounded source pixel
     ranked against the annulus ``|r - rho_px| <= fwhm`` (finite pixels farther
     than ``keepout`` (default ``1.5 fwhm``) from the source and from every
     ``exclude_xy`` position: other sources, which are not noise).  ``excl_arcs``
     (with ``pxscale``) drops the pixels in those arcs too, the ADI sidelobes the
-    source's ring left out (:func:`ring_snr`).  Returns ``(stim_value, fraction >=
+    source's ring left out (:func:`ring_snr`).  ``pixel_mask`` (True = left out, the run's
+    disk mask) drops its pixels, as every noise ring does.  Returns ``(stim_value, fraction >=
     value)``."""
     ny, nx = stim.shape
     cx, cy = star_center(stim.shape)
@@ -580,6 +582,8 @@ def stim_fap(stim: np.ndarray, x: float, y: float, rho_px: float, fwhm: float,
         ann &= np.hypot(xx - ex, yy - ey) > keepout
     if len(excl_arcs) and pxscale is not None:
         ann &= ~_in_arcs(xx, yy, _arc_regions(excl_arcs, pxscale, fwhm, cx, cy, angle_convention), cx, cy)
+    if pixel_mask is not None and np.shape(pixel_mask) == stim.shape:
+        ann &= ~np.asarray(pixel_mask, bool)
     if _metrics._RING_RECORDER is not None:
         _metrics._ring_emit({"fn": "stim_fap", "shape": tuple(stim.shape), "center": (float(cx), float(cy)),
                              "x": float(sx), "y": float(sy), "r": float(rho_px), "fwhm": float(fwhm),
@@ -595,25 +599,26 @@ def stim_fap(stim: np.ndarray, x: float, y: float, rho_px: float, fwhm: float,
 
 def bootstrap_nights(stack: np.ndarray, weights: np.ndarray, rho: float, theta: float,
                      pxscale: float, fwhm: float, srad: float = 1.5, n_boot: int = 500,
-                     rng: Optional[np.random.Generator] = None, angle_convention: str = "pa") -> float:
+                     rng: Optional[np.random.Generator] = None, angle_convention: str = "pa",
+                     rules: Optional[Dict[str, Any]] = None) -> float:
     """Bootstrap-over-nights significance (``near2v_boot``, verify 203-214):
     resample the ``nn`` nights with replacement ``n_boot`` times, recombine
     (weighted, no radprof), re-locate the matched-filter peak within ``srad`` and
     record its VALUE; result ``mean / std`` over finite draws (NaN if < 3 finite
     or std = 0).  DEVIATION: the peak value is read directly (the IDL ring
-    exclusion ``exr = srad`` cannot affect it)."""
+    exclusion ``exr = srad`` cannot affect it).  The matched filter is the run's
+    (``rules``, :func:`~klip_tpe.metrics.matched_filter`)."""
     stack = np.asarray(stack, float)
     nn = stack.shape[0]
     if rng is None:
         rng = np.random.default_rng(42)
-    kern = gaussian_kernel(fwhm)
     vals = np.full(int(n_boot), np.nan)
     for b in range(int(n_boot)):
         idx = rng.integers(0, nn, nn)
         cb = combine_nights(stack, weights, idx)
-        A = mf_convolve(cb, fwhm, kern)
+        A = matched_filter(cb, fwhm, rules, rho)
         vals[b] = snr_fap(cb, rho, theta, pxscale, fwhm, exr=srad, srad=srad, mfmap=A,
-                          angle_convention=angle_convention)["peak"]
+                          angle_convention=angle_convention, rules=rules)["peak"]
     g = vals[np.isfinite(vals)]
     if g.size < 3:
         return float("nan")
@@ -635,8 +640,9 @@ def night_subsets(nn: int) -> Dict[str, np.ndarray]:
 def verify_maps(stack: np.ndarray, weights: Optional[np.ndarray] = None, fwhm: Optional[float] = None,
                 flatten: bool = False, *, combined: Optional[np.ndarray] = None) -> Dict[str, Any]:
     """Subset images (weighted combines, verify 545-552), the night-STIM map (555)
-    and, when ``fwhm`` is given, the matched-filter map of every subset.  Empty
-    subsets (nn = 1) give all-NaN images.
+    and, when ``fwhm`` is given, the Gaussian matched-filter map of every subset
+    (``mf``, a look at the subsets: since 2026-11-01 each S/N makes the run's own map,
+    :func:`snr_fap`).  Empty subsets (nn = 1) give all-NaN images.
 
     ``flatten`` applies :func:`radprof` to each combine, as the IDL does; off by
     default so the subsets match what the run scored.  ``combined``, an image of the
@@ -683,7 +689,8 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
                       tap_list: Sequence[float] = DEFAULT_TAP_LIST, rbin_as: Optional[float] = None,
                       angle_convention: str = "pa", return_maps: bool = False,
                       combined: Optional[np.ndarray] = None, combined_inj: Optional[np.ndarray] = None,
-                      path_a: Optional[str] = None, sidelobes=None) -> List[Dict[str, Any]]:
+                      path_a: Optional[str] = None, sidelobes=None,
+                      rules: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Verify candidates on a per-night image stack (``near2_verify``, verify 493-746).
 
     Parameters
@@ -725,6 +732,10 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
         source's Path-A ring left out.  A candidate at a known companion is not left out of
         its own ring as a companion.  Each row adds ``noise``: ``{arc_deg, n_arcs,
         fallback}``.
+    rules
+        the run's ring rules (:func:`~klip_tpe.metrics.ring_rules`): every S/N is the search's
+        (:func:`snr_fap`), with its matched filter and pixel mask, and the STIM annulus and the
+        bootstrap take the mask and the matched filter too.  None: the search metric's defaults.
 
     Returns a list of dicts, one per candidate (``kind='candidate'``) followed
     by one per injected source (``kind='injection'``) when ``injected`` is given.
@@ -758,31 +769,31 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
         rho, theta = float(rho), float(theta)
         noise = None
         if sidelobes is None:
-            # Path A on the combined image (verify 588)
+            # Path A on the combined image (verify 588), the search's S/N under the run's rules
             sa = snr_fap(maps["subsets"]["combined"], rho, theta, pxscale, fwhm, exr, drift_px,
-                         exclude_xy=kxy, mfmap=maps["mf"]["combined"], angle_convention=angle_convention)
+                         exclude_xy=kxy, angle_convention=angle_convention, rules=rules)
             ssub = {name: snr_fap(maps["subsets"][name], rho, theta, pxscale, fwhm, exr, drift_px,
-                                  exclude_xy=kxy, mfmap=maps["mf"][name], angle_convention=angle_convention)["snr"]
+                                  exclude_xy=kxy, angle_convention=angle_convention, rules=rules)["snr"]
                     for name in SUBSET_NAMES}
             arcs = ()
         else:
             # the sidelobe rule: the candidate's own arc and the other known companions'
             others = _without_self(known, rho, theta, pxscale, fwhm, exr, angle_convention)
-            rk = dict(exr=exr, srad=drift_px, exclude_xy=kxy, known=others, angle_convention=angle_convention)
-            sa = ring_snr(maps["subsets"]["combined"], 0, [rho], [theta], pxscale, fwhm, sidelobes,
-                          mfmap=maps["mf"]["combined"], **rk)
+            rk = dict(exr=exr, srad=drift_px, exclude_xy=kxy, known=others, angle_convention=angle_convention,
+                      rules=rules)
+            sa = ring_snr(maps["subsets"]["combined"], 0, [rho], [theta], pxscale, fwhm, sidelobes, **rk)
             ssub = {name: (sa["snr"] if name == "combined" else
-                           ring_snr(maps["subsets"][name], 0, [rho], [theta], pxscale, fwhm, sidelobes,
-                                    mfmap=maps["mf"][name], **rk)["snr"])
+                           ring_snr(maps["subsets"][name], 0, [rho], [theta], pxscale, fwhm, sidelobes, **rk)["snr"])
                     for name in SUBSET_NAMES}
             arcs = sa.get("arcs") or ()
             noise = _noise(sa)
         # Path B: STIM at the nominal (rounded) position with the annulus null (594-602)
         xs, ys = source_xy(rho, theta, pxscale, cx, cy, angle_convention)
         sval, sfap = stim_fap(stim, float(xs[0]), float(ys[0]), rho / pxscale, fwhm, exr, exclude_xy=kxy,
-                              excl_arcs=arcs, pxscale=pxscale, angle_convention=angle_convention)
+                              excl_arcs=arcs, pxscale=pxscale, angle_convention=angle_convention,
+                              pixel_mask=(rules or {}).get("pixel_mask"))
         bsig = bootstrap_nights(stack, w, rho, theta, pxscale, fwhm, drift_px, n_boot, rng,
-                                angle_convention) if (n_boot and nn >= 2) else float("nan")
+                                angle_convention, rules=rules) if (n_boot and nn >= 2) else float("nan")
         part = [ssub[k] for k in SUBSET_NAMES[1:]]
         persist = float(np.nanmin(part)) if np.any(np.isfinite(part)) else float("nan")
         rows.append({"kind": "candidate", "index": c + 1, "rho": rho, "theta": theta,
@@ -806,7 +817,7 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
                                          weights=w[: inj_stack.shape[0]], drift_px=drift_px,
                                          excl_fwhm=excl_fwhm, angle_convention=angle_convention,
                                          fap_list=fap_list, tap_list=tap_list, rbin_as=rbin_as,
-                                         combined=combined_inj, clean=clean, sidelobes=sidelobes)
+                                         combined=combined_inj, clean=clean, sidelobes=sidelobes, rules=rules)
         rows.extend(irows)
         maps["injected"] = imaps
         maps["limits"] = imaps["limits"]
@@ -826,7 +837,8 @@ def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, floa
                       excl_fwhm: float = 1.5, angle_convention: str = "pa",
                       fap_list: Sequence[float] = DEFAULT_FAP_LIST, tap_list: Sequence[float] = DEFAULT_TAP_LIST,
                       rbin_as: Optional[float] = None, combined: Optional[np.ndarray] = None,
-                      clean: Optional[np.ndarray] = None, sidelobes=None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+                      clean: Optional[np.ndarray] = None, sidelobes=None,
+                      rules: Optional[Dict[str, Any]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Injection calibration block (verify 621-735): Path-A S/N / FAP, subset S/N,
     injected-STIM value + annulus FAP per injected source ``(rho, theta,
     contrast)``, then the detection-limit tables from sources with finite
@@ -849,7 +861,8 @@ def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, floa
     ``sidelobes`` (:class:`~klip_tpe.metrics.Sidelobes`): each source's rings leave out the ADI
     arcs of every source of the block and of the known companions, with the farthest fallback
     (:func:`ring_snr`), and its STIM annulus and solved contrasts leave out what its Path-A
-    ring left out.  ``noise`` in each row says how its Path-A ring came out."""
+    ring left out.  ``noise`` in each row says how its Path-A ring came out.  ``rules``: the
+    run's ring rules, as :func:`verify_candidates` takes them."""
     inj_stack = np.asarray(inj_stack, float)
     if inj_stack.ndim == 2:
         inj_stack = inj_stack[None]
@@ -865,7 +878,7 @@ def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, floa
         clean = np.asarray(clean, float)
         if clean.shape != (ny, nx):
             raise ValueError(f"verify_injections: clean image {clean.shape} is not the frame size {(ny, nx)}")
-        scaled = _ScaledImage(clean, maps["subsets"]["combined"], fwhm)
+        scaled = _ScaledImage(clean, maps["subsets"]["combined"], fwhm, rules=rules)
     fap0 = float(list(fap_list)[0])
     items: List[Tuple[Dict[str, Any], Any]] = []
     rows: List[Dict[str, Any]] = []
@@ -875,24 +888,24 @@ def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, floa
         excl = kxy + sxy[:m] + sxy[m + 1:]            # the known sources and the block's others
         if sidelobes is None:
             s = snr_fap(maps["subsets"]["combined"], rho, theta, pxscale, fwhm, exr, drift_px,
-                        exclude_xy=excl, mfmap=maps["mf"]["combined"], angle_convention=angle_convention)
+                        exclude_xy=excl, angle_convention=angle_convention, rules=rules)
             ssub = {name: snr_fap(maps["subsets"][name], rho, theta, pxscale, fwhm, exr, drift_px,
-                                  exclude_xy=excl, mfmap=maps["mf"][name], angle_convention=angle_convention)["snr"]
+                                  exclude_xy=excl, angle_convention=angle_convention, rules=rules)["snr"]
                     for name in SUBSET_NAMES}
             arcs = ()
         else:
-            rk = dict(exr=exr, srad=drift_px, exclude_xy=excl, known=list(known), angle_convention=angle_convention)
+            rk = dict(exr=exr, srad=drift_px, exclude_xy=excl, known=list(known), angle_convention=angle_convention,
+                      rules=rules)
             srho, sth = [float(v[0]) for v in sources], [float(v[1]) for v in sources]
-            s = ring_snr(maps["subsets"]["combined"], m, srho, sth, pxscale, fwhm, sidelobes,
-                         mfmap=maps["mf"]["combined"], **rk)
+            s = ring_snr(maps["subsets"]["combined"], m, srho, sth, pxscale, fwhm, sidelobes, **rk)
             ssub = {name: (s["snr"] if name == "combined" else
-                           ring_snr(maps["subsets"][name], m, srho, sth, pxscale, fwhm, sidelobes,
-                                    mfmap=maps["mf"][name], **rk)["snr"])
+                           ring_snr(maps["subsets"][name], m, srho, sth, pxscale, fwhm, sidelobes, **rk)["snr"])
                     for name in SUBSET_NAMES}
             arcs = tuple(s.get("arcs") or ())
         xs, ys = source_xy(rho, theta, pxscale, cx, cy, angle_convention)
         sval, sfap = stim_fap(maps["stim"], float(xs[0]), float(ys[0]), rho / pxscale, fwhm, exr, exclude_xy=excl,
-                              excl_arcs=arcs, pxscale=pxscale, angle_convention=angle_convention)
+                              excl_arcs=arcs, pxscale=pxscale, angle_convention=angle_convention,
+                              pixel_mask=(rules or {}).get("pixel_mask"))
         row = {"kind": "injection", "index": m + 1, "rho": rho, "theta": theta, "contrast": con,
                "x": s["x"], "y": s["y"], "snr": s["snr"], "fap": s["fap"], "nap": s["nap"],
                "peak": s["peak"], "subsets": ssub, "stim": sval, "stim_fap": sfap}
@@ -901,7 +914,7 @@ def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, floa
         if scaled is not None and np.isfinite(con) and con > 0:
             sol = solved_contrasts(clean, maps["subsets"]["combined"], rho, theta, con, pxscale, fwhm, exr, drift_px,
                                    exclude_xy=excl, fap=fap0, taps=list(tap_list), angle_convention=angle_convention,
-                                   _scaled=scaled, excl_arcs=arcs)
+                                   _scaled=scaled, excl_arcs=arcs, rules=rules)
             row.update(c_det=sol["c_det"], c_tap_solved=list(sol["c_tap"]))
             args = (rho, theta, pxscale, fwhm, exr, drift_px, excl, angle_convention, arcs)
             items.append((row, lambda c, con=con, args=args: _detected(*scaled.snr(c / con, *args), fap0)))

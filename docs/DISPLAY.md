@@ -41,7 +41,13 @@ so the evaluation loop never waits for it.
 | Best (eval *b*) | the incumbent's injected reduction |
 | Stitched best (no inj) / (with inj) | the running stitch over annuli done so far + the incumbent |
 
-**Second row — S/N maps** of the same five images.  Circles mark the injected positions
+A known companion is circled on the images, and its S/N is printed on the two clean ones.  It
+is measured as the search measures, with the run's matched filter, despike, radial band and
+pixel mask.  For a run directory these come from its setup, and the Gaussian of the metric's
+FWHM stands in for a measured kernel.
+
+**Second row — S/N maps** of the same five images, their noise without the run's pixel mask
+(the disk).  Circles mark the injected positions
 with `raw/corr` S/N: *raw* is the S/N in the injected image, *corr* the clean-subtracted
 score (`s_inj − max(s_clean, 0)`) the optimizer maximises.  The panel title carries the
 evaluation's score, `orig / corr`.  A draw scores the median of its sources' values (the mean
@@ -90,6 +96,7 @@ the calibration trials are shown
 ```
 run_dir/
   run_setup.json / run_setup.txt      configuration, space, instrument
+  pixel_mask.fits                     the metric's pixel mask (the disk), which every ring and map leaves out
   results.txt / results.jsonl         one row per evaluation (annulus, index, phase, x, k used, score, raw, wall)
   checkpoint.json                     written after every evaluation -> klip-tpe resume
   checkpoint.prev.json                the save before it (a crash of the machine leaves one of the two)
