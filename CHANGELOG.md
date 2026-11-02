@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased — 2026-11-02 (the FMMF templates turned to each noise sample's azimuth)
+
+- **Under `--metric fmmf` each noise sample is filtered with the template a source there would
+  have** (the NEAR2 session's note of 2026-11-01).  An ADI forward model's self-subtraction
+  lobes lie along the azimuth through the source.  `FMMFSNR` gave each source one template,
+  and `mawet_peak_snr` read the ring's apertures and the band's pixels off the one map that
+  template made, so an aperture 90 deg away saw the lobes along the radius.  Now each
+  aperture takes the template turned by its azimuth from the source, and each band pixel the
+  template turned to its bin of azimuth, half a FWHM of arc wide (`mawet_peak_snr(turn=)`,
+  `metrics.turn_kernel`), normalized again as the source's was.  The source's own peak keeps
+  its map.  On noise smeared 8 to 20 deg along the azimuth, the ring's scatter came within
+  about a tenth of the true scatter of the source's filter, where unturned it was 1.7 to 3
+  times it.  The fallback filters, round, are not turned.  `RunConfig.fmmf_turn` and
+  `FMMFSNR.turn` default to True.  A run saved before resumes with the one map, and NEAR's
+  runs, on `MawetPeakSNR` with a round kernel, are not touched.
+- **`fmmf.fmmf_map` turns its templates the right way.**  Both of its turns went the other way
+  (`scipy.ndimage.rotate` turns clockwise in the image's frame), which mirrored every template
+  but at its own azimuth: a planet 30 to 60 deg from the test source kept about 0.7 of its
+  amplitude, and now 0.95 everywhere.  A pixel at +180 deg of azimuth fell in no bin and stayed
+  NaN, and now falls in the last.  `fmmf.turn_template` turns a template counterclockwise in
+  the image's frame.
+- Not done: a forward model at each aperture, which the note asks for where the PSF or the
+  coronagraph is not round about the star (NIRCam's bars).  Turning is exact only where it is.
+- Tests in `tests/test_fmmf_turn.py`.
+
 ## Unreleased — 2026-11-01 (a saved run keeps its verify, the S/N maps over the mask, and the convergence panels from 0)
 
 - **A run keeps the verify it was made with** (`RunConfig.verify_snr`, `--verify-snr`, the

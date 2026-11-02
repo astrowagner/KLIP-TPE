@@ -37,10 +37,21 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+from scipy import ndimage
 
 from .metrics import Metric, gaussian_kernel, mawet_peak_snr, radprof, source_xy, star_center
 
-__all__ = ["fm_kernel", "fm_kernels", "FMMFSNR", "fmmf_map"]
+__all__ = ["fm_kernel", "fm_kernels", "FMMFSNR", "fmmf_map", "turn_template"]
+
+
+def turn_template(k: np.ndarray, dphi_deg: float, order: int = 1) -> np.ndarray:
+    """``k`` turned by ``dphi_deg`` degrees about its center, counterclockwise in the image's
+    ``(x, y) = (column, row)`` frame, the sense of ``arctan2(y - cy, x - cx)``.  An ADI forward
+    model's template turned by the azimuth from its source to another position is the template
+    a source there would have.  ``scipy.ndimage.rotate`` turns the other way for a positive
+    angle, hence the sign."""
+    return ndimage.rotate(np.asarray(k, float), -float(dphi_deg), reshape=False, order=int(order),
+                          mode="constant", cval=0.0)
 
 
 def fm_kernel(fm_image: np.ndarray, x: float, y: float, size: int, *, zero_mean: bool = True,
@@ -122,6 +133,15 @@ class FMMFSNR(Metric):
     removes a flat pedestal from the template; ``min_snr_px`` rejects an FM stamp whose
     peak is below that many times its own robust scatter (0 = accept any finite stamp).
 
+    ``turn`` (default True): each noise aperture of the ring and each pixel of the radial band
+    is filtered with the source's template turned by its azimuth from the source
+    (:func:`klip_tpe.metrics.turn_kernel`), the template a source there would have.  The
+    self-subtraction lobes of an ADI forward model lie along the azimuth through the source,
+    so read off the one map of the unturned template, an aperture 90 deg away saw them along
+    the radius, and against anisotropic residuals the ring's scatter was not the noise of the
+    source's own filter (NEAR2 note, 2026-11-01).  ``RunConfig.fmmf_turn`` sets it for a run,
+    and a run saved before keeps the one map (``False``).
+
     ``fm_from_difference`` (read by :meth:`klip_tpe.runner.Runner._fm_for`) lets a reducer
     with no analytic KLIP-FM -- this package's pyKLIP, VIP and spaceKLIP backends -- supply
     the *numerical* forward model ``injected - clean`` instead, which is the same thing to
@@ -154,6 +174,8 @@ class FMMFSNR(Metric):
     #: no S/N for a source placed inside this many FWHM of the star (as
     #: :class:`~klip_tpe.metrics.MawetPeakSNR`, which the Runner fits to the injection floor)
     inner_fwhm: float = 1.0
+    #: the noise samples take the source's template turned to their azimuth (see above)
+    turn: bool = True
 
     def _fallback(self, rho_one: float) -> np.ndarray:
         if self.kernel_fn is not None:
@@ -181,12 +203,20 @@ class FMMFSNR(Metric):
     def per_source(self, img_inj, img_clean, rho, theta, fm=None, why: Optional[list] = None) -> np.ndarray:
         img = radprof(img_inj) if self.flatten else np.asarray(img_inj, float)
         ks = self.kernels(fm, rho, theta, shape=np.shape(img))
+        # the forward-modelled templates are turned to each noise sample's azimuth, the
+        # fallbacks (round PSF or Gaussian filters) are not
+        turn = None
+        if self.turn:
+            fmk = fm_kernels(fm, rho, theta, self.pxscale, self.fwhm, size_fwhm=self.size_fwhm,
+                             angle_convention=self.angle_convention, zero_mean=self.zero_mean,
+                             min_snr_px=self.min_snr_px, shape=np.shape(img))
+            turn = [k is not None for k in fmk] if len(fmk) == len(ks) else None
         snr, det = mawet_peak_snr(img, rho, theta, self.pxscale, self.fwhm, kernel=ks,
                                   search_px=self.search_px, excl_fwhm=self.excl_fwhm, known=self.known,
                                   declip_nsig=self.declip_nsig, band_fwhm=self.band_fwhm,
                                   min_ring=self.min_ring, penalty=self.penalty,
                                   pixel_mask=self.pixel_mask, inner_fwhm=self.inner_fwhm,
-                                  angle_convention=self.angle_convention, return_details=True)
+                                  angle_convention=self.angle_convention, return_details=True, turn=turn)
         if why is not None:
             why[:] = [d.get("why") for d in det]
         return snr
@@ -201,6 +231,7 @@ class FMMFSNR(Metric):
                 "declip_nsig": self.declip_nsig, "band_fwhm": self.band_fwhm,
                 "min_ring": self.min_ring, "penalty": self.penalty, "flatten": self.flatten,
                 "inner_fwhm": self.inner_fwhm, "fm_from_difference": self.fm_from_difference,
+                "turn": bool(self.turn),
                 "fm_fraction": round(self.stats["fm"] / n, 4),
                 "n_filtered": self.stats["fm"] + self.stats["fallback"]}
 
@@ -234,16 +265,17 @@ def fmmf_map(image: np.ndarray, fm_image: np.ndarray, sources: Sequence[Any], px
     rho = np.array([s.rho for s in sources], float)
     theta = np.array([s.theta for s in sources], float)
     xs, ys = source_xy(rho, theta, pxscale, cx, cy, angle_convention)
-    # one template per test source, rotated so its star-ward axis points at -x
+    # One template per test source, turned so its star-ward axis points at -x.  Until
+    # 2026-11-01 both turns of this function went the other way (scipy's rotate turns
+    # clockwise in this frame), which mirrored every template but at its own azimuth: a planet
+    # 30 to 60 deg from the test source kept about 0.7 of its amplitude.
     tpl: Dict[float, List[np.ndarray]] = {}
-    from scipy import ndimage
     for r, th, x, y in zip(rho, theta, xs, ys):
         k = fm_kernel(fm, x, y, size, zero_mean=zero_mean, lsq_norm=False)
         if k is None:
             continue
         az = np.degrees(np.arctan2(y - cy, x - cx))
-        tpl.setdefault(round(float(r), 4), []).append(
-            ndimage.rotate(k, -az, reshape=False, order=1, mode="constant", cval=0.0))
+        tpl.setdefault(round(float(r), 4), []).append(turn_template(k, -az))
     if not tpl:
         raise ValueError("no usable forward-modelled templates in fm_image")
     radii = np.array(sorted(tpl), float)
@@ -257,16 +289,17 @@ def fmmf_map(image: np.ndarray, fm_image: np.ndarray, sources: Sequence[Any], px
     amp = np.full((ny, nx), np.nan)
     nth = int(n_theta or max(8, int(round(2 * np.pi * np.max(rr) / (pxscale * fwhm)))))
     azbins = np.linspace(-180.0, 180.0, nth + 1)
+    # each pixel's azimuth bin, the last one closed (a pixel at +180 deg fell in none before)
+    jbin = np.clip(np.floor((az + 180.0) / (360.0 / nth)).astype(int), 0, nth - 1)
     for i, r in enumerate(radii):
         band = (rr >= edges[i]) & (rr < edges[i + 1])
         if not band.any():
             continue
         for j in range(nth):
-            sl = band & (az >= azbins[j]) & (az < azbins[j + 1])
+            sl = band & (jbin == j)
             if not sl.any():
                 continue
-            k = ndimage.rotate(stack[i], (azbins[j] + azbins[j + 1]) / 2.0, reshape=False,
-                               order=1, mode="constant", cval=0.0)
+            k = turn_template(stack[i], (azbins[j] + azbins[j + 1]) / 2.0)
             den = float((k * k).sum())
             if den <= 0:
                 continue
