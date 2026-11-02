@@ -593,6 +593,58 @@ class _TurnedFilter:
         return out
 
 
+class _PlacedFilter:
+    """The matched-filter value at pixels of the image, each with the template ``kernel_at(x, y)``
+    gives for a source there: what ``ndimage.convolve(imz, k, mode="nearest")`` gives at that
+    pixel with that template, one small dot product per sample.  The forward model of a source
+    at each noise aperture (:class:`klip_tpe.fmmf.FMTemplates`).  The templates are square, of
+    an odd size, as a forward model's stamps are."""
+
+    def __init__(self, imz: np.ndarray, kernel_at: Callable[[float, float], Optional[np.ndarray]],
+                 pads: Dict[int, np.ndarray]):
+        self.imz, self.kernel_at, self.pads = imz, kernel_at, pads
+        self._flip: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+
+    def _flipped(self, k: np.ndarray) -> np.ndarray:
+        e = self._flip.get(id(k))
+        if e is None or e[0] is not k:            # the kernel is kept, so its id stays its own
+            e = self._flip[id(k)] = (k, np.asarray(k, float)[::-1, ::-1])
+        return e[1]
+
+    def _pad(self, c: int) -> np.ndarray:
+        if c not in self.pads:                    # the frame padded as mode="nearest" extends it
+            self.pads[c] = np.pad(self.imz, c, mode="edge")
+        return self.pads[c]
+
+    def at(self, x: int, y: int) -> Optional[float]:
+        """The value at pixel ``(x, y)``, None when ``kernel_at`` gives no template there."""
+        k = self.kernel_at(x, y)
+        if k is None:
+            return None
+        K = k.shape[0]
+        return float((self._pad(K // 2)[y:y + K, x:x + K] * self._flipped(k)).sum())
+
+    def band(self, x: np.ndarray, y: np.ndarray, cx: float, cy: float, r: float, az: float,
+             width: float) -> np.ndarray:
+        """Values at pixels ``(x, y)``, in bins of ``width`` radians of azimuth from ``az``, each
+        bin with the template at its center on the circle of radius ``r``, and NaN in a bin
+        ``kernel_at`` gives none for."""
+        x, y = np.asarray(x, int), np.asarray(y, int)
+        dphi = np.angle(np.exp(1j * (np.arctan2(y - cy, x - cx) - az)))
+        b = np.round(dphi / width).astype(int)
+        out = np.full(x.size, np.nan)
+        for bi in np.unique(b):
+            a = az + bi * width
+            k = self.kernel_at(cx + r * np.cos(a), cy + r * np.sin(a))
+            if k is None:
+                continue
+            sel = np.where(b == bi)[0]
+            K = k.shape[0]
+            win = np.lib.stride_tricks.sliding_window_view(self._pad(K // 2), (K, K))
+            out[sel] = np.einsum("nij,ij->n", win[y[sel], x[sel]], self._flipped(k))
+        return out
+
+
 def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                    kernel=None, search_px: float = 1.5,
                    excl_fwhm: float = 1.5, known: Sequence[Tuple[float, float]] = (),
@@ -603,7 +655,8 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                    excl_arcs: Sequence[Tuple[float, float, float, float]] = (),
                    peak_xy: Optional[Sequence[Tuple[float, float]]] = None,
                    exclude_xy: Sequence[Tuple[float, float]] = (), mfmap: Optional[np.ndarray] = None,
-                   turn: Any = None):
+                   turn: Any = None,
+                   templates_at: Optional[Sequence[Optional[Callable[[float, float], Optional[np.ndarray]]]]] = None):
     """Matched-filter Mawet et al. (2014) detection S/N of each source.
 
     * optional single-pixel de-spiking, then convolution with ``kernel`` (default
@@ -657,6 +710,15 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
     ``turn`` every sample is read from the one map, which suits a round kernel.  Not with
     ``mfmap``.
 
+    ``templates_at`` (one entry per source, None or a callable ``(x, y) -> template``): each
+    noise aperture and each bin of the radial band takes the template the callable gives for a
+    source at that pixel, the forward model of a source there, its own PSF, throughput and
+    self-subtraction included (:class:`klip_tpe.fmmf.FMTemplates`, NEAR2 note, 2026-11-01,
+    asked 2).  The band's bins are half a FWHM of arc wide, as under ``turn``, and each takes
+    the template at its center on the ring.  An entry takes the place of ``turn`` for its
+    source, whose own peak keeps the map of its kernel.  A sample the callable gives None for
+    is read off that map.  Not with ``mfmap``.
+
     The IDL ``near2_snrpk`` asked the guard of the located peak instead.  On a clean
     image that peak is whichever noise pixel is highest within ``search_px``, and for a
     source at 1.1 FWHM it lay inside 1 FWHM about half the time, so the clean term, and
@@ -692,6 +754,11 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
         turns = [bool(t) for t in turn]
         if len(turns) != nsrc:
             raise ValueError(f"mawet_peak_snr: {len(turns)} turn flags for {nsrc} sources")
+    placed: List[Any] = [None] * nsrc
+    if templates_at is not None and mfmap is None:
+        placed = list(templates_at)
+        if len(placed) != nsrc:
+            raise ValueError(f"mawet_peak_snr: {len(placed)} templates_at entries for {nsrc} sources")
     _pads: Dict[int, np.ndarray] = {}
 
     def amap(i: int) -> np.ndarray:
@@ -768,9 +835,11 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
         th0 = np.arctan2(py - cy, px - cx)
         vals, valok = [], []
         ring: Optional[List[List[Any]]] = [] if recording else None
-        # a forward model's template, turned for each sample to the azimuth it is taken at
+        # each sample with the forward model of a source there (templates_at), or with the
+        # source's template turned to the azimuth it is taken at (turn)
+        pf = _PlacedFilter(imz, placed[s], _pads) if placed[s] is not None and imz is not None else None
         tf = (_TurnedFilter(imz, kerns[s], np.arctan2(ys[s] - cy, xs[s] - cx), _pads)
-              if turns[s] and imz is not None else None)
+              if pf is None and turns[s] and imz is not None else None)
         for q in range(1, nap):
             th = th0 + q * 2 * np.pi / nap
             xk, yk = int(round(cx + r * np.cos(th))), int(round(cy + r * np.sin(th)))
@@ -793,7 +862,11 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                     ring.append([xk, yk, "arc"])
                 continue
             mok = not (kx.size and np.any(np.hypot(xk - kx, yk - ky) < exr))
-            vals.append(A[yk, xk] if tf is None else tf.at(xk, yk, th - tf.az))
+            if pf is not None:
+                v = pf.at(xk, yk)
+                vals.append(A[yk, xk] if v is None else v)
+            else:
+                vals.append(A[yk, xk] if tf is None else tf.at(xk, yk, th - tf.az))
             valok.append(mok)
             if ring is not None:
                 ring.append([xk, yk, "used" if mok else "known"])
@@ -812,7 +885,14 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
             if arc_px is not None:
                 keep &= ~arc_px
             sel = keep if keep.sum() >= 5 else bnd
-            if tf is None:
+            if pf is not None:
+                byy, bxx = np.nonzero(sel)
+                bvals = pf.band(bxx, byy, cx, cy, r, float(np.arctan2(ys[s] - cy, xs[s] - cx)),
+                                0.5 * fwhm / max(r, 1.0))
+                off = ~np.isfinite(bvals)
+                if off.any():
+                    bvals[off] = A[byy[off], bxx[off]]
+            elif tf is None:
                 bvals = A[sel]
             else:
                 byy, bxx = np.nonzero(sel)
@@ -1547,10 +1627,16 @@ class Objective:
             return float(np.mean(v))
         return float(np.median(v))
 
-    def _fmkw(self, fm) -> Dict:
+    def _fmkw(self, fm, fm_at=None) -> Dict:
         """``fm`` reaches the metric only when it asked for it, so every existing
-        :class:`Metric` keeps its 4-argument signature."""
-        return {"fm": fm} if self.metric.needs_fm else {}
+        :class:`Metric` keeps its 4-argument signature.  ``fm_at``, the forward-model passes at
+        the noise apertures (:class:`klip_tpe.fmmf.FMTemplates`), only when there are some and
+        the metric takes them."""
+        if not self.metric.needs_fm:
+            return {}
+        if fm_at is not None and _takes(self.metric, "fm_at"):
+            return {"fm": fm, "fm_at": fm_at}
+        return {"fm": fm}
 
     def _values(self, img, img_clean, rho, th, kw) -> Tuple[np.ndarray, Optional[List[Optional[str]]]]:
         """The metric's per-source values, and each NaN one's reason when the metric can
@@ -1563,17 +1649,17 @@ class Objective:
         v = self.metric.per_source(img, img_clean, rho, th, why=why, **kw)
         return v, (why if len(why) == len(rho) else None)
 
-    def score_raw(self, img_inj, sources: Sequence[Source], img_clean=None, fm=None) -> ScoreResult:
+    def score_raw(self, img_inj, sources: Sequence[Source], img_clean=None, fm=None, fm_at=None) -> ScoreResult:
         rho = [s.rho for s in sources]
         th = [s.theta for s in sources]
-        raw, wr = self._values(img_inj, img_clean, rho, th, self._fmkw(fm))
+        raw, wr = self._values(img_inj, img_clean, rho, th, self._fmkw(fm, fm_at))
         agg = self._agg(raw)
         return ScoreResult(agg, raw, raw, None, why=None if np.isfinite(agg) else why_failed(raw, wr))
 
-    def score_search(self, img_inj, sources: Sequence[Source], img_clean=None, fm=None) -> ScoreResult:
+    def score_search(self, img_inj, sources: Sequence[Source], img_clean=None, fm=None, fm_at=None) -> ScoreResult:
         rho = [s.rho for s in sources]
         th = [s.theta for s in sources]
-        kw = self._fmkw(fm)
+        kw = self._fmkw(fm, fm_at)
         raw, wr = self._values(img_inj, img_clean, rho, th, kw)
         if not self.effective_clean_subtract:
             # plain metric, or a difference metric that already used the clean image:

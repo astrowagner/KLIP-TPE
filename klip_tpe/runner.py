@@ -46,7 +46,7 @@ import threading
 import time
 import warnings
 from dataclasses import asdict, dataclass, field, fields, replace
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -347,6 +347,18 @@ class RunConfig:
     #: template a source there would have (NEAR2 note, 2026-11-01).  ``False`` reads every
     #: sample off the one map of the unturned template, as runs saved before did and resume.
     fmmf_turn: bool = True
+    #: Under a forward-modelled metric, each noise aperture takes a forward model of its own, from
+    #: a forward-model pass with a source alone on its pixel, and a sample between two apertures,
+    #: as each bin of the radial band, their two models weighted by azimuth
+    #: (:class:`klip_tpe.fmmf.FMTemplates`).  Each sample is then filtered as a source there
+    #: would be, where the PSF or the coronagraph is not round about the star too (NEAR2 note,
+    #: 2026-11-01, asked 2).  For the noise of the source's own filter, turning (``fmmf_turn``)
+    #: stays exact where the noise is round about the star, and this where the noise changes as
+    #: the PSF does.  It costs a pass per aperture, about ``2 pi r / FWHM`` per source, on every
+    #: image the metric scores: the search's draws, the calibration's, the validation's and the
+    #: winner's.  Off by default (Kevin Wagner, 2026-11-02), and runs saved before resume
+    #: without it.
+    fmmf_fm_apertures: bool = False
     inject_inset_fwhm: float = 1.0        # injection band inset from the annulus edges
     pair_area_midpoint: bool = True       # 2 sources -> both at sqrt((r_in^2+r_out^2)/2), 180 deg apart (IDL 2026-09-05)
     #: Every injection of every stage (search, k-scan re-score, calibration, validation,
@@ -531,6 +543,7 @@ class RunConfig:
         d.setdefault("score_floor", None)
         d.setdefault("verify_snr", "idl")
         d.setdefault("fmmf_turn", False)
+        d.setdefault("fmmf_fm_apertures", False)
         return _from_dict_filtered(cls, d)
 
 
@@ -1388,12 +1401,14 @@ class Runner:
             smp.sidelobes = rule
 
     def _install_fmmf_turn(self) -> None:
-        """``RunConfig.fmmf_turn`` on a forward-modelled metric (:class:`klip_tpe.fmmf.FMMFSNR`):
-        whether its noise samples take the source's template turned to their azimuth.  A run
-        saved before 2026-11-01 keeps the one map it was scored with."""
+        """``RunConfig.fmmf_turn`` and ``fmmf_fm_apertures`` on a forward-modelled metric
+        (:class:`klip_tpe.fmmf.FMMFSNR`): whether its noise samples take the source's template
+        turned to their azimuth, and whether each noise aperture takes a forward model of its
+        own.  A run saved before 2026-11-01 keeps the one map it was scored with."""
         m = getattr(self.objective, "metric", None)
         if m is not None and hasattr(m, "turn") and hasattr(m, "needs_fm"):
             m.turn = bool(getattr(self.cfg, "fmmf_turn", True))
+            m.fm_apertures = bool(getattr(self.cfg, "fmmf_fm_apertures", False))
 
     def _ring_rules(self) -> Dict[str, Any]:
         """The search's noise-ring rules (:func:`klip_tpe.metrics.ring_rules`), which the verify,
@@ -2005,7 +2020,8 @@ class Runner:
         forward model, so every other objective keeps its original signature."""
         return {"fm": fm} if getattr(self.objective.metric, "needs_fm", False) else {}
 
-    def _fm_for(self, inj: Optional[EvalImages], clean: Optional[EvalImages] = None) -> Dict[str, Any]:
+    def _fm_for(self, inj: Optional[EvalImages], clean: Optional[EvalImages] = None,
+                cfg: Optional[Config] = None, sources: Optional[Sequence[Source]] = None) -> Dict[str, Any]:
         """The forward model to score this pair of reductions with.
 
         The analytic KLIP-FM image when the reducer produced one; otherwise the
@@ -2016,6 +2032,12 @@ class Runner:
         to the backends with no analytic FM -- this package's pyKLIP, VIP and spaceKLIP
         ones.  Both scoring calls of :meth:`Objective.score_search` get the *same* array, so
         the injected and clean terms are always filtered with identical kernels.
+
+        With ``RunConfig.fmmf_fm_apertures`` and the configuration ``cfg`` the images were
+        reduced with, also ``fm_at``, a :class:`klip_tpe.fmmf.FMTemplates` that makes this
+        configuration's forward model of a source alone at each noise aperture the metric asks
+        for (:meth:`_fm_passes`), at the contrast of ``sources``.  Both scoring calls share it,
+        and with it the passes.
         """
         if not getattr(self.objective.metric, "needs_fm", False) or inj is None:
             return {}
@@ -2024,7 +2046,52 @@ class Runner:
             a, b = np.asarray(inj.image, float), np.asarray(clean.image, float)
             if a.ndim == 2 and a.shape == b.shape:
                 fm = a - b
-        return {"fm": fm}
+        out: Dict[str, Any] = {"fm": fm}
+        if (cfg is not None and fm is not None and getattr(self.objective.metric, "fm_apertures", False)
+                and np.ndim(inj.image) == 2):
+            from .fmmf import FMTemplates
+            cs = [abs(float(s.contrast)) for s in (sources or []) if np.isfinite(s.contrast) and s.contrast]
+            out["fm_at"] = FMTemplates(lambda srcs, cfg=cfg, clean=clean: self._fm_passes(cfg, srcs, clean),
+                                       np.shape(inj.image), self.pxscale,
+                                       contrast=float(np.median(cs)) if cs else float(self.contrast),
+                                       angle_convention=getattr(self.reducer, "angle_convention", "pa"))
+        return out
+
+    def _fm_passes(self, cfg: Config, srcs: Sequence[Source], clean: Optional[EvalImages] = None
+                   ) -> Iterator[Optional[np.ndarray]]:
+        """One forward-model pass of ``cfg`` for each of ``srcs``, a source alone in each, as
+        many at once as the reducer serves, yielded in order as they come: the KLIP-FM image of
+        a clean reduction with that model source, or on a reducer without KLIP-FM the numerical
+        forward model, the reduction with that source injected minus ``clean``.  None for a pass
+        that failed or gave no image, and for every pass when there is neither KLIP-FM nor a
+        clean image to subtract."""
+        srcs = list(srcs)
+        analytic = bool(getattr(self.reducer, "supports_fm", False))
+        if not srcs or (not analytic and (clean is None
+                                          or not getattr(self.objective.metric, "fm_from_difference", True))):
+            for _ in srcs:
+                yield None
+            return
+        if analytic:
+            calls = [lambda s=s, j=j: self._reduce(cfg, None, fm_sources=[s], tag=f"fm_ap{j}")
+                     for j, s in enumerate(srcs)]
+        else:
+            calls = [lambda s=s, j=j: self._reduce(cfg, [s], tag=f"fm_ap{j}_inj") for j, s in enumerate(srcs)]
+        failed: List[BaseException] = []
+        with contextlib.closing(self._run_ordered(calls, self._reduction_window(len(cfg.selected)))) as stream:
+            for _, res in stream:
+                img = None
+                if isinstance(res, BaseException):
+                    failed.append(res)
+                elif analytic:
+                    img = getattr(res, "fm_image", None)
+                else:
+                    a, b = np.asarray(res.image, float), np.asarray(clean.image, float)
+                    img = a - b if a.ndim == 2 and a.shape == b.shape else None
+                yield None if img is None else np.asarray(img, float)
+        if failed:
+            self.log(f"  FMMF: {len(failed)} of {len(srcs)} forward-model passes at the noise apertures failed "
+                     f"({failed[0]!r}), and those apertures take their neighbors' models")
 
     def _score_stack(self, stack: Optional[np.ndarray], parts, sources,
                      fm_stack: Optional[np.ndarray] = None) -> Dict[str, Optional[float]]:
@@ -2322,7 +2389,7 @@ class Runner:
                 if need_clean:
                     clean = self._reduce(cfg, None, tag=tag + "_clean")
             t_reduced = time.time()
-            sr = self._score_images(inj, clean, sources, raw_only)
+            sr = self._score_images(inj, clean, sources, raw_only, cfg=cfg)
             failed = False
         except Exception as exc:  # a failed reduction scores as failed, never as a stale image
             self.log(f"  evaluation failed: {exc!r}")
@@ -2336,10 +2403,11 @@ class Runner:
         return rec, inj, clean
 
     def _score_images(self, inj: EvalImages, clean: Optional[EvalImages], sources: Sequence[Source],
-                      raw_only: bool = False):
+                      raw_only: bool = False, cfg: Optional[Config] = None):
         """The objective on one injected image (and the clean one), as :meth:`evaluate`
-        scores it."""
-        fmkw = self._fm_for(inj, clean)
+        scores it.  ``cfg``: the configuration the images were reduced with, for the
+        forward-model passes at the noise apertures (``RunConfig.fmmf_fm_apertures``)."""
+        fmkw = self._fm_for(inj, clean, cfg=cfg, sources=sources)
         if raw_only:
             return self.objective.score_raw(inj.image, sources, None if clean is None else clean.image, **fmkw)
         return self.objective.score_search(inj.image, sources, None if clean is None else clean.image, **fmkw)
@@ -2533,7 +2601,7 @@ class Runner:
                         raise sr
                 else:
                     inj = res
-                    sr = self._score_images(inj, shared, srcs)
+                    sr = self._score_images(inj, shared, srcs, cfg=cfg)
                 failed = False
             except Exception as exc:                  # noqa: BLE001
                 self.log(f"  evaluation failed: {exc!r}")
@@ -2836,7 +2904,7 @@ class Runner:
                             raise got_cln
                         clean = got_cln
                         r = self.objective.score_search(inj.image, src, None if clean is None else clean.image,
-                                                        **self._fm_for(inj, clean))
+                                                        **self._fm_for(inj, clean, cfg=cfgk, sources=src))
                         vals.append(r.score)
                         whys.append(None if np.isfinite(r.score) else (getattr(r, "why", None) or "score not finite"))
                         # keep the last measurement for the display (on_calibration images)
@@ -3536,7 +3604,7 @@ class Runner:
                             raise res
                         inj = res
                         r = self.objective.score_raw(inj.image, src, None if clean is None else clean.image,
-                                                     **self._fm_for(inj, clean))
+                                                     **self._fm_for(inj, clean, cfg=cfg, sources=src))
                         if not np.isfinite(r.score):
                             vwhy[t] = getattr(r, "why", None) or "score not finite"
                         trials.append(r.score)
@@ -3739,7 +3807,8 @@ class Runner:
                         raise res
                     clean = cleans[k]
                     r = self.objective.score_raw(res.image, plans[k][t], None if clean is None else clean.image,
-                                                 **self._fm_for(res, clean))
+                                                 **self._fm_for(res, clean, cfg=entrants[k][2]["config"],
+                                                                sources=plans[k][t]))
                     scores[k, t] = float(r.score)
                 except Exception as exc:          # noqa: BLE001
                     self.log(f"  validation final round: a trial failed: {exc!r}")
@@ -3826,7 +3895,7 @@ class Runner:
                     if isinstance(res, BaseException):
                         raise res
                     r = self.objective.score_raw(res.image, src, None if clean is None else clean.image,
-                                                 **self._fm_for(res, clean))
+                                                 **self._fm_for(res, clean, cfg=cfg, sources=src))
                     trials.append(float(r.score))
                     imgs.append(res)
                     ps.append([None if not np.isfinite(v) else float(v) for v in r.per_source])

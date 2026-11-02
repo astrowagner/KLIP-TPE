@@ -228,6 +228,27 @@ the PSF and the coronagraph are round about the star. A run saved before keeps t
 `fmmf_map` turns its templates the same way. Until 2026-11-01 it turned them the other way,
 which mirrored each template but at its own azimuth.
 
+A forward model at each aperture (`RunConfig.fmmf_fm_apertures`, `--fmmf-fm-apertures`, off by
+default, NEAR2 note of 2026-11-01, asked 2). Each noise aperture takes the forward model of a
+source alone on its pixel, from a forward-model pass of its own, and a sample between two
+apertures, as each bin of the radial band, their two models weighted by azimuth
+(`klip_tpe.fmmf.FMTemplates`). A run makes the passes with KLIP-FM, or on a backend without it
+as the reduction with the source injected minus the clean one, and the injected and clean
+terms of a score share them. It costs a pass per aperture, about 2πr/FWHM per source, on every
+image the metric scores: the search's draws, the calibration's, the validation's and the
+winner's. The templates are then right for any PSF. On a core elongated along x and fixed in
+the image, with ADI lobes along the azimuth, a planet anywhere on the ring comes back whole to
+within 1 %, against 0.70 to 1.14 with the turned template. The noise of the source's own filter is
+another matter. Turning carries that filter along the ring by rotation, and is exact where the
+noise is round about the star (white noise, residuals smeared along the azimuth). Each
+aperture's own model is exact where the noise changes as the PSF does. In noise striped along
+x, fixed in the image as that PSF is, the ring's RMS noise came out 0.98 to 0.99 of the source
+filter's with the apertures' own models and 0.65 to 0.83 turned. In white noise it came out
+1.00 to 1.01 turned and 0.89 to 1.16 with the apertures' own, whose norm changes along the
+ring. A round PSF measures the same both ways. `fmmf_map(fm_at=...)` takes a forward model per
+bin the same way, and `FMMFSNR.describe()` reports `fm_apertures` and the passes made. Each
+partition's own score (`Runner._score_stack`, for scripts) takes no passes.
+
 ### VIP cubes
 
 VIP keeps cubes as plain arrays: `Dataset(cube, angle_list, texp=...)` is all that is
