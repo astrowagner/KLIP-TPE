@@ -337,9 +337,24 @@ class AnnulusData:
 
     @property
     def replicated(self) -> bool:
+        """Has some reduction parameter a slot of its own per partition?  A partition's
+        selection flag (role ``"selection"``) does not make the reduction parameters
+        per-partition.  Counted, it had a run with global bin, filter, angsep, corr and k print
+        each of them once per partition, and its corner cycle through the partitions' subsets
+        of one landscape (MWC 758 ALES session, 2026-10-31 and 2026-11-02)."""
         r = self.__dict__.get("_replicated")
         if r is None:
-            r = self.__dict__["_replicated"] = any(p.partition is not None for p in self.params)
+            r = self.__dict__["_replicated"] = any(p.partition is not None and p.role == "reduction"
+                                                   for p in self.params)
+        return r
+
+    @property
+    def partitioned(self) -> bool:
+        """Has any parameter a partition, a selection flag included (what ``replicated`` meant
+        before 2026-11-02)?  The k panels show the k each partition used whenever it is."""
+        r = self.__dict__.get("_partitioned")
+        if r is None:
+            r = self.__dict__["_partitioned"] = any(p.partition is not None for p in self.params)
         return r
 
     @property
@@ -1267,7 +1282,7 @@ def panel_k(ax, ad: AnnulusData, current: Optional[int] = None):
         ax.text(0.5, 0.5, "collecting...", ha="center", va="center", transform=ax.transAxes)
         return
     rnd = ad.is_random()
-    per_part = ad.replicated and ("k_klip" in ad.bases or any(isinstance(k, dict) for k in ad.k_used))
+    per_part = ad.partitioned and ("k_klip" in ad.bases or any(isinstance(k, dict) for k in ad.k_used))
     cmap = matplotlib.colormaps.get_cmap("tab10")
     if per_part and ad.partitions:
         inc = ad.inclusion()
@@ -1295,7 +1310,8 @@ def panel_k(ax, ad: AnnulusData, current: Optional[int] = None):
         kc = ad.k_scalar(current)
         if np.isfinite(kc):
             ax.scatter([kc], [ad.y[current]], s=70, marker="s", facecolor="none", edgecolor=CUR_COLOR, lw=1.2, zorder=4)
-    ax.set_xlabel("k_klip (# PCs)" + ("  [median over selected partitions]" if per_part and not ad.replicated else ""))
+    ax.set_xlabel("k_klip (# PCs)" + ("  [median over selected partitions]"
+                                     if not per_part and any(isinstance(k, dict) for k in ad.k_used) else ""))
     ax.set_ylabel("search score")
     ax.set_xlim(0.5, ad.k_hi() + 0.5)
 
@@ -1689,13 +1705,15 @@ def draw_corner(fig, cs: Dict[str, Any], ad: AnnulusData, title: str, rect=(0.06
     open for a warm-up one.  Colour therefore means one thing throughout and the fill means
     another, rather than colour standing in for the top-gamma cut -- which during warm-up
     left a few arbitrary points coloured among grey ones that were no different in kind.
-    ``top_mask`` is still used to decide what survives thinning on a long run."""
+    ``top_mask`` is still used to decide what survives thinning on a long run.
+
+    Returns the cells' axes by ``(row, column)``, empty while collecting."""
     names, lo, hi, X, y = cs["names"], cs["lo"], cs["hi"], cs["X"], cs["y"]
     lo, hi = _widen_flat(lo, hi)
     d = len(names)
     if X.shape[0] < 1 or d == 0:
         fig.text(0.5, 0.5, "collecting...", ha="center", va="center")
-        return
+        return {}
     norm = _score_norm(y, crange)
     cmap = matplotlib.colormaps.get_cmap(SCORE_CMAP)
     warm = np.zeros(len(y), bool) if warm is None else warm
@@ -1706,11 +1724,13 @@ def draw_corner(fig, cs: Dict[str, Any], ad: AnnulusData, title: str, rect=(0.06
     x0, y0, w, h = rect
     gs = GridSpec(d, d, left=x0, bottom=y0, right=x0 + w, top=y0 + h, wspace=0.08, hspace=0.08, figure=fig)
     ms = float(np.clip(np.sqrt(80.0 / max(len(y), 1)), 0.3, 1.0))
+    cells: Dict[Tuple[int, int], Any] = {}
     for i in range(d):          # row (y param)
         for j in range(d):      # col (x param)
             if j > i:
                 continue
             ax = fig.add_subplot(gs[i, j])
+            cells[(i, j)] = ax
             if i == j:
                 bi_v = None if best_pt is None else best_pt[i]
                 cu_v = None if cur_pt is None else cur_pt[i]
@@ -1746,8 +1766,10 @@ def draw_corner(fig, cs: Dict[str, Any], ad: AnnulusData, title: str, rect=(0.06
                 ax.set_ylim(lo[i], hi[i])
             ax.tick_params(labelsize=5.5 if compact else 6)
             if compact:
-                ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(3))
-                ax.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(3))
+                # without each cell's top label, that at the cell's far edge, a cell's last
+                # label and the next cell's first ran into each other
+                ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(3, prune="upper"))
+                ax.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(3, prune="upper"))
             lab = (lambda nm: COL_ABBREV.get(nm, nm)) if compact else (lambda nm: nm)
             lfs = 6.5 if compact else 7.5
             if i < d - 1:
@@ -1772,7 +1794,7 @@ def draw_corner(fig, cs: Dict[str, Any], ad: AnnulusData, title: str, rect=(0.06
         fig.colorbar(sm, cax=cax, orientation="horizontal")
         cax.tick_params(labelsize=6, pad=1)
         fig.text(x0 + 0.5 * w, y0 + h + 0.040, title, fontsize=7.5, ha="center", va="bottom")
-        return
+        return cells
     cax = fig.add_axes([x0 + 0.30 * w, y0 + h + 0.028, 0.70 * w, 0.012])
     fig.colorbar(sm, cax=cax, orientation="horizontal")
     cax.tick_params(labelsize=6, pad=1)
@@ -1781,6 +1803,7 @@ def draw_corner(fig, cs: Dict[str, Any], ad: AnnulusData, title: str, rect=(0.06
     leg = (f"metric: {ad.metric_name}.  color = search score, filled = guided, hollow = warm-up;  square = best,\n"
            "dashed = current, triangle = validation candidate, star = validated winner")
     fig.text(x0, y0 + h + 0.052, leg, fontsize=6.5, va="bottom", color=_grey("#444444", "#bbbbbb"))
+    return cells
 
 
 def _nw_bandwidth(v, lo, hi, ng=24):
@@ -2175,7 +2198,7 @@ def render_kbook(ad: AnnulusData, out_pdf: str) -> str:
             ax = fig.add_subplot(111)
             ev = np.arange(1, ad.n + 1)
             cmap = matplotlib.colormaps.get_cmap("tab10")
-            parts = ad.partitions if (ad.replicated and ad.partitions) else [None]
+            parts = ad.partitions if (ad.partitioned and ad.partitions) else [None]
             for j, pid in enumerate(parts):
                 ks = np.array([ad.k_partition(i, pid) if pid is not None else ad.k_scalar(i) for i in range(ad.n)])
                 if pid is not None:
@@ -2840,27 +2863,114 @@ def _cv(v) -> str:
     return f"{v:.2g}"
 
 
-def _vec_lines(ad: AnnulusData, i: int) -> List[str]:
-    """IDL ``near2m_pnvecstr``: one ``name [v1 v2 ...]`` entry per base parameter (one value
-    per partition, or one value), then k and the included partitions."""
+def _counts(vals) -> str:
+    """``14 x11, - x9``: each value once, in the order it first comes, with how many times."""
+    order: List[str] = []
+    n: Dict[str, int] = {}
+    for v in vals:
+        s = _cv(v)
+        if s not in n:
+            order.append(s)
+            n[s] = 0
+        n[s] += 1
+    return ", ".join(s if n[s] == 1 else f"{s} x{n[s]}" for s in order)
+
+
+def _parts_text(partitions: Sequence[Any], selected: Sequence[Any]) -> Tuple[str, str]:
+    """``("g00 g02 g10 g12-g19", " (11/20)")``: the selected partitions without the prefix they
+    all share, runs of three or more in the partitions' order merged, and how many of how
+    many, the count apart so that a cut keeps it."""
+    names = [str(p) for p in partitions]
+    short, _ = _partition_tick_labels(names)
+    chosen = {str(s) for s in selected}
+    runs: List[List[str]] = []
+    cur: List[str] = []
+    for nm, sh in zip(names, short):
+        if nm in chosen:
+            cur.append(sh)
+        elif cur:
+            runs.append(cur)
+            cur = []
+    if cur:
+        runs.append(cur)
+    items: List[str] = []
+    for r in runs:
+        items += [f"{r[0]}-{r[-1]}"] if len(r) >= 3 else r
+    items += [str(s) for s in selected if str(s) not in names]
+    n_in = len(chosen & set(names)) + sum(str(s) not in names for s in selected)
+    return " ".join(items), f" ({n_in}/{len(names)})"
+
+
+@dataclass
+class _VecItem:
+    """One line of a BEST / TEST block: its forms, the fullest first, and a tail a cut keeps."""
+    forms: List[str]
+    keep: str = ""
+
+
+def _vec_forms(lab: str, vals: Sequence[float]) -> List[str]:
+    """A per-partition vector's forms, the one to show first: up to 8 partitions the values in
+    the partitions' order (``bin [5 7 9]``), past 8 each value once with its count
+    (``k used 14 x11, - x9``), which a long run of values reads better as."""
+    full = f"{lab} [{' '.join(_cv(v) for v in vals)}]"
+    counts = f"{lab} {_counts(vals)}"
+    return [full, counts] if len(vals) <= 8 else [counts, full]
+
+
+def _vec_items(ad: AnnulusData, i: int) -> List[_VecItem]:
+    """IDL ``near2m_pnvecstr``: a line per base parameter, its value, or with a slot per
+    partition its values in the partitions' order (``bin [5 7 9]``) and, shorter, each value
+    once with its count (``bin 5 x2, 9``); then the k each partition used, and the partitions
+    in (``parts g00 g02 g10 g12-g19 (11/20)``).  A base with one slot shows one value, however
+    many partitions there are."""
     if not (0 <= i < ad.n):
         return []
-    out = []
-    parts = ad.partitions if ad.replicated else [None]
+    out: List[_VecItem] = []
     for base in ad.bases:
+        lab = COL_ABBREV.get(base, base)
+        own = any(p.partition is not None for p in ad.params if p.role == "reduction" and p.base == base)
+        if not own:
+            dim = ad.dim_for(base, None)
+            out.append(_VecItem([f"{lab} {_cv(np.nan if dim is None else ad.X[i, dim])}"]))
+            continue
         vals = []
-        for pid in parts:
+        for pid in ad.partitions:
             dim = ad.dim_for(base, pid)
             vals.append(np.nan if dim is None else ad.X[i, dim])
-        out.append(f"{COL_ABBREV.get(base, base)} [{' '.join(_cv(v) for v in vals)}]")
+        out.append(_VecItem(_vec_forms(lab, vals)))
     kd = ad.k_used[i]
+    klab = "k used" if "k_klip" in ad.bases else "k"
     if isinstance(kd, dict):
-        out.append("k [" + " ".join(_cv(kd.get(str(p), kd.get(p, np.nan))) for p in ad.partitions) + "]")
+        vals = [kd.get(str(p), kd.get(p, np.nan)) for p in ad.partitions]
+        vals = [np.nan if v is None else float(v) for v in vals]
+        out.append(_VecItem(_vec_forms(klab, vals)))
     elif kd is not None:
-        out.append(f"k [{_cv(kd)}]")
+        out.append(_VecItem([f"{klab} {_cv(kd)}"]))
     if ad.multi:
-        out.append("parts " + ",".join(str(p) for p in ad.selected[i]))
+        body, tail = _parts_text(ad.partitions, ad.selected[i])
+        out.append(_VecItem([f"parts {body}{tail}"], keep=tail))
     return out
+
+
+def _vec_lines(ad: AnnulusData, i: int) -> List[str]:
+    """The BEST / TEST lines of eval ``i`` in their fullest forms (:func:`_vec_items`)."""
+    return [it.forms[0] for it in _vec_items(ad, i)]
+
+
+def _cut(s: str, cap: int, keep: str = "") -> str:
+    """``s`` in at most ``cap`` characters, cut after a whole word with "..." and ending on
+    ``keep``."""
+    if len(s) <= cap:
+        return s
+    tail = keep if keep and s.endswith(keep) and cap > len(keep) + 6 else ""
+    body = s[:len(s) - len(tail)] if tail else s
+    room = cap - len(tail) - 4                     # " ..." takes four
+    if room < 1:
+        return s[:max(cap, 0)]
+    head = body[:room + 1]
+    sp = head.rfind(" ")
+    head = head[:sp] if sp > room // 2 else body[:room]
+    return head.rstrip(" ,[") + " ..." + tail
 
 
 def _inj_lines(ad: AnnulusData, i: int, src=None) -> List[str]:
@@ -2892,6 +3002,306 @@ def _text_block(fig, x_lab, x_c1, x_c2, y_top, label, lab_lines, vec_lines, pitc
         ncol = max(ncol, row + 1)
     nrows = max(len(lab_lines) + 1, ncol)
     return y_top - (nrows + 0.6) * pitch
+
+
+def _renderer(fig):
+    """The figure's renderer, an Agg canvas given to a figure that has none (a bare ``Figure()``)."""
+    get = getattr(fig.canvas, "get_renderer", None)
+    if get is None:
+        FigureCanvasAgg(fig)
+        get = fig.canvas.get_renderer
+    return get()
+
+
+def _fit_prop(fig, renderer, s: str, width: float, fs: float) -> str:
+    """``s`` cut with "..." until it is at most ``width`` (figure fraction) wide at ``fs`` points
+    in the proportional font."""
+    W = fig.bbox.width
+    t = fig.text(0, 0, s, fontsize=fs)
+    try:
+        if t.get_window_extent(renderer).width / W <= width:
+            return s
+        lo, hi = 0, len(s)
+        while lo < hi:                             # the longest head that fits with "..."
+            mid = (lo + hi + 1) // 2
+            t.set_text(s[:mid].rstrip() + "...")
+            if t.get_window_extent(renderer).width / W <= width:
+                lo = mid
+            else:
+                hi = mid - 1
+        return s[:lo].rstrip() + "..." if lo > 0 else ""
+    finally:
+        t.remove()
+
+
+class _RhsText:
+    """A block of lines in the panel's upper-right region (elapsed / ETA), centred in its box."""
+
+    def __init__(self, fig, lines: Sequence[str], fs: float = 7.0, gid: str = "rhs:eta"):
+        self.fig, self.fs = fig, fs
+        self.t = fig.text(0, 0, "\n".join(lines), fontsize=fs, va="top", ha="center", linespacing=1.5, gid=gid)
+
+    def size(self, s: float, r) -> Tuple[float, float]:
+        self.t.set_fontsize(max(self.fs * s, 5.0))
+        self.t.set_linespacing(1.5 if s >= 0.85 else 1.3)
+        bb = self.t.get_window_extent(r)
+        return bb.width / self.fig.bbox.width, bb.height / self.fig.bbox.height
+
+    def place(self, x0, y0, x1, y1) -> None:
+        self.t.set_position(((x0 + x1) / 2.0, y1))
+
+
+class _RhsLegend:
+    """The corner's marker key, right-aligned in its box, a line per marker."""
+
+    ENTRIES = (("o", "warm-up / explore"), ("O", "TPE"), ("s", "best"), ("^", "valid"), ("*", "final"))
+
+    def __init__(self, fig, fg: str, fs: float = 6.5):
+        self.fig, self.fs = fig, fs
+        self.texts = [fig.text(0, 0, txt, ha="right", va="center", fontsize=fs, gid="rhs:legend")
+                      for _, txt in self.ENTRIES]
+        self.marks = []
+        for mk, _ in self.ENTRIES:
+            ln = matplotlib.lines.Line2D([0], [0], marker=mk.lower(), ms=5, mfc=fg if mk == "O" else "none", mec=fg,
+                                         ls="none", transform=fig.transFigure, gid="rhs:legend")
+            fig.add_artist(ln)
+            self.marks.append(ln)
+        self.pitch = 0.022
+
+    def size(self, s: float, r) -> Tuple[float, float]:
+        for t in self.texts:
+            t.set_fontsize(max(self.fs * s, 5.0))
+        self.pitch = max(0.022 * s, 0.0155)
+        w = max(t.get_window_extent(r).width for t in self.texts) / self.fig.bbox.width
+        return w + 0.021, len(self.texts) * self.pitch
+
+    def place(self, x0, y0, x1, y1) -> None:
+        for k, (t, ln) in enumerate(zip(self.texts, self.marks)):
+            yy = y1 - (k + 0.5) * self.pitch
+            t.set_position((x1 - 0.016, yy))
+            ln.set_data([x1 - 0.007], [yy])
+
+
+class _RhsAxes:
+    """A panel of the upper-right region: its axes, with the room its title, ticks and labels
+    take around it measured once, so that its whole box is what gets placed."""
+
+    def __init__(self, ax, r, h: float = 0.086, min_w: float = 0.06, pref_w: Optional[float] = None):
+        self.ax, self.h, self.min_w = ax, h, min_w
+        self.pref_w = max(min_w, pref_w or 0.0)       # the width it reads well at (all its tick labels, say)
+        self.need_w = self.pref_w
+        fig = ax.figure
+        W, H = fig.bbox.width, fig.bbox.height
+        tb, pos = ax.get_tightbbox(r), ax.get_position()
+        self.m = (max(pos.x0 - tb.x0 / W, 0.0), max(pos.y0 - tb.y0 / H, 0.0),
+                  max(tb.x1 / W - pos.x1, 0.0), max(tb.y1 / H - pos.y1, 0.0))   # left, bottom, right, top
+        title = ax.title.get_text()
+        self.title_w = ax.title.get_window_extent(r).width / W if title else 0.0
+
+    def size(self, s: float, r) -> Tuple[float, float]:
+        l, b, rr, t = self.m
+        return l + max(self.need_w, self.title_w) + rr, b + max(self.h * s, 0.04) + t
+
+    def place(self, x0, y0, x1, y1) -> None:
+        l, b, rr, t = self.m
+        self.ax.set_position([x0 + l, y0 + b, max(x1 - rr - x0 - l, 0.01), max(y1 - t - y0 - b, 0.01)])
+
+
+def _stair_left(diag: Sequence[Tuple[float, float, float, float]], yb: float, yt: float, x_min: float,
+                padx: float, pady: float) -> float:
+    """The left edge of the room right of the corner's diagonal cells, for a box between ``yb``
+    and ``yt``: past every diagonal cell it would share a height with."""
+    left = x_min
+    for x0, y0, x1, y1 in diag:
+        if y1 + pady > yb and y0 - pady < yt:
+            left = max(left, x1 + padx)
+    return left
+
+
+def _place_rhs(r, eta, legend, panels: Sequence[_RhsAxes], diag, x_min: float, x_right: float, y_top: float,
+               y_bot: float, gap: float = 0.008, padx: float = 0.012,
+               pady: float = 0.010) -> Dict[str, Any]:
+    """Lay the upper-right region out from the corner's diagonal cells: the elapsed / ETA text,
+    the partition panels and the marker key, each by its whole box, so that none crosses a
+    cell, another box or the figure's edge.  The arrangements, the first that fits at the
+    largest scale: the panels and the key down the right and the text beside them, the panels
+    down the right and the text and the key beside them, all in one column with the text and
+    the key side by side on top, and all in one column.  The scale shrinks the fonts, the
+    panels' heights and the key's pitch, from 1 to 0.6.  Returns the boxes placed and the
+    scale."""
+    items = {"eta": eta, "legend": legend}
+    for k, p in enumerate(panels):
+        items[f"panel{k}"] = p
+    pnames = [f"panel{k}" for k in range(len(panels))]
+
+    def lane(names, sizes, right_of, y0):
+        """Stack ``names`` down from ``y0``, each right-aligned to ``right_of(yb, yt)`` and left of
+        the stairs.  None when one does not fit."""
+        out, y = {}, y0
+        for nm in names:
+            w, h = sizes[nm]
+            yb = y - h
+            if yb < y_bot:
+                return None
+            left, right = _stair_left(diag, yb, y, x_min, padx, pady), right_of(yb, y)
+            if right - left < w:
+                return None
+            out[nm] = (left, yb, right, y)
+            y = yb - gap
+        return out
+
+    def beside(placed):
+        """The right edge for a box beside the boxes ``placed``: left of each it shares a height with."""
+        def right_of(yb, yt):
+            x = x_right
+            for x0, y0, x1, y1 in placed.values():
+                if y0 - gap < yt and y1 + gap > yb:
+                    x = min(x, x0 - gap)
+            return x
+        return right_of
+
+    def full(yb, yt):
+        return x_right
+
+    arrangements = [(pnames + ["legend"], ["eta"]), (pnames, ["eta", "legend"])] if panels else [([], ["eta", "legend"])]
+    # the panels at the widths they read well at first, then at the least they can take
+    for s, wide in [(s, True) for s in np.arange(1.0, 0.59, -0.05)] + [(s, False) for s in np.arange(1.0, 0.59, -0.05)]:
+        if not wide and all(p.pref_w <= p.min_w for p in panels):
+            break
+        for p in panels:
+            p.need_w = p.pref_w if wide else p.min_w
+        sizes = {nm: it.size(float(s), r) for nm, it in items.items()}
+        for right_lane, left_lane in arrangements:
+            R = lane(right_lane, sizes, full, y_top)
+            if R is None:
+                continue
+            L = lane(left_lane, sizes, beside(R), y_top)
+            if L is not None:
+                return _rhs_commit(items, {**R, **L}, float(s))
+        # one column: the text and the key side by side on top, then the panels
+        we, he = sizes["eta"]
+        wl, hl = sizes["legend"]
+        sizes["top"] = (we + gap + wl, max(he, hl))
+        R = lane(["top"] + pnames, sizes, full, y_top)
+        if R is not None:
+            x0, y0, x1, y1 = R.pop("top")
+            R["legend"] = (x1 - wl, y1 - hl, x1, y1)
+            R["eta"] = (x0, y1 - he, x1 - wl - gap, y1)
+            return _rhs_commit(items, R, float(s))
+        R = lane(["eta", "legend"] + pnames, sizes, full, y_top)
+        if R is not None:
+            return _rhs_commit(items, R, float(s))
+    # nothing fits at 0.6: one column, the key and then the panels dropped from the bottom up
+    for p in panels:
+        p.need_w = p.min_w
+    sizes = {nm: it.size(0.6, r) for nm, it in items.items()}
+    names = ["eta"] + pnames + ["legend"]
+    while names:
+        R = lane(names, sizes, full, y_top)
+        if R is not None:
+            break
+        names.pop()
+    for nm in items:
+        if nm not in (R or {}):
+            for a in _rhs_artists(items[nm]):
+                a.set_visible(False)
+    return _rhs_commit(items, R or {}, 0.6)
+
+
+def _tick_pitch(ax, r, factor: float) -> float:
+    """``factor`` times the widest x tick label of ``ax``, as a figure fraction: what one label
+    needs along the axis."""
+    labs = [t for t in ax.get_xticklabels() if t.get_text()]
+    if not labs:
+        return 0.0
+    return factor * max(t.get_window_extent(r).width for t in labs) / ax.figure.bbox.width
+
+
+def _fit_partition_ticks(ax_eff, ax_cnt, npart: int, fig) -> None:
+    """Thin the partition panels' tick labels to what their widths hold, as placed: the effect
+    panel keeps every k-th name, the count panel takes integer ticks a label apart."""
+    r = _renderer(fig)
+    labs = [t for t in ax_eff.get_xticklabels() if t.get_text()]
+    if labs:
+        texts = [t.get_text() for t in ax_eff.get_xticklabels()]
+        per = 1.25 * max(t.get_window_extent(r).width for t in labs)
+        w = ax_eff.get_window_extent(r).width
+        k = max(1, int(np.ceil(len(texts) * per / max(w, 1.0))))
+        if k > 1:
+            ax_eff.set_xticklabels([t if j % k == 0 else "" for j, t in enumerate(texts)],
+                                   rotation=labs[0].get_rotation(), fontsize=labs[0].get_fontsize())
+    labs = [t for t in ax_cnt.get_xticklabels() if t.get_text()]
+    if labs and npart > 1:
+        per = 2.2 * max(t.get_window_extent(r).width for t in labs)
+        w = ax_cnt.get_window_extent(r).width
+        if npart * per > w:
+            ax_cnt.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=max(2, int(w / per)), integer=True))
+            ax_cnt.set_xlim(0.5, npart + 0.5)
+
+
+def _rhs_artists(it) -> List[Any]:
+    if isinstance(it, _RhsText):
+        return [it.t]
+    if isinstance(it, _RhsLegend):
+        return list(it.texts) + list(it.marks)
+    return [it.ax]
+
+
+def _rhs_commit(items, boxes, s: float) -> Dict[str, Any]:
+    for nm, b in boxes.items():
+        items[nm].place(*b)
+    return {"boxes": boxes, "scale": s}
+
+
+def _settings_blocks(fig, blocks: Sequence[Tuple[str, List[str], List[_VecItem]]], x_lab: float, x_c1: float,
+                     x_c2: float, x_r: float, y_top: float, y_floor: float, pitch: float, fs: float,
+                     min_pitch: float = 0.0135) -> Tuple[float, Dict[str, Tuple[float, float, float, float]]]:
+    """The BEST / TEST blocks (IDL ``near2m_2col`` with a label column), every line fitted to its
+    column as measured.  ``blocks``: ``[(label, label column lines, items)]``.  The items go in
+    two columns when each has a form that fits its own.  Otherwise each gets a line of its own
+    across both, at a pitch that keeps the blocks above ``y_floor``, as long as that pitch is at
+    least ``min_pitch``.  Whatever still does not fit is cut with "...".  Returns the y under the
+    blocks and each column's box, by the ``gid`` its texts carry."""
+    r = _renderer(fig)
+    probe = fig.text(0, 0, "M" * 40, fontsize=fs, family="monospace")
+    cw = probe.get_window_extent(r).width / 40.0 / fig.bbox.width     # one character, figure fraction
+    probe.remove()
+    pad = 0.8 * cw
+    n1 = int((x_c2 - x_c1 - pad) / cw)
+    n2 = int((x_r - x_c2) / cw)
+    nw = int((x_r - x_c1) / cw)
+
+    def fits(forms, cap):
+        return any(len(f) <= cap for f in forms)
+
+    two = all(fits(it.forms, n1 if k % 2 == 0 else n2) for _, _, items in blocks for k, it in enumerate(items))
+    rows2 = sum(max(len(lab) + 1, -(-len(items) // 2)) + 0.6 for _, lab, items in blocks)
+    rows1 = sum(max(len(lab) + 1, len(items)) + 0.6 for _, lab, items in blocks)
+    room = max(y_top - y_floor, 0.0)
+    if not two and room / max(rows1, 1e-9) < min_pitch:
+        two = True                                 # no room for a line each: two columns, cut
+    rows = rows2 if two else rows1
+    p = min(pitch, room / max(rows, 1e-9))
+    cols = {"settings:lab": (x_lab, y_floor, x_c1 - pad, y_top), "settings:c1": (x_c1, y_floor, x_c2 - pad, y_top),
+            "settings:c2": (x_c2, y_floor, x_r, y_top), "settings:wide": (x_c1, y_floor, x_r, y_top)}
+    y = y_top
+    for label, lab_lines, items in blocks:
+        fig.text(x_lab, y, label, fontsize=fs + 0.5, weight="bold", va="top", gid="settings:lab")
+        for k, t in enumerate(lab_lines):
+            fig.text(x_lab, y - (k + 1) * p, _fit_prop(fig, r, t, x_c1 - pad - x_lab, fs), fontsize=fs, va="top",
+                     gid="settings:lab")
+        for k, it in enumerate(items):
+            if two:
+                row, x, cap, gid = k // 2, (x_c1, x_c2)[k % 2], (n1, n2)[k % 2], ("settings:c1", "settings:c2")[k % 2]
+            else:
+                row, x, cap, gid = k, x_c1, nw, "settings:wide"
+            s = next((f for f in it.forms if len(f) <= cap), None)
+            if s is None:
+                s = _cut(min(it.forms, key=len), cap, it.keep)
+            fig.text(x, y - row * p, s, fontsize=fs, va="top", family="monospace", gid=gid)
+        n = max(len(lab_lines) + 1, -(-len(items) // 2) if two else len(items))
+        y -= (n + 0.6) * p
+    return y, cols
 
 
 def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[str] = None,
@@ -2970,6 +3380,11 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
             ax._no_caption = True
             draw_image(ax, img, ad, title, cmap, note=note, **kw)
             ax.set_title(title, fontsize=7.5)
+            if x0 > xs[0]:
+                # the row's first cell carries the y axis: each cell's own ticks and "arcsec"
+                # stood over the right edge of the cell before it
+                ax.set_ylabel("")
+                ax.tick_params(labelleft=False)
             return ax
 
         # ---- row 1: images ---------------------------------------------------------
@@ -3048,19 +3463,26 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
         if step_label:
             fig.text(lx0, 0.985, step_label, fontsize=8, va="top", color="#00d000")
         pitch, fs = 0.0185, 6.4
-        xlab, xc1, xc2 = hx0 + 0.008, hx0 + 0.118, hx0 + 0.238
-        yb = 0.955
+        xlab, xc1, xc2, xr = hx0 + 0.008, hx0 + 0.118, hx0 + 0.238, hx1 - 0.003
+        # the corner's grid, and its title over its colourbar, which the blocks stay above
+        crect = (hx0, 0.035, hx1 - hx0, 0.635)
+        c_title_top = crect[1] + crect[3] + 0.040 + 1.3 * 7.5 / 72.0 / fig.get_figheight()
+        blocks = []
         if b_ok:
-            yb = _text_block(fig, xlab, xc1, xc2, yb, "BEST",
-                             _inj_lines(ad, bi, images.best_sources), _vec_lines(ad, bi), pitch, fs)
+            blocks.append(("BEST", _inj_lines(ad, bi, images.best_sources), _vec_items(ad, bi)))
         if n_ok:
-            _text_block(fig, xlab, xc1, xc2, yb, "TEST", _inj_lines(ad, i), _vec_lines(ad, i), pitch, fs)
+            blocks.append(("TEST", _inj_lines(ad, i), _vec_items(ad, i)))
+        layout: Dict[str, Any] = {}
+        if blocks:
+            _, layout = _settings_blocks(fig, blocks, xlab, xc1, xc2, xr, 0.955, c_title_top + 0.006, pitch, fs)
         # ---- corner (lower-left triangle of the right region) -----------------------------
-        # One partition at a time, cycling, as IDL does.  Pooling every partition into one
-        # picture overlays landscapes that need not agree -- a parameter can be good on one
-        # night and bad on the next, and the pooled cloud shows a blur that is true of no
-        # night in particular.  ``corner_partition`` selects it: "__cycle__" steps through
-        # by panel, a partition id pins one, None restores the pooled view.
+        # With a slot per partition for some reduction parameter, one partition at a time,
+        # cycling, as IDL does.  Pooling every partition into one picture overlays landscapes
+        # that need not agree -- a parameter can be good on one night and bad on the next, and
+        # the pooled cloud shows a blur that is true of no night in particular.  With global
+        # reduction parameters there is one landscape, and the corner pools it
+        # (``AnnulusData.replicated``).  ``corner_partition`` selects it: "__cycle__" steps
+        # through by panel, a partition id pins one, None restores the pooled view.
         pid = corner_partition
         if pid == "__cycle__":
             pid = (ad.partitions[i % len(ad.partitions)]
@@ -3082,10 +3504,10 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
         else:
             scope = (f"   ({npart} {plabel}s pooled, 1 point per {plabel} per eval)"
                      if ad.replicated and npart > 1 else "")
-        draw_corner(fig, cs, ad, f"S/N landscape -- {stat} S/N{scope}",
-                    rect=(hx0, 0.035, hx1 - hx0, 0.635), warm=warm,
-                    best_pt=_best_pt(ad, cs, pid), cur_pt=cur_pt, cands=_cands(ad, cs, pid), top_mask=top_rows,
-                    compact=True, max_points=CORNER_MAX_POINTS)
+        cells = draw_corner(fig, cs, ad, f"S/N landscape -- {stat} S/N{scope}",
+                            rect=crect, warm=warm,
+                            best_pt=_best_pt(ad, cs, pid), cur_pt=cur_pt, cands=_cands(ad, cs, pid),
+                            top_mask=top_rows, compact=True, max_points=CORNER_MAX_POINTS) or {}
         # ---- upper-right triangle: elapsed/ETA, night panels, legend ------------------------
         tot = elapsed_s + eta_full_s if np.isfinite(elapsed_s) and np.isfinite(eta_full_s) else np.nan
         # A trial's own time: from its dispatch until it was processed (eval), and until its
@@ -3102,31 +3524,50 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
                      "last eval {}  (reduce {})".format(*(_sec(v) for v in tt["last"])),
                      (f"1 done every {loop_s:.1f} s" + (f"  ({flight} in flight)" if flight else ""))
                      if np.isfinite(loop_s) else "1 done every --"]
-        fig.text(hx0 + 0.41 * (hx1 - hx0), 0.668, "\n".join(eta_lines), fontsize=7, va="top", ha="center", linespacing=1.5)
-        px0, px1 = hx0 + 0.50 * (hx1 - hx0) + 0.030, hx1 - 0.004
-        hN, ptop = 0.086, 0.625
+        # Every box of this region is laid out from the corner's diagonal cells as drawn, by its
+        # whole extent (title, ticks and labels included), and shrunk to fit: at fixed figure
+        # fractions the "S/N vs # groups" axes of a 20-group run started inside the third
+        # diagonal cell of a 5-parameter corner (MWC 758 ALES session, 2026-11-02).
+        rend = _renderer(fig)
+        panels: List[_RhsAxes] = []
         if ad.multi:                            # single night: no night effect / S/N vs # nights panels
-            ax = _box(fig, px0, ptop - hN, px1, ptop)
+            prov = (hx0 + 0.05, 0.40, hx1 - 0.01, 0.486)
+            ax = _box(fig, *prov)
             panel_partition_effect(ax, ad)
             ax.set_title("", loc="left")
             ax.set_title(f"{plabel} effect ({'black' if white else 'white'}=in, gray=out)", fontsize=7)
             ax.set_xlabel(plabel); ax.set_ylabel(f"{stat} S/N", fontsize=6.5)
-            nn_top = ptop - hN - 0.052
-            ax = _box(fig, px0, nn_top - hN, px1, nn_top)
+            ax.tick_params(labelsize=6)
+            if npart > 10:
+                ax.set_xticklabels([t.get_text() for t in ax.get_xticklabels()], rotation=90, fontsize=6)
+            ax_eff = ax
+            panels.append(_RhsAxes(ax, rend, pref_w=npart * _tick_pitch(ax, rend, 1.25)))
+            ax = _box(fig, *prov)
             panel_partition_count(ax, ad)
             if ax.get_legend():
                 ax.get_legend().remove()
             ax.set_title("", loc="left")
             ax.set_title(f"S/N vs # {plabel}s", fontsize=7)
             ax.set_xlabel(f"# {plabel}s"); ax.set_ylabel(f"{stat} S/N", fontsize=6.5)
-            yL = nn_top - hN - 0.050
-        else:
-            yL = ptop - 0.010
-        for il, (mk, txt) in enumerate((("o", "warm-up / explore"), ("O", "TPE"), ("s", "best"), ("^", "valid"), ("*", "final"))):
-            yy = yL - il * 0.022
-            fig.text(px1 - 0.020, yy, txt, ha="right", va="center", fontsize=6.5)
-            fig.add_artist(matplotlib.lines.Line2D([px1 - 0.010], [yy], marker=mk.lower(), ms=5, mfc=fg if mk == "O" else "none",
-                                                   mec=fg, ls="none", transform=fig.transFigure))
+            ax.tick_params(labelsize=6)
+            ax_cnt = ax
+            panels.append(_RhsAxes(ax, rend, pref_w=min(npart, 10) * _tick_pitch(ax, rend, 2.2)))
+        eta = _RhsText(fig, eta_lines)
+        legend = _RhsLegend(fig, fg)
+        diag = []
+        for k in range(len(cs["names"])):
+            if (k, k) in cells:
+                pb = cells[(k, k)].get_position()
+                diag.append((pb.x0, pb.y0, pb.x1, pb.y1))
+        rhs = _place_rhs(rend, eta, legend, panels, diag, hx0 + 0.004, hx1 - 0.004,
+                         crect[1] + crect[3] - 0.004, crect[1])
+        if ad.multi:
+            _fit_partition_ticks(ax_eff, ax_cnt, npart, fig)
+        layout.update({f"rhs:{nm}": b for nm, b in rhs["boxes"].items()})
+        layout["rhs:scale"] = rhs["scale"]
+        # each text column's and panel's box, and the panels' axes, for the layout tests
+        fig._klip_layout = layout
+        fig._klip_axes = {f"rhs:panel{k}": p.ax for k, p in enumerate(panels)}
         if out_png:
             os.makedirs(os.path.dirname(os.path.abspath(out_png)), exist_ok=True)
             fig.savefig(out_png, dpi=dpi, facecolor=fig.get_facecolor())
