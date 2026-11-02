@@ -532,6 +532,67 @@ WHY_RING = "fewer than 5 apertures on its ring"
 WHY_NOISE = "no noise samples on its ring or band"
 
 
+def turn_kernel(k: np.ndarray, dphi: float, *, order: int = 3) -> np.ndarray:
+    """A least-squares template ``k = m / sum(m^2)`` turned by ``dphi`` radians about its center,
+    counterclockwise in the image's ``(x, y) = (column, row)`` frame, the sense of
+    ``arctan2(y - cy, x - cx)``, and normalized again as it was: zero-mean when ``k`` was, and
+    ``m' / sum(m'^2)`` for the turned template ``m'``.  An ADI forward model's template, turned
+    by the azimuth from its source to another position on the ring, is the template a source
+    there would have (NEAR2 note, 2026-11-01).  ``scipy.ndimage.rotate`` turns the other way
+    for a positive angle, hence the sign."""
+    k = np.asarray(k, float)
+    s2 = float((k * k).sum())
+    if s2 <= 0 or not np.isfinite(dphi) or dphi == 0.0:
+        return k
+    m = k / s2                                    # the template, from its least-squares filter
+    t = ndimage.rotate(m, -np.degrees(float(dphi)), reshape=False, order=int(order), mode="constant", cval=0.0)
+    if abs(float(k.sum())) <= 1e-9 * float(np.abs(k).sum()):
+        t = t - t.mean()
+    d = float((t * t).sum())
+    return t / d if d > 0 else k
+
+
+class _TurnedFilter:
+    """The matched-filter value of one source's template turned to other positions on the image,
+    each value what ``ndimage.convolve(imz, turned, mode="nearest")`` gives at that pixel, one
+    small dot product instead of a convolution.  Turned templates are kept by angle (to
+    ``1e-6`` rad), since the ring and the band ask the same angles of several pixels."""
+
+    def __init__(self, imz: np.ndarray, kernel: np.ndarray, az: float, pads: Dict[int, np.ndarray]):
+        self.k = np.asarray(kernel, float)
+        self.c = self.k.shape[0] // 2
+        if self.c not in pads:                    # the frame padded as mode="nearest" extends it
+            pads[self.c] = np.pad(imz, self.c, mode="edge")
+        self.pad = pads[self.c]
+        self.az = float(az)
+        self._flip: Dict[int, np.ndarray] = {}
+
+    def _flipped(self, dphi: float) -> np.ndarray:
+        key = int(round(float(dphi) * 1e6))
+        if key not in self._flip:
+            self._flip[key] = turn_kernel(self.k, key * 1e-6)[::-1, ::-1]
+        return self._flip[key]
+
+    def at(self, x: int, y: int, dphi: float) -> float:
+        K = self.k.shape[0]
+        return float((self.pad[y:y + K, x:x + K] * self._flipped(dphi)).sum())
+
+    def band(self, x: np.ndarray, y: np.ndarray, cx: float, cy: float, width: float) -> np.ndarray:
+        """Values at pixels ``(x, y)``, each with the template turned to its azimuth, in bins of
+        ``width`` radians of azimuth, as :func:`klip_tpe.fmmf.fmmf_map` filters by bin."""
+        x, y = np.asarray(x, int), np.asarray(y, int)
+        dphi = np.angle(np.exp(1j * (np.arctan2(y - cy, x - cx) - self.az)))
+        b = np.round(dphi / width).astype(int)
+        out = np.empty(x.size, float)
+        K = self.k.shape[0]
+        win = np.lib.stride_tricks.sliding_window_view(self.pad, (K, K))
+        for bi in np.unique(b):
+            sel = np.where(b == bi)[0]
+            fk = self._flipped(bi * width)
+            out[sel] = np.einsum("nij,ij->n", win[y[sel], x[sel]], fk)
+        return out
+
+
 def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                    kernel=None, search_px: float = 1.5,
                    excl_fwhm: float = 1.5, known: Sequence[Tuple[float, float]] = (),
@@ -541,7 +602,8 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                    angle_convention: str = "pa", return_details: bool = False,
                    excl_arcs: Sequence[Tuple[float, float, float, float]] = (),
                    peak_xy: Optional[Sequence[Tuple[float, float]]] = None,
-                   exclude_xy: Sequence[Tuple[float, float]] = (), mfmap: Optional[np.ndarray] = None):
+                   exclude_xy: Sequence[Tuple[float, float]] = (), mfmap: Optional[np.ndarray] = None,
+                   turn: Any = None):
     """Matched-filter Mawet et al. (2014) detection S/N of each source.
 
     * optional single-pixel de-spiking, then convolution with ``kernel`` (default
@@ -586,6 +648,15 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
     contrasts, :func:`matched_filter`).  The details' ``n_left`` counts the ring's
     apertures left after the exclusions; ``nclean`` is 0 when fewer than 3 are left.
 
+    ``turn`` (True, or one flag per source): the source's kernel is a template in the source's
+    own orientation, an ADI forward model's (:class:`klip_tpe.fmmf.FMMFSNR`).  Each noise
+    aperture then takes the template turned by its azimuth from the source
+    (:func:`turn_kernel`), and each band pixel the template turned to its bin of azimuth, half
+    a FWHM of arc wide, so every sample is filtered as a source there would be (NEAR2 note,
+    2026-11-01).  The source's own peak keeps the map of the unturned template.  Without
+    ``turn`` every sample is read from the one map, which suits a round kernel.  Not with
+    ``mfmap``.
+
     The IDL ``near2_snrpk`` asked the guard of the located peak instead.  On a clean
     image that peak is whichever noise pixel is highest within ``search_px``, and for a
     source at 1.1 FWHM it lay inside 1 FWHM about half the time, so the clean term, and
@@ -613,6 +684,15 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
         kerns = _per_source_kernels(kernel, nsrc, fwhm)
     img, imz = prep["img"], prep.get("imz")
     _amaps: Dict[int, np.ndarray] = {}
+    if turn is None or turn is False or mfmap is not None:
+        turns = [False] * nsrc
+    elif turn is True:
+        turns = [True] * nsrc
+    else:
+        turns = [bool(t) for t in turn]
+        if len(turns) != nsrc:
+            raise ValueError(f"mawet_peak_snr: {len(turns)} turn flags for {nsrc} sources")
+    _pads: Dict[int, np.ndarray] = {}
 
     def amap(i: int) -> np.ndarray:
         if mfmap is not None:
@@ -688,6 +768,9 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
         th0 = np.arctan2(py - cy, px - cx)
         vals, valok = [], []
         ring: Optional[List[List[Any]]] = [] if recording else None
+        # a forward model's template, turned for each sample to the azimuth it is taken at
+        tf = (_TurnedFilter(imz, kerns[s], np.arctan2(ys[s] - cy, xs[s] - cx), _pads)
+              if turns[s] and imz is not None else None)
         for q in range(1, nap):
             th = th0 + q * 2 * np.pi / nap
             xk, yk = int(round(cx + r * np.cos(th))), int(round(cy + r * np.sin(th)))
@@ -710,7 +793,7 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                     ring.append([xk, yk, "arc"])
                 continue
             mok = not (kx.size and np.any(np.hypot(xk - kx, yk - ky) < exr))
-            vals.append(A[yk, xk])
+            vals.append(A[yk, xk] if tf is None else tf.at(xk, yk, th - tf.az))
             valok.append(mok)
             if ring is not None:
                 ring.append([xk, yk, "used" if mok else "known"])
@@ -728,7 +811,12 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                 keep &= (xx - ex[t]) ** 2 + (yy - ey[t]) ** 2 >= exr * exr
             if arc_px is not None:
                 keep &= ~arc_px
-            bvals = A[keep] if keep.sum() >= 5 else A[bnd]
+            sel = keep if keep.sum() >= 5 else bnd
+            if tf is None:
+                bvals = A[sel]
+            else:
+                byy, bxx = np.nonzero(sel)
+                bvals = tf.band(bxx, byy, cx, cy, 0.5 * fwhm / max(r, 1.0))
             if bvals.size >= 5:
                 sd_band, mn_band = float(np.std(bvals, ddof=1)), float(np.mean(bvals))
         nclean, sd_ring, mn_ring = 0, -1.0, 0.0

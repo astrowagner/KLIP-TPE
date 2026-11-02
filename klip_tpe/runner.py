@@ -342,6 +342,11 @@ class RunConfig:
     #: filter alone.  Runs saved before 2026-11-01 resume, re-reduce and verify with ``"idl"``,
     #: and so do ``--from-idl-setup`` runs.
     verify_snr: str = "search"
+    #: Under a forward-modelled metric (``--metric fmmf``, :class:`klip_tpe.fmmf.FMMFSNR`), each
+    #: noise aperture and band pixel takes the source's template turned to its azimuth, the
+    #: template a source there would have (NEAR2 note, 2026-11-01).  ``False`` reads every
+    #: sample off the one map of the unturned template, as runs saved before did and resume.
+    fmmf_turn: bool = True
     inject_inset_fwhm: float = 1.0        # injection band inset from the annulus edges
     pair_area_midpoint: bool = True       # 2 sources -> both at sqrt((r_in^2+r_out^2)/2), 180 deg apart (IDL 2026-09-05)
     #: Every injection of every stage (search, k-scan re-score, calibration, validation,
@@ -525,6 +530,7 @@ class RunConfig:
         # and one saved before 2026-11-01 its negative scores, and its verify
         d.setdefault("score_floor", None)
         d.setdefault("verify_snr", "idl")
+        d.setdefault("fmmf_turn", False)
         return _from_dict_filtered(cls, d)
 
 
@@ -996,6 +1002,7 @@ class Runner:
         self.log = log
         self._apply_sampler_config()
         self._install_sidelobes()
+        self._install_fmmf_turn()
         self.callbacks: List[RunCallback] = list(callbacks)
         self._last_images: Dict[str, Any] = {}
         os.makedirs(run_dir, exist_ok=True)
@@ -1379,6 +1386,14 @@ class Runner:
         smp = getattr(self.sampler, "base", None) or self.sampler
         if hasattr(smp, "sidelobes"):
             smp.sidelobes = rule
+
+    def _install_fmmf_turn(self) -> None:
+        """``RunConfig.fmmf_turn`` on a forward-modelled metric (:class:`klip_tpe.fmmf.FMMFSNR`):
+        whether its noise samples take the source's template turned to their azimuth.  A run
+        saved before 2026-11-01 keeps the one map it was scored with."""
+        m = getattr(self.objective, "metric", None)
+        if m is not None and hasattr(m, "turn") and hasattr(m, "needs_fm"):
+            m.turn = bool(getattr(self.cfg, "fmmf_turn", True))
 
     def _ring_rules(self) -> Dict[str, Any]:
         """The search's noise-ring rules (:func:`klip_tpe.metrics.ring_rules`), which the verify,
@@ -5564,6 +5579,7 @@ class Runner:
         self.cfg = RunConfig.from_dict(st["config"])
         self._apply_sampler_config()
         self._install_sidelobes()
+        self._install_fmmf_turn()
         self.space = SearchSpace.from_dict(
             st["space"], project=project if project is not None else getattr(self.space, "project", None))
         self.rng.bit_generator.state = st["rng_state"]

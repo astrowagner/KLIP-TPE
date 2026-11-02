@@ -217,6 +217,17 @@ were really forward-modelled rather than fallbacks (the per-evaluation k-scan ha
 forward model and always falls back). `klip_tpe.fmmf.fmmf_map` turns a ring of test
 sources into a full-frame FMMF amplitude/S-N map for the final image.
 
+The forward model is not round. Its self-subtraction lobes lie along the azimuth through the
+source. So each noise aperture on the ring, and each pixel of the radial band, is filtered
+with the source's template turned by its azimuth from the source, the template a source
+there would have (`RunConfig.fmmf_turn`, the default since 2026-11-01, NEAR2 note). Read off
+the one map of the unturned template, an aperture 90 deg away saw the lobes along the radius.
+Against residuals smeared 8 to 20 deg along the azimuth, the ring's scatter then came out
+1.7 to 3 times the noise of the source's own filter. Turning is exact only where
+the PSF and the coronagraph are round about the star. A run saved before keeps the one map.
+`fmmf_map` turns its templates the same way. Until 2026-11-01 it turned them the other way,
+which mirrored each template but at its own azimuth.
+
 ### VIP cubes
 
 VIP keeps cubes as plain arrays: `Dataset(cube, angle_list, texp=...)` is all that is
