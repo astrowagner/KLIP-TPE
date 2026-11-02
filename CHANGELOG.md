@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased — 2026-11-02 (the live panel's settings block and right-hand layout)
+
+- **A partition's selection flag no longer makes the reduction parameters per-partition** (the
+  MWC 758 ALES session's note of 2026-11-02, and item 1 of its note of 2026-10-31).
+  `AnnulusData.replicated` counted the `sel_n2_gXX` flags, so with global bin, filter, angsep,
+  corr and k the BEST / TEST blocks printed each of them 20 times, and the corner cycled
+  through the groups' subsets of one landscape.  It now counts reduction parameters only, and
+  `AnnulusData.partitioned` keeps the old meaning for the k panels.  With global reduction
+  parameters the corner pools the landscape, a point per evaluation, and the post-hoc corner
+  and landscape books print one page where they printed one per partition.
+- **The BEST / TEST blocks fit their columns.**  A global parameter prints one value.  Past 8
+  partitions a vector prints each value once with its count (`k used 14 x11, - x9`).  `parts`
+  drops the prefix the partitions share, merges runs and counts
+  (`g00 g02 g10 g12-g19 (11/20)`).  Each line is measured against its column and cut with
+  `...` after a whole word, the count kept.  When two columns do not hold the lines, each takes
+  a line of its own in the room above the corner's title.
+- **The upper-right region is laid out from the corner's cells.**  The elapsed / ETA text, the
+  group effect and S/N vs # groups panels and the legend are placed by their whole boxes,
+  right of the corner's diagonal cells as drawn, and shrink to fit.  The partition panels thin
+  their tick labels to their widths.  At fixed figure fractions the S/N vs # groups axes had
+  sat inside the third diagonal cell of a 5-parameter corner.
+- Two more overlaps the new layout test found.  Each image cell's y ticks and "arcsec" stood
+  over the cell to its left, and only the first cell of a row carries the y axis now.  The
+  corner's edge tick labels ran into the next cell's, and each cell drops its top label.
+- Tests in `tests/test_live_panel_layout.py`: 2 to 20 partitions, 2 to 9 corner parameters,
+  with a slot per partition or without.  No two axes' drawn boxes overlap, and every text lies
+  inside the figure and inside its own column.
+
 ## Unreleased — 2026-11-02 (a forward model at each noise aperture)
 
 - **Under `--metric fmmf`, `--fmmf-fm-apertures` gives each noise aperture a forward model of
