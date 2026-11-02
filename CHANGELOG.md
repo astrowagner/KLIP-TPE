@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased — 2026-11-02 (a forward model at each noise aperture)
+
+- **Under `--metric fmmf`, `--fmmf-fm-apertures` gives each noise aperture a forward model of
+  its own** (`RunConfig.fmmf_fm_apertures`, the NEAR2 session's note of 2026-11-01, asked 2,
+  off unless asked, Kevin Wagner).  Each aperture of a source's ring takes the forward model of
+  a source alone on its pixel, from a forward-model pass of its own, and a sample between two
+  apertures, as each bin of the radial band, their two models weighted by azimuth
+  (`fmmf.FMTemplates`, `fmmf.aperture_templates`, `mawet_peak_snr(templates_at=)`).  The run
+  makes the passes with KLIP-FM, or on a backend without it as the reduction with the source
+  injected minus the clean one, as many at once as the reducer serves, and the injected and
+  clean terms of a score share them.  It costs a pass per aperture, about 2πr/FWHM per source,
+  on every image the metric scores: the search's draws, the calibration's, the validation's
+  and the winner's.
+- The templates are then right for any PSF.  On a core elongated along x and fixed in the image,
+  with ADI lobes along the azimuth, a planet anywhere on the ring comes back whole to within
+  1 %, against 0.70 to 1.14 with the turned template.  For the noise of the source's own filter,
+  turning stays exact where the noise is round about the star, and each aperture's own model is
+  exact where the noise changes as the PSF does.  In noise striped along x as that PSF is, the
+  ring's RMS noise came out 0.98 to 0.99 of the source filter's with the apertures' own models
+  and 0.65 to 0.83 turned.  In white noise, 1.00 to 1.01 turned and 0.89 to 1.16 with the
+  apertures' own, whose norm changes along the ring.  A round PSF measures the same both ways.
+- `fmmf_map(fm_at=)` takes a forward model of its own in each bin of azimuth.  `fmmf.fm_stamp`
+  and `fmmf.template_from_stamp` are `fm_kernel`'s two halves, which it still is.
+  `FMMFSNR.describe()` reports `fm_apertures`, `fm_aperture_passes` and `fm_aperture_empty`.
+  Runs saved before resume without it.
+- Tests in `tests/test_fmmf_apertures.py`.
+
 ## Unreleased — 2026-11-02 (the FMMF templates turned to each noise sample's azimuth)
 
 - **Under `--metric fmmf` each noise sample is filtered with the template a source there would

@@ -1002,6 +1002,14 @@ def _protocol_args(p):
                         "search's own S/N under the run's rules, and every ring and map without the pixel mask). idl "
                         "measures as before 2026-11-01, with the IDL verify's S/N (a Gaussian kernel, no despike or "
                         "radial band) and the pixel mask in the search's rings alone, as --from-idl-setup does")
+    p.add_argument("--fmmf-fm-apertures", action="store_true", default=False,
+                   help="with --metric fmmf, each noise aperture takes a forward model of its own, from a "
+                        "forward-model pass with a source alone there, and a sample between two apertures their two "
+                        "models weighted by azimuth, the template a source there has where the PSF is not round "
+                        "about the star. For the noise of the source's own filter, turning its template (the "
+                        "default) is exact where the noise is round about the star, this where the noise changes "
+                        "as the PSF does. It costs a pass per aperture, about 2 pi r / FWHM per source, on every "
+                        "image the metric scores (default off)")
     p.add_argument("--n-sources", type=int, nargs="+", default=None, metavar="N",
                    help="injected sources per annulus, the last value repeating (default: klip-tpe's rule "
                         "by the annulus' outer edge, and 0 asks for the rule in that annulus). The cap that "
@@ -1137,7 +1145,8 @@ def _protocol_config(a) -> dict:
                 **({"min_r_fwhm": rmin} if rmin is not None else {}),
                 **({"ann_extra": extra} if extra else {}),
                 **({"score_floor": _score_floor(sf)} if sf is not None else {}),
-                **({"verify_snr": a.verify_snr} if getattr(a, "verify_snr", None) else {}))
+                **({"verify_snr": a.verify_snr} if getattr(a, "verify_snr", None) else {}),
+                **({"fmmf_fm_apertures": True} if getattr(a, "fmmf_fm_apertures", False) else {}))
 
 
 def build_near_space(red, a):

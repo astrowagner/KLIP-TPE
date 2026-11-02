@@ -79,10 +79,10 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--verify-n-boot VERIFY_N_BOOT] [--param-verify]
                         [--no-param-verify] [--n-remeasure N]
                         [--score-floor S] [--verify-snr {search,idl}]
-                        [--n-sources N [N ...]] [--min-r-fwhm X] [--n-pv N_PV]
-                        [--pv-divmin PV_DIVMIN] [--candidates]
-                        [--write-setup-files] [--no-setup-files]
-                        [--legacy-stitch] [--batch BATCH]
+                        [--fmmf-fm-apertures] [--n-sources N [N ...]]
+                        [--min-r-fwhm X] [--n-pv N_PV] [--pv-divmin PV_DIVMIN]
+                        [--candidates] [--write-setup-files]
+                        [--no-setup-files] [--legacy-stitch] [--batch BATCH]
                         [--batch-mode {pipeline,sync}]
                         [--edge-padding {between,all}] [--display]
                         [--no-display] [--display-every DISPLAY_EVERY]
@@ -374,6 +374,17 @@ options:
                         with the IDL verify's S/N (a Gaussian kernel, no
                         despike or radial band) and the pixel mask in the
                         search's rings alone, as --from-idl-setup does
+  --fmmf-fm-apertures   with --metric fmmf, each noise aperture takes a
+                        forward model of its own, from a forward-model pass
+                        with a source alone there, and a sample between two
+                        apertures their two models weighted by azimuth, the
+                        template a source there has where the PSF is not round
+                        about the star. For the noise of the source's own
+                        filter, turning its template (the default) is exact
+                        where the noise is round about the star, this where
+                        the noise changes as the PSF does. It costs a pass per
+                        aperture, about 2 pi r / FWHM per source, on every
+                        image the metric scores (default off)
   --n-sources N [N ...]
                         injected sources per annulus, the last value repeating
                         (default: klip-tpe's rule by the annulus' outer edge,
@@ -642,9 +653,9 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--verify] [--no-verify] [--verify-n-boot VERIFY_N_BOOT]
                      [--param-verify] [--no-param-verify] [--n-remeasure N]
                      [--score-floor S] [--verify-snr {search,idl}]
-                     [--n-sources N [N ...]] [--min-r-fwhm X] [--n-pv N_PV]
-                     [--pv-divmin PV_DIVMIN] [--candidates]
-                     [--write-setup-files] [--no-setup-files]
+                     [--fmmf-fm-apertures] [--n-sources N [N ...]]
+                     [--min-r-fwhm X] [--n-pv N_PV] [--pv-divmin PV_DIVMIN]
+                     [--candidates] [--write-setup-files] [--no-setup-files]
                      [--legacy-stitch] [--batch BATCH]
                      [--batch-mode {pipeline,sync}]
                      [--edge-padding {between,all}] [--display] [--no-display]
@@ -936,6 +947,17 @@ options:
                         with the IDL verify's S/N (a Gaussian kernel, no
                         despike or radial band) and the pixel mask in the
                         search's rings alone, as --from-idl-setup does
+  --fmmf-fm-apertures   with --metric fmmf, each noise aperture takes a
+                        forward model of its own, from a forward-model pass
+                        with a source alone there, and a sample between two
+                        apertures their two models weighted by azimuth, the
+                        template a source there has where the PSF is not round
+                        about the star. For the noise of the source's own
+                        filter, turning its template (the default) is exact
+                        where the noise is round about the star, this where
+                        the noise changes as the PSF does. It costs a pass per
+                        aperture, about 2 pi r / FWHM per source, on every
+                        image the metric scores (default off)
   --n-sources N [N ...]
                         injected sources per annulus, the last value repeating
                         (default: klip-tpe's rule by the annulus' outer edge,
