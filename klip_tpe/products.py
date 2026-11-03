@@ -69,7 +69,10 @@ def noise_profile(img: np.ndarray, fwhm: float, rmin: float, rmax: float,
 def throughput_fit(r_s: np.ndarray, k_s: np.ndarray, r_eval: np.ndarray, order: int = 2) -> np.ndarray:
     """Robust polynomial fit of ``log K`` vs separation (``near2m_kfit``): the order is
     reduced until there are enough points, 3-sigma clipped once, and the evaluation
-    is clamped to the sampled radius range.  Fewer than 3 points -> median."""
+    is clamped to the sampled radius range.  Fewer than 3 points -> median.  The order
+    never exceeds the number of distinct radii less one, so samples all at one radius
+    (``--inject-rho``) take order 0, the mean of ``log K``, rather than a fit numpy warns is
+    rank-deficient (NEAR2, 2026-11-02)."""
     r_s, k_s = np.asarray(r_s, float), np.asarray(k_s, float)
     g = np.isfinite(r_s) & np.isfinite(k_s) & (k_s > 0)
     r_s, k_s = r_s[g], k_s[g]
@@ -78,15 +81,20 @@ def throughput_fit(r_s: np.ndarray, k_s: np.ndarray, r_eval: np.ndarray, order: 
         return np.full(r_eval.shape, np.nan)
     if r_s.size < 3:
         return np.full(r_eval.shape, float(np.median(k_s)))
+
+    def _distinct(r):
+        return int(np.unique(np.round(r, 9)).size)
+
     lk = np.log(k_s)
-    o = int(min(order, r_s.size - 1))
+    o = int(max(min(order, r_s.size - 1, _distinct(r_s) - 1), 0))
     coef = np.polyfit(r_s, lk, o)
     res = lk - np.polyval(coef, r_s)
     sd = np.std(res)
     if sd > 0 and r_s.size > o + 2:
         keep = np.abs(res) <= 3 * sd
         if keep.sum() > o + 1:
-            coef = np.polyfit(r_s[keep], lk[keep], o)
+            o2 = int(max(min(o, _distinct(r_s[keep]) - 1), 0))
+            coef = np.polyfit(r_s[keep], lk[keep], o2)
     re = np.clip(r_eval, r_s.min(), r_s.max())
     return np.exp(np.polyval(coef, re))
 

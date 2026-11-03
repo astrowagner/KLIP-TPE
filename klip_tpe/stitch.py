@@ -10,6 +10,9 @@ per-partition stacks) and calls in here for the *how*:
   pads only the edges where two annuli meet (``RunConfig.edge_padding``).
 * :func:`stitch_stacks` -- the same for per-partition stacks onto the union of
   partition ids (NaN where an annulus did not use a partition).
+* :func:`tile_of` / :func:`tile_index` / :func:`stitch_by_tiles` -- which tile holds a
+  radius or a pixel, and maps put together tile by tile with no blending (the annuli' own
+  S/N maps).
 * :func:`seam_pixels` -- pixels inside the searched span still NaN after stitching.
 * :func:`fits_header` / :func:`write_fits` -- provenance headers (``.fits`` or ``.fits.gz``).
 * :func:`write_params_table`, :func:`write_contrast_curve`, :func:`write_setup_file`
@@ -28,6 +31,7 @@ from . import __version__
 from .metrics import star_center
 
 __all__ = ["tile_mask", "stitch_tiles", "stitch_stacks", "seam_pixels", "seam_trim", "annulus_tiles",
+           "tile_of", "tile_index", "stitch_by_tiles",
            "fits_header", "write_fits", "read_fits", "write_params_table", "write_contrast_curve",
            "write_setup_file", "PARAM_COLUMNS"]
 
@@ -137,6 +141,48 @@ def stitch_stacks(stacks: Sequence[Optional[np.ndarray]], part_ids: Sequence[Opt
             num[u][m] += wi * st[j][m]
             den[u][m] += wi
     return num / np.where(den > 0, den, np.nan), union
+
+
+def tile_of(r_px: float, tiles: Sequence[Tuple[float, float]]) -> Optional[int]:
+    """The index of the tile holding radius ``r_px``: ``rin <= r < rout``, the last tile's
+    outer edge included.  None outside every tile."""
+    r = float(r_px)
+    for k, (a, b) in enumerate(tiles):
+        if float(a) <= r < float(b):
+            return k
+    if len(tiles) and abs(r - float(tiles[-1][1])) < 1e-6:
+        return len(tiles) - 1
+    return None
+
+
+def tile_index(shape, tiles: Sequence[Tuple[float, float]]) -> np.ndarray:
+    """Each pixel's tile as :func:`tile_of` gives it for the pixel's radius, -1 outside every
+    tile."""
+    rr = _radius(shape)
+    out = np.full(tuple(shape), -1, int)
+    n = len(tiles)
+    for k, (a, b) in enumerate(tiles):
+        inside = (rr >= float(a)) & ((rr < float(b)) | ((k == n - 1) & (np.abs(rr - float(b)) < 1e-6)))
+        out[inside & (out < 0)] = k
+    return out
+
+
+def stitch_by_tiles(images: Sequence[Optional[np.ndarray]], tiles: Sequence[Tuple[float, float]]) -> np.ndarray:
+    """Each pixel from the image of the tile holding it (:func:`tile_index`), with no blending
+    at the boundaries, for maps that must not be averaged, as the annuli' own S/N maps.  NaN
+    outside every tile, where that tile's image is missing and where it is NaN."""
+    ref = next((im for im in images if im is not None), None)
+    if ref is None:
+        raise ValueError("no images to stitch")
+    shape = np.shape(ref)
+    idx = tile_index(shape, tiles)
+    out = np.full(shape, np.nan)
+    for k, im in enumerate(images):
+        if im is None or np.shape(im) != shape:
+            continue
+        m = idx == k
+        out[m] = np.asarray(im, float)[m]
+    return out
 
 
 def seam_pixels(stitched: np.ndarray, r0: float, r1: float) -> np.ndarray:

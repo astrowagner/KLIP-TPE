@@ -344,7 +344,7 @@ def fit_chain(runner, nodes: Dict[str, Sequence[Source]], labels: Optional[Seque
     zt = runner._tiles(zones)                    # the run's stitch tiles (its zones without overlaps)
     edges = [z[0] for z in zt] + [zt[-1][1]]
     w = runner._stitch_weights(cleans, zones)
-    pads = runner._tile_pads(zt)
+    pads = runner._tile_pads(zt, annuli=zones)
     image = read_fits(os.path.join(runner.run_dir, "klip_stitched.fits"))
     if image is None:
         image = runner._maybe_flatten(stitch_tiles(cleans, zt, w, pads=pads))
@@ -514,7 +514,7 @@ def fit_per_night(runner, chain: Sequence[Source], *, line_pa: Optional[float] =
     zt = runner._tiles(zones)
     edges = [z[0] for z in zt] + [zt[-1][1]]
     w = runner._stitch_weights([d["clean"] for _, d in items], zones)
-    pads = runner._tile_pads(zt)
+    pads = runner._tile_pads(zt, annuli=zones)
     fm_stacks, fm_ids = [], []
     ia_keep = runner.ia
     try:

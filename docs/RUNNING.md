@@ -111,7 +111,8 @@ in order:
   and not the default.  A run resumes with the rings it was saved with.
 * The verify and the candidate search follow the same switch.  Under the rule they take the
   same arcs: Path A and the subsets, the STIM annulus and the solved contrasts of
-  `verify_report.txt` and `stitched_verify_report.txt` (with `rereduce --verify-sources` too),
+  `verify_report.txt`, `stitched_verify_report.txt` and `tile_verify_report.txt` (with
+  `rereduce --verify-sources` too),
   and each candidate's S/N.  Their sources are given, not counted, so where the arcs leave
   fewer than 4 samples the source's own arc narrows to let in the farthest, then the other
   sources' arcs are let in, then the known companions'.  The report says which ring took
@@ -264,15 +265,42 @@ to `annulus10` (58.05-67.36), and the per-annulus lists of `--n-iter`, `--n-init
 for the annuli past their end.  `--use-contrast` does not.  An annulus past its end is
 calibrated, as one given 0 is.  Each annulus is searched, calibrated, validated, gridded and verified over its own zone,
 as any annulus is.  Where two annuli overlap, the stitch takes each radius from the annulus whose
-centre is nearest.  The boundary between their tiles is the midpoint between the centres, with
-the same 2 px blend as an edge between annuli.  Where annuli meet without overlapping, the tile
-edge is their shared edge.  The run's stitch and its per-night cubes, the param maps, the seam
+centre is nearest.  The boundary between their tiles is the midpoint between the centres, and
+the tiles meet there sharply.  The boundary lies inside both zones, so there is no zone edge to
+blend over, and a 2 px blend would give the sources inside it partly to the neighbor's image.
+Where annuli meet without overlapping, the tile edge is their shared edge, with the 2 px blend.
+A run saved before 2026-11-03 keeps the blend it was stitched with, and `--overlap-pads` gives a
+new run that blend.  The run's stitch and its per-night cubes, the param maps, the seam
 patching, the contrast curve (each annulus' section over its tile, with the seam trim at the tile
 edges), `rereduce` and `fit-chain` all use the tiles.  The log lists the zones and tiles at the
 start.  `final_results.json` records both, and `klip_stitched_params.txt` adds the tile columns.
 `rereduce` refuses a run whose recorded tiles differ from those its zones give.  A zone that holds
 another, or the same zone twice, is refused, and so is `--ann-extra` with `--opt-width`.  Without
 `--ann-extra` the tiles are the zones and every product is as before.
+
+### The final stitch's injections and the per-tile measure
+
+The final verify measures the validation sources on the injected stitch,
+`klip_stitched_inj.fits`.  Each annulus' validated injected image holds that annulus' sources
+alone, and with overlapping annuli a source's matched filter and its noise ring take two or
+three annuli' images.  NEAR2's s7 tiles are 4.66 px wide, and its matched filter is 21 px
+across.  Stitched from those images, the stitch held each source in part of its footprint
+only, and the verify measured a dilution of it.  Since 2026-11-03 (NEAR2's s7 note, Kevin Wagner):
+
+* A new run reduces each annulus' winner once more at its end, with every annulus' validation
+  sources, and stitches those images.  The injected stitch is then the injected twin of the
+  clean one, whichever tiles a source's footprint takes.  It costs one reduction per annulus,
+  and none with one annulus.  The log says so, and `klip_stitched_inj.fits` carries
+  `INJALL = 1`.  The annuli's own `best_inj.fits` stay as the validation made them.
+  `--stitch-injections own` stitches each annulus' own, as a run saved before 2026-11-03 does.
+* The per-tile measure (`tile_verify_report.txt`) measures each source and each candidate on the
+  image of the annulus whose tile holds it, as the search and the validation measure an
+  annulus' sources, and names that annulus on its line.  Each source's ring leaves out the
+  other sources that image holds.  A source the tile's annulus did not inject (a run with each
+  annulus' own) is listed with no S/N.  `stitched_verify_report.txt` ends with the two S/N side
+  by side, the stitch's and the tile's.
+* The tile-wise S/N maps (`klip_stitched_snr_tiles.fits`, `klip_stitched_snr_tiles_inj.fits`) put
+  each annulus' S/N map from its own image together by tiles, with no blend.
 
 ### The score floor (`--score-floor`)
 
@@ -469,14 +497,20 @@ So a line subtracted, planets added, or a bad frame left out cost one reduction 
 and kind instead of a new search.
 
 * Each winner is reduced clean, and with the injections of the final verify's calibration
-  block: by default the winner's own validation injections, as in the run.  `--verify-sources
-  FILE` (rho, PA and contrast per line) puts those in instead, all of them into every
-  annulus' injected reduction, each listed under the annulus that holds it.
-* The tiles are stitched with the run's weights (`final_results.json`) and its seam patching.
-  On the run's own frames the products are the run's, to the bit.
+  block: by default the winners' validation injections, as in the run.  For a run made since
+  2026-11-03 that is all of them in every annulus' injected reduction, and for a run saved
+  before, each annulus' own (the final stitch's injections, above).  `--stitch-injections all`
+  or `own` overrides the run's.  `--verify-sources FILE` (rho, PA and contrast per line) puts
+  those in instead, all of them into every annulus' injected reduction, each listed under the
+  annulus whose tile holds it.
+* The tiles are stitched with the run's weights (`final_results.json`), its pads and its seam
+  patching.  On the run's own frames the products are the run's, to the bit.
+  `--overlap-pads` and `--no-overlap-pads` override the run's pads between overlapping annuli,
+  and the stitch is then not the run's.
 * It writes `klip_stitched.fits`, `klip_stitched_snr.fits`, the injected and per-night
-  stitches, `klip_stitched_params.txt`, `stitched_verify_report.txt` (not with `--no-verify`)
-  and `rereduce.json`, the record of the frames, the weights and the injections.
+  stitches, the tile-wise S/N maps, `klip_stitched_params.txt`, `stitched_verify_report.txt`
+  and `tile_verify_report.txt` (not with `--no-verify`) and `rereduce.json`, the record of the
+  frames, the weights, the injections and the pads.
 * The run directory is only read.  An output that already holds a re-reduction is refused
   unless `--overwrite` is given.
 * On the run's own frames it verifies a finished run again with the current verify.  Since
@@ -493,7 +527,8 @@ and kind instead of a new search.
   `--inject-sources` say, and keeps it out of the noise apertures.
 
 From Python, `Runner.resume(run_dir, reducer, objective, sampler, same_frames=False)` with the
-edited reducer, then `runner.rereduce(out_dir, verify_sources=...)`.
+edited reducer, then `runner.rereduce(out_dir, verify_sources=..., stitch_injections=...,
+overlap_pads=...)`.
 
 ## Interruptions
 

@@ -353,7 +353,23 @@ def _library_separations(psflib: str, hdr, n: int) -> Tuple[Optional[List[float]
     return None, "75-mas grid (v1)"
 
 
+class _ThroughputTable:
+    """A measured throughput ``T(r)``: linear between its samples, 1 past the last, clipped to
+    0-1.  A class rather than a closure, so it pickles and the books can be drawn in worker
+    processes (NEAR2, 2026-11-02: ``_throughput_table.<locals>.fn`` did not)."""
+
+    def __init__(self, seps: np.ndarray, thr: np.ndarray):
+        self.seps = np.asarray(seps, float)
+        self.thr = np.asarray(thr, float)
+
+    def __call__(self, r):
+        r = np.asarray(r, float)
+        return np.clip(np.interp(r, self.seps, self.thr, right=1.0), 0.0, 1.0)
+
+
 def _throughput_table(psflib: str) -> Optional[Callable]:
+    """``throughput_merged.csv`` of the PSF library as a :class:`_ThroughputTable`, None
+    without one."""
     p = os.path.join(psflib, "throughput_merged.csv")
     if not os.path.exists(p):
         return None
@@ -367,13 +383,7 @@ def _throughput_table(psflib: str) -> Optional[Callable]:
                 continue
     seps, thr = np.array(seps), np.array(thr)
     o = np.argsort(seps)
-    seps, thr = seps[o], thr[o]
-
-    def fn(r):
-        r = np.asarray(r, float)
-        out = np.interp(r, seps, thr, right=1.0)
-        return np.clip(out, 0.0, 1.0)
-    return fn
+    return _ThroughputTable(seps[o], thr[o])
 
 
 def analytic_throughput(r):

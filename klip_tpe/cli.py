@@ -1033,6 +1033,7 @@ def _protocol_args(p):
     p.add_argument("--edge-padding", choices=("between", "all"), default=None,
                    help="pad annulus edges only where two annuli meet (between, the default) or on every edge "
                         "including the innermost and outermost (all, as the IDL does)")
+    _stitch_args(p)
     p.add_argument("--display", dest="display", action="store_true", default=True,
                    help="live display: per-eval step panels, books, progress movie (default on)")
     p.add_argument("--no-display", dest="display", action="store_false")
@@ -1060,6 +1061,26 @@ def _protocol_args(p):
     live.add_argument("--strict-liveness", dest="liveness_check", action="store_const", const="strict",
                       help="stop before the first evaluation when the pre-flight finds a dimension that "
                            "changes nothing, instead of warning")
+
+
+def _stitch_args(p, rerun: bool = False):
+    """``--stitch-injections`` and ``--overlap-pads``, for a new run (``near``, ``generic``) or,
+    with ``rerun``, for ``rereduce``, where the default is what the run did."""
+    was = ("the run's, all for a run made since 2026-11-03 and own before" if rerun else "all")
+    p.add_argument("--stitch-injections", choices=("all", "own"), default=None,
+                   help="what the final stitch's injected images hold. all: each annulus' winner reduced once "
+                        "more with every annulus' validation sources, so the final verify measures each source on "
+                        "the injected twin of the stitch, whichever tiles its footprint takes. own: each annulus' "
+                        f"validated image, with its own sources only (default: {was})")
+    pads = p.add_mutually_exclusive_group()
+    pads.add_argument("--overlap-pads", dest="overlap_pads", action="store_const", const=True, default=None,
+                      help="pad the stitch's tile edges between overlapping annuli (--ann-extra), as runs saved "
+                           "before 2026-11-03 did" + (" (default: the run's pads)" if rerun else
+                                                      ". Such an edge lies inside both zones, and by default the "
+                                                      "tiles meet sharply there"))
+    pads.add_argument("--no-overlap-pads", dest="overlap_pads", action="store_const", const=False,
+                      help="no pads between overlapping annuli, the default for a new run"
+                           + (". For a run that had them, the stitch is then not the run's" if rerun else ""))
 
 
 def _n_sources(a):
@@ -1146,7 +1167,10 @@ def _protocol_config(a) -> dict:
                 **({"ann_extra": extra} if extra else {}),
                 **({"score_floor": _score_floor(sf)} if sf is not None else {}),
                 **({"verify_snr": a.verify_snr} if getattr(a, "verify_snr", None) else {}),
-                **({"fmmf_fm_apertures": True} if getattr(a, "fmmf_fm_apertures", False) else {}))
+                **({"fmmf_fm_apertures": True} if getattr(a, "fmmf_fm_apertures", False) else {}),
+                **({"stitch_injections": a.stitch_injections} if getattr(a, "stitch_injections", None) else {}),
+                **({"stitch_overlap_pads": bool(a.overlap_pads)} if getattr(a, "overlap_pads", None) is not None
+                   else {}))
 
 
 def build_near_space(red, a):
@@ -1562,7 +1586,9 @@ def cmd_rereduce(a):
         print(f"  verify: --verify-snr {a.verify_snr}, the run's own is {r.cfg.verify_snr}")
         r.cfg.verify_snr = a.verify_snr
     try:
-        r.rereduce(out, verify_sources=vs, verify=not a.no_verify)
+        r.rereduce(out, verify_sources=vs, verify=not a.no_verify,
+                   stitch_injections=getattr(a, "stitch_injections", None),
+                   overlap_pads=getattr(a, "overlap_pads", None))
     except ValueError as exc:
         raise SystemExit(f"rereduce: {exc}")
 
@@ -1862,8 +1888,9 @@ def _build_parser():
     p.add_argument("--run-dir", default="last", help="the finished run (default: the newest on record)")
     p.add_argument("--verify-sources", default=None, metavar="FILE",
                    help="the final verify's injections: one per line, rho (arcsec), PA (deg) and contrast, all of "
-                        "them in every annulus' injected reduction (default: the winners' own validation "
-                        "injections, as in the run)")
+                        "them in every annulus' injected reduction (default: the winners' validation injections, "
+                        "as the run stitched them, see --stitch-injections)")
+    _stitch_args(p, rerun=True)
     p.add_argument("--no-verify", action="store_true", help="the stitch and its S/N map only")
     p.add_argument("--verify-snr", default=None, choices=["search", "idl"],
                    help="how the verify and the S/N map measure (default: as the run did, idl for a run saved "

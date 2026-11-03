@@ -4,7 +4,8 @@ frame of mwc758_ales_repeat: 20 wavelength groups, five global reduction paramet
 * A partition's selection flag does not make the reduction parameters per-partition: global
   bin, filter, angsep, corr and k print once each, and the corner pools the one landscape.
 * The per-group k is each value once with its count, the groups are named without their shared
-  prefix with runs merged, and every line is fitted to its column as measured.
+  prefix with runs merged, and every line is fitted to its column as measured.  The
+  correlation cut prints with 4 decimals (ALES session, 2026-11-03).
 * The upper-right region is laid out from the corner's diagonal cells and each box's whole
   extent: for 2 to 20 partitions and 2 to 9 corner parameters no two axes' boxes overlap, and
   every text lies inside the figure and inside its own column.
@@ -137,10 +138,16 @@ def test_the_settings_lines():
     assert D._parts_text(["n1", "n2", "n3"], ["n1", "n2"]) == ("n1 n2", " (2/3)")
     assert D._counts([14] * 11 + [np.nan] * 9) == "14 x11, - x9"
     assert D._counts([5, 7, 5]) == "5 x2, 7"
+    assert D._cv(0.99331, "corr_thresh") == "0.9933" and D._cv(0.99331) == "0.99"
+    assert D._cv(1.0, "corr_thresh") == "1.0000" and D._cv(np.nan, "corr_thresh") == "-"
+    assert D._counts([0.9933, 0.9933, 0.991], "corr_thresh") == "0.9933 x2, 0.9910"
     ad = _ad(20, 5)
     i = ad.n - 1
     lines = D._vec_lines(ad, i)
-    assert lines[:5] == [f"{lab} {D._cv(ad.X[i, k])}" for k, lab in enumerate(("bin", "filt", "asep", "corr", "k"))]
+    assert lines[:5] == [f"{lab} {D._cv(ad.X[i, k], SPECS[k][0])}"
+                         for k, lab in enumerate(("bin", "filt", "asep", "corr", "k"))]
+    # the correlation cut with 4 decimals: the search's cuts lie between 0.990 and 0.997
+    assert lines[3] == f"corr {ad.X[i, 3]:.4f}" and len(lines[3]) == len("corr 0.9933")
     nsel = len(ad.selected[i])
     pair = [f"14 x{nsel}", f"- x{20 - nsel}"]
     assert lines[5] == "k used " + ", ".join(pair if ad.partitions[0] in ad.selected[i] else pair[::-1])
