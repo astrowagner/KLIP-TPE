@@ -218,6 +218,20 @@ class RunConfig:
         innermost inner edge and outermost outer edge are reduced and stitched as given.
         ``"all"`` pads every edge, as the IDL does.  A run saved before this field existed
         resumes with ``"all"``, so its evaluations stay comparable.
+    stitch_overlap_pads
+        whether the stitch pads a tile edge between two overlapping annuli
+        (``ann_extra``).  Such an edge lies inside both zones, so there is no zone edge to
+        blend over, and a pad would give the sources inside it partly to the neighbor's
+        image.  False (the default): the tiles meet sharply there, and the pads stay where
+        annuli only meet.  A run saved before 2026-11-03 resumes with True, the pads it
+        stitched with.
+    stitch_injections
+        what the final stitch's injected images hold.  ``"all"`` (the default): each
+        annulus' winner is reduced once more at the end with every annulus' validation
+        sources, so the injected stitch is the injected twin of the clean one and the final
+        verify measures each source on it whichever tiles its footprint takes.  ``"own"``:
+        each annulus' validated injected image, with its own sources only, as a run saved
+        before 2026-11-03 resumes.  The annuli' own ``best_inj.fits`` are never changed.
     batch / batch_mode
         ``batch > 1`` keeps that many trials in flight.  ``"pipeline"`` (the default): when
         the oldest trial is in, the next proposal is asked from the history so far and goes
@@ -428,6 +442,8 @@ class RunConfig:
     cand_verify_top: int = 5
     legacy_stitch: bool = False
     edge_padding: str = "between"         # "between" (only where annuli meet) | "all" (every edge, the IDL)
+    stitch_overlap_pads: bool = False     # pad the stitch's tile edges between overlapping annuli
+    stitch_injections: str = "all"        # "all" (every annulus' validation sources in each) | "own"
     partition_weighting: Optional[str] = None
     fm_curve: bool = True
     fm_preview: bool = True              # live KLIP-FM preview at each new best (IDL: 'after 1st best')
@@ -544,6 +560,10 @@ class RunConfig:
         d.setdefault("verify_snr", "idl")
         d.setdefault("fmmf_turn", False)
         d.setdefault("fmmf_fm_apertures", False)
+        # and one saved before 2026-11-03 its stitch: pads between overlapping annuli, and each
+        # annulus' injected image with its own sources
+        d.setdefault("stitch_overlap_pads", True)
+        d.setdefault("stitch_injections", "own")
         return _from_dict_filtered(cls, d)
 
 
@@ -959,6 +979,28 @@ def _core_edits(d: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+def _in_order(stack: Optional[np.ndarray], have: Optional[Sequence[Any]],
+              want: Optional[Sequence[Any]]) -> Optional[np.ndarray]:
+    """A per-partition stack in the partition order ``want``, from the order ``have`` it came in.
+    As it is when either order is unknown or they hold different partitions."""
+    if stack is None or not have or not want:
+        return stack
+    h, w = [str(p) for p in have], [str(p) for p in want]
+    if h == w or sorted(h) != sorted(w) or len(h) != np.shape(stack)[0]:
+        return stack
+    return np.stack([np.asarray(stack)[h.index(p)] for p in w])
+
+
+def _src_key(s: Sequence[float]) -> Tuple[float, float]:
+    """A source's place, ``(rho, PA)`` rounded, to tell whether an image holds it."""
+    return (round(float(s[0]), 6), round(float(s[1]), 4))
+
+
+def _same_sources(a: Sequence[Sequence[float]], b: Sequence[Sequence[float]]) -> bool:
+    """Whether two source lists put sources at the same places."""
+    return sorted(_src_key(s) for s in a) == sorted(_src_key(s) for s in b)
+
+
 def _describe_edits(d: Dict[str, Any]) -> str:
     if not d:
         return "the default frames"
@@ -1183,12 +1225,22 @@ class Runner:
             return [tuple(z) for z in zones]
         return annulus_tiles(zones)
 
-    def _tile_pads(self, zones: Sequence[Tuple[float, float]], pad: float = 2.0) -> List[Tuple[float, float]]:
-        """``(pad_in, pad_out)`` in px for each stitch tile: ``pad`` on an edge between
-        annuli, 0 at the run's innermost and outermost edges (:meth:`_pad_edges`)."""
+    def _tile_pads(self, zones: Sequence[Tuple[float, float]], pad: float = 2.0,
+                   annuli: Optional[Sequence[Tuple[float, float]]] = None) -> List[Tuple[float, float]]:
+        """``(pad_in, pad_out)`` in px for each stitch tile (``zones``, the tiles): ``pad`` on
+        an edge between annuli, 0 at the run's innermost and outermost edges
+        (:meth:`_pad_edges`).  ``annuli``, the annuli' zones the tiles were made from, also
+        gives 0 to an edge between two annuli that overlap, unless
+        :attr:`RunConfig.stitch_overlap_pads`: that edge lies inside both zones."""
+        over = [False] * len(zones)
+        if annuli is not None and len(annuli) == len(zones) and not getattr(self.cfg, "stitch_overlap_pads", True):
+            for k in range(len(annuli) - 1):
+                over[k] = float(annuli[k][1]) > float(annuli[k + 1][0]) + 1e-9
         out = []
-        for a_in, a_out in zones:
+        for k, (a_in, a_out) in enumerate(zones):
             pin, pout = self._pad_edges(float(a_in), float(a_out))
+            pin = pin and not (k > 0 and over[k - 1])
+            pout = pout and not over[k]
             out.append((pad if pin else 0.0, pad if pout else 0.0))
         return out
 
@@ -4650,7 +4702,7 @@ class Runner:
                "IMGTYPE": f"running equal-weight stitch{self._flat_tag}", "EDGES": ",".join(f"{z[0]:.1f}" for z in tiles)
                + f",{tiles[-1][1]:.1f}"}
         hdr.update(self._north_header())
-        pads = self._tile_pads(tiles)
+        pads = self._tile_pads(tiles, annuli=zones)
         st = self._maybe_flatten(stitch_tiles(cleans, tiles, pads=pads))
         files = {"clean": os.path.join(self.run_dir, "klip_stitched_running.fits")}
         _write_fits(files["clean"], st, hdr)
@@ -4848,7 +4900,7 @@ class Runner:
         if not maps:
             return None
         tiles = self._tiles(zones)
-        return stitch_param_maps(maps, tiles, out_dir=self.run_dir, pads=self._tile_pads(tiles, pad=1.0))
+        return stitch_param_maps(maps, tiles, out_dir=self.run_dir, pads=self._tile_pads(tiles, pad=1.0, annuli=zones))
 
     def _candidates_hook(self, ia: int, final: bool = False, stitched: Optional[Dict[str, Any]] = None
                          ) -> Optional[List[Dict[str, Any]]]:
@@ -5056,7 +5108,10 @@ class Runner:
         out = {"annuli": [r.to_dict() for r in results], "seed": self.cfg.seed, "bench_tag": self.cfg.bench_tag}
         stitched = None
         if results and self.cfg.save_fits:
-            stitched = self._guard("final stitch", self._final_stitch, results)
+            # RunConfig.stitch_injections "all": the winners reduced again with every annulus'
+            # validation sources (on failure the stitch takes each annulus' own, and says so)
+            imgs = self._guard("final injections", self._final_inj_images, results)
+            stitched = self._guard("final stitch", self._final_stitch, results, images=imgs)
             if stitched is not None and stitched.get("weights") is not None:
                 out["stitch_weights"] = [float(v) for v in stitched["weights"]]
                 out["stitch_files"] = stitched.get("files", {})
@@ -5111,13 +5166,80 @@ class Runner:
         self.log(f"run complete: {len(results)} annuli, {self.records_count} evaluations")
         self._emit("on_finish")
 
+    def _final_inj_images(self, results: Sequence[AnnulusResult]) -> Optional[Dict[int, Dict[str, Any]]]:
+        """:attr:`RunConfig.stitch_injections` ``"all"``: each annulus' winner reduced once more
+        with every annulus' validation sources, its injected image and per-partition images in
+        place of the validated ones, for the final stitch.  None under ``"own"``, and when each
+        annulus' own injected image already holds them all (a single annulus).  The annuli'
+        ``best_inj.fits`` are left as they are."""
+        if str(getattr(self.cfg, "stitch_injections", "own")).lower() != "all":
+            return None
+        items = [(r, self._annulus_images(r.annulus)) for r in results]
+        items = [(r, d) for r, d in items if d is not None and d.get("clean") is not None]
+        allsrc = [tuple(float(v) for v in s) for _, d in items for s in (d.get("sources") or [])]
+        if not allsrc or all(_same_sources(d.get("sources") or [], allsrc) for _, d in items):
+            return None
+        srcs = [Source(*s) for s in allsrc]
+        self._log_close_pairs([d.get("sources") or [] for _, d in items], self.log)
+        out: Dict[int, Dict[str, Any]] = {}
+        t0 = time.time()
+        ia_keep = self.ia
+        try:
+            for r, d in items:
+                t1 = time.time()
+                self.ia = r.annulus
+                cfg = self._config_from_dict(r.winner_config)
+                # no KLIP-FM pass: the stitch takes the image alone
+                ev = self._reduce(cfg, srcs, tag=f"a{r.annulus + 1}_final_inj", fm_sources=[])
+                if ev.image is None:
+                    raise ValueError(f"annulus {r.annulus + 1}: the winner's reduction returned no image")
+                out[r.annulus] = dict(d, inj=ev.image, inj_stack=_in_order(ev.stack, ev.partitions, d.get("parts")),
+                                      inj_sources=list(allsrc))
+                self.log(f"  annulus {r.annulus + 1}: the winner reduced with all {len(srcs)} validation sources "
+                         f"for the final stitch ({time.time() - t1:.1f} s)")
+        finally:
+            self.ia = ia_keep
+        self.log(f"  final stitch: {len(out)} winner(s) reduced with every annulus' validation sources "
+                 f"({time.time() - t0:.1f} s)")
+        return out
+
+    def _log_close_pairs(self, groups: Sequence[Sequence[Sequence[float]]], log: Callable[[str], None],
+                         within_fwhm: float = 2.0) -> List[Tuple[Tuple[float, float], Tuple[float, float], float]]:
+        """Pairs of sources from different annuli (``groups``, each annulus' ``(rho, PA, ...)``)
+        within ``within_fwhm`` FWHM of each other, logged: in an image that holds both, each
+        adds to the other's S/N.  Returns ``((rho, PA), (rho, PA), separation in FWHM)``."""
+        conv = getattr(self.reducer, "angle_convention", "pa")
+        pts = []
+        for g, srcs in enumerate(groups):
+            for s in srcs:
+                x, y = source_xy([float(s[0])], [float(s[1])], self.pxscale, 0.0, 0.0, conv)
+                pts.append((g, float(s[0]), float(s[1]), float(x[0]), float(y[0])))
+        out = []
+        for i, a in enumerate(pts):
+            for b in pts[i + 1:]:
+                d = float(np.hypot(a[3] - b[3], a[4] - b[4])) / float(self.fwhm)
+                if a[0] != b[0] and d < within_fwhm:
+                    out.append(((a[1], a[2]), (b[1], b[2]), d))
+        if out:
+            log(f"  {len(out)} pair(s) of validation sources from different annuli lie within {within_fwhm:g} FWHM "
+                f"of each other, and each adds to the other's S/N where an image holds both: "
+                + ", ".join(f"{p[0]:.3f}\"/{p[1]:.1f} and {q[0]:.3f}\"/{q[1]:.1f} ({dd:.2f} FWHM)"
+                            for p, q, dd in out[:8]) + (" ..." if len(out) > 8 else ""))
+        return out
+
     def _final_stitch(self, results: Sequence[AnnulusResult], weights: Optional[Sequence[float]] = None,
-                      extra_header: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+                      extra_header: Optional[Dict[str, Any]] = None,
+                      images: Optional[Dict[int, Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
         """The final stitch of the annuli' winner images.  ``weights`` replaces the
         sensitivity weights (:meth:`rereduce` keeps the run's), and ``extra_header`` goes into
-        every FITS header."""
-        from .stitch import seam_pixels, stitch_stacks, stitch_tiles, write_params_table
-        items = [(r, self._annulus_images(r.annulus)) for r in results]
+        every FITS header.  ``images`` replaces :meth:`_annulus_images` for the annuli it holds
+        (:meth:`_final_inj_images`).  Each annulus' ``inj_sources`` says which sources its
+        injected image holds (its own when not given).  Besides the stitches and their S/N
+        maps, writes the tile-wise S/N maps: each annulus' S/N map from its own image, put
+        together by tiles (:func:`~klip_tpe.stitch.stitch_by_tiles`)."""
+        from .stitch import seam_pixels, stitch_by_tiles, stitch_stacks, stitch_tiles, tile_of, write_params_table
+        images = images or {}
+        items = [(r, images.get(r.annulus) or self._annulus_images(r.annulus)) for r in results]
         items = [(r, d) for r, d in items if d is not None and d.get("clean") is not None]
         if not items:
             return None
@@ -5128,7 +5250,7 @@ class Runner:
         tiles = self._tiles(zones)
         edges = [t[0] for t in tiles] + [tiles[-1][1]]
         w = self._stitch_weights(cleans, zones) if weights is None else np.asarray(weights, float)
-        pads = self._tile_pads(tiles)
+        pads = self._tile_pads(tiles, annuli=zones)
         st = stitch_tiles(cleans, tiles, w, pads=pads)
         # seam patching: pixels inside the searched span left NaN -> a re-run of that annulus'
         # winner, its zone padded by 3 px on each edge shared with another annulus
@@ -5174,6 +5296,7 @@ class Runner:
             ttxt = "" if tuple(t) == (float(r.inrad), float(r.outrad)) else f" tile [{t[0]:5.2f}-{t[1]:5.2f}]"
             hist.append(f"  a{r.annulus+1} [{r.inrad:5.1f}-{r.outrad:5.1f}]{ttxt} {ptxt} "
                         f"SNR{r.winner_score:6.2f} c{r.contrast:.2E} n={','.join(r.partitions) or 'all'}")
+        overlap = any(tuple(t) != tuple(z) for t, z in zip(tiles, zones))
         hdr = {"NANN": len(items), "PHASE": "final", "IMGTYPE": f"radially-optimized stitch{self._flat_tag}",
                "LEGACY": int(self.cfg.legacy_stitch), "NSEAM": int(seam.sum()), "NPATCH": npatch,
                "EDGES": ",".join(f"{e:.1f}" for e in edges), "WEIGHTS": ",".join(f"{v:.3f}" for v in w),
@@ -5181,7 +5304,9 @@ class Runner:
                "NITER": str(self.cfg.n_iter), "NINIT": str(self.cfg.n_init), "NVALID": self.cfg.validation.n_valid,
                "NTOP": self.cfg.validation.n_top, "GAMMA": self.cfg.gamma, "NCAND": self.cfg.ncand,
                "SEED": self.cfg.seed, "RUNDIR": os.path.basename(os.path.abspath(self.run_dir)),
-               "OPTWIDTH": int(self.cfg.opt_width)}
+               "OPTWIDTH": int(self.cfg.opt_width),
+               # where annuli overlap: whether their tiles' shared edges were padded
+               **({"OVLPADS": int(bool(getattr(self.cfg, "stitch_overlap_pads", True)))} if overlap else {})}
         hdr.update(self._north_header())
         hdr.update(extra_header or {})
         files = {"clean": os.path.join(self.run_dir, "klip_stitched.fits")}
@@ -5197,10 +5322,16 @@ class Runner:
         allsrc = []
         for _, d in items:
             allsrc.extend(d.get("sources") or [])
+        # the sources each annulus' injected image holds: its own, unless reduced again with all
+        held = [[tuple(float(v) for v in s) for s in (d.get("inj_sources", d.get("sources")) or [])]
+                for _, d in items]
+        inj_all = all(_same_sources(h, allsrc) for h, (_, d) in zip(held, items) if d.get("inj") is not None)
+        hi = None
         if any(d.get("inj") is not None for _, d in items):
             sti = self._maybe_flatten(stitch_tiles([d["inj"] if d.get("inj") is not None else d["clean"]
                                                     for _, d in items], tiles, w, pads=pads))
-            hi = dict(hdr, IMGTYPE=f"validated-winner injected stitch{self._flat_tag}", INJNSRC=len(allsrc))
+            hi = dict(hdr, IMGTYPE=f"validated-winner injected stitch{self._flat_tag}", INJNSRC=len(allsrc),
+                      INJALL=int(inj_all))
             for j, s in enumerate(allsrc):
                 hi[f"INJRHO{j+1}"], hi[f"INJPA{j+1}"] = float(s[0]), float(s[1])
                 if len(s) > 2:
@@ -5233,9 +5364,39 @@ class Runner:
             _write_fits(files[label], cube, hc)
             out[label] = cube
             out["night_ids"] = ids
+        # the annuli as the stitch took them, for the per-tile measure of the final verify
+        annuli = []
+        for (r, d), t, z, h in zip(items, tiles, zones, held):
+            annuli.append({"annulus": int(r.annulus), "tile": (float(t[0]), float(t[1])),
+                           "zone": (float(z[0]), float(z[1])), "clean": self._maybe_flatten(d["clean"]),
+                           "inj": None if d.get("inj") is None else self._maybe_flatten(d["inj"]),
+                           "clean_stack": d.get("clean_stack"), "inj_stack": d.get("inj_stack"),
+                           "parts": d.get("parts"), "inj_sources": h})
+        out["annuli"] = annuli
+        # the tile-wise S/N maps: each annulus' S/N map from its own image, put together by
+        # tiles with no blending (NEAR2 s7 note, 2026-11-02)
+        from .products import snr_widened_header
+        for key, fname, label, what in (("clean", "klip_stitched_snr_tiles.fits", "snr_tiles", "clean"),
+                                        ("inj", "klip_stitched_snr_tiles_inj.fits", "snr_tiles_inj", "injected")):
+            if not any(a[key] is not None for a in annuli) or (key == "inj" and hi is None):
+                continue
+            maps, winfo = [], {"widened": {}}
+            for k, a in enumerate(annuli):
+                if a[key] is None:
+                    maps.append(None)
+                    continue
+                inf: Dict[str, Any] = {}
+                ex = self._inj_xy(a["inj_sources"], a[key].shape) if key == "inj" else []
+                maps.append(self._snr_map(a[key], info=inf, exclude_xy=ex))
+                winfo["widened"].update({rad: hw for rad, hw in (inf.get("widened") or {}).items()
+                                         if tile_of(rad, tiles) == k})
+            ht = dict(hi if key == "inj" else hdr, IMGTYPE=f"tile-wise S/N map ({what}), each annulus' own map by tiles",
+                      **snr_widened_header(winfo))
+            files[label] = os.path.join(self.run_dir, fname)
+            out[label] = stitch_by_tiles(maps, tiles)
+            _write_fits(files[label], out[label], ht, hist)
         # parameters table
         rows = []
-        overlap = any(tuple(t) != tuple(z) for t, z in zip(tiles, zones))
         for (r, d), t in zip(items, tiles):
             rows.append({"ann": r.annulus + 1, "inner_px": r.inrad, "outer_px": r.outrad,
                          "params": r.winner_config.get("params", {}), "best_SNR": r.winner_score,
@@ -5277,8 +5438,12 @@ class Runner:
         """``near2_verify`` with the known sources as candidates and all validated injections
         as the calibration block.  Path A measures the final stitch itself (``klip_stitched.fits``
         and ``klip_stitched_inj.fits``), Path B the stitched per-partition cubes.  ``header``
-        adds lines to the report's header."""
-        from .verify import verify_candidates, write_verify_table
+        adds lines to the report's header.
+
+        The per-tile measure follows (:meth:`_tile_verify`, ``tile_verify_report.txt``): each
+        candidate and source on the image of the annulus whose tile holds it.  The stitched
+        report closes with the two S/N side by side."""
+        from .verify import tile_comparison_lines, verify_candidates, write_verify_table
         stack = stitched.get("nights")
         if stack is None:
             stack = stitched["clean"][None]
@@ -5306,15 +5471,46 @@ class Runner:
                                        path_a=None if clean_img is None else
                                        "the stitched image (klip_stitched.fits, injected klip_stitched_inj.fits)",
                                        sidelobes=self._verify_rule(), rules=self._ring_rules())
+        hdr = dict({"run": os.path.abspath(self.run_dir)}, **(header or {}))
+        tile = self._guard("per-tile verify", self._tile_verify, stitched, known, allsrc, hdr)
         path = os.path.join(self.run_dir, "stitched_verify_report.txt")
-        write_verify_table(path, rows, maps.get("limits"), header=dict({"run": os.path.abspath(self.run_dir)},
-                                                                       **(header or {})))
+        write_verify_table(path, rows, maps.get("limits"), header=hdr,
+                           extra_lines=tile_comparison_lines(rows, tile["rows"]) if tile else ())
         out = {"rows": rows, "limits": maps.get("limits"), "report": path}
+        if tile:
+            out["tiles"] = tile
         self._emit("on_verify", -1, "verify", out)
         return out
 
+    def _tile_verify(self, stitched: Dict[str, Any], known: Sequence[Tuple[float, float]],
+                     sources: Sequence[Sequence[float]], header: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The per-tile measure (:func:`~klip_tpe.verify.verify_tiles`, NEAR2 s7 note,
+        2026-11-02): each candidate and each source on the image of the annulus whose tile
+        holds it, as the stitch took the annulus (``stitched["annuli"]``).  Writes
+        ``tile_verify_report.txt``.  None when there is nothing to measure."""
+        from .verify import verify_tiles, write_verify_table
+        annuli = stitched.get("annuli")
+        if not annuli or not (len(known) or len(sources)):
+            return None
+        rng = np.random.default_rng((int(self.cfg.seed or 0) + 31337 + 104729) % (2 ** 32))
+        rows, maps = verify_tiles(annuli, known, [tuple(float(v) for v in s) for s in sources], self.fwhm,
+                                  self.pxscale, known=known, n_boot=int(self.cfg.verify_n_boot), rng=rng,
+                                  excl_fwhm=self._excl_fwhm(), angle_convention=self.reducer.angle_convention,
+                                  sidelobes=self._verify_rule(), rules=self._ring_rules())
+        if not rows:
+            return None
+        path = os.path.join(self.run_dir, "tile_verify_report.txt")
+        write_verify_table(path, rows, maps.get("limits"), header=header)
+        absent = sum(1 for r in rows if r.get("absent"))
+        if absent:
+            self.log(f"  per-tile verify: {absent} source(s) lie in a tile whose annulus did not inject them "
+                     f"(RunConfig.stitch_injections = {getattr(self.cfg, 'stitch_injections', 'own')!r}), "
+                     f"listed without an S/N")
+        return {"rows": rows, "limits": maps.get("limits"), "report": path}
+
     def rereduce(self, out_dir: str, *, verify_sources: Optional[Sequence[Any]] = None, verify: bool = True,
-                 log: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
+                 log: Optional[Callable[[str], None]] = None, stitch_injections: Optional[str] = None,
+                 overlap_pads: Optional[bool] = None) -> Dict[str, Any]:
         """A finished run's winners reduced again, on this runner's reducer, with the final
         stitch, its S/N map and the final verify written to ``out_dir``.  The run directory is
         only read.
@@ -5322,18 +5518,31 @@ class Runner:
         The point is other frames: a line subtracted, planets added (the reducer's
         ``data_edits``), without a new search.  Build the runner with :meth:`resume` and
         ``same_frames=False``.  Each annulus' winning configuration is reduced clean, and with
-        the injections of the verify's calibration block: the winner's own validation sources
-        (each in its annulus, as in the run), or ``verify_sources`` (``(rho_arcsec, pa_deg,
-        contrast)``, all of them in every annulus' injected reduction, each listed under the
-        annulus that holds it).  The tiles are stitched with the run's weights
-        (``final_results.json``, else worked out from its winner images as the run did) and
-        the run's seam patching, so on the run's own frames the products are the run's.
+        the injections of the verify's calibration block: the winners' validation sources, or
+        ``verify_sources`` (``(rho_arcsec, pa_deg, contrast)``, each listed under the annulus
+        whose tile holds it), all of them in every annulus' injected reduction.  Without a
+        list, a run with :attr:`RunConfig.stitch_injections` ``"own"`` (saved before
+        2026-11-03) puts each annulus' own sources in its reduction alone, as it did, and
+        ``stitch_injections`` (``"all"`` / ``"own"``) overrides the run's.  The tiles are
+        stitched with the run's weights (``final_results.json``, else worked out from its
+        winner images as the run did), its pads (``overlap_pads`` overrides
+        :attr:`RunConfig.stitch_overlap_pads`) and its seam patching, so on the run's own
+        frames the products are the run's.
 
         Writes ``klip_stitched.fits``, ``klip_stitched_snr.fits``, the injected and
-        per-partition stitches, ``klip_stitched_params.txt``, ``stitched_verify_report.txt``
-        (unless ``verify`` is False) and ``rereduce.json``.  Returns that record."""
+        per-partition stitches, the tile-wise S/N maps, ``klip_stitched_params.txt``,
+        ``stitched_verify_report.txt`` and ``tile_verify_report.txt`` (unless ``verify`` is
+        False) and ``rereduce.json``.  Returns that record."""
         log = log or self.log
         t0 = time.time()
+        mode = str(stitch_injections or getattr(self.cfg, "stitch_injections", "own")).lower()
+        if mode not in ("all", "own"):
+            raise ValueError(f"stitch_injections {stitch_injections!r}: all or own")
+        if verify_sources is not None and str(stitch_injections or "").lower() == "own":
+            raise ValueError("a list of verify sources goes into every annulus' injected reduction: "
+                             "stitch_injections 'own' does not go with it")
+        pads_run = bool(getattr(self.cfg, "stitch_overlap_pads", True))
+        pads_now = pads_run if overlap_pads is None else bool(overlap_pads)
         results = [r for r in (self.results or []) if r is not None]
         src_run = os.path.abspath(self.run_dir)
         if not results or len(results) < self.cfg.nann:
@@ -5369,27 +5578,34 @@ class Runner:
         # the injections: per annulus, what goes in and what the verify lists under it
         if verify_sources is None:
             listed = {r.annulus: [Source(*(float(v) for v in s)) for s in r.winner_sources] for r, _ in items}
-            put_in = dict(listed)
-            v_from = "the winners' validation injections"
+            if mode == "all":
+                every = [s for r, _ in items for s in listed[r.annulus]]
+                put_in = {r.annulus: list(every) for r, _ in items}
+                v_from = "the winners' validation injections, all of them in every annulus"
+                self._log_close_pairs([[s.as_tuple() for s in listed[r.annulus]] for r, _ in items], log)
+            else:
+                put_in = dict(listed)
+                v_from = "the winners' validation injections, each annulus its own"
         else:
+            from .stitch import tile_of
             vs = [s if isinstance(s, Source) else Source(*(float(v) for v in s)) for s in verify_sources]
             listed = {r.annulus: [] for r, _ in items}
             for s in vs:
                 rp = float(s.rho) / self.pxscale
                 # listed under the annulus whose tile holds it (its zone, without overlaps)
-                hold = [r.annulus for (r, _), z in zip(items, tiles) if z[0] <= rp < z[1]]
-                if not hold and abs(rp - tiles[-1][1]) < 1e-6:
-                    hold = [items[-1][0].annulus]
-                if not hold:
+                k = tile_of(rp, tiles)
+                if k is None:
                     raise ValueError(f"verify source at rho={s.rho:g}\" ({rp:.1f} px) lies outside the run's annuli "
                                      f"({zones[0][0]:.1f}-{zones[-1][1]:.1f} px)")
-                listed[hold[0]].append(s)
+                listed[items[k][0].annulus].append(s)
             put_in = {r.annulus: list(vs) for r, _ in items}
             v_from = f"{len(vs)} given source(s)"
         edits = dict(getattr(self.reducer, "data_edits", None) or {})
         frames, run_frames = _describe_edits(_core_edits(edits)), _describe_edits(_core_edits(self.cfg.data_edits))
         log(f"rereduce {os.path.basename(src_run)}: {len(items)} annulus winner(s) on {frames} (the run was made on "
-            f"{run_frames}), stitch weights from {w_from}, verify injections: {v_from}")
+            f"{run_frames}), stitch weights from {w_from}, verify injections: {v_from}"
+            + (f", pads between overlapping annuli {'on' if pads_now else 'off'} (the run's: "
+               f"{'on' if pads_run else 'off'})" if pads_now != pads_run else ""))
         self._start_workers()
         new: Dict[int, Dict[str, Any]] = {}
         per_ann = []
@@ -5401,7 +5617,8 @@ class Runner:
                 cfg = self._config_from_dict(r.winner_config)
                 ev_c = self._reduce(cfg, None, tag=f"rereduce_a{r.annulus + 1}_clean")
                 src = put_in[r.annulus]
-                ev_i = self._reduce(cfg, src, tag=f"rereduce_a{r.annulus + 1}_inj") if src else None
+                # no KLIP-FM pass: the stitch and the verify take the image alone
+                ev_i = self._reduce(cfg, src, tag=f"rereduce_a{r.annulus + 1}_inj", fm_sources=[]) if src else None
                 if ev_c.image is None or (ev_i is not None and ev_i.image is None):
                     raise ValueError(f"annulus {r.annulus + 1}: the winner's reduction returned no image")
                 new[r.annulus] = {
@@ -5409,7 +5626,7 @@ class Runner:
                     "clean_stack": ev_c.stack, "inj_stack": None if ev_i is None else ev_i.stack,
                     "parts": [str(p) for p in (ev_c.partitions or r.partitions or cfg.selected)],
                     "sources": [s.as_tuple() for s in listed[r.annulus]], "contrast": d.get("contrast"),
-                    "weights": ev_c.weights}
+                    "inj_sources": [s.as_tuple() for s in src], "weights": ev_c.weights}
                 per_ann.append({"annulus": r.annulus + 1, "zone_px": list(z),
                                 **({"tile_px": list(tiles[len(per_ann)])} if self.cfg.ann_extra else {}),
                                 "winner_eval": int(r.winner_index) + 1,
@@ -5421,11 +5638,12 @@ class Runner:
             self.ia = ia_keep
         os.makedirs(out_dir, exist_ok=True)
         mod = [replace(r, winner_sources=[s.as_tuple() for s in listed[r.annulus]]) for r in results]
-        keep = (self.run_dir, self._ann_images, self.results)
+        keep = (self.run_dir, self._ann_images, self.results, self.cfg.stitch_overlap_pads)
         nsub, nadd = len(edits.get("subtracted_sources") or []), len(edits.get("injected_sources") or [])
         ndrop = sum(len(v) for v in _dropped(edits.get("dropped_frames")).values())
         try:
             self.run_dir, self._ann_images, self.results = out_dir, new, list(mod)
+            self.cfg.stitch_overlap_pads = pads_now
             stitched = self._final_stitch(mod, weights=weights, extra_header={
                 "REREDUCE": 1, "FROMRUN": os.path.basename(src_run)[:60], "NSUBSRC": nsub, "NADDSRC": nadd,
                 "NDROPFR": ndrop})
@@ -5434,13 +5652,16 @@ class Runner:
                 ver = self._final_verify(stitched, header={
                     "run": f"{out_dir} (the winners of {src_run} reduced again on {frames})"})
         finally:
-            self.run_dir, self._ann_images, self.results = keep
+            self.run_dir, self._ann_images, self.results, self.cfg.stitch_overlap_pads = keep
         rec = {"run_dir": src_run, "out_dir": out_dir, "frames": frames, "run_frames": run_frames,
                "data_edits": edits, "run_data_edits": dict(self.cfg.data_edits or {}),
                "stitch_weights": weights, "weights_from": w_from, "verify_injections": v_from,
                "verify_sources": None if verify_sources is None else [s.as_tuple() for s in vs],
+               "stitch_injections": "all" if verify_sources is not None else mode,
+               "overlap_pads": pads_now,
                "annuli": per_ann, "files": dict((stitched or {}).get("files") or {}),
                "verify_report": None if ver is None else ver.get("report"),
+               "tile_verify_report": None if not (ver or {}).get("tiles") else ver["tiles"].get("report"),
                # the instrument's constants this re-reduction used (the plate scale, the PSF library)
                "provenance": getattr(self.reducer, "provenance", None),
                "seconds": round(time.time() - t0, 1)}

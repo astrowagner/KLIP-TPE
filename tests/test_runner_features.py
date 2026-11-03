@@ -385,7 +385,10 @@ def test_opt_width_loop_commits_edges_until_r_cap(tmp_path):
     for x in recs:
         rmid = 0.5 * sum(x["meta"]["zone"]) * runner.pxscale
         assert all(abs(s[0] - rmid) < 1e-6 for s in x["sources"])
-    assert any("committed annulus edge" in l for l in logs) and ("reached r_cap" in logs[-2] or "< w_lo" in logs[-2])
+    # the last committed edge says why the loop stopped (the final products log after it)
+    committed = [ln for ln in logs if "committed annulus edge" in ln]
+    assert committed and ("reached r_cap" in committed[-1] or "< w_lo" in committed[-1])
+    assert logs[-1].startswith("run complete")
     # reducer received inrad/outrad from the decoded config, not 'width'
     assert "width" not in runner._reduce(runner.space.decode(runner.history.X[0]), None).meta.get("n1", {}).get("params", {"width": 0}) \
         or True

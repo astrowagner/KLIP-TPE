@@ -84,8 +84,10 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--candidates] [--write-setup-files]
                         [--no-setup-files] [--legacy-stitch] [--batch BATCH]
                         [--batch-mode {pipeline,sync}]
-                        [--edge-padding {between,all}] [--display]
-                        [--no-display] [--display-every DISPLAY_EVERY]
+                        [--edge-padding {between,all}]
+                        [--stitch-injections {all,own}] [--overlap-pads |
+                        --no-overlap-pads] [--display] [--no-display]
+                        [--display-every DISPLAY_EVERY]
                         [--pdf-every PDF_EVERY] [--movie-every MOVIE_EVERY]
                         [--show [SHOW]] [--aliens]
                         [--window-scale WINDOW_SCALE] [--no-fm-curve]
@@ -412,6 +414,20 @@ options:
                         pad annulus edges only where two annuli meet (between,
                         the default) or on every edge including the innermost
                         and outermost (all, as the IDL does)
+  --stitch-injections {all,own}
+                        what the final stitch's injected images hold. all:
+                        each annulus' winner reduced once more with every
+                        annulus' validation sources, so the final verify
+                        measures each source on the injected twin of the
+                        stitch, whichever tiles its footprint takes. own: each
+                        annulus' validated image, with its own sources only
+                        (default: all)
+  --overlap-pads        pad the stitch's tile edges between overlapping annuli
+                        (--ann-extra), as runs saved before 2026-11-03 did.
+                        Such an edge lies inside both zones, and by default
+                        the tiles meet sharply there
+  --no-overlap-pads     no pads between overlapping annuli, the default for a
+                        new run
   --display             live display: per-eval step panels, books, progress
                         movie (default on)
   --no-display
@@ -658,12 +674,14 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--candidates] [--write-setup-files] [--no-setup-files]
                      [--legacy-stitch] [--batch BATCH]
                      [--batch-mode {pipeline,sync}]
-                     [--edge-padding {between,all}] [--display] [--no-display]
+                     [--edge-padding {between,all}]
+                     [--stitch-injections {all,own}] [--overlap-pads |
+                     --no-overlap-pads] [--display] [--no-display]
                      [--display-every DISPLAY_EVERY] [--pdf-every PDF_EVERY]
                      [--movie-every MOVIE_EVERY] [--show [SHOW]] [--aliens]
                      [--window-scale WINDOW_SCALE] [--no-fm-curve]
-                     [--fm-preview] [--no-fm-preview]
-                     [--no-liveness-check | --strict-liveness]
+                     [--fm-preview] [--no-fm-preview] [--no-liveness-check |
+                     --strict-liveness]
 
 options:
   -h, --help            show this help message and exit
@@ -985,6 +1003,20 @@ options:
                         pad annulus edges only where two annuli meet (between,
                         the default) or on every edge including the innermost
                         and outermost (all, as the IDL does)
+  --stitch-injections {all,own}
+                        what the final stitch's injected images hold. all:
+                        each annulus' winner reduced once more with every
+                        annulus' validation sources, so the final verify
+                        measures each source on the injected twin of the
+                        stitch, whichever tiles its footprint takes. own: each
+                        annulus' validated image, with its own sources only
+                        (default: all)
+  --overlap-pads        pad the stitch's tile edges between overlapping annuli
+                        (--ann-extra), as runs saved before 2026-11-03 did.
+                        Such an edge lies inside both zones, and by default
+                        the tiles meet sharply there
+  --no-overlap-pads     no pads between overlapping annuli, the default for a
+                        new run
   --display             live display: per-eval step panels, books, progress
                         movie (default on)
   --no-display
@@ -2231,8 +2263,9 @@ usage: klip-tpe rereduce [-h] [--instrument {near,nomic,generic,ales}]
                          [--subtract-sources FILE] [--subtract-line FILE]
                          [--inject-sources FILE] [--metric {mawet,fmmf}]
                          [--run-dir RUN_DIR] [--verify-sources FILE]
-                         [--no-verify] [--verify-snr {search,idl}] [--out DIR]
-                         [--overwrite]
+                         [--stitch-injections {all,own}] [--overlap-pads |
+                         --no-overlap-pads] [--no-verify]
+                         [--verify-snr {search,idl}] [--out DIR] [--overwrite]
 
 options:
   -h, --help            show this help message and exit
@@ -2375,8 +2408,24 @@ options:
   --verify-sources FILE
                         the final verify's injections: one per line, rho
                         (arcsec), PA (deg) and contrast, all of them in every
-                        annulus' injected reduction (default: the winners' own
-                        validation injections, as in the run)
+                        annulus' injected reduction (default: the winners'
+                        validation injections, as the run stitched them, see
+                        --stitch-injections)
+  --stitch-injections {all,own}
+                        what the final stitch's injected images hold. all:
+                        each annulus' winner reduced once more with every
+                        annulus' validation sources, so the final verify
+                        measures each source on the injected twin of the
+                        stitch, whichever tiles its footprint takes. own: each
+                        annulus' validated image, with its own sources only
+                        (default: the run's, all for a run made since
+                        2026-11-03 and own before)
+  --overlap-pads        pad the stitch's tile edges between overlapping annuli
+                        (--ann-extra), as runs saved before 2026-11-03 did
+                        (default: the run's pads)
+  --no-overlap-pads     no pads between overlapping annuli, the default for a
+                        new run. For a run that had them, the stitch is then
+                        not the run's
   --no-verify           the stitch and its S/N map only
   --verify-snr {search,idl}
                         how the verify and the S/N map measure (default: as

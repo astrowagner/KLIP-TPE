@@ -2854,21 +2854,31 @@ def panel_contrast_idl(ax, curves, contrast: float, placeholder: Optional[str] =
     ax.set_ylabel("SNR=5 contrast")
 
 
-def _cv(v) -> str:
-    """Compact value for the BEST/TEST vectors: ints as ints, else 2 significant digits."""
+#: decimals a BEST / TEST line gives a parameter that two significant digits cannot tell apart:
+#: the frame-correlation cut, which the search sets between 0.990 and 0.997 (MWC 758 ALES
+#: session, 2026-11-03)
+VEC_DECIMALS = {"corr_thresh": 4}
+
+
+def _cv(v, base: Optional[str] = None) -> str:
+    """Compact value for the BEST/TEST vectors: ints as ints, else 2 significant digits, or
+    for ``base`` in :data:`VEC_DECIMALS` its decimals (``corr 0.9933``)."""
     if v is None or not np.isfinite(v):
         return "-"
+    nd = VEC_DECIMALS.get(base) if base else None
+    if nd is not None:
+        return f"{float(v):.{int(nd)}f}"
     if abs(v - round(v)) < 1e-6:
         return str(int(round(v)))
     return f"{v:.2g}"
 
 
-def _counts(vals) -> str:
+def _counts(vals, base: Optional[str] = None) -> str:
     """``14 x11, - x9``: each value once, in the order it first comes, with how many times."""
     order: List[str] = []
     n: Dict[str, int] = {}
     for v in vals:
-        s = _cv(v)
+        s = _cv(v, base)
         if s not in n:
             order.append(s)
             n[s] = 0
@@ -2908,12 +2918,12 @@ class _VecItem:
     keep: str = ""
 
 
-def _vec_forms(lab: str, vals: Sequence[float]) -> List[str]:
+def _vec_forms(lab: str, vals: Sequence[float], base: Optional[str] = None) -> List[str]:
     """A per-partition vector's forms, the one to show first: up to 8 partitions the values in
     the partitions' order (``bin [5 7 9]``), past 8 each value once with its count
     (``k used 14 x11, - x9``), which a long run of values reads better as."""
-    full = f"{lab} [{' '.join(_cv(v) for v in vals)}]"
-    counts = f"{lab} {_counts(vals)}"
+    full = f"{lab} [{' '.join(_cv(v, base) for v in vals)}]"
+    counts = f"{lab} {_counts(vals, base)}"
     return [full, counts] if len(vals) <= 8 else [counts, full]
 
 
@@ -2931,13 +2941,13 @@ def _vec_items(ad: AnnulusData, i: int) -> List[_VecItem]:
         own = any(p.partition is not None for p in ad.params if p.role == "reduction" and p.base == base)
         if not own:
             dim = ad.dim_for(base, None)
-            out.append(_VecItem([f"{lab} {_cv(np.nan if dim is None else ad.X[i, dim])}"]))
+            out.append(_VecItem([f"{lab} {_cv(np.nan if dim is None else ad.X[i, dim], base)}"]))
             continue
         vals = []
         for pid in ad.partitions:
             dim = ad.dim_for(base, pid)
             vals.append(np.nan if dim is None else ad.X[i, dim])
-        out.append(_VecItem(_vec_forms(lab, vals)))
+        out.append(_VecItem(_vec_forms(lab, vals, base)))
     kd = ad.k_used[i]
     klab = "k used" if "k_klip" in ad.bases else "k"
     if isinstance(kd, dict):

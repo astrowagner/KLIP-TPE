@@ -1,5 +1,50 @@
 # Changelog
 
+## Unreleased — 2026-11-03 (the final stitch with every annulus' sources, and the per-tile measure)
+
+- **Each annulus' injected image in the final stitch holds every annulus' validation sources**
+  (`RunConfig.stitch_injections = "all"`, NEAR2's s7 note of 2026-11-02, ask 1, Kevin Wagner).
+  The final stitch had taken each annulus' validated `best_inj`, which holds that annulus'
+  sources alone.  With overlapping annuli a source's matched filter and noise ring take two or
+  three annuli' images (s7: 4.66 px tiles, a 21 px filter), so inside 1.75" the stitched verify
+  measured a dilution of the sources, and a source of one annulus in the next annulus' tile
+  not at all.  A new run now reduces each winner once more at its end with all the sources
+  (one reduction per annulus, none with one annulus) and stitches those images.  The injected
+  stitch carries `INJALL = 1`, and the annuli's `best_inj.fits` are left as they are.
+  `rereduce` without a list does the same for a run made since then.  A run saved before, and
+  a `--from-idl-setup` run, keep each annulus' own (`"own"`), and `--stitch-injections all` or
+  `own` overrides a new run's or a re-reduction's.  The re-reductions skip the KLIP-FM pass
+  `rereduce` had made and not used.
+- **The per-tile measure** (ask 2).  `tile_verify_report.txt` measures each source and each
+  candidate on the image of the annulus whose tile holds it, as the search and the validation
+  measure an annulus' sources (`verify.verify_tiles`).  Each source's ring leaves out every
+  other source that image holds, and a source the tile's annulus did not inject is listed with
+  no S/N.  `stitched_verify_report.txt` closes with the stitch's S/N and the tile's side by
+  side.  The tile-wise S/N maps, `klip_stitched_snr_tiles.fits` and
+  `klip_stitched_snr_tiles_inj.fits`, put each annulus' S/N map from its own image together by
+  tiles, with no blend (`stitch.stitch_by_tiles`, `stitch.tile_of`, `stitch.tile_index`).
+- **No pads where annuli overlap** (`RunConfig.stitch_overlap_pads = False`, ask 3).  Such a
+  tile edge lies inside both zones, and the 2 px blend gave the outer part of one annulus'
+  sources to the next annulus' image.  The tiles meet sharply there, and the blend stays where
+  annuli only meet.  A run saved before keeps its pads (`OVLPADS` in the final FITS says which),
+  and `--overlap-pads` / `--no-overlap-pads` override a new run's or a re-reduction's.
+- The small things of the note's section 4.  The live window and `klip-tpe view` take the
+  panel's own size while the canvas has none (`winsize.panel_box`: a Tk window after a callback
+  error left the figure's box NaN, and the conversion to integers crashed the viewer).
+  `products.throughput_fit` fits order 0 when all the samples sit at one radius, where numpy
+  warned of a rank-deficient fit.  The PSF library's throughput is a class
+  (`near._ThroughputTable`) where it was a closure, and the books' snapshot keeps the matched
+  filter as its kernels at the separations the drawings ask for, without the metric and the
+  reducer behind it (`books._snapshot`).  Since the ring rules joined the snapshot on
+  2026-11-01, a run whose metric takes the reducer's matched filter (the near, generic and ALES
+  adapters) had drawn its books on the main thread, and it draws them in their own process
+  again.
+- The live panel prints the correlation cut with 4 decimals, `corr 0.9933` (the MWC 758 ALES
+  session, 2026-11-03).  Two significant digits printed 0.99 for every cut the search chooses
+  between.
+- Tests in `tests/test_stitch_all_sources.py`.  Docs in `docs/RUNNING.md` (the final stitch's
+  injections and the per-tile measure, overlapping annuli, `rereduce`) and `docs/DISPLAY.md`.
+
 ## Unreleased — 2026-11-02 (the live panel's settings block and right-hand layout)
 
 - **A partition's selection flag no longer makes the reduction parameters per-partition** (the

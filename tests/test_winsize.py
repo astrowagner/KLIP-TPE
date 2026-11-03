@@ -286,6 +286,25 @@ def test_the_panel_box_is_the_largest_fit_at_the_panel_aspect():
     assert winsize.panel_box(_agg(1920, 1043), (1850, 990)) == (1920, 1027)
 
 
+def test_a_canvas_with_no_size_gives_the_panel_its_own():
+    """A Tk window after a callback error, or being torn down, can leave the figure's box NaN:
+    both get_width_height and the box fail to convert (NEAR2, 2026-11-02, the viewer crashed)."""
+    import types
+
+    def bad(physical=True):
+        raise ValueError("cannot convert float NaN to integer")
+    nan_fig = types.SimpleNamespace(canvas=types.SimpleNamespace(get_width_height=bad),
+                                    bbox=types.SimpleNamespace(size=(float("nan"), float("nan"))))
+    assert winsize.panel_box(nan_fig, (1850, 990)) == (1850, 990)
+    zero = types.SimpleNamespace(canvas=types.SimpleNamespace(get_width_height=lambda physical=True: (0, 0)),
+                                 bbox=types.SimpleNamespace(size=(0.0, 0.0)))
+    assert winsize.panel_box(zero, (1850, 990)) == (1850, 990)
+    # the box when the toolkit's size fails but the figure's does not
+    half = types.SimpleNamespace(canvas=types.SimpleNamespace(get_width_height=bad),
+                                 bbox=types.SimpleNamespace(size=(925.0, 495.0)))
+    assert winsize.panel_box(half, (1850, 990)) == (925, 495)
+
+
 def test_fit_image_keeps_a_fitting_panel_and_doubles_for_a_2x_screen():
     rng = np.random.default_rng(0)
     a = rng.integers(0, 255, (990, 1850, 4), dtype=np.uint8)

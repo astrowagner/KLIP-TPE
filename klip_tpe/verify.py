@@ -100,8 +100,8 @@ from .metrics import (_arc_regions, _in_arcs, gaussian_kernel, matched_filter, m
 
 __all__ = ["t_fap", "t_thresh", "contrast_limit", "contrast_limit_image", "mf_convolve",
            "snr_fap", "solved_contrasts", "combine_nights", "night_stim", "stim_fap", "bootstrap_nights",
-           "night_subsets", "verify_maps", "verify_candidates", "verify_injections",
-           "limit_tables", "write_verify_table", "write_curve_table"]
+           "night_subsets", "verify_maps", "verify_candidates", "verify_injections", "verify_tiles",
+           "tile_comparison_lines", "limit_tables", "write_verify_table", "write_curve_table"]
 
 SUBSET_NAMES = ("combined", "first-half", "second-half", "even", "odd")
 DEFAULT_FAP_LIST = (2.87e-7, 1.350e-3, 1.0e-2, 0.10)      # verify 514: 5sig-eq, 3sig-eq, 1%, 10%
@@ -1046,7 +1046,152 @@ def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, floa
     maps["limits"] = limit_tables(rows, fwhm, pxscale, fap_list, tap_list, rbin_as)
     if maps["limits"] is not None and items:
         maps["limits"]["solved"] = _solved_bins(maps["limits"], items)
+    # for TABLE 3 over several blocks (verify_tiles): each source's row and detection test
+    maps["solved_items"] = items
     return rows, maps
+
+
+def _place_key(s: Sequence[float]) -> Tuple[float, float]:
+    """A source's place, ``(rho, PA)`` rounded, to tell whether an image holds it."""
+    return (round(float(s[0]), 6), round(float(s[1]), 4))
+
+
+def _tile_stack(stack: Optional[np.ndarray], img: np.ndarray,
+                parts: Optional[Sequence[Any]]) -> Tuple[np.ndarray, Optional[List[str]]]:
+    """An annulus' per-partition images and their ids, or its image alone."""
+    if stack is None:
+        return np.asarray(img, float)[None], None
+    st = np.asarray(stack, float)
+    if st.ndim == 2:
+        st = st[None]
+    ids = [str(p) for p in parts] if parts is not None and len(parts) == st.shape[0] else None
+    return st, ids
+
+
+def verify_tiles(annuli: Sequence[Dict[str, Any]], candidates: Sequence[Tuple[float, float]],
+                 sources: Sequence[Tuple[float, ...]], fwhm: float, pxscale: float, *,
+                 known: Sequence[Tuple[float, float]] = (), fap_op: float = 2.87e-7, drift_px: float = 1.5,
+                 n_boot: int = 500, rng: Optional[np.random.Generator] = None, excl_fwhm: float = 1.5,
+                 fap_list: Sequence[float] = DEFAULT_FAP_LIST, tap_list: Sequence[float] = DEFAULT_TAP_LIST,
+                 rbin_as: Optional[float] = None, angle_convention: str = "pa", sidelobes=None,
+                 rules: Optional[Dict[str, Any]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """The per-tile measure (NEAR2 s7 note, 2026-11-02): each candidate and each injected
+    source measured on the image of the annulus whose tile holds it, the way the search and
+    the validation measure an annulus' sources, instead of on the stitch, where a source's
+    matched filter and its pad can take in the neighboring annuli' images.
+
+    ``annuli`` holds one dict per annulus in the stitch's order: ``tile`` ``(rin, rout)`` px,
+    ``clean`` and ``inj`` (its Path-A images as the stitch took them), ``clean_stack`` and
+    ``inj_stack`` (its per-partition images, else the image alone), ``parts`` (their ids),
+    ``inj_sources`` (the sources its injected image holds) and ``annulus`` (its index).  The
+    tile holding a position is :func:`~klip_tpe.stitch.tile_of` of its separation.
+
+    Each candidate is measured as :func:`verify_candidates` measures it on the stitch, its ring
+    without the known companions.  Each source is measured as :func:`verify_injections` does,
+    its ring without the other sources its image holds, those of the other tiles too.  A source
+    whose tile's annulus did not inject it (a run whose annuli each injected only their own,
+    ``RunConfig.stitch_injections = "own"``) gets a row marked ``absent`` and no S/N.
+
+    Returns ``(rows, maps)``: the candidate rows, then the source rows, in the order given, each
+    with ``annulus`` (1-based) and ``tile_px``, and ``maps["limits"]``, the detection-limit
+    tables of the sources measured, TABLE 3 included.  A position outside every tile gets no
+    row."""
+    from .stitch import tile_of
+    if rng is None:
+        rng = np.random.default_rng(42)
+    tiles = [(float(a["tile"][0]), float(a["tile"][1])) for a in annuli]
+    nan = float("nan")
+    crow: Dict[int, Dict[str, Any]] = {}
+    srow: Dict[int, Dict[str, Any]] = {}
+    items: List[Tuple[Dict[str, Any], Any]] = []
+    nights: List[str] = []
+    for j, a in enumerate(annuli):
+        cj = [k for k, c in enumerate(candidates) if tile_of(float(c[0]) / pxscale, tiles) == j]
+        sj = [m for m, s in enumerate(sources) if tile_of(float(s[0]) / pxscale, tiles) == j]
+        if not cj and not sj:
+            continue
+        tag = {"annulus": int(a.get("annulus", j)) + 1, "tile_px": tiles[j]}
+        clean = np.asarray(a["clean"], float)
+        stack, ids = _tile_stack(a.get("clean_stack"), clean, a.get("parts"))
+        nights += [p for p in (ids or []) if p not in nights]
+        if cj:
+            rows = verify_candidates(stack, ids, [candidates[k] for k in cj], fwhm, pxscale, known=known,
+                                     fap_op=fap_op, drift_px=drift_px, n_boot=n_boot, rng=rng, excl_fwhm=excl_fwhm,
+                                     fap_list=fap_list, tap_list=tap_list, rbin_as=rbin_as,
+                                     angle_convention=angle_convention, combined=clean, sidelobes=sidelobes,
+                                     rules=rules)
+            for k, r in zip(cj, rows):
+                r.update(index=k + 1, **tag)
+                crow[k] = r
+        if not sj:
+            continue
+        have = {_place_key(s) for s in (a.get("inj_sources") or [])}
+        meas = [m for m in sj if _place_key(sources[m]) in have] if a.get("inj") is not None else []
+        for m in sj:
+            if m in meas:
+                continue
+            s = sources[m]
+            srow[m] = {"kind": "injection", "index": m + 1, "rho": float(s[0]), "theta": float(s[1]),
+                       "contrast": float(s[2]) if len(s) > 2 else nan, "x": nan, "y": nan, "snr": nan,
+                       "fap": nan, "nap": 0, "peak": nan, "subsets": {n: nan for n in SUBSET_NAMES},
+                       "stim": nan, "stim_fap": nan, "absent": True, **tag}
+        if not meas:
+            continue
+        inj = np.asarray(a["inj"], float)
+        istack, _ = _tile_stack(a.get("inj_stack"), inj, a.get("parts"))
+        mine = {_place_key(sources[m]) for m in meas}
+        others = [(float(s[0]), float(s[1])) for s in (a.get("inj_sources") or []) if _place_key(s) not in mine]
+        irows, imaps = verify_injections(istack, [sources[m] for m in meas], fwhm, pxscale,
+                                         known=list(known) + others, drift_px=drift_px, excl_fwhm=excl_fwhm,
+                                         angle_convention=angle_convention, fap_list=fap_list, tap_list=tap_list,
+                                         rbin_as=rbin_as, combined=inj, clean=clean, sidelobes=sidelobes,
+                                         rules=rules)
+        for m, r in zip(meas, irows):
+            r.update(index=m + 1, **tag)
+            srow[m] = r
+        items += list(imaps.get("solved_items") or [])
+    inj_rows = [srow[m] for m in sorted(srow)]
+    measured = [r for r in inj_rows if not r.get("absent")]
+    limits = limit_tables(measured, fwhm, pxscale, fap_list, tap_list, rbin_as) if measured else None
+    if limits is not None and items:
+        limits["solved"] = _solved_bins(limits, items)
+    rows = [crow[k] for k in sorted(crow)] + inj_rows
+    meta = {"nights": nights, "fap_op": fap_op, "drift_px": drift_px, "excl_fwhm": excl_fwhm, "fwhm": fwhm,
+            "pxscale": pxscale, "n_boot": n_boot,
+            "path_a": "the image of the annulus whose tile holds the position, as the stitch took it",
+            "sidelobes": None if sidelobes is None else sidelobes.describe()}
+    for r in rows:
+        r["meta"] = meta
+    return rows, {"limits": limits, "meta": meta}
+
+
+def tile_comparison_lines(rows: Sequence[Dict[str, Any]], tile_rows: Sequence[Dict[str, Any]],
+                          report: str = "tile_verify_report.txt") -> List[str]:
+    """The closing section of the stitched report: each candidate's and source's S/N on the
+    stitch beside its S/N on the image of the annulus whose tile holds it (:func:`verify_tiles`,
+    in full in ``report``).  Every line is a comment."""
+    def key(r):
+        return (r.get("kind", "candidate"), int(r["index"]))
+
+    tile = {key(r): r for r in tile_rows}
+    rho_h = 'rho["]'
+    L = ["#", f"# ==== the stitch beside the tiles ({report}) ====",
+         "#   each S/N on the stitched image, and on the image of the annulus whose tile holds the position,",
+         "#   the image the search and the validation measure that annulus' sources on.  In full in that report.",
+         f"#   {'kind':<9} {'#':>3} {rho_h:>7} {'PA[deg]':>7} {'contrast':>10}  {'tile':>4}  {'S/N stitch':>10}  {'S/N tile':>8}"]
+    for r in rows:
+        t = tile.get(key(r))
+        con = r.get("contrast", float("nan"))
+        cstr = f"{con:10.3E}" if np.isfinite(con) and con > 0 else f"{'-':>10}"
+        if t is None:
+            where, st = "-", "outside every tile"
+        elif t.get("absent"):
+            where, st = f"a{t['annulus']}", "not injected there"
+        else:
+            where, st = f"a{t['annulus']}", _f(t["snr"])
+        L.append(f"#   {r.get('kind', 'candidate'):<9} {int(r['index']):>3} {r['rho']:7.3f} {r['theta']:7.1f} {cstr}  "
+                 f"{where:>4}  {_f(r['snr']):>10}  {st:>8}")
+    return L
 
 
 def limit_tables(inj_rows: Sequence[Dict[str, Any]], fwhm: float, pxscale: float,
@@ -1180,10 +1325,11 @@ def _noise_lines(injs: Sequence[Dict[str, Any]]) -> List[str]:
 
 
 def write_verify_table(path: str, rows: Sequence[Dict[str, Any]], limits: Optional[Dict[str, Any]] = None,
-                       header: Optional[Dict[str, Any]] = None) -> str:
+                       header: Optional[Dict[str, Any]] = None, extra_lines: Sequence[str] = ()) -> str:
     """Write the ``verify_report.txt`` of ``near2_verify`` (verify 574-724) from
     the rows of :func:`verify_candidates`.  ``limits`` defaults to the tables
-    derived from the injection rows present.  Returns the text."""
+    derived from the injection rows present.  Rows of :func:`verify_tiles` also say whose
+    image measured them.  ``extra_lines`` close the report.  Returns the text."""
     meta = dict(header or {})
     for r in rows:
         if "meta" in r:
@@ -1210,9 +1356,16 @@ def write_verify_table(path: str, rows: Sequence[Dict[str, Any]], limits: Option
               "#   arcs are let in, then the known companions'.  The STIM annulus leaves out the same.", "#"]
     cands = [r for r in rows if r.get("kind", "candidate") == "candidate"]
     injs = [r for r in rows if r.get("kind") == "injection"]
+    def _on(r):
+        t = r.get("tile_px")
+        return "" if "annulus" not in r else (f"annulus {r['annulus']}'s image" + (
+            f", tile {float(t[0]):.2f}-{float(t[1]):.2f} px" if t is not None else ""))
+
     for r in cands:
         s = r["subsets"]
         L.append(f"== candidate {r['index']}  rho={r['rho']:.3f}\"  PA={r['theta']:.1f} deg ==")
+        if "annulus" in r:
+            L.append(f"   measured on {_on(r)}")
         fb = (r.get("noise") or {}).get("fallback")
         L.append(f"   [A] combined S/N = {_f(r['snr'])}   FAP = {_f(r['fap'], '{:10.2E}')}   (nap={int(r['nap'])}"
                  + (f", {fb}" if fb else "") + ")")
@@ -1228,16 +1381,25 @@ def write_verify_table(path: str, rows: Sequence[Dict[str, Any]], limits: Option
         L.append(f"#   each source's noise ring leaves out the other sources and the known ones "
                  f"({float(meta.get('excl_fwhm', 1.5)):.1f} FWHM keep-out)"
                  + (", and the ADI arcs of the sidelobe rule (above)" if rule else ""))
-        L.append("#   columns: rho[\"] PA[deg] contrast  | combined S/N  FAP  | injected-STIM  STIM-FAP")
+        tiled = any("annulus" in r for r in injs)
+        L.append("#   columns: rho[\"] PA[deg] contrast  | combined S/N  FAP  | injected-STIM  STIM-FAP"
+                 + ("  | the annulus whose image measured it" if tiled else ""))
         for r in injs:
             s = r["subsets"]
             cstr = f"{r['contrast']:10.3E}" if np.isfinite(r.get("contrast", np.nan)) and r["contrast"] > 0 else "  (n/a)  "
+            if r.get("absent"):
+                t = r.get("tile_px")
+                tt = "" if t is None else f" (tile {float(t[0]):.2f}-{float(t[1]):.2f} px)"
+                L.append(f"   rho={r['rho']:.3f}\" PA={r['theta']:.1f}  c={cstr}  | not in annulus {r['annulus']}'s "
+                         f"injected image{tt}: not measured")
+                continue
             L.append(f"   rho={r['rho']:.3f}\" PA={r['theta']:.1f}  c={cstr}  | S/N={_f(r['snr'])}  FAP={_f(r['fap'], '{:10.2E}')}"
-                     f"  | STIM={_f(r['stim'])}  STIM-FAP={_f(r['stim_fap'], '{:10.2E}')}")
+                     f"  | STIM={_f(r['stim'])}  STIM-FAP={_f(r['stim_fap'], '{:10.2E}')}"
+                     + (f"  | a{r['annulus']}" if "annulus" in r else ""))
             L.append(f"       subset S/N  comb={_f(s['combined'])}  1st={_f(s['first-half'])}  2nd={_f(s['second-half'])}"
                      f"  even={_f(s['even'])}  odd={_f(s['odd'])}")
         if rule:
-            L += _noise_lines(injs)
+            L += _noise_lines([r for r in injs if not r.get("absent")])
         if limits is None:
             limits = limit_tables(injs, meta.get("fwhm", 1.0), meta.get("pxscale", 1.0))
         if limits is not None:
@@ -1250,6 +1412,7 @@ def write_verify_table(path: str, rows: Sequence[Dict[str, Any]], limits: Option
                 L.append("#")
                 L += _table3_lines(limits)
         L.append("#  -> Table 1 c@TAP90 at the operating FAP is the headline 90%-completeness limit per separation.")
+    L += [str(v) for v in extra_lines]
     text = "\n".join(L) + "\n"
     with open(path, "w") as f:
         f.write(text)

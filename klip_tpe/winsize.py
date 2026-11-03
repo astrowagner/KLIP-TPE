@@ -527,13 +527,28 @@ def keep_window_size(fig) -> Optional[str]:
 
 
 # -- the panel inside it -----------------------------------------------------------------
+def _canvas_px(fig) -> Optional[Tuple[int, int]]:
+    """``fig``'s canvas in device pixels, or None while it has no size.  A Tk window being torn
+    down, or after a callback error, can leave the figure's box NaN, and then both
+    ``get_width_height`` and the box itself fail to convert (NEAR2, 2026-11-02)."""
+    for get in (lambda: fig.canvas.get_width_height(physical=True), lambda: tuple(fig.bbox.size)):
+        try:
+            W, H = (float(v) for v in get())
+        except Exception:
+            continue
+        if np.isfinite(W) and np.isfinite(H) and W >= 1 and H >= 1:
+            return int(W), int(H)
+    return None
+
+
 def panel_box(fig, px: Tuple[int, int]) -> Tuple[int, int]:
     """The device pixels a ``px`` panel fills in ``fig``'s canvas: as large as fits, at its
-    own aspect.  Device pixels, so a 2x screen gives twice the toolkit's size."""
-    try:
-        W, H = fig.canvas.get_width_height(physical=True)
-    except Exception:
-        W, H = (int(v) for v in fig.bbox.size)
+    own aspect.  Device pixels, so a 2x screen gives twice the toolkit's size.  The panel's
+    own size while the canvas has none."""
+    wh = _canvas_px(fig)
+    if wh is None:
+        return max(1, int(px[0])), max(1, int(px[1]))
+    W, H = wh
     s = min(W / float(px[0]), H / float(px[1]))
     return max(1, int(px[0] * s + 1e-6)), max(1, int(px[1] * s + 1e-6))
 
@@ -589,10 +604,7 @@ def show_panel(fig, img, px: Tuple[int, int]) -> Tuple[int, int]:
     Returns the box it fills, in device pixels."""
     box = panel_box(fig, px)
     a = fit_image(img, box)
-    try:
-        W, H = fig.canvas.get_width_height(physical=True)
-    except Exception:
-        W, H = (int(v) for v in fig.bbox.size)
+    W, H = _canvas_px(fig) or box
     xo, yo = max(0, (W - a.shape[1]) // 2), max(0, (H - a.shape[0]) // 2)
     old = getattr(fig, "_klip_panel", None)
     if old is not None and old.get_array().shape == a.shape and (old.ox, old.oy) == (xo, yo):

@@ -12,9 +12,16 @@ same order on the same data, so the files are the same, and the run goes on with
 annulus meanwhile.  It runs at a lower priority than the workers, and a Ctrl-C of the run
 does not stop it: it finishes the books and exits.  The run waits for it only at its end.
 ``KLIP_TPE_BOOKS=inline`` draws the books on the main thread, as before.
+
+The snapshot leaves the run's matched filter behind (:func:`_snapshot`): the ring rules'
+``kernel_at`` is the metric's own kernel, which reaches the reducer and every frame.  That
+neither pickled (NEAR2, 2026-11-02: a closure of the PSF library, then the partitioned
+reducer) nor belongs in a drawing process.  The snapshot holds the kernels at the
+separations the drawings ask for instead.
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import pickle
@@ -52,6 +59,51 @@ _LOG = "books.log"
 def in_background() -> bool:
     """False when ``KLIP_TPE_BOOKS`` asks for the books on the main thread."""
     return os.environ.get("KLIP_TPE_BOOKS", "").strip().lower() not in ("inline", "main", "0", "off", "no")
+
+
+class _KernelSamples:
+    """A matched filter's kernel as a function of separation, kept as samples: the kernel at
+    each separation sampled, and for any other the nearest sample's."""
+
+    def __init__(self, fn, rhos: Sequence[float]):
+        import numpy as np
+        self.rhos: List[float] = []
+        self.kernels: List[Any] = []
+        for r in sorted({round(float(v), 6) for v in rhos}):
+            k = fn(r)
+            self.rhos.append(r)
+            self.kernels.append(None if k is None else np.asarray(k, float))
+
+    def __call__(self, rho):
+        if not self.rhos:
+            return None
+        r = float(rho)
+        return self.kernels[min(range(len(self.rhos)), key=lambda j: abs(self.rhos[j] - r))]
+
+
+def _snapshot(ad):
+    """``ad`` as the books process gets it: its ring rules' ``kernel_at`` as the kernels at the
+    known companions' separations and their median (what :func:`~klip_tpe.display.known_snr`
+    asks) and every quarter FWHM across the annulus, the rest as it is."""
+    import numpy as np
+    ex = ad.extra if isinstance(getattr(ad, "extra", None), dict) else None
+    rules = (ex or {}).get("rules")
+    ka = rules.get("kernel_at") if isinstance(rules, dict) else None
+    if not callable(ka) or isinstance(ka, _KernelSamples):
+        return ad
+    seps = [float(k[0]) for k in (getattr(ad, "known", None) or ())]
+    if seps:
+        seps.append(float(np.nanmedian(seps)))
+    try:
+        px, fw = float(ad.pxscale), float(ad.fwhm)
+        lo, hi = float(ad.inrad) * px, float(ad.outrad) * px
+        step = max(0.25 * fw * px, 1e-3)
+        seps += list(np.arange(lo, hi + 0.5 * step, step))
+    except (AttributeError, TypeError, ValueError):
+        pass
+    snap = copy.copy(ad)
+    snap.extra = dict(ex, rules=dict(rules, kernel_at=_KernelSamples(ka, seps)))
+    return snap
 
 
 def draw(ad, out_dir: str, books: Sequence[Tuple[str, str, str]] = BOOKS) -> List[Dict[str, Any]]:
@@ -139,7 +191,7 @@ def start(ad, out_dir: str, ia: int, books: Sequence[Tuple[str, str, str]] = BOO
     job_dir = tempfile.mkdtemp(prefix="klip_books_")
     try:
         with open(os.path.join(job_dir, _JOB), "wb") as f:
-            pickle.dump({"ad": ad, "out_dir": os.path.abspath(out_dir), "books": tuple(books)}, f,
+            pickle.dump({"ad": _snapshot(ad), "out_dir": os.path.abspath(out_dir), "books": tuple(books)}, f,
                         protocol=pickle.HIGHEST_PROTOCOL)
         with open(os.path.join(job_dir, _LOG), "wb") as log:
             # started in the job directory, so nothing in the run's working directory can
