@@ -431,6 +431,16 @@ SEED_GROUPS = {f"sel_n2_{g}": int(int(g[1:]) >= 9) for g in GROUPS}     # the pa
 full = search(red, space, objective, sampler, run_config(defaults=SEED_GROUPS), RUN_FULL)
 
 # %% [markdown]
+# The search on all 20 groups is the one of `mwc758_ales_repeat`, made on 2026-11-02 and 03.
+# It repeats the run of 2026-10-28 evaluation for evaluation: the same 3000
+# vectors, the same winner (evaluation 2619, S/N 3.05, and 2.91 in the election) and the same 11
+# groups. A trial's score has been floored at 0 since 2026-11-01, which changed the recorded score
+# of 155 of its trials and none of its proposals. The repeat adds what the code makes now: a
+# verify that measures as the search does (`RunConfig.verify_snr="search"`), the disk mask in
+# every noise ring, S/N maps filled where the mask leaves a ring too few pixels, and the injection
+# grid of section 10. The g15–g19 run is the one of 2026-10-27 and 28.
+
+# %% [markdown]
 # ## 7. What Did They Decide?
 #
 # The winners' parameters, their scores, and the groups each keeps:
@@ -674,6 +684,10 @@ plt.xlabel("separation (arcsec)"); plt.ylabel("S/N=5 contrast at 3.8 µm")
 plt.legend(fontsize=7); plt.grid(alpha=.3); plt.title("MWC 758, 2019 Nov 14, ALES, c-coloured sources");
 
 # %% [markdown]
+# The search on all 20 groups made a grid at two separations in its 0.4–0.8″ annulus: S/N 5 at
+# 4.9e-5 at 0.55″ and 3.6e-5 at 0.65″, with 11 positions settled at each. The g15–g19 run predates
+# the grid, so its curve is the fit to the validation injections.
+#
 # The contrast is a flux ratio to the star at 3.8 µm for a source with c's spectrum, since every
 # template is the night's own star. `annulus01/corner.pdf`, `importance.pdf` and
 # `landscapes.pdf` show the sampled space, `partition_map.png` the flags' history of section 8,

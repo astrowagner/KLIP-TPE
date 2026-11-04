@@ -183,12 +183,13 @@ def contrast_limit_image(alpha_img: float, beta: float, ci, si, napi) -> float:
 # C.1.4  matched-filter S/N + FAP at a source
 # ----------------------------------------------------------------------------
 def mf_convolve(img: np.ndarray, fwhm: float, kernel: Optional[np.ndarray] = None) -> np.ndarray:
-    """``near2v_mfconv`` (verify 117-120): NaN -> 0 then convolution with the
-    unit-sum FWHM Gaussian (``near2v_mfkern``, verify 53-59) with edge
-    truncation (``mode='nearest'``)."""
+    """``near2v_mfconv`` (verify 117-120): NaN -> 0 then the matched filter, the image
+    correlated with the unit-sum FWHM Gaussian (``near2v_mfkern``, verify 53-59) with edge
+    truncation (``mode='nearest'``).  The Gaussian is round, so a convolution gives the same
+    map, and a ``kernel`` given is correlated, as a matched filter takes its template."""
     img = np.asarray(img, float)
     k = gaussian_kernel(fwhm) if kernel is None else kernel
-    return ndimage.convolve(np.where(np.isfinite(img), img, 0.0), k, mode="nearest")
+    return ndimage.correlate(np.where(np.isfinite(img), img, 0.0), k, mode="nearest")
 
 
 def _snr_fap_idl(img: np.ndarray, rho: float, theta: float, pxscale: float, fwhm: float,

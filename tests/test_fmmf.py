@@ -56,9 +56,9 @@ def test_fm_kernel_is_zero_mean_and_lsq_normalised():
     k = fm_kernel(fm, x, y, size=int(2 * np.ceil(2.5 * FWHM) + 1))
     assert k is not None
     assert abs(float(k.sum())) < 1e-9                      # zero-mean: blind to a pedestal
-    # filtering the scene with it returns the amplitude of the template
+    # filtering (correlating) the scene with it returns the amplitude of the template
     from scipy import ndimage
-    amp = ndimage.convolve(img, k, mode="nearest")[int(round(y)), int(round(x))]
+    amp = ndimage.correlate(img, k, mode="nearest")[int(round(y)), int(round(x))]
     assert amp == pytest.approx(3.0, rel=0.05)
 
 

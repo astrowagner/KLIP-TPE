@@ -388,10 +388,10 @@ def kernel_from_profile(stamp: np.ndarray, fwhm: float) -> np.ndarray:
 # ----------------------------------------------------------------------------
 # one declip and one matched filter per image and kernel
 # ----------------------------------------------------------------------------
-#: images :func:`mawet_peak_snr` has prepared (declipped, zero-filled and convolved), kept by
+#: images :func:`mawet_peak_snr` has prepared (declipped, zero-filled and filtered), kept by
 #: their bytes.  A trial's clean image is scored once for each of its draws, and
 #: :func:`sidelobe_snr` measures each source, and each fallback, on the same image again, so
-#: the same declip and the same convolutions came back several times an evaluation.  Keyed by
+#: the same declip and the same filtering came back several times an evaluation.  Keyed by
 #: the bytes, so an image changed in place is another image.  0 turns the cache off.
 PREPARED_CACHE_SIZE = 8
 _prepared_cache: "collections.OrderedDict[Tuple[Any, ...], Dict[str, Any]]" = collections.OrderedDict()
@@ -554,23 +554,29 @@ def turn_kernel(k: np.ndarray, dphi: float, *, order: int = 3) -> np.ndarray:
 
 class _TurnedFilter:
     """The matched-filter value of one source's template turned to other positions on the image,
-    each value what ``ndimage.convolve(imz, turned, mode="nearest")`` gives at that pixel, one
-    small dot product instead of a convolution.  Turned templates are kept by angle (to
-    ``1e-6`` rad), since the ring and the band ask the same angles of several pixels."""
+    each value what ``ndimage.correlate(imz, turned, mode="nearest")`` gives at that pixel (with
+    ``correlate=False`` what ``ndimage.convolve`` gives, as runs saved before 2026-11-04
+    measured), one small dot product instead of a whole map.  Turned templates are kept by
+    angle (to ``1e-6`` rad), since the ring and the band ask the same angles of several pixels."""
 
-    def __init__(self, imz: np.ndarray, kernel: np.ndarray, az: float, pads: Dict[int, np.ndarray]):
+    def __init__(self, imz: np.ndarray, kernel: np.ndarray, az: float, pads: Dict[int, np.ndarray],
+                 correlate: bool = True):
         self.k = np.asarray(kernel, float)
         self.c = self.k.shape[0] // 2
         if self.c not in pads:                    # the frame padded as mode="nearest" extends it
             pads[self.c] = np.pad(imz, self.c, mode="edge")
         self.pad = pads[self.c]
         self.az = float(az)
+        self.correlate = bool(correlate)
         self._flip: Dict[int, np.ndarray] = {}
 
     def _flipped(self, dphi: float) -> np.ndarray:
+        """The turned template as the dot product takes it: as it is to correlate, turned 180
+        deg to convolve."""
         key = int(round(float(dphi) * 1e6))
         if key not in self._flip:
-            self._flip[key] = turn_kernel(self.k, key * 1e-6)[::-1, ::-1]
+            t = turn_kernel(self.k, key * 1e-6)
+            self._flip[key] = t if self.correlate else t[::-1, ::-1]
         return self._flip[key]
 
     def at(self, x: int, y: int, dphi: float) -> float:
@@ -595,20 +601,25 @@ class _TurnedFilter:
 
 class _PlacedFilter:
     """The matched-filter value at pixels of the image, each with the template ``kernel_at(x, y)``
-    gives for a source there: what ``ndimage.convolve(imz, k, mode="nearest")`` gives at that
-    pixel with that template, one small dot product per sample.  The forward model of a source
-    at each noise aperture (:class:`klip_tpe.fmmf.FMTemplates`).  The templates are square, of
-    an odd size, as a forward model's stamps are."""
+    gives for a source there: what ``ndimage.correlate(imz, k, mode="nearest")`` gives at that
+    pixel with that template (with ``correlate=False`` what ``ndimage.convolve`` gives), one
+    small dot product per sample.  The forward model of a source at each noise aperture
+    (:class:`klip_tpe.fmmf.FMTemplates`).  The templates are square, of an odd size, as a forward
+    model's stamps are."""
 
     def __init__(self, imz: np.ndarray, kernel_at: Callable[[float, float], Optional[np.ndarray]],
-                 pads: Dict[int, np.ndarray]):
+                 pads: Dict[int, np.ndarray], correlate: bool = True):
         self.imz, self.kernel_at, self.pads = imz, kernel_at, pads
+        self.correlate = bool(correlate)
         self._flip: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
 
     def _flipped(self, k: np.ndarray) -> np.ndarray:
+        """The template as the dot product takes it: as it is to correlate, turned 180 deg to
+        convolve."""
         e = self._flip.get(id(k))
         if e is None or e[0] is not k:            # the kernel is kept, so its id stays its own
-            e = self._flip[id(k)] = (k, np.asarray(k, float)[::-1, ::-1])
+            kk = np.asarray(k, float)
+            e = self._flip[id(k)] = (k, kk if self.correlate else kk[::-1, ::-1])
         return e[1]
 
     def _pad(self, c: int) -> np.ndarray:
@@ -656,11 +667,12 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                    peak_xy: Optional[Sequence[Tuple[float, float]]] = None,
                    exclude_xy: Sequence[Tuple[float, float]] = (), mfmap: Optional[np.ndarray] = None,
                    turn: Any = None,
-                   templates_at: Optional[Sequence[Optional[Callable[[float, float], Optional[np.ndarray]]]]] = None):
+                   templates_at: Optional[Sequence[Optional[Callable[[float, float], Optional[np.ndarray]]]]] = None,
+                   correlate: bool = True):
     """Matched-filter Mawet et al. (2014) detection S/N of each source.
 
-    * optional single-pixel de-spiking, then convolution with ``kernel`` (default
-      FWHM Gaussian);
+    * optional single-pixel de-spiking, then the matched filter: the image correlated with
+      ``kernel`` (default FWHM Gaussian), the template as a source looks (``correlate``);
     * no S/N for a source placed inside ``inner_fwhm`` FWHM of the star, or so close that
       its ring holds fewer than 5 apertures.  Both are asked of the position the source
       was given, ``rho``, so a clean and an injected image are judged by the same
@@ -719,6 +731,13 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
     source, whose own peak keeps the map of its kernel.  A sample the callable gives None for
     is read off that map.  Not with ``mfmap``.
 
+    ``correlate`` (default True): the matched filter correlates the image with the kernel, the
+    template as a source looks, so a source shaped like it gives its own amplitude.  ``False``
+    convolves, which turns the template 180 deg first.  The two give the same map, to the bit,
+    for a kernel that is the same turned 180 deg (the Gaussian, an azimuthally averaged PSF),
+    and convolving loses part of a lopsided template's source, as an FMMF run saved before
+    2026-11-04 measured (``RunConfig.fmmf_correlate``, GitHub agent's finding 13).
+
     The IDL ``near2_snrpk`` asked the guard of the located peak instead.  On a clean
     image that peak is whichever noise pixel is highest within ``search_px``, and for a
     source at 1.1 FWHM it lay inside 1 FWHM about half the time, so the clean term, and
@@ -766,10 +785,10 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
             return mfmap
         k = kerns[i]
         if id(k) not in _amaps:
-            kk = _digest(np.asarray(k))
+            kk = _digest(np.asarray(k)) + (bool(correlate),)
             m = prep["maps"].get(kk)
             if m is None:
-                m = ndimage.convolve(imz, k, mode="nearest")
+                m = (ndimage.correlate if correlate else ndimage.convolve)(imz, k, mode="nearest")
                 _frozen(m)
                 prep["maps"][kk] = m
             _amaps[id(k)] = m
@@ -837,8 +856,9 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
         ring: Optional[List[List[Any]]] = [] if recording else None
         # each sample with the forward model of a source there (templates_at), or with the
         # source's template turned to the azimuth it is taken at (turn)
-        pf = _PlacedFilter(imz, placed[s], _pads) if placed[s] is not None and imz is not None else None
-        tf = (_TurnedFilter(imz, kerns[s], np.arctan2(ys[s] - cy, xs[s] - cx), _pads)
+        pf = (_PlacedFilter(imz, placed[s], _pads, correlate=correlate)
+              if placed[s] is not None and imz is not None else None)
+        tf = (_TurnedFilter(imz, kerns[s], np.arctan2(ys[s] - cy, xs[s] - cx), _pads, correlate=correlate)
               if pf is None and turns[s] and imz is not None else None)
         for q in range(1, nap):
             th = th0 + q * 2 * np.pi / nap
@@ -1024,12 +1044,12 @@ def rule_kwargs(rules: Optional[Dict[str, Any]], rho: float, shape) -> Dict[str,
 def matched_filter(img: np.ndarray, fwhm: float, rules: Optional[Dict[str, Any]] = None,
                    rho: Optional[float] = None) -> np.ndarray:
     """The matched-filter map :func:`mawet_peak_snr` measures ``img`` on, under ``rules``
-    (:func:`ring_rules`): despiked, zero-filled and convolved with the kernel at ``rho``."""
+    (:func:`ring_rules`): despiked, zero-filled and correlated with the kernel at ``rho``."""
     kw = rule_kwargs(rules, rho if rho is not None else 0.0, np.shape(img)) if rules else {}
     prep = _prepare(np.asarray(img, float), kw.get("declip_nsig", 6.0))
     k = kw.get("kernel")
     k = gaussian_kernel(fwhm) if k is None else np.asarray(k, float)
-    return ndimage.convolve(prep["imz"], k, mode="nearest")
+    return ndimage.correlate(prep["imz"], k, mode="nearest")
 
 
 def _ring_fluxes(img, cx, cy, sep, phi0, nap, aprad, excl_xy, exr, known_xy, skip=None, trace=None,

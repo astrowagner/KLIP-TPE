@@ -83,10 +83,12 @@ def test_a_placed_template_reads_the_convolution_with_it():
         return bank[int(round(x)) % 2 + 2 * (int(round(y)) % 2)]
 
     pf = _PlacedFilter(img, at, {})
+    old = _PlacedFilter(img, at, {}, correlate=False)          # runs saved before 2026-11-04
     for x in (0, 1, 30, 60):
         for y in (0, 3, 30, 60):
-            want = ndimage.convolve(img, at(x, y), mode="nearest")[y, x]
+            want = ndimage.correlate(img, at(x, y), mode="nearest")[y, x]
             assert pf.at(x, y) == pytest.approx(want, abs=1e-12)
+            assert old.at(x, y) == pytest.approx(ndimage.convolve(img, at(x, y), mode="nearest")[y, x], abs=1e-12)
     # the band: each bin with the template at its center on the circle
     c = 30.0
     yy, xx = np.nonzero(np.abs(np.hypot(*np.mgrid[0:61, 0:61] - c) - 20) <= 1.0)
@@ -95,7 +97,7 @@ def test_a_placed_template_reads_the_convolution_with_it():
     for i in (0, len(xx) // 3, len(xx) - 1):
         a = 0.3 + b[i] * 0.1
         k = at(c + 20 * np.cos(a), c + 20 * np.sin(a))
-        assert got[i] == pytest.approx(ndimage.convolve(img, k, mode="nearest")[yy[i], xx[i]], abs=1e-12)
+        assert got[i] == pytest.approx(ndimage.correlate(img, k, mode="nearest")[yy[i], xx[i]], abs=1e-12)
     # no template there: None, and NaN in the band
     assert _PlacedFilter(img, lambda x, y: None, {}).at(5, 5) is None
     assert np.isnan(_PlacedFilter(img, lambda x, y: None, {}).band(xx[:3], yy[:3], c, c, 20.0, 0.0, 0.1)).all()
@@ -280,7 +282,9 @@ def test_a_round_psf_measures_the_same_either_way():
             _, d = mawet_peak_snr(im, [1.5], [20.0], PX, FWHM, kernel=[km], declip_nsig=None, peak_xy=pk,
                                   return_details=True, **kw)
             sig[name].append(d[0]["sigma"])
-    assert np.mean(sig["own"]) == pytest.approx(np.mean(sig["turn"]), rel=0.02)
+    # within 3 %: 2.3 % correlating, 0.4 % convolving as before 2026-11-04 (the arcs curve, so a
+    # filter and its 180-deg turn see their noise a little differently)
+    assert np.mean(sig["own"]) == pytest.approx(np.mean(sig["turn"]), rel=0.03)
     assert np.mean(sig["map"]) > 1.5 * np.mean(sig["own"])
 
 
@@ -327,7 +331,7 @@ def test_fmmf_map_takes_a_forward_model_per_bin():
         ix, iy = int(round(x[0])), int(round(y[0]))
         im = _planet(ix, iy, n=n, **shape)
         k = fm_kernel(im, ix, iy, SIZE, lsq_norm=False)
-        truth = ndimage.convolve(im, k / float((k * k).sum()), mode="nearest")[iy, ix]
+        truth = ndimage.correlate(im, k / float((k * k).sum()), mode="nearest")[iy, ix]
         fa = FMTemplates(lambda srcs: _fm_for(srcs, n=n, **shape), (n, n), PX)
         out = fmmf_map(im, fm, src, PX, FWHM, n_theta=72, fm_at=fa)
         assert out["n_fm_bins"] == fa.n_passes > 0

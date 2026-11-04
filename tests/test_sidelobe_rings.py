@@ -19,7 +19,7 @@ from klip_tpe import ContrastGridConfig, Runner, RunConfig, ValidationConfig
 from klip_tpe.candidates import coverage_rim
 from klip_tpe.metrics import (InjectionDifferenceSNR, MawetPeakSNR, Objective, Sidelobes, Source, mawet_peak_snr,
                               sidelobe_snr, source_xy, star_center)
-from klip_tpe.runner import _few_apertures
+from klip_tpe.runner import _few_apertures, _grid_ring_text
 from klip_tpe.stitch import write_contrast_curve
 
 from conftest import build_synthetic_run
@@ -325,3 +325,21 @@ def test_a_run_covered_out_to_its_last_edge_keeps_its_owa(tmp_path):
     Runner(red, space, obj, samp, cfg, str(tmp_path), log=logs.append).run()
     assert os.path.exists(os.path.join(str(tmp_path), "cand"))
     assert not [l for l in logs if "candidate search: OWA" in l], [l for l in logs if "OWA" in l]
+
+
+def test_the_grid_calls_its_keep_out_a_keep_out():
+    """With no sidelobe arcs (the grid's "off", the default) the angle the grid logs is the
+    1.5 FWHM keep-out, as the IDL contrast generators skip the source and the aperture each
+    side.  mwc758_ales_repeat logged it as "sidelobes +/- 14.4 deg at 0.60"" (MWC 758 ALES
+    session, 2026-11-03)."""
+    from klip_tpe import contrast_grid as CG
+    r_px, fw, px = 0.60 / 0.0345, 2.9083217, 0.0345
+    hw = CG.footprint_deg(r_px, fw, CG.ContrastGridConfig(), 120.0)
+    assert round(hw, 1) == 14.4
+    assert (_grid_ring_text("off", None, hw, r_px, fw, px)
+            == 'no sidelobe arcs, the ring skips +/- 14.4 deg (1.5 FWHM) beside the source at 0.60"')
+    assert _grid_ring_text("rotation", None, 40.0, r_px, fw, px) == 'sidelobes +/- 40.0 deg at 0.60"'
+    assert _grid_ring_text("off", Sidelobes(rotation_deg=149.0), hw, r_px, fw, px).startswith(
+        "the run's sidelobe rule, +/- 149.0 deg")
+    assert (_few_apertures({"nclean": 0, "n_left": 1}, 6, hw, keepout=True)
+            == "1 noise aperture left beside the 1.5 FWHM keep-out, +/- 14 deg (fewer than 6)")

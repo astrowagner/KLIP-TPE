@@ -243,7 +243,9 @@ def _pct(v: np.ndarray, q: float) -> float:
 def summarize(positions: Sequence[GridPosition], seps: Sequence[float], pxscale: float,
               cfg: ContrastGridConfig, sidelobe_deg: Sequence[float], n_reductions: int) -> Dict[str, Any]:
     """The curve: per separation the median contrast of the settled positions with the 16th
-    and 84th percentiles, and the counts (``n`` settled, ``n_pos`` tested, ``n_blocked``)."""
+    and 84th percentiles, and the counts (``n`` settled, ``n_pos`` tested, ``n_blocked``).
+    ``sidelobe_deg`` is each separation's :func:`footprint_deg`: the arc's half-width, or with
+    ``sidelobe="off"`` the 1.5 FWHM keep-out's angle, which is no arc."""
     seps = np.asarray(seps, float)
     med, p16, p84, n, npos, nblk = [], [], [], [], [], []
     for j in range(seps.size):
