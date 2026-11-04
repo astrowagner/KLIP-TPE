@@ -1075,11 +1075,23 @@ def verify_tiles(annuli: Sequence[Dict[str, Any]], candidates: Sequence[Tuple[fl
                  n_boot: int = 500, rng: Optional[np.random.Generator] = None, excl_fwhm: float = 1.5,
                  fap_list: Sequence[float] = DEFAULT_FAP_LIST, tap_list: Sequence[float] = DEFAULT_TAP_LIST,
                  rbin_as: Optional[float] = None, angle_convention: str = "pa", sidelobes=None,
-                 rules: Optional[Dict[str, Any]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+                 rules: Optional[Dict[str, Any]] = None, stitch: Optional[Dict[str, Any]] = None
+                 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """The per-tile measure (NEAR2 s7 note, 2026-11-02): each candidate and each injected
-    source measured on the image of the annulus whose tile holds it, the way the search and
-    the validation measure an annulus' sources, instead of on the stitch, where a source's
-    matched filter and its pad can take in the neighboring annuli' images.
+    source measured with the pixels of the annulus whose tile holds it, as that annulus
+    reduced them, beside the stitch, which blends or patches a tile's pixels in places.
+
+    ``stitch`` (the runner passes it): the stitched images, ``clean``, ``inj``, the per-partition
+    cubes ``nights`` and ``nights_inj`` with their ids ``night_ids``, and ``inj_sources``, the
+    sources the injected stitch holds.  Each annulus is then measured on the stitch with its tile
+    put in (:func:`~klip_tpe.stitch.put_tile_in`, each partition by its id): its own pixels on its
+    tile, the stitch's around it.  Without it, each annulus is measured on its image alone, as
+    the search and the validation measure its sources.  That image is NaN outside the annulus'
+    zone, and the matched filter and the noise ring take zeros there.  Where the next annulus in
+    has residuals several times the zone's, that leaves noise out of the ring and the radial
+    band, and inside about 1.3" of NEAR2's runs the image alone read 1.3 to 6 times the
+    stitch's S/N (NEAR2 note, 2026-11-04).  Where a tile takes no blend, the stitch with the
+    tile put in is the stitch itself, so the two S/N agree there.
 
     ``annuli`` holds one dict per annulus in the stitch's order: ``tile`` ``(rin, rout)`` px,
     ``clean`` and ``inj`` (its Path-A images as the stitch took them), ``clean_stack`` and
@@ -1089,15 +1101,16 @@ def verify_tiles(annuli: Sequence[Dict[str, Any]], candidates: Sequence[Tuple[fl
 
     Each candidate is measured as :func:`verify_candidates` measures it on the stitch, its ring
     without the known companions.  Each source is measured as :func:`verify_injections` does,
-    its ring without the other sources its image holds, those of the other tiles too.  A source
-    whose tile's annulus did not inject it (a run whose annuli each injected only their own,
-    ``RunConfig.stitch_injections = "own"``) gets a row marked ``absent`` and no S/N.
+    its ring without the other sources its image holds, those of the other tiles and of the
+    stitch too.  A source whose tile's annulus did not inject it (a run whose annuli each
+    injected only their own, ``RunConfig.stitch_injections = "own"``) gets a row marked
+    ``absent`` and no S/N.
 
     Returns ``(rows, maps)``: the candidate rows, then the source rows, in the order given, each
-    with ``annulus`` (1-based) and ``tile_px``, and ``maps["limits"]``, the detection-limit
-    tables of the sources measured, TABLE 3 included.  A position outside every tile gets no
-    row."""
-    from .stitch import tile_of
+    with ``annulus`` (1-based), ``tile_px`` and, with ``stitch``, ``in_stitch``, and
+    ``maps["limits"]``, the detection-limit tables of the sources measured, TABLE 3 included.
+    A position outside every tile gets no row."""
+    from .stitch import put_tile_in, put_tile_in_stack, tile_index, tile_of
     if rng is None:
         rng = np.random.default_rng(42)
     tiles = [(float(a["tile"][0]), float(a["tile"][1])) for a in annuli]
@@ -1106,6 +1119,8 @@ def verify_tiles(annuli: Sequence[Dict[str, Any]], candidates: Sequence[Tuple[fl
     srow: Dict[int, Dict[str, Any]] = {}
     items: List[Tuple[Dict[str, Any], Any]] = []
     nights: List[str] = []
+    st = stitch if stitch and stitch.get("clean") is not None else None
+    idx = None if st is None else tile_index(np.shape(st["clean"]), tiles)
     for j, a in enumerate(annuli):
         cj = [k for k, c in enumerate(candidates) if tile_of(float(c[0]) / pxscale, tiles) == j]
         sj = [m for m, s in enumerate(sources) if tile_of(float(s[0]) / pxscale, tiles) == j]
@@ -1113,7 +1128,14 @@ def verify_tiles(annuli: Sequence[Dict[str, Any]], candidates: Sequence[Tuple[fl
             continue
         tag = {"annulus": int(a.get("annulus", j)) + 1, "tile_px": tiles[j]}
         clean = np.asarray(a["clean"], float)
+        in_st = st is not None and np.shape(st["clean"]) == clean.shape
+        if in_st:
+            tag["in_stitch"] = True
+            mine_tile = idx == j
+            clean = put_tile_in(st["clean"], clean, mine_tile)
         stack, ids = _tile_stack(a.get("clean_stack"), clean, a.get("parts"))
+        if in_st and a.get("clean_stack") is not None:
+            stack = put_tile_in_stack(st.get("nights"), st.get("night_ids"), stack, ids, mine_tile)
         nights += [p for p in (ids or []) if p not in nights]
         if cj:
             rows = verify_candidates(stack, ids, [candidates[k] for k in cj], fwhm, pxscale, known=known,
@@ -1139,9 +1161,18 @@ def verify_tiles(annuli: Sequence[Dict[str, Any]], candidates: Sequence[Tuple[fl
         if not meas:
             continue
         inj = np.asarray(a["inj"], float)
-        istack, _ = _tile_stack(a.get("inj_stack"), inj, a.get("parts"))
+        if in_st:
+            inj = put_tile_in(st.get("inj"), inj, mine_tile)
+        istack, iids = _tile_stack(a.get("inj_stack"), inj, a.get("parts"))
+        if in_st and a.get("inj_stack") is not None:
+            istack = put_tile_in_stack(st.get("nights_inj"), st.get("night_ids"), istack, iids, mine_tile)
         mine = {_place_key(sources[m]) for m in meas}
-        others = [(float(s[0]), float(s[1])) for s in (a.get("inj_sources") or []) if _place_key(s) not in mine]
+        held = list(a.get("inj_sources") or []) + (list(st.get("inj_sources") or []) if in_st else [])
+        others, seen = [], set(mine)
+        for s in held:                    # the image's other sources: the annulus' and, around its tile, the stitch's
+            if _place_key(s) not in seen:
+                seen.add(_place_key(s))
+                others.append((float(s[0]), float(s[1])))
         irows, imaps = verify_injections(istack, [sources[m] for m in meas], fwhm, pxscale,
                                          known=list(known) + others, drift_px=drift_px, excl_fwhm=excl_fwhm,
                                          angle_convention=angle_convention, fap_list=fap_list, tap_list=tap_list,
@@ -1159,7 +1190,9 @@ def verify_tiles(annuli: Sequence[Dict[str, Any]], candidates: Sequence[Tuple[fl
     rows = [crow[k] for k in sorted(crow)] + inj_rows
     meta = {"nights": nights, "fap_op": fap_op, "drift_px": drift_px, "excl_fwhm": excl_fwhm, "fwhm": fwhm,
             "pxscale": pxscale, "n_boot": n_boot,
-            "path_a": "the image of the annulus whose tile holds the position, as the stitch took it",
+            "path_a": ("the stitched image with the tile of the annulus that holds the position put in: that "
+                       "annulus' own pixels on its tile, the stitch's around it" if st is not None else
+                       "the image of the annulus whose tile holds the position, as the stitch took it"),
             "sidelobes": None if sidelobes is None else sidelobes.describe()}
     for r in rows:
         r["meta"] = meta
@@ -1169,16 +1202,21 @@ def verify_tiles(annuli: Sequence[Dict[str, Any]], candidates: Sequence[Tuple[fl
 def tile_comparison_lines(rows: Sequence[Dict[str, Any]], tile_rows: Sequence[Dict[str, Any]],
                           report: str = "tile_verify_report.txt") -> List[str]:
     """The closing section of the stitched report: each candidate's and source's S/N on the
-    stitch beside its S/N on the image of the annulus whose tile holds it (:func:`verify_tiles`,
+    stitch beside its S/N with the pixels of the annulus whose tile holds it (:func:`verify_tiles`,
     in full in ``report``).  Every line is a comment."""
     def key(r):
         return (r.get("kind", "candidate"), int(r["index"]))
 
     tile = {key(r): r for r in tile_rows}
     rho_h = 'rho["]'
-    L = ["#", f"# ==== the stitch beside the tiles ({report}) ====",
-         "#   each S/N on the stitched image, and on the image of the annulus whose tile holds the position,",
-         "#   the image the search and the validation measure that annulus' sources on.  In full in that report.",
+    if any(r.get("in_stitch") for r in tile_rows):
+        what = ["#   each S/N on the stitched image, and on the stitch with the tile of the annulus that holds the",
+                "#   position put in.  The two differ only where the stitch blends or patches that tile.  In full in",
+                "#   that report."]
+    else:
+        what = ["#   each S/N on the stitched image, and on the image of the annulus whose tile holds the position,",
+                "#   the image the search and the validation measure that annulus' sources on.  In full in that report."]
+    L = ["#", f"# ==== the stitch beside the tiles ({report}) ====", *what,
          f"#   {'kind':<9} {'#':>3} {rho_h:>7} {'PA[deg]':>7} {'contrast':>10}  {'tile':>4}  {'S/N stitch':>10}  {'S/N tile':>8}"]
     for r in rows:
         t = tile.get(key(r))
@@ -1359,8 +1397,12 @@ def write_verify_table(path: str, rows: Sequence[Dict[str, Any]], limits: Option
     injs = [r for r in rows if r.get("kind") == "injection"]
     def _on(r):
         t = r.get("tile_px")
-        return "" if "annulus" not in r else (f"annulus {r['annulus']}'s image" + (
-            f", tile {float(t[0]):.2f}-{float(t[1]):.2f} px" if t is not None else ""))
+        tt = f", tile {float(t[0]):.2f}-{float(t[1]):.2f} px" if t is not None else ""
+        if "annulus" not in r:
+            return ""
+        if r.get("in_stitch"):
+            return f"the stitch with annulus {r['annulus']}'s tile put in{tt}"
+        return f"annulus {r['annulus']}'s image{tt}"
 
     for r in cands:
         s = r["subsets"]
@@ -1383,8 +1425,10 @@ def write_verify_table(path: str, rows: Sequence[Dict[str, Any]], limits: Option
                  f"({float(meta.get('excl_fwhm', 1.5)):.1f} FWHM keep-out)"
                  + (", and the ADI arcs of the sidelobe rule (above)" if rule else ""))
         tiled = any("annulus" in r for r in injs)
+        in_st = any(r.get("in_stitch") for r in injs)
         L.append("#   columns: rho[\"] PA[deg] contrast  | combined S/N  FAP  | injected-STIM  STIM-FAP"
-                 + ("  | the annulus whose image measured it" if tiled else ""))
+                 + ("  | the annulus whose tile, put into the stitch, measured it" if in_st else
+                    "  | the annulus whose image measured it" if tiled else ""))
         for r in injs:
             s = r["subsets"]
             cstr = f"{r['contrast']:10.3E}" if np.isfinite(r.get("contrast", np.nan)) and r["contrast"] > 0 else "  (n/a)  "

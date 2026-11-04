@@ -294,13 +294,27 @@ only, and the verify measured a dilution of it.  Since 2026-11-03 (NEAR2's s7 no
   `INJALL = 1`.  The annuli's own `best_inj.fits` stay as the validation made them.
   `--stitch-injections own` stitches each annulus' own, as a run saved before 2026-11-03 does.
 * The per-tile measure (`tile_verify_report.txt`) measures each source and each candidate on the
-  image of the annulus whose tile holds it, as the search and the validation measure an
-  annulus' sources, and names that annulus on its line.  Each source's ring leaves out the
-  other sources that image holds.  A source the tile's annulus did not inject (a run with each
-  annulus' own) is listed with no S/N.  `stitched_verify_report.txt` ends with the two S/N side
-  by side, the stitch's and the tile's.
-* The tile-wise S/N maps (`klip_stitched_snr_tiles.fits`, `klip_stitched_snr_tiles_inj.fits`) put
-  each annulus' S/N map from its own image together by tiles, with no blend.
+  stitch with the tile of the annulus that holds it put in.  That annulus' own pixels are on its
+  tile and the stitch's around it, and each partition goes in by its id.  It names that annulus
+  on its line.
+  Each source's ring leaves out the other sources the image holds.  A source the tile's annulus
+  did not inject (a run with each annulus' own) is listed with no S/N.
+  `stitched_verify_report.txt` ends with the two S/N side by side, the stitch's and the tile's.
+  They differ only where the stitch blends or patches a tile, and are the same where it does not.
+* The tile-wise S/N maps (`klip_stitched_snr_tiles.fits`, `klip_stitched_snr_tiles_inj.fits`) take,
+  on each tile, the S/N map of the stitch with that tile put in, with no blend between tiles.
+
+Until 2026-11-04 the per-tile measure and the tile-wise maps used each annulus' image alone, as
+the search and the validation measure its sources.  That image is NaN outside the annulus'
+zone, and the matched filter and the noise ring take zeros there, where on the stitch they take
+the neighbors' residuals (NEAR2 note, 2026-11-04).  Where the next annulus in has residuals
+several times the zone's, the zeros leave noise out of the ring and the radial band.  Inside
+about 1.3" of NEAR2's s5 and s7 the image alone read 1.3 to 6 times the stitch's S/N, most
+near a zone's inner edge, and about the same beyond.  The search, the validation and the
+contrast grid still measure each annulus on its image alone, since its neighbors' winners do
+not exist yet.  Their S/N and contrast curves are then optimistic where the residuals rise
+steeply toward the star.  There the stitched verify, which measures every validation source on
+the stitch, and its detection-limit tables are the numbers to quote.
 
 ### The score floor (`--score-floor`)
 

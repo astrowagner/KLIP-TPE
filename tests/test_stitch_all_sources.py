@@ -11,10 +11,11 @@ What must hold:
   keeps each annulus' own (``"own"``), and so does its ``rereduce`` unless told otherwise.
 * Where annuli overlap the tiles meet sharply (``stitch_overlap_pads`` False), where they only
   meet the pads stay, and a run saved before keeps its pads.
-* The per-tile measure: each source and candidate measured on the image of the annulus whose
-  tile holds it (``tile_verify_report.txt``), a source that image does not hold listed without
-  an S/N, the stitched report closing with both S/N side by side, and the tile-wise S/N maps,
-  each annulus' map from its own image put together by tiles.
+* The per-tile measure: each source and candidate measured on the stitch with the tile of the
+  annulus that holds it put in (``tile_verify_report.txt``, since 2026-11-04), a source that
+  annulus' image does not hold listed without an S/N, the stitched report closing with both S/N
+  side by side, equal where the tiles take no blend, and the tile-wise S/N maps, on each tile the
+  map of the stitch with that tile put in.
 """
 from __future__ import annotations
 
@@ -28,7 +29,7 @@ from astropy.io import fits
 from klip_tpe import verify as V
 from klip_tpe.metrics import source_xy, star_center
 from klip_tpe.runner import CalibrationConfig, RunConfig, Runner, ValidationConfig
-from klip_tpe.stitch import stitch_by_tiles, tile_index, tile_of
+from klip_tpe.stitch import put_tile_in, stitch_by_tiles, tile_index, tile_of
 
 from conftest import build_synthetic_run
 
@@ -217,11 +218,12 @@ def test_the_final_stitch_holds_every_annulus_sources(run):
 
 
 @pytest.mark.slow
-def test_the_tiles_meet_sharply_and_the_tile_snr_maps_are_each_annulus_own(run):
+def test_the_tiles_meet_sharply_and_the_tile_snr_maps_put_each_tile_into_the_stitch(run):
     d, r, results, logs = run
     tiles = [(8.0, 18.0), (18.0, 28.0)]
     st = fits.getdata(os.path.join(d, "klip_stitched.fits")).astype(float)
     snr_t = fits.getdata(os.path.join(d, "klip_stitched_snr_tiles.fits")).astype(float)
+    snr_st = fits.getdata(os.path.join(d, "klip_stitched_snr.fits")).astype(float)
     assert os.path.exists(os.path.join(d, "klip_stitched_snr_tiles_inj.fits"))
     idx = tile_index(st.shape, tiles)
     yy, xx = np.mgrid[0:st.shape[0], 0:st.shape[1]]
@@ -232,9 +234,12 @@ def test_the_tiles_meet_sharply_and_the_tile_snr_maps_are_each_annulus_own(run):
         best = fits.getdata(os.path.join(d, f"annulus{k + 1:02d}", "best_clean.fits")).astype(float)
         m = (idx == k) & ~on_edge & np.isfinite(st) & np.isfinite(best)
         assert m.sum() > 200 and np.allclose(st[m], best[m], rtol=1e-6, atol=1e-9), "no blend inside the tiles"
-        own_snr = r._snr_map(best)                # from the float32 file: to its precision
+        # the S/N map of the stitch with this tile put in, from the float32 files: to their precision
+        own_snr = r._snr_map(put_tile_in(st, best, idx == k))
         m2 = (idx == k) & np.isfinite(own_snr)
         assert m2.sum() > 200 and np.allclose(snr_t[m2], own_snr[m2], rtol=1e-4, atol=1e-4)
+        # no blend inside the tiles: the stitch's own S/N map there
+        assert np.allclose(snr_t[m2], snr_st[m2], rtol=1e-4, atol=1e-4)
     assert np.all(np.isnan(snr_t[idx < 0]))
 
 
@@ -244,10 +249,15 @@ def test_the_tile_report_and_the_two_snr_side_by_side(run):
     tile_rows = _rows(os.path.join(d, "tile_verify_report.txt"))
     nsrc = sum(len(x.winner_sources) for x in results)
     assert len(tile_rows) == nsrc and all(a == 2 and s is not None for _, _, s, a in tile_rows), tile_rows
+    tile_text = open(os.path.join(d, "tile_verify_report.txt")).read()
+    assert "PATH A = the stitched image with the tile of the annulus that holds the position put in" in tile_text
     text = open(os.path.join(d, "stitched_verify_report.txt")).read()
     assert "==== the stitch beside the tiles (tile_verify_report.txt) ====" in text
+    assert "differ only where the stitch blends or patches that tile" in text
     side = [ln for ln in text.splitlines() if ln.startswith("#   injection")]
     assert len(side) == nsrc and all(" a2 " in ln for ln in side)
+    # the tiles take no blend here: the stitch's S/N and the tile's are the same
+    assert all(ln.split()[-1] == ln.split()[-2] for ln in side), side
 
 
 @pytest.mark.slow

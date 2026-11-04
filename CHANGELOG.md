@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased — 2026-11-04 (the per-tile measure on the stitch with the tile put in)
+
+- **The per-tile measure and the tile-wise S/N maps put each tile into the stitch** (NEAR2's
+  note of 2026-11-04, Kevin Wagner).  `tile_verify_report.txt` measures each source and
+  candidate on the stitch with the tile of the annulus that holds it put in, each partition by
+  its id (`stitch.put_tile_in`, `stitch.put_tile_in_stack`, `verify_tiles(stitch=)`), and
+  `klip_stitched_snr_tiles[_inj].fits` take, on each tile, the S/N map of the stitch with that
+  tile put in.  They used each annulus' image alone, NaN outside its zone, where the matched
+  filter and the noise ring take zeros.  On the stitch they take the neighbors' residuals.
+  Inside about 1.3" of NEAR2's s5 and s7 the image alone read 1.3 to 6 times the stitch's S/N,
+  where the residuals of the next annulus in are several times the zone's.  The two S/N now
+  differ only where the stitch blends or patches a tile.  The search, the validation and the
+  contrast grid still measure each annulus on its image alone (docs/RUNNING.md).
+- Tests in `tests/test_tile_in_stitch.py` and `tests/test_stitch_all_sources.py`.  Docs in
+  RUNNING.md.
+
 ## Unreleased — 2026-11-04 (the FMMF correlates, the grid's keep-out named, tutorial 7's repeat run)
 
 - **The forward-modeled matched filter correlates the image with its templates**

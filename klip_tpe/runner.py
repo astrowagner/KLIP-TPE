@@ -5265,9 +5265,11 @@ class Runner:
         every FITS header.  ``images`` replaces :meth:`_annulus_images` for the annuli it holds
         (:meth:`_final_inj_images`).  Each annulus' ``inj_sources`` says which sources its
         injected image holds (its own when not given).  Besides the stitches and their S/N
-        maps, writes the tile-wise S/N maps: each annulus' S/N map from its own image, put
-        together by tiles (:func:`~klip_tpe.stitch.stitch_by_tiles`)."""
-        from .stitch import seam_pixels, stitch_by_tiles, stitch_stacks, stitch_tiles, tile_of, write_params_table
+        maps, writes the tile-wise S/N maps: on each tile, the S/N map of the stitch with that
+        tile's annulus image put in (:func:`~klip_tpe.stitch.put_tile_in`), put together by tiles
+        (:func:`~klip_tpe.stitch.stitch_by_tiles`)."""
+        from .stitch import (put_tile_in, seam_pixels, stitch_by_tiles, stitch_stacks, stitch_tiles, tile_index,
+                             tile_of, write_params_table)
         images = images or {}
         items = [(r, images.get(r.annulus) or self._annulus_images(r.annulus)) for r in results]
         items = [(r, d) for r, d in items if d is not None and d.get("clean") is not None]
@@ -5403,24 +5405,29 @@ class Runner:
                            "clean_stack": d.get("clean_stack"), "inj_stack": d.get("inj_stack"),
                            "parts": d.get("parts"), "inj_sources": h})
         out["annuli"] = annuli
-        # the tile-wise S/N maps: each annulus' S/N map from its own image, put together by
-        # tiles with no blending (NEAR2 s7 note, 2026-11-02)
+        # the tile-wise S/N maps: on each tile, the S/N map of the stitch with that tile's annulus
+        # image put in, put together by tiles with no blending (NEAR2 s7 note, 2026-11-02).  The
+        # stitch around the tile gives the matched filter and the noise rings the neighbors'
+        # residuals, where the annulus' image alone gave them zeros (NEAR2 note, 2026-11-04).
         from .products import snr_widened_header
+        tidx = tile_index(st_f.shape, tiles)
         for key, fname, label, what in (("clean", "klip_stitched_snr_tiles.fits", "snr_tiles", "clean"),
                                         ("inj", "klip_stitched_snr_tiles_inj.fits", "snr_tiles_inj", "injected")):
             if not any(a[key] is not None for a in annuli) or (key == "inj" and hi is None):
                 continue
+            base = st_f if key == "clean" else out.get("inj")
             maps, winfo = [], {"widened": {}}
             for k, a in enumerate(annuli):
                 if a[key] is None:
                     maps.append(None)
                     continue
                 inf: Dict[str, Any] = {}
-                ex = self._inj_xy(a["inj_sources"], a[key].shape) if key == "inj" else []
-                maps.append(self._snr_map(a[key], info=inf, exclude_xy=ex))
+                img_k = put_tile_in(base, a[key], tidx == k)
+                ex = self._inj_xy(list(allsrc) + list(a["inj_sources"] or []), img_k.shape) if key == "inj" else []
+                maps.append(self._snr_map(img_k, info=inf, exclude_xy=ex))
                 winfo["widened"].update({rad: hw for rad, hw in (inf.get("widened") or {}).items()
                                          if tile_of(rad, tiles) == k})
-            ht = dict(hi if key == "inj" else hdr, IMGTYPE=f"tile-wise S/N map ({what}), each annulus' own map by tiles",
+            ht = dict(hi if key == "inj" else hdr, IMGTYPE=f"tile-wise S/N map ({what}), each tile put into the stitch",
                       **snr_widened_header(winfo))
             files[label] = os.path.join(self.run_dir, fname)
             out[label] = stitch_by_tiles(maps, tiles)
@@ -5471,8 +5478,8 @@ class Runner:
         adds lines to the report's header.
 
         The per-tile measure follows (:meth:`_tile_verify`, ``tile_verify_report.txt``): each
-        candidate and source on the image of the annulus whose tile holds it.  The stitched
-        report closes with the two S/N side by side."""
+        candidate and source on the stitch with the tile of the annulus that holds it put in.
+        The stitched report closes with the two S/N side by side."""
         from .verify import tile_comparison_lines, verify_candidates, write_verify_table
         stack = stitched.get("nights")
         if stack is None:
@@ -5515,18 +5522,24 @@ class Runner:
     def _tile_verify(self, stitched: Dict[str, Any], known: Sequence[Tuple[float, float]],
                      sources: Sequence[Sequence[float]], header: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """The per-tile measure (:func:`~klip_tpe.verify.verify_tiles`, NEAR2 s7 note,
-        2026-11-02): each candidate and each source on the image of the annulus whose tile
-        holds it, as the stitch took the annulus (``stitched["annuli"]``).  Writes
+        2026-11-02): each candidate and each source on the stitch with the tile of the annulus
+        that holds it put in, the annulus as the stitch took it (``stitched["annuli"]``).  Since
+        2026-11-04 the stitch is around the tile, where the annulus' image alone, NaN outside its
+        zone, gave the matched filter and the noise ring zeros (NEAR2 note, 2026-11-04).  Writes
         ``tile_verify_report.txt``.  None when there is nothing to measure."""
         from .verify import verify_tiles, write_verify_table
         annuli = stitched.get("annuli")
         if not annuli or not (len(known) or len(sources)):
             return None
         rng = np.random.default_rng((int(self.cfg.seed or 0) + 31337 + 104729) % (2 ** 32))
-        rows, maps = verify_tiles(annuli, known, [tuple(float(v) for v in s) for s in sources], self.fwhm,
+        allsrc = [tuple(float(v) for v in s) for s in sources]
+        st = {"clean": stitched.get("clean"), "inj": stitched.get("inj"), "nights": stitched.get("nights"),
+              "nights_inj": stitched.get("nights_inj"), "night_ids": stitched.get("night_ids"),
+              "inj_sources": allsrc if stitched.get("inj") is not None else []}
+        rows, maps = verify_tiles(annuli, known, allsrc, self.fwhm,
                                   self.pxscale, known=known, n_boot=int(self.cfg.verify_n_boot), rng=rng,
                                   excl_fwhm=self._excl_fwhm(), angle_convention=self.reducer.angle_convention,
-                                  sidelobes=self._verify_rule(), rules=self._ring_rules())
+                                  sidelobes=self._verify_rule(), rules=self._ring_rules(), stitch=st)
         if not rows:
             return None
         path = os.path.join(self.run_dir, "tile_verify_report.txt")
