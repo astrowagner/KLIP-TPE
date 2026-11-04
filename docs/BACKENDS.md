@@ -249,6 +249,19 @@ ring. A round PSF measures the same both ways. `fmmf_map(fm_at=...)` takes a for
 bin the same way, and `FMMFSNR.describe()` reports `fm_apertures` and the passes made. Each
 partition's own score (`Runner._score_stack`, for scripts) takes no passes.
 
+The filter correlates the image with each template (`RunConfig.fmmf_correlate`, the default
+since 2026-11-04, Kevin Wagner), as a matched filter does, so a source shaped like the template
+gives its least-squares amplitude. Until then it convolved, which turns the template 180 deg
+first. A forward model is lopsided, so the convolution kept part of a source. On the KLIP-FM
+templates of the runs' cross-check passes it kept 0.93 of the amplitude in the median for HD 95086
+(LMIRCam) and 0.82 to 0.87 for MWC 758 (ALES), down to 0.53 to 0.64 for a source at a zone's inner
+edge. The noise goes through a filter of the same norm, so the S/N fell by the same factor. The
+turned filters and the apertures' own models follow the same rule, and so does `fmmf_map`
+(`correlate=False` gives the old maps). A round kernel, the Gaussian or an azimuthally averaged
+PSF, gives the same map to the bit either way, so every other metric, the verify, the S/N maps
+and the KLIP-FM curve are as they were. A custom backend's `matched_filter_kernel_fn` kernel is
+correlated too, and gives the same map if a 180 deg turn leaves it as it is. A run saved before keeps the convolution.
+
 ### VIP cubes
 
 VIP keeps cubes as plain arrays: `Dataset(cube, angle_list, texp=...)` is all that is

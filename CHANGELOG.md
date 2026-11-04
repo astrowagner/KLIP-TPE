@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased — 2026-11-04 (the FMMF correlates, the grid's keep-out named, tutorial 7's repeat run)
+
+- **The forward-modeled matched filter correlates the image with its templates**
+  (`RunConfig.fmmf_correlate`, `FMMFSNR.correlate`, the GitHub agent's finding 13, Kevin Wagner
+  2026-11-03).  `ndimage.convolve` turns a template 180 deg before it filters, and a KLIP-FM
+  template is lopsided, so the FMMF kept part of each source.  On the runs' own KLIP-FM templates
+  it kept 0.93 of the amplitude and S/N in the median for HD 95086 (LMIRCam) and 0.82 to 0.87 for
+  MWC 758 (ALES), down to 0.53 to 0.64 at a zone's inner edge.  `mawet_peak_snr(correlate=)`, the turned
+  and placed filters and `fmmf_map(correlate=)` correlate in a new run, and a run saved before
+  resumes convolving.  Round kernels (the Gaussian, an azimuthally averaged PSF) give the same
+  map to the bit either way, so every Mawet run, the verify, the S/N maps, the KLIP-FM curve and
+  the companion fit, which now correlate too, are as they were.  A custom backend's
+  `matched_filter_kernel_fn` kernel is correlated too, the same map if a 180 deg turn leaves it
+  as it is.  The IDL's kernels are round and it has no FMMF.
+- **The contrast grid names its keep-out** (the MWC 758 ALES session, 2026-11-03).  With the
+  grid's sidelobes off, the default, its rings leave out no arcs, and the angle it logged as
+  "sidelobes +/- 14.4 deg at 0.60\"" is the 1.5 FWHM keep-out beside the source, as the IDL
+  contrast generators skip the source and the aperture each side.  The log line and a position's
+  reason for too few apertures now say so.  No measurement changes.
+- Tutorial 7's search on all 20 groups is `mwc758_ales_repeat`, which repeats the run of
+  2026-10-28 evaluation for evaluation on the current code and adds the search's verify, the mask
+  in every ring, the filled S/N maps and the injection grid (two separations, 4.9e-5 at 0.55" and
+  3.6e-5 at 0.65").  The text and its numbers stand.
+- `run_mwc758_ales_clike.py --per-group`: every reduction parameter searched per wavelength group,
+  bin and filter untied (the MWC 758 ALES session's change, committed as it is).
+- Tests in `tests/test_fmmf_correlate.py` and `tests/test_sidelobe_rings.py`.  Docs in BACKENDS.md.
+
 ## Unreleased — 2026-11-03 (the final stitch with every annulus' sources, and the per-tile measure)
 
 - **Each annulus' injected image in the final stitch holds every annulus' validation sources**

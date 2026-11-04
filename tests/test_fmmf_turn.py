@@ -59,11 +59,14 @@ def test_the_unturned_template_reads_the_map():
     k = rng.standard_normal((11, 11))
     k -= k.mean()
     k /= (k * k).sum()
+    corr = ndimage.correlate(img, k, mode="nearest")
     conv = ndimage.convolve(img, k, mode="nearest")
     tf = _TurnedFilter(img, k, 0.3, {})
+    old = _TurnedFilter(img, k, 0.3, {}, correlate=False)       # runs saved before 2026-11-04
     for x in (0, 1, 30, 60):
         for y in (0, 4, 30, 60):
-            assert tf.at(x, y, 0.0) == pytest.approx(conv[y, x], abs=1e-12)
+            assert tf.at(x, y, 0.0) == pytest.approx(corr[y, x], abs=1e-12)
+            assert old.at(x, y, 0.0) == pytest.approx(conv[y, x], abs=1e-12)
     assert np.allclose(turn_kernel(k, 2 * np.pi), k, atol=1e-12)
 
 
@@ -80,7 +83,7 @@ def test_a_turned_template_recovers_a_planet_at_any_azimuth():
         ref = got if ref is None else ref
         assert got == pytest.approx(ref, rel=0.01), dphi
         if 45 <= abs(dphi) <= 90:                 # the unturned template misses the lobes
-            assert ndimage.convolve(im, km, mode="nearest")[iy, ix] < 0.85 * ref
+            assert ndimage.correlate(im, km, mode="nearest")[iy, ix] < 0.85 * ref
 
 
 @pytest.mark.parametrize("smear", [0.0, 15.0])
@@ -96,7 +99,7 @@ def test_the_ring_scatter_is_the_noise_of_the_source_s_own_filter(smear):
     true, turned, flat = [], [], []
     for seed in range(24):
         im = _arcs(seed, smear)
-        true.append(ndimage.convolve(im, km, mode="nearest")[pk[0][1], pk[0][0]])
+        true.append(ndimage.correlate(im, km, mode="nearest")[pk[0][1], pk[0][0]])
         for t, out in ((True, turned), (False, flat)):
             _, d = mawet_peak_snr(im, [1.5], [pa], PX, FWHM, kernel=[km], declip_nsig=None, turn=[t], peak_xy=pk,
                                   return_details=True)

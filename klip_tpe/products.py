@@ -36,7 +36,7 @@ def noise_profile(img: np.ndarray, fwhm: float, rmin: float, rmax: float,
         kc = (kd - 1) / 2.0
         yy, xx = np.mgrid[0:kd, 0:kd]
         kernel = ((xx - kc) ** 2 + (yy - kc) ** 2 <= rad * rad).astype(float)
-    A = ndimage.convolve(np.where(np.isfinite(img), img, 0.0), kernel, mode="nearest")
+    A = ndimage.correlate(np.where(np.isfinite(img), img, 0.0), kernel, mode="nearest")
     fin = np.isfinite(img)
     if pixel_mask is not None and np.shape(pixel_mask) == img.shape:
         fin = fin & ~np.asarray(pixel_mask, bool)
@@ -207,7 +207,7 @@ def snr_map(img: np.ndarray, fwhm: float, kernel: Optional[np.ndarray] = None,
     if kernel is None:
         kernel = gaussian_kernel(fwhm)
     fin = np.isfinite(img)
-    A = ndimage.convolve(np.where(fin, img, 0.0), kernel, mode="nearest")
+    A = ndimage.correlate(np.where(fin, img, 0.0), kernel, mode="nearest")
     yy, xx = np.mgrid[0:ny, 0:nx]
     rr = np.hypot(xx - cx, yy - cy)
     keep = fin.copy()
@@ -327,7 +327,7 @@ def fm_response(img: np.ndarray, rho, theta, pxscale: float, fwhm: float,
         kern = np.asarray(kern, float)
         key = kern.tobytes()
         if key not in conv_cache:
-            conv_cache[key] = ndimage.convolve(imz, np.asarray(kern, float), mode="nearest")
+            conv_cache[key] = ndimage.correlate(imz, np.asarray(kern, float), mode="nearest")
         A = conv_cache[key]
         px0, py0 = int(round(xs[s])), int(round(ys[s]))
         pkv, bx, by = -np.inf, px0, py0

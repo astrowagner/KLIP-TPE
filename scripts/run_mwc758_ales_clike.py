@@ -157,6 +157,9 @@ ap.add_argument("--workers", default="auto")
 ap.add_argument("--seed", type=int, default=7)
 ap.add_argument("--run-dir", default=None)
 ap.add_argument("--show", choices=("window", "none"), default="window")
+ap.add_argument("--per-group", action="store_true",
+                help="every reduction parameter searched separately for each wavelength group (one slot per "
+                     "group, bin and filter not tied), where by default one block is shared by every group")
 ap.add_argument("--quick", action="store_true", help="12 evaluations, 2 validation draws: a smoke test")
 a = ap.parse_args()
 if a.sdi and a.nights != "nov14":
@@ -253,6 +256,8 @@ PAPER = {"bin": 15, "filter": 11, "k_klip": 15, "n_ang": 6, "angsep": 0.01, "ang
          "zone_in": EDGES[0] - 5.0, "zone_out": 27.0 - EDGES[1], "post_hp": 0}
 # angsep from --angsep-min: above 0 no evaluation reaches the auto-fast basis (every frame, the target's own included)
 as_kw = {} if a.angsep_min is None else {"angsep_range": (float(a.angsep_min), 3.0)}
+if a.per_group:
+    as_kw["per_night"] = True          # a block per partition, as NEAR's per-night space (search_space.make_space)
 if a.k_max is not None:
     as_kw["k_klip_max"] = int(a.k_max)
 corr_floor_cuts = {}          # --corr-range: the frames of each group the floor itself drops
@@ -296,7 +301,7 @@ def build_space(extra=None):
 space = build_space()
 held = {}                     # --pin, as the reducer gets it (an int parameter as an int)
 if user_pin:
-    by_name = {q.name: q for q in space.params if not q.name.startswith("sel_")}
+    by_name = {q.base: q for q in space.params if not q.name.startswith("sel_")}   # a base names every group's slot
     for _name, _v in user_pin.items():
         q = by_name.get(_name)
         if q is None:
@@ -397,6 +402,7 @@ tag += f"_corr{a.corr_range[0]:g}-{a.corr_range[1]:g}" if a.corr_range is not No
 tag += f"_pinc{a.p_include:g}" if a.p_include is not None else ""
 tag += "".join(f"_{k.replace('_', '')}{v:g}" for k, v in sorted(held.items()))
 tag += "_sdi" if a.sdi else ""
+tag += "_pergroup" if a.per_group else ""
 tag += "_star" if a.spectrum == "star" else ""
 run_dir = os.path.abspath(a.run_dir or os.path.join("tutorials", "runs", f"mwc758_ales_clike{tag}" + ("_quick" if a.quick else "")))
 if a.quick:
@@ -405,7 +411,7 @@ if a.quick:
                     validation=ValidationConfig(n_top=2, n_valid=2),
                     calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=1, scan_k=a.no_seed_paper,
                                                   ceiling=a.max_contrast),
-                    fm_curve=False,
+                    fm_curve=False, link_params=[] if a.per_group else ["bin", "filter"],
                     param_verify=False, notes="c-coloured smoke test")
 else:
     cfg = RunConfig(ann_edges=EDGES, n_iter=a.n_iter, n_init=a.n_init, seed=a.seed, n_remeasure=a.n_remeasure,
@@ -414,7 +420,7 @@ else:
                     validation=ValidationConfig(n_top=6, n_valid=8),
                     calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=2, scan_k=a.no_seed_paper,
                                                   ceiling=a.max_contrast),
-                    fm_curve=True,
+                    fm_curve=True, link_params=[] if a.per_group else ["bin", "filter"],
                     notes=f"tutorial 7 with c-coloured injections ({spec_label or 'star spectrum'}); the paper's ADI as seed"
                           + (f"; groups {fixed[0]}-{fixed[-1]} held" if fixed else "")
                           + f"; matched filter {rep_group}"

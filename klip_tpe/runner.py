@@ -373,6 +373,13 @@ class RunConfig:
     #: winner's.  Off by default (Kevin Wagner, 2026-11-02), and runs saved before resume
     #: without it.
     fmmf_fm_apertures: bool = False
+    #: Under a forward-modelled metric, the matched filter correlates the image with each
+    #: template, as a matched filter does, so a source shaped like it gives its least-squares
+    #: amplitude.  ``False`` convolves, which turns the template 180 deg first and kept 0.82 to
+    #: 0.93 of a source's amplitude and S/N in the median on the runs' KLIP-FM templates (GitHub
+    #: agent's finding 13, Kevin Wagner, 2026-11-03).  Round kernels, every other metric's, give the
+    #: same map either way.  Runs saved before 2026-11-04 resume with ``False``, as they scored.
+    fmmf_correlate: bool = True
     inject_inset_fwhm: float = 1.0        # injection band inset from the annulus edges
     pair_area_midpoint: bool = True       # 2 sources -> both at sqrt((r_in^2+r_out^2)/2), 180 deg apart (IDL 2026-09-05)
     #: Every injection of every stage (search, k-scan re-score, calibration, validation,
@@ -560,6 +567,7 @@ class RunConfig:
         d.setdefault("verify_snr", "idl")
         d.setdefault("fmmf_turn", False)
         d.setdefault("fmmf_fm_apertures", False)
+        d.setdefault("fmmf_correlate", False)
         # and one saved before 2026-11-03 its stitch: pads between overlapping annuli, and each
         # annulus' injected image with its own sources
         d.setdefault("stitch_overlap_pads", True)
@@ -695,10 +703,25 @@ def _whys(counts: "collections.Counter", top: int = 3) -> str:
     return out + (f", {rest} other" if rest else "")
 
 
-def _few_apertures(d: Dict[str, Any], min_ring: int, arc_deg: float) -> str:
+def _grid_ring_text(sidelobe: str, rule: Any, hw_deg: float, r_px: float, fwhm: float, pxscale: float) -> str:
+    """What the contrast grid's noise ring leaves out beside the source, for its log line: the
+    run's sidelobe rule, the grid's own arcs (``ContrastGridConfig.sidelobe`` "rotation" or
+    "fixed"), or with neither (the grid's "off", the default) the 1.5 FWHM keep-out alone, as
+    the IDL contrast generators skip the source and the aperture each side.  The keep-out had
+    been logged as "sidelobes" (MWC 758 ALES session, 2026-11-03)."""
+    at = f"at {float(r_px) * float(pxscale):.2f}\""
+    if rule is not None:
+        return f"the run's sidelobe rule, +/- {float(rule.half_width(float(r_px), float(fwhm))):.1f} deg {at}"
+    if str(sidelobe).lower() == "off":
+        return f"no sidelobe arcs, the ring skips +/- {float(hw_deg):.1f} deg (1.5 FWHM) beside the source {at}"
+    return f"sidelobes +/- {float(hw_deg):.1f} deg {at}"
+
+
+def _few_apertures(d: Dict[str, Any], min_ring: int, arc_deg: float, keepout: bool = False) -> str:
     """Why a contrast-grid position kept fewer than ``min_ring`` noise apertures, for its
     record and the log, from its S/N details (:func:`klip_tpe.metrics.sidelobe_snr`).  Where
-    the fallback was tried, the reason is the ring itself, not the sidelobes."""
+    the fallback was tried, the reason is the ring itself, not the sidelobes.  ``keepout``: the
+    angle is the 1.5 FWHM keep-out, the grid's ring with no sidelobe arcs."""
     def aps(k: int) -> str:
         return f"{k} noise aperture{'' if k == 1 else 's'}"
     tried, n_fb = d.get("fallback_tried"), d.get("n_fallback")
@@ -707,6 +730,8 @@ def _few_apertures(d: Dict[str, Any], min_ring: int, arc_deg: float) -> str:
     if tried == "farthest" and n_fb is not None:
         return f"{aps(int(n_fb))} on the whole ring (fewer than {min_ring})"
     k = int(d.get("n_arcs", d.get("n_left", d.get("nclean", 0))))
+    if keepout:
+        return f"{aps(k)} left beside the 1.5 FWHM keep-out, +/- {float(arc_deg):.0f} deg (fewer than {min_ring})"
     return (f"{aps(k)} left beside the +/- {float(d.get('arc_deg', arc_deg)):.0f} deg sidelobes "
             f"(fewer than {min_ring})")
 
@@ -1453,14 +1478,16 @@ class Runner:
             smp.sidelobes = rule
 
     def _install_fmmf_turn(self) -> None:
-        """``RunConfig.fmmf_turn`` and ``fmmf_fm_apertures`` on a forward-modelled metric
-        (:class:`klip_tpe.fmmf.FMMFSNR`): whether its noise samples take the source's template
-        turned to their azimuth, and whether each noise aperture takes a forward model of its
-        own.  A run saved before 2026-11-01 keeps the one map it was scored with."""
+        """``RunConfig.fmmf_turn``, ``fmmf_fm_apertures`` and ``fmmf_correlate`` on a
+        forward-modelled metric (:class:`klip_tpe.fmmf.FMMFSNR`): whether its noise samples take
+        the source's template turned to their azimuth, whether each noise aperture takes a
+        forward model of its own, and whether the filter correlates or convolves.  A run saved
+        before keeps the filter it was scored with."""
         m = getattr(self.objective, "metric", None)
         if m is not None and hasattr(m, "turn") and hasattr(m, "needs_fm"):
             m.turn = bool(getattr(self.cfg, "fmmf_turn", True))
             m.fm_apertures = bool(getattr(self.cfg, "fmmf_fm_apertures", False))
+            m.correlate = bool(getattr(self.cfg, "fmmf_correlate", True))
 
     def _ring_rules(self) -> Dict[str, Any]:
         """The search's noise-ring rules (:func:`klip_tpe.metrics.ring_rules`), which the verify,
@@ -2009,6 +2036,8 @@ class Runner:
                 for _, res in stream:
                     yield res
         min_ring, aperture = geo["min_ring"], geo["aperture"]
+        # no arcs: the angle is the 1.5 FWHM keep-out, not a sidelobe
+        keepout = geo.get("rule") is None and str(gc.sidelobe).lower() == "off"
 
         def measure(res, p, c):
             snr, d = self._grid_snr(geo, res.image, p.r_px, p.theta, clean=clean_img)
@@ -2016,13 +2045,14 @@ class Runner:
             if d.get("why"):
                 return np.nan, str(d["why"])
             if int(d.get("nclean", 0)) < min_ring:
-                return np.nan, _few_apertures(d, min_ring, hw(p.r_px))
+                return np.nan, _few_apertures(d, min_ring, hw(p.r_px), keepout=keepout)
             return snr, None
         t0 = time.time()
         n_test = sum(p.status != "excluded" for p in positions)
         self.log(f"  contrast grid: {n_test} position(s) on {seps.size} separation(s), one injection per reduction, "
                  f"S/N {gc.target_snr:g} +/- {100 * gc.precision:g} % ({'aperture' if aperture else 'matched-filter'} S/N, "
-                 f"sidelobes +/- {hw(float(np.median(seps))):.1f} deg at {np.median(seps) * pxscale:.2f}\")")
+                 + _grid_ring_text(gc.sidelobe, geo.get("rule"), hw(float(np.median(seps))), float(np.median(seps)),
+                                   fwhm, pxscale) + ")")
         positions, n_red = CG.run_grid(
             positions, start, reduce_many, measure, gc, log=self.log,
             stage=lambda s_: self.hb.stage(f"annulus {ia + 1} contrast grid: {s_}", write=False, annulus=ia))

@@ -81,13 +81,13 @@ def test_a_trial_filters_each_image_once(monkeypatch):
     image go through the matched filter once each."""
     obj, clean, injs, draws = _trial()
     calls = []
-    real = ndimage.convolve
+    real = ndimage.correlate                           # the matched filter correlates
 
     def counting(a, k, *args, **kw):
         if np.shape(k) == (KD, KD):                    # not the declip's 3x3 neighbour count
             calls.append(1)
         return real(a, k, *args, **kw)
-    monkeypatch.setattr(ndimage, "convolve", counting)
+    monkeypatch.setattr(ndimage, "correlate", counting)
     monkeypatch.setattr(metrics, "PREPARED_CACHE_SIZE", 0)
     _score(obj, clean, injs, draws)
     n_off = len(calls)

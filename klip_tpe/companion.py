@@ -154,7 +154,7 @@ def ring_sigma(img: np.ndarray, rho: float, pa: float, fwhm_px: float, pxscale: 
     on where the apertures happen to fall.  Also the scatter of all matched-filtered pixels in
     a 1-px band at that radius (same exclusions), for comparison."""
     img = np.asarray(img, float)
-    A = ndimage.convolve(np.where(np.isfinite(img), img, 0.0), kernel, mode="nearest")
+    A = ndimage.correlate(np.where(np.isfinite(img), img, 0.0), kernel, mode="nearest")
     ny, nx = img.shape
     cx, cy = star_center(img.shape)
     x0, y0 = _xy(img.shape, rho, pa, pxscale, angle_convention)
@@ -208,7 +208,7 @@ def companion_snr(reduce_fn: Callable[[Optional[Sequence[Source]]], np.ndarray],
     removed = (np.asarray(reduce_fn([Source(rho, pa, -float(contrast))]), float) if removed is None
                else np.asarray(removed, float))
     model = clean - removed
-    A = ndimage.convolve(np.where(np.isfinite(model), model, 0.0), kernel, mode="nearest")
+    A = ndimage.correlate(np.where(np.isfinite(model), model, 0.0), kernel, mode="nearest")
     x0, y0 = _xy(clean.shape, rho, pa, pxscale, angle_convention)
     isr = int(np.ceil(search_px))
     best, bx, by = -np.inf, int(round(x0)), int(round(y0))

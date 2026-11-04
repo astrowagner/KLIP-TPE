@@ -357,6 +357,14 @@ class FMMFSNR(Metric):
     ``RunConfig.fmmf_fm_apertures`` sets it for a run.  ``stats['fm_passes']`` counts the
     passes, ``stats['fm_empty']`` those that gave no template.
 
+    ``correlate`` (default True): the matched filter correlates the image with each template, so
+    a source shaped like it gives its least-squares amplitude.  ``False`` convolves, which turns
+    the template 180 deg first.  On the KLIP-FM templates of the runs' cross-check passes that
+    kept 0.82 to 0.93 of the amplitude and S/N in the median, and 0.53 to 0.64 of a source at a
+    zone's inner edge (GitHub agent's finding 13, 2026-11-04).  The fallback filters are round and
+    give the same map either way.  ``RunConfig.fmmf_correlate`` sets it for a run, and a run
+    saved before keeps the convolution (``False``).
+
     ``fm_from_difference`` (read by :meth:`klip_tpe.runner.Runner._fm_for`) lets a reducer
     with no analytic KLIP-FM -- this package's pyKLIP, VIP and spaceKLIP backends -- supply
     the *numerical* forward model ``injected - clean`` instead, which is the same thing to
@@ -393,6 +401,8 @@ class FMMFSNR(Metric):
     turn: bool = True
     #: each noise aperture takes a forward model of its own, from the runner's ``fm_at`` (see above)
     fm_apertures: bool = False
+    #: True correlates the image with each template, as a matched filter does, and False convolves (see above)
+    correlate: bool = True
 
     def _fallback(self, rho_one: float) -> np.ndarray:
         if self.kernel_fn is not None:
@@ -448,7 +458,7 @@ class FMMFSNR(Metric):
                                   min_ring=self.min_ring, penalty=self.penalty,
                                   pixel_mask=self.pixel_mask, inner_fwhm=self.inner_fwhm,
                                   angle_convention=self.angle_convention, return_details=True, turn=turn,
-                                  templates_at=tat)
+                                  templates_at=tat, correlate=bool(getattr(self, "correlate", True)))
         if why is not None:
             why[:] = [d.get("why") for d in det]
         return snr
@@ -464,6 +474,7 @@ class FMMFSNR(Metric):
                 "min_ring": self.min_ring, "penalty": self.penalty, "flatten": self.flatten,
                 "inner_fwhm": self.inner_fwhm, "fm_from_difference": self.fm_from_difference,
                 "turn": bool(self.turn), "fm_apertures": bool(getattr(self, "fm_apertures", False)),
+                "correlate": bool(getattr(self, "correlate", True)),
                 "fm_aperture_passes": int(self.stats.get("fm_passes", 0)),
                 "fm_aperture_empty": int(self.stats.get("fm_empty", 0)),
                 "fm_fraction": round(self.stats["fm"] / n, 4),
@@ -474,7 +485,8 @@ class FMMFSNR(Metric):
 def fmmf_map(image: np.ndarray, fm_image: np.ndarray, sources: Sequence[Any], pxscale: float,
              fwhm: float, *, contrast: float = 1.0, size_fwhm: float = 2.5,
              angle_convention: str = "pa", zero_mean: bool = True, flatten: bool = False,
-             n_theta: Optional[int] = None, fm_at: Optional[FMTemplates] = None) -> Dict[str, np.ndarray]:
+             n_theta: Optional[int] = None, fm_at: Optional[FMTemplates] = None,
+             correlate: bool = True) -> Dict[str, np.ndarray]:
     """A full-frame FMMF amplitude and S/N map from a ring of forward-modelled templates.
 
     ``sources`` are the FM test sources whose response ``fm_image`` holds (a golden-angle
@@ -494,6 +506,10 @@ def fmmf_map(image: np.ndarray, fm_image: np.ndarray, sources: Sequence[Any], px
     nearest its center in place of the radius' template turned there, a pass per bin and radius.
     A bin whose pass gave nothing keeps the turned template.  ``n_fm_bins``, returned with
     ``fm_at``, counts the bins that took their own.
+
+    ``correlate`` (default True): each pixel's value is the image correlated with its template,
+    the least-squares amplitude of a source shaped like it.  ``False`` convolves, which turns
+    the template 180 deg first, as before 2026-11-04 (GitHub agent's finding 13).
     """
     img = radprof(image) if flatten else np.asarray(image, float)
     img = np.where(np.isfinite(img), img, 0.0)
@@ -558,7 +574,7 @@ def fmmf_map(image: np.ndarray, fm_image: np.ndarray, sources: Sequence[Any], px
             den = float((k * k).sum())
             if den <= 0:
                 continue
-            amp[sl] = ndimage.convolve(img, k / den, mode="nearest")[sl]
+            amp[sl] = (ndimage.correlate if correlate else ndimage.convolve)(img, k / den, mode="nearest")[sl]
     amp = amp / float(contrast)
 
     snr = np.full_like(amp, np.nan)
