@@ -31,7 +31,7 @@ from . import __version__
 from .metrics import star_center
 
 __all__ = ["tile_mask", "stitch_tiles", "stitch_stacks", "seam_pixels", "seam_trim", "annulus_tiles",
-           "tile_of", "tile_index", "stitch_by_tiles",
+           "tile_of", "tile_index", "stitch_by_tiles", "put_tile_in", "put_tile_in_stack",
            "fits_header", "write_fits", "read_fits", "write_params_table", "write_contrast_curve",
            "write_setup_file", "PARAM_COLUMNS"]
 
@@ -183,6 +183,45 @@ def stitch_by_tiles(images: Sequence[Optional[np.ndarray]], tiles: Sequence[Tupl
         m = idx == k
         out[m] = np.asarray(im, float)[m]
     return out
+
+
+def put_tile_in(stitched: Optional[np.ndarray], image: Optional[np.ndarray], tile: np.ndarray
+                ) -> Optional[np.ndarray]:
+    """The stitch with one annulus' image put in on its tile: ``image`` where ``tile`` (a mask,
+    as ``tile_index(...) == k``) holds and ``image`` is finite, ``stitched`` everywhere else.  A
+    matched filter and a noise ring near the tile's edge then take the neighbors' residuals, as
+    on the stitch, where on ``image`` alone, NaN outside its zone, they take zeros (NEAR2 note,
+    2026-11-04).  ``image`` alone when there is no stitch of its shape, None without ``image``."""
+    if image is None:
+        return None
+    img = np.asarray(image, float)
+    if stitched is None or np.shape(stitched) != img.shape:
+        return img
+    out = np.array(stitched, dtype=float)
+    take = np.asarray(tile, bool) & np.isfinite(img)
+    out[take] = img[take]
+    return out
+
+
+def put_tile_in_stack(stitched: Optional[np.ndarray], stitched_ids: Optional[Sequence[Any]], stack: np.ndarray,
+                      ids: Optional[Sequence[Any]], tile: np.ndarray) -> np.ndarray:
+    """:func:`put_tile_in` for each partition: each plane of ``stack`` (an annulus' per-partition
+    images, ids ``ids``) put into the plane of the stitched per-partition cube with the same id.
+    A plane whose id the stitched cube lacks, and every plane when either set of ids is unknown,
+    stays as the annulus has it."""
+    st = np.asarray(stack, float)
+    if st.ndim == 2:
+        st = st[None]
+    if stitched is None or ids is None or stitched_ids is None:
+        return st
+    cube = np.asarray(stitched, float)
+    if cube.ndim == 2:
+        cube = cube[None]
+    if cube.shape[1:] != st.shape[1:] or len(stitched_ids) != cube.shape[0] or len(ids) != st.shape[0]:
+        return st
+    at = {str(p): k for k, p in enumerate(stitched_ids)}
+    return np.stack([plane if str(p) not in at else put_tile_in(cube[at[str(p)]], plane, tile)
+                     for p, plane in zip(ids, st)])
 
 
 def seam_pixels(stitched: np.ndarray, r0: float, r1: float) -> np.ndarray:
