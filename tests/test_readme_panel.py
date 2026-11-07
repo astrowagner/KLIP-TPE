@@ -1,7 +1,7 @@
 """The README panel's script: RX J0534 by default, through run_rxj0534.py, titled by name.
 
-The run takes two days on four nights of LMIRCam data, so a wrong argument found at the end
-costs the run.  These tests check the command line it hands run_rxj0534.py, and that the
+The run takes about three days on four nights of LMIRCam data (three annuli), so a wrong argument
+found at the end costs the run.  These tests check the command line it hands run_rxj0534.py, and that the
 display's title replaces the run directory's name.
 """
 from __future__ import annotations
@@ -34,6 +34,7 @@ def test_the_default_is_rxj0534_through_run_rxj0534(monkeypatch, tmp_path):
     assert _opt(argv, "--contrast-grid") == "grid"
     assert _opt(argv, "--cg-step") == "0.5", "half-FWHM steps: five separations in the +/- 2 FWHM annulus"
     assert _opt(argv, "--cg-pa") == "12"
+    assert _opt(argv, "--extra-annuli") == "2", "three annuli: the companion's and two outside it"
     assert _opt(argv, "--out") == str(tmp_path / "readme")
     assert argv[-1] == "--show" and "--panels" not in argv
     assert "--seed" not in argv and "--n-init" not in argv, "run_rxj0534.py's own seed and warm-up"
@@ -46,7 +47,30 @@ def test_no_show_still_writes_the_panels(monkeypatch):
     assert _opt(argv, "--n-iter") == "5000"
     assert _opt(argv, "--cg-step") == "1"
     assert _opt(argv, "--seed") == "4"
-    assert a.run_dir == os.path.expanduser("~/klip_tpe_runs/rxj0534/readme")
+    assert a.run_dir == os.path.expanduser("~/klip_tpe_runs/rxj0534/readme_3ann"), \
+        "a new directory: the single-annulus run in .../readme would otherwise be resumed"
+
+
+def test_the_companions_annulus_alone_is_still_one_option_away():
+    argv = readme_panel.rxj0534_argv(readme_panel.parse(["--extra-annuli", "0"]))
+    assert "--extra-annuli" not in argv
+
+
+def test_the_three_annuli_touch_and_the_crop_holds_them():
+    """The geometry the README run gets, without loading data: the first annulus is the
+    companion's +/- 2 FWHM, the next two are as wide and touch it, and the default crop holds
+    the outermost with the single-annulus run's margin."""
+    rx = pytest.importorskip("run_rxj0534")
+    r_px = rx.PLANET[0] / rx.PXSCALE
+    e = rx.annulus_edges(r_px, rx.FWHM_PX, extra=2)
+    assert len(e) == 4
+    assert 0.5 * (e[0] + e[1]) == pytest.approx(r_px), "the first annulus is centred on the companion"
+    widths = [e[k + 1] - e[k] for k in range(3)]
+    assert widths == pytest.approx([4 * rx.FWHM_PX] * 3)
+    assert [round(v * rx.PXSCALE, 3) for v in e] == [0.198, 0.582, 0.966, 1.349]
+    assert rx.crop_for(e) == 152 and rx.crop_for(e) * 2 + 1 <= 400, "inside the 400-px frames"
+    assert rx.crop_for(rx.annulus_edges(r_px, rx.FWHM_PX)) == 80, "one annulus keeps the old crop"
+    assert rx.annulus_edges(r_px, rx.FWHM_PX, ann=(20, 40), extra=1) == [20.0, 40.0, 60.0]
 
 
 def test_hd95086_keeps_its_own_settings():

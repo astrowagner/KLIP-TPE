@@ -662,3 +662,101 @@ def test_fresh_starts_over_on_purpose(big_tree, tmp_path):
     run_rxj0534.main(base + ["--fresh"])
     log = open(os.path.join(out, "run.log")).read()
     assert "continued with the recorded settings" not in log.split("--fresh")[-1]
+
+
+# ------------------------------------------------------------------ --extra-annuli (the README run)
+@pytest.fixture
+def wide_tree(tmp_path, monkeypatch):
+    """Frames wide enough for the README run's three annuli (out to 126 px), so the runner's ring
+    check sees whole rings and keeps both sources of a pair; on the 48-px tree it caps them at one."""
+    root = _fake_tree(str(tmp_path / "LMIRCamWide"), nframes=6, size=270)
+    monkeypatch.setattr(run_rxj0534, "ROOT", root)
+
+    def fake_angles(path):
+        n = fits.getheader(path.replace("_angles", "_cube")
+                           .replace("_bin.sav", "_align_cen_bin.fits"))["NAXIS3"]
+        return np.linspace(-6.0, 48.0, n) + hash(os.path.basename(path)) % 7 * 1e-3
+
+    monkeypatch.setattr(run_rxj0534, "_angles", fake_angles)
+    monkeypatch.setattr(run_rxj0534, "_texp", lambda p: 3020.22)
+    return root
+
+
+def _capture_cfg(monkeypatch, results=()):
+    """Runner.run replaced: the run's configuration recorded, ``results`` returned, nothing searched."""
+    from klip_tpe.runner import Runner
+    seen = {}
+
+    def fake_run(self):
+        seen["cfg"], seen["fwhm"] = self.cfg, float(self.reducer.fwhm)
+        return list(results)
+
+    monkeypatch.setattr(Runner, "run", fake_run)
+    return seen
+
+
+def test_extra_annuli_reach_the_run_each_injected_on_its_own_ring(wide_tree, tmp_path, monkeypatch):
+    """Two annuli outside the companion's, as wide and touching it.  inject_rho is one radius
+    for the whole run and the runner refuses an annulus it is not in, so with --even-pa each
+    band is collapsed to its own mid-radius instead -- the companion's separation in the first."""
+    seen = _capture_cfg(monkeypatch)
+    out = str(tmp_path / "o_3ann")
+    rc = run_rxj0534.main(["--partitions", "4", "--n-iter", "10", "--out", out, "--extra-annuli", "2",
+                           "--even-pa", "--n-sources", "2", "--k-max", "4", "--max-drop", "0",
+                           "--crop", "0", "--workers", "1"])
+    assert rc == 0
+    cfg, fwhm = seen["cfg"], seen["fwhm"]
+    r_px = run_rxj0534.PLANET[0] / run_rxj0534.PXSCALE
+    want = run_rxj0534.annulus_edges(r_px, fwhm, extra=2)
+    assert cfg.ann_edges == pytest.approx(want) and len(cfg.ann_edges) == 4
+    assert cfg.inject_rho is None, "one radius for every annulus would stop the run at annulus 2"
+    assert cfg.inject_inset_fwhm > 0.5 * (want[1] - want[0]) / fwhm, "each band collapsed to its mid-radius"
+    assert cfg.n_iter == 10 and cfg.n_sources == 2
+    log = open(os.path.join(out, "run.log")).read()
+    assert "all within" in log, "the companion's annulus still injects on its ring"
+    for ia in (1, 2):
+        line = [l for l in log.splitlines() if f"annulus {ia + 1}: 2 injected at rho" in l]
+        assert line, log
+        ring = 0.5 * (want[ia] + want[ia + 1])
+        import re
+        got = [float(v) for v in re.findall(r"\(([0-9.]+) px\)", line[0].split(", PA")[0])]
+        assert got == pytest.approx([ring, ring], abs=0.01), (ia, got, ring)
+
+
+def test_one_annulus_keeps_its_companion_radius_as_before(tree, tmp_path, monkeypatch):
+    seen = _capture_cfg(monkeypatch)
+    run_rxj0534.main(["--partitions", "4", "--n-iter", "10", "--out", str(tmp_path / "o_1ann"), "--even-pa",
+                      "--n-sources", "2", "--k-max", "4", "--max-drop", "0", "--crop", "0", "--workers", "1"])
+    cfg = seen["cfg"]
+    assert len(cfg.ann_edges) == 2
+    assert cfg.inject_rho == pytest.approx(run_rxj0534.PLANET[0], abs=1e-3)
+    assert cfg.inject_inset_fwhm == 1.0, "the single-annulus run is left exactly as it was"
+
+
+def test_a_crop_too_small_for_the_extra_annuli_is_refused(tree, tmp_path, monkeypatch):
+    _capture_cfg(monkeypatch)
+    with pytest.raises(SystemExit, match="outermost annulus"):
+        run_rxj0534.main(["--partitions", "4", "--n-iter", "10", "--out", str(tmp_path / "o_crop"),
+                          "--extra-annuli", "2", "--crop", "100", "--k-max", "4", "--max-drop", "0",
+                          "--workers", "1"])
+
+
+def test_the_default_crop_grows_to_hold_the_extra_annuli(tree, tmp_path, monkeypatch):
+    _capture_cfg(monkeypatch)
+    out = str(tmp_path / "o_crop2")
+    run_rxj0534.main(["--partitions", "4", "--n-iter", "10", "--out", out, "--extra-annuli", "2",
+                      "--k-max", "4", "--max-drop", "0", "--workers", "1"])
+    assert "cropped to 305 px" in open(os.path.join(out, "run.log")).read()
+
+
+def test_only_the_annulus_holding_the_companion_reports_it(tree, tmp_path, monkeypatch):
+    img = np.random.default_rng(0).normal(size=(161, 161))
+    r_px = run_rxj0534.PLANET[0] / run_rxj0534.PXSCALE
+    e = run_rxj0534.annulus_edges(r_px, run_rxj0534.FWHM_PX, extra=2)
+    res = [types.SimpleNamespace(annulus=k, inrad=e[k], outrad=e[k + 1], clean_image=img) for k in range(3)]
+    _capture_cfg(monkeypatch, res)
+    out = str(tmp_path / "o_rep")
+    run_rxj0534.main(["--partitions", "4", "--n-iter", "10", "--out", out, "--extra-annuli", "2",
+                      "--k-max", "4", "--max-drop", "0", "--crop", "0", "--workers", "1"])
+    said = [l for l in open(os.path.join(out, "run.log")).read().splitlines() if "recovered at S/N" in l]
+    assert len(said) == 1 and "annulus 1:" in said[0], said

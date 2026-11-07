@@ -1,22 +1,27 @@
 #!/usr/bin/env python
 """The README's panel: RX J0534 b (LBTI/LMIRCam L', four nights), run until it has converged.
 
-    python3 scripts/readme_panel.py                       # 3,000 evaluations, about ten hours on the Mac Pro
+    python3 scripts/readme_panel.py                       # 3 annuli x 3,000 evaluations, about three days on the Mac Pro
+    python3 scripts/readme_panel.py --extra-annuli 0      # the companion's annulus alone, about ten hours
     python3 scripts/readme_panel.py --n-iter 5000         # longer
     python3 scripts/readme_panel.py --cg-step 1           # the contrast grid at FWHM steps
     python3 scripts/readme_panel.py --no-show             # no window, panels still written
     python3 scripts/readme_panel.py --target hd95086      # the panel on public data (VLT/SPHERE)
 
 RX J0534 is ``scripts/run_rxj0534.py``'s four-night search (``--partitions 4``), with the
-companion held out of the objective and the annulus its separation +/- 2 FWHM.  The injections
-go two at a time (``--n-sources``), 180 deg apart on the companion's ring at 0.39"
-(``run_rxj0534.py --even-pa``), from an anchor drawn afresh for every evaluation.  The README's
-image before this one was the same search at 5,000 evaluations with three injections at random
-angles, whose running median climbed for about 1,500 evaluations and then stayed flat, so 3,000
-show the climb and a plateau as long again.  The contrast grid steps half a FWHM
-(``--cg-step``), which in that annulus gives five separations from 0.29" to 0.49" in place of
-three.  The panel's title is ``--title`` ("RX J0534"), not the run directory's name.  The data
-are read from ``LMIRCAM_ROOT`` (default /Volumes/RAID36TB/LMIRCam).
+companion held out of the objective.  The first annulus is its separation +/- 2 FWHM
+(0.20-0.58"), and two more of the same width follow outward (``--extra-annuli``, 0.58-0.97" and
+0.97-1.35"), each searched for ``--n-iter`` evaluations; the frames are cropped to hold the
+outermost.  The injections go two at a time (``--n-sources``), 180 deg apart on each annulus'
+mid-radius, which in the first is the companion's ring at 0.39" (``run_rxj0534.py --even-pa``),
+from an anchor drawn afresh for every evaluation.  The README's image before this one was the
+companion's annulus alone at 5,000 evaluations with three injections at random angles, whose
+running median climbed for about 1,500 evaluations and then stayed flat, so 3,000 show the climb
+and a plateau as long again.  The outer annuli hold two and three times the inner one's pixels,
+so they take about that much longer.  The contrast grid steps half a FWHM (``--cg-step``): five
+separations per annulus, a FWHM in from its edges, so the curve has no points within a FWHM of
+the seams.  The panel's title is ``--title`` ("RX J0534"), not the run directory's name.  The
+data are read from ``LMIRCAM_ROOT`` (default /Volumes/RAID36TB/LMIRCam).
 
 ``--target hd95086`` is tutorial 02's search on HD 95086 (VLT/SPHERE IRDIS K1+K2, 30-70 px,
 HD 95086 b passed as known) with the same data and seed, after a 200-evaluation warm-up.  Its
@@ -30,10 +35,13 @@ source per reduction at 12 position angles per separation (``--cg-pa``), each it
 (``--cg-target``) with the IDL contrast generators' aperture photometry or the run's
 matched-filter S/N (``--cg-snr``).
 
-The run writes to ``--run-dir`` (``~/klip_tpe_runs/rxj0534/readme``, or
-``~/klip_tpe_runs/hd95086``), outside any synced folder.  Its last panel, the finished annulus
-with the validated winner, is the image at the top of the README (``docs/img/step_display.png``).
-Running the command again resumes the run.
+The run writes to ``--run-dir`` (``~/klip_tpe_runs/rxj0534/readme_3ann``, or
+``~/klip_tpe_runs/hd95086``), outside any synced folder; the single-annulus run of 2026-10-30 is
+in ``~/klip_tpe_runs/rxj0534/readme``.  Its last panel, the last annulus finished with its
+validated winner, is the image at the top of the README (``docs/img/step_display.png``): its
+stitched images and contrast curve cover every annulus, the companion's included, and its
+convergence and parameter panels are the last annulus'.  Running the command again resumes the
+run.
 """
 from __future__ import annotations
 
@@ -49,10 +57,10 @@ if _HERE not in sys.path:
 
 #: per target, the settings that differ: run directory, title, seed, warm-up, grid step, sources
 TARGETS = {
-    "rxj0534": dict(run_dir="~/klip_tpe_runs/rxj0534/readme", title="RX J0534", seed=None, n_init=None,
-                    cg_step=0.5, n_sources=2),
+    "rxj0534": dict(run_dir="~/klip_tpe_runs/rxj0534/readme_3ann", title="RX J0534", seed=None, n_init=None,
+                    cg_step=0.5, n_sources=2, extra_annuli=2),
     "hd95086": dict(run_dir="~/klip_tpe_runs/hd95086", title="HD 95086", seed=3, n_init=200, cg_step=1.0,
-                    n_sources=None),
+                    n_sources=None, extra_annuli=0),
 }
 
 
@@ -68,8 +76,11 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--n-sources", type=int, default=None,
                    help="injected sources per evaluation (default 2 on RX J0534, evenly spaced in angle, "
                         "and the runner's rule on HD 95086)")
+    p.add_argument("--extra-annuli", type=int, default=None,
+                   help="RX J0534: annuli outside the companion's, each as wide (default 2; 0 for the "
+                        "companion's annulus alone)")
     p.add_argument("--run-dir", default=None,
-                   help="run directory (default ~/klip_tpe_runs/rxj0534/readme or ~/klip_tpe_runs/hd95086)")
+                   help="run directory (default ~/klip_tpe_runs/rxj0534/readme_3ann or ~/klip_tpe_runs/hd95086)")
     p.add_argument("--title", default=None, help="the panel's title (default \"RX J0534\" or \"HD 95086\")")
     p.add_argument("--cg-pa", type=int, default=12, help="contrast grid: position angles per separation (default 12)")
     p.add_argument("--cg-step", type=float, default=None,
@@ -99,6 +110,8 @@ def rxj0534_argv(a: argparse.Namespace) -> list:
     argv = ["--partitions", "4", "--n-iter", str(a.n_iter), "--out", a.run_dir, "--title", a.title,
             "--n-sources", str(a.n_sources), "--even-pa", "--contrast-grid", "grid", "--cg-pa", str(a.cg_pa), "--cg-step", f"{a.cg_step:g}",
             "--cg-target", f"{a.cg_target:g}", "--cg-snr", a.cg_snr, "--workers", str(a.workers)]
+    if a.extra_annuli:
+        argv += ["--extra-annuli", str(a.extra_annuli)]
     if a.n_init is not None:
         argv += ["--n-init", str(a.n_init)]
     if a.seed is not None:
