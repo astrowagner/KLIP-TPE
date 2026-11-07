@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — 2026-11-07 (the README panel over three annuli)
+
+- **`scripts/run_rxj0534.py --extra-annuli N`** adds N annuli outside the companion's, each as
+  wide and touching the one before (Kevin Wagner: the README panel on more of the field).  With
+  the default annulus, 2 gives 0.20-0.58", 0.58-0.97" and 0.97-1.35".  The default crop grows to
+  hold the outermost with the single-annulus run's margin (152 px for two), and a smaller
+  `--crop` is refused.  `RunConfig.inject_rho` is one radius for the whole run and the runner
+  refuses an annulus it does not lie in, so with `--even-pa` each annulus' band is collapsed to
+  its own mid-radius instead (`inject_inset_fwhm` past its half-width), which in the first is the
+  companion's separation as before.  The log gives each annulus' injection radius, and the
+  companion's recovered S/N is reported for the annuli that hold it.  One annulus runs exactly
+  as before.
+- **`scripts/readme_panel.py`** runs the three annuli by default, 3,000 evaluations each (about
+  three days on the Mac Pro), into `~/klip_tpe_runs/rxj0534/readme_3ann`; `--extra-annuli 0` is
+  the companion's annulus alone.  The README image is the last annulus' finished panel, whose
+  stitched images and contrast curve cover all three.
+- Tests in `tests/test_run_rxj0534.py` and `tests/test_readme_panel.py`.
+
 ## Unreleased — 2026-11-04 (the per-tile measure on the stitch with the tile put in)
 
 - **The per-tile measure and the tile-wise S/N maps put each tile into the stitch** (NEAR2's

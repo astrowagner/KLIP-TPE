@@ -28,6 +28,7 @@ Running it
     python scripts/run_rxj0534.py                  # 16 partitions (night x side x cube)
     python scripts/run_rxj0534.py --partitions 4   # one per night, comparable to run B2
     python scripts/run_rxj0534.py --default-only   # just the baseline, no search (~minutes)
+    python scripts/run_rxj0534.py --extra-annuli 2 # and two annuli outside the companion's
 
 ``--partitions`` is the interesting knob: 4 nights reproduces the 38-D regime the paper
 already benchmarks, 16 pushes it to ~150-D.  Running both gives the dimension-scaling
@@ -59,6 +60,26 @@ LAM_M = 3.8e-6            # standard L'
 DIAM_M = 8.4              # one LBT primary (dual-aperture, incoherent)
 
 PLANET = (0.390, 300.5)   # arcsec, deg E of N -- from the Table 2 offsets above
+
+#: the reducer's FWHM in pixels, 1.028 lambda/D as generic.make_reducer sets it, known before the
+#: data are loaded -- the crop has to be chosen first
+FWHM_PX = 1.028 * LAM_M / DIAM_M * 206265.0 / PXSCALE
+
+
+def annulus_edges(r_px, fwhm, ann=None, ann_fwhm=2.0, extra=0):
+    """The run's annulus edges, px: the first annulus is ``ann`` or the companion's separation
+    ``r_px`` +/- ``ann_fwhm`` FWHM, and ``extra`` more follow outward, each as wide as the first
+    and touching the one before (``--extra-annuli``)."""
+    half = float(ann_fwhm) * float(fwhm)
+    a0, a1 = (float(ann[0]), float(ann[1])) if ann else (max(float(r_px) - half, 1.0), float(r_px) + half)
+    w = a1 - a0
+    return [a0, a1] + [a1 + w * (k + 1) for k in range(int(extra))]
+
+
+def crop_for(edges, margin_px=25.6, floor=80):
+    """The crop half-width that holds the outermost annulus with the margin the default run has
+    (its 54-px annulus in an 80-px crop), and never below ``floor``."""
+    return max(int(floor), int(np.ceil(float(edges[-1]) + float(margin_px))))
 
 
 class CompanionTrace:
@@ -255,6 +276,11 @@ def main(argv=None):
                          "+/- 2 FWHM, which puts it exactly at the mid-radius the injections use")
     ap.add_argument("--ann-fwhm", type=float, default=2.0, metavar="N",
                     help="half-width of the default annulus in FWHM (default 2)")
+    ap.add_argument("--extra-annuli", type=int, default=0, metavar="N",
+                    help="N more annuli outside the first, each as wide as it and touching the one before "
+                         "(default 0). The first stays the companion's; with the default annulus, 2 gives "
+                         "0.20-0.58\", 0.58-0.97\" and 0.97-1.35\". With --even-pa each annulus' injections "
+                         "sit on its own mid-radius, which for the first is the companion's separation")
     # 3, not 2: this is LMIRCam.  The NIRCam limit of two (a small coronagraphic field, where
     # simultaneous sources perturb the basis each other sees) was applied here by mistake on
     # 2026-09-22 (471c017) and is a NIRCam setting only -- run_demos D / H2 carry it.
@@ -271,9 +297,11 @@ def main(argv=None):
                          "separation. Only for a deliberately wide band (a contrast curve over "
                          "a range); for a detection run it means optimizing the wrong radius")
     ap.add_argument("--clean", action="store_true", help="use the pipeline's cleaned frames")
-    ap.add_argument("--crop", type=int, default=80, metavar="HALF",
-                    help="crop each frame to 2*HALF+1 about the star (default 80; 0 = full frame). "
-                         "The annulus reaches 55 px, so 80 is a wide margin and cuts ~7 GB to ~1 GB")
+    ap.add_argument("--crop", type=int, default=None, metavar="HALF",
+                    help="crop each frame to 2*HALF+1 about the star (0 = full frame). Default 80: the "
+                         "annulus reaches 55 px, so 80 is a wide margin and cuts ~7 GB to ~1 GB. With "
+                         "--extra-annuli the default grows to hold the outermost annulus with the same "
+                         "margin (152 for two)")
     ap.add_argument("--out", default=None)
     ap.add_argument("--seed", type=int, default=21)
     ap.add_argument("--workers", default="auto")
@@ -305,6 +333,13 @@ def main(argv=None):
                     help="contrast grid: the IDL contrast generators' aperture photometry (default) or the "
                          "run's matched-filter S/N")
     a = ap.parse_args(argv)
+    if a.extra_annuli < 0:
+        raise SystemExit(f"--extra-annuli takes 0 or more, not {a.extra_annuli}")
+    if a.crop is None:
+        # chosen before the data are loaded, so from the nominal FWHM; checked against the
+        # reducer's own once it exists
+        a.crop = 80 if not a.extra_annuli else crop_for(
+            annulus_edges(PLANET[0] / PXSCALE, FWHM_PX, a.ann, a.ann_fwhm, a.extra_annuli))
 
     out = a.out or os.path.join(os.getcwd(), f"rxj0534_p{a.partitions}")
     os.makedirs(out, exist_ok=True)
@@ -327,14 +362,21 @@ def main(argv=None):
     # injected source.  So the objective is measured on the companion's own ring -- the
     # separation the result is about -- instead of being diluted across a wide band.
     r_px = PLANET[0] / PXSCALE
-    half = a.ann_fwhm * red.fwhm
-    ann = tuple(a.ann) if a.ann else (max(r_px - half, 1.0), r_px + half)
+    edges = annulus_edges(r_px, red.fwhm, a.ann, a.ann_fwhm, a.extra_annuli)
+    ann = (edges[0], edges[1])
+    multi = len(edges) > 2
     mid = 0.5 * (ann[0] + ann[1])
     log(f"annulus {ann[0]:.1f}-{ann[1]:.1f} px ({ann[0] * PXSCALE:.3f}-{ann[1] * PXSCALE:.3f}\"), "
         f"mid-radius {mid:.1f} px vs companion at {r_px:.1f} px")
     if abs(mid - r_px) > 0.5 * red.fwhm:
         log(f"  note: injections will sit at {mid * PXSCALE:.3f}\", not the companion's "
             f"{PLANET[0]:.3f}\" -- pass --ann symmetric about {r_px:.1f} px to match it")
+    for k in range(2, len(edges)):
+        log(f"annulus {k} of {len(edges) - 1}: {edges[k - 1]:.1f}-{edges[k]:.1f} px "
+            f"({edges[k - 1] * PXSCALE:.3f}-{edges[k] * PXSCALE:.3f}\") (--extra-annuli)")
+    if a.crop and edges[-1] + 0.5 * red.fwhm > a.crop:
+        raise SystemExit(f"the outermost annulus reaches {edges[-1]:.1f} px, past the {a.crop}-px crop -- "
+                         f"pass a larger --crop, or 0 for the full frame")
 
     # The companion is 'known': injections keep clear of it, it is masked out of the noise
     # ring, and it never enters the score -- that is what makes its recovered S/N a real
@@ -368,7 +410,14 @@ def main(argv=None):
     cg = dict(n_pa=a.cg_pa, sep_step_fwhm=a.cg_step, target_snr=a.cg_target, snr=a.cg_snr)
     if a.contrast_grid:
         cg["mode"] = a.contrast_grid
-    cfg = RunConfig(ann_edges=[ann[0], ann[1]], n_iter=n_iter, n_init=n_init, seed=a.seed,
+    # --even-pa puts the sources on one radius.  With one annulus that is RunConfig.inject_rho,
+    # the companion's separation.  inject_rho is one radius for the whole run, and the runner
+    # refuses an annulus it does not lie in, so with --extra-annuli each annulus' band is
+    # collapsed to its own mid-radius instead: inset by more than its half-width, the runner's
+    # band (Runner._band_for) is that mid-radius, which for the first annulus is the
+    # companion's separation again.  The contrast grid keeps its own edges (edge_fwhm).
+    collapse = {"inject_inset_fwhm": 0.5 * (ann[1] - ann[0]) / red.fwhm + 0.01} if (a.even_pa and multi) else {}
+    cfg = RunConfig(ann_edges=list(edges), n_iter=n_iter, n_init=n_init, seed=a.seed,
                     n_sources=a.n_sources,
                     # NEAR's two-source convention collapses the band to the annulus'
                     # AREA-weighted mid radius, which for a band centred on the companion
@@ -376,7 +425,8 @@ def main(argv=None):
                     # when --n-sources 2 is chosen.  Here the band is already collapsed onto
                     # that ring on purpose, so the convention has nothing to add.
                     pair_area_midpoint=False,
-                    inject_rho=mid * PXSCALE if a.even_pa else None,
+                    inject_rho=mid * PXSCALE if (a.even_pa and not multi) else None,
+                    **collapse,
                     validation=ValidationConfig(n_top=1 if a.default_only else 6,
                                                 n_valid=10),
                     calibration=CalibrationConfig(target=(4.0, 6.0), aim=5.0, n_remeasure=3),
@@ -420,6 +470,13 @@ def main(argv=None):
         log(f"  all within {off:.2f} px of the companion at {PLANET[0] / PXSCALE:.2f} px -- "
             f"the objective is measured on its own ring, at whatever angles each "
             f"evaluation draws")
+    for ia in range(1, len(edges) - 1):
+        runner_probe.ia = ia
+        more = runner_probe.search_sources(ia, cfg.contrast0)
+        ring = 0.5 * (edges[ia] + edges[ia + 1])
+        log(f"annulus {ia + 1}: {len(more)} injected at rho = "
+            + ", ".join(f"{s.rho:.4f}\" ({s.rho / PXSCALE:.2f} px)" for s in more)
+            + f", PA re-drawn each evaluation; its centre ring is {ring:.2f} px")
 
     callbacks, disp = [], None
     if a.show or a.panels:
@@ -465,7 +522,8 @@ def main(argv=None):
         m = MawetPeakSNR(pxscale=red.pxscale, fwhm=red.fwhm, kernel_fn=red.matched_filter_kernel)
         for r in results:
             img = getattr(r, "clean_image", None)
-            if img is not None:
+            inr, outr = float(getattr(r, "inrad", 0.0)), float(getattr(r, "outrad", np.inf))
+            if img is not None and inr <= r_px <= outr:        # the annuli that hold the companion
                 snr = float(m.per_source(img, None, [PLANET[0]], [PLANET[1]])[0])
                 log(f"annulus {r.annulus + 1}: RX J0534 b recovered at S/N = {snr:.2f} "
                     f"(published four-night stack: ~5.2)")
