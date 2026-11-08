@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased — 2026-11-08 (the stitched images reach the whole zones at the ends)
+
+- **The stitched images reach the whole KLIP zone of the innermost and the outermost annulus**
+  (the MWC 758 ALES session's note of 2026-11-07, Kevin Wagner).  The innermost tile reaches in
+  to the star and the outermost out past the frame's edge (`stitch.open_ends`,
+  `Runner._image_tiles`), so the stitch takes those annuli' images wherever they are finite,
+  their whole zone with its pads and `zone_in` / `zone_out`.  A one-annulus run's stitch is its
+  winner's image: `wispit2_ales`' stitch covered 6.5-11.0 px where its winner covers 0.7-17.1.
+  The boundaries between annuli are as before.  The clean, injected, running and per-partition
+  stitches, their S/N maps and the tile-wise S/N maps all follow.  The scored annuli still set
+  the injections and the measures, the contrast grid, the candidate search and the `EDGES`
+  header, and `final_results.json` and `rereduce` keep the scored tiles.  `rereduce` gives a
+  finished run the new stitch.  `legacy_stitch` keeps the stitch inside the scored tiles.
+- The synthetic reducer widens its zone by `zone_in` / `zone_out`, as the KLIP reducer does.
+- Tests in `tests/test_stitch_open_ends.py`.  Docs in RUNNING.md.
+
 ## Unreleased — 2026-11-07 (the README panel over three annuli)
 
 - **`scripts/run_rxj0534.py --extra-annuli N`** adds N annuli outside the companion's, each as

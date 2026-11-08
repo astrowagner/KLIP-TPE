@@ -30,7 +30,7 @@ import numpy as np
 from . import __version__
 from .metrics import star_center
 
-__all__ = ["tile_mask", "stitch_tiles", "stitch_stacks", "seam_pixels", "seam_trim", "annulus_tiles",
+__all__ = ["tile_mask", "stitch_tiles", "stitch_stacks", "seam_pixels", "seam_trim", "annulus_tiles", "open_ends",
            "tile_of", "tile_index", "stitch_by_tiles", "put_tile_in", "put_tile_in_stack",
            "fits_header", "write_fits", "read_fits", "write_params_table", "write_contrast_curve",
            "write_setup_file", "PARAM_COLUMNS"]
@@ -66,6 +66,23 @@ def annulus_tiles(zones: Sequence[Tuple[float, float]]) -> List[Tuple[float, flo
             tiles[k][1] = m
             tiles[k + 1][0] = m
     return [(a, b) for a, b in tiles]
+
+
+def open_ends(tiles: Sequence[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    """The tiles an image product is stitched over: ``tiles`` with the innermost reaching in to
+    the star and the outermost out past the frame's edge.  The stitch then takes the innermost
+    and outermost annuli' images wherever they are finite, which is their whole KLIP zone, with
+    its pads and ``zone_in`` / ``zone_out``, since a reducer's image is NaN outside its zone.  A
+    one-annulus run's stitch is then its winner's image (MWC 758 ALES session, 2026-11-07).  The
+    boundaries between annuli are kept."""
+    t = [(float(a), float(b)) for a, b in tiles]
+    if not t:
+        return t
+    i_in = min(range(len(t)), key=lambda k: t[k][0])
+    i_out = max(range(len(t)), key=lambda k: t[k][1])
+    t[i_in] = (0.0, t[i_in][1])
+    t[i_out] = (t[i_out][0], float("inf"))
+    return t
 
 
 def tile_mask(shape, rin: float, rout: float, pad: Any = 2.0) -> np.ndarray:
