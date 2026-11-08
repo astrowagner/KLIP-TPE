@@ -1250,6 +1250,16 @@ class Runner:
             return [tuple(z) for z in zones]
         return annulus_tiles(zones)
 
+    def _image_tiles(self, tiles: Sequence[Tuple[float, float]]) -> List[Tuple[float, float]]:
+        """The tiles the stitched images are made over (:func:`~klip_tpe.stitch.open_ends`): the
+        scored tiles, with the innermost and outermost reaching the whole KLIP zones of their
+        annuli, so every image product shows the full reduction (MWC 758 ALES session,
+        2026-11-07).  The scored tiles still assign positions to annuli, and the scores, the
+        contrast grid and the candidate search stay inside the scored annuli.
+        ``legacy_stitch`` keeps the scored tiles, as the IDL stitch cropped to them."""
+        from .stitch import open_ends
+        return [tuple(t) for t in tiles] if self.cfg.legacy_stitch else open_ends(tiles)
+
     def _tile_pads(self, zones: Sequence[Tuple[float, float]], pad: float = 2.0,
                    annuli: Optional[Sequence[Tuple[float, float]]] = None) -> List[Tuple[float, float]]:
         """``(pad_in, pad_out)`` in px for each stitch tile (``zones``, the tiles): ``pad`` on
@@ -4733,7 +4743,8 @@ class Runner:
                + f",{tiles[-1][1]:.1f}"}
         hdr.update(self._north_header())
         pads = self._tile_pads(tiles, annuli=zones)
-        st = self._maybe_flatten(stitch_tiles(cleans, tiles, pads=pads))
+        itiles = self._image_tiles(tiles)       # the innermost and outermost annuli' whole zones
+        st = self._maybe_flatten(stitch_tiles(cleans, itiles, pads=pads))
         files = {"clean": os.path.join(self.run_dir, "klip_stitched_running.fits")}
         _write_fits(files["clean"], st, hdr)
         snr, hs, _ = self._snr_product(st, dict(hdr, IMGTYPE="running stitched S/N map (Mawet)"))
@@ -4741,7 +4752,7 @@ class Runner:
         _write_fits(files["snr"], snr, hs)
         out = {"clean": st, "snr": snr, "zones": zones, "tiles": tiles}
         if any(i is not None for i in injs):
-            sti = self._maybe_flatten(stitch_tiles([i if i is not None else c for i, c in zip(injs, cleans)], tiles,
+            sti = self._maybe_flatten(stitch_tiles([i if i is not None else c for i, c in zip(injs, cleans)], itiles,
                                                    pads=pads))
             hi = dict(hdr, IMGTYPE="running equal-weight stitch (injected)", INJNSRC=len(sources))
             for j, s in enumerate(sources):
@@ -4755,7 +4766,7 @@ class Runner:
             out["inj"] = sti
         if at_end and any(s is not None for s in stacks):
             w = self._stitch_weights(cleans, zones)
-            cube, ids = stitch_stacks(stacks, parts, tiles, w, pads=pads)
+            cube, ids = stitch_stacks(stacks, parts, itiles, w, pads=pads)
             if cube is not None:
                 hc = dict(hdr, IMGTYPE="running stitched per-partition cube (clean)", NNIGHT=len(ids))
                 for j, p in enumerate(ids):
@@ -5283,7 +5294,8 @@ class Runner:
         edges = [t[0] for t in tiles] + [tiles[-1][1]]
         w = self._stitch_weights(cleans, zones) if weights is None else np.asarray(weights, float)
         pads = self._tile_pads(tiles, annuli=zones)
-        st = stitch_tiles(cleans, tiles, w, pads=pads)
+        itiles = self._image_tiles(tiles)       # the innermost and outermost annuli' whole zones
+        st = stitch_tiles(cleans, itiles, w, pads=pads)
         # seam patching: pixels inside the searched span left NaN -> a re-run of that annulus'
         # winner, its zone padded by 3 px on each edge shared with another annulus
         seam = seam_pixels(st, edges[0], edges[-1])
@@ -5361,7 +5373,7 @@ class Runner:
         hi = None
         if any(d.get("inj") is not None for _, d in items):
             sti = self._maybe_flatten(stitch_tiles([d["inj"] if d.get("inj") is not None else d["clean"]
-                                                    for _, d in items], tiles, w, pads=pads))
+                                                    for _, d in items], itiles, w, pads=pads))
             hi = dict(hdr, IMGTYPE=f"validated-winner injected stitch{self._flat_tag}", INJNSRC=len(allsrc),
                       INJALL=int(inj_all))
             for j, s in enumerate(allsrc):
@@ -5381,7 +5393,7 @@ class Runner:
             stacks = [d.get(key) for _, d in items]
             if not any(s is not None for s in stacks):
                 continue
-            cube, ids = stitch_stacks(stacks, [d.get("parts") for _, d in items], tiles, w, pads=pads)
+            cube, ids = stitch_stacks(stacks, [d.get("parts") for _, d in items], itiles, w, pads=pads)
             if cube is None:
                 continue
             hc = dict(hdr, IMGTYPE=f"stitched per-partition cube ({'injected' if 'inj' in key else 'clean'})",
@@ -5410,7 +5422,7 @@ class Runner:
         # stitch around the tile gives the matched filter and the noise rings the neighbors'
         # residuals, where the annulus' image alone gave them zeros (NEAR2 note, 2026-11-04).
         from .products import snr_widened_header
-        tidx = tile_index(st_f.shape, tiles)
+        tidx = tile_index(st_f.shape, itiles)
         for key, fname, label, what in (("clean", "klip_stitched_snr_tiles.fits", "snr_tiles", "clean"),
                                         ("inj", "klip_stitched_snr_tiles_inj.fits", "snr_tiles_inj", "injected")):
             if not any(a[key] is not None for a in annuli) or (key == "inj" and hi is None):
@@ -5426,11 +5438,11 @@ class Runner:
                 ex = self._inj_xy(list(allsrc) + list(a["inj_sources"] or []), img_k.shape) if key == "inj" else []
                 maps.append(self._snr_map(img_k, info=inf, exclude_xy=ex))
                 winfo["widened"].update({rad: hw for rad, hw in (inf.get("widened") or {}).items()
-                                         if tile_of(rad, tiles) == k})
+                                         if tile_of(rad, itiles) == k})
             ht = dict(hi if key == "inj" else hdr, IMGTYPE=f"tile-wise S/N map ({what}), each tile put into the stitch",
                       **snr_widened_header(winfo))
             files[label] = os.path.join(self.run_dir, fname)
-            out[label] = stitch_by_tiles(maps, tiles)
+            out[label] = stitch_by_tiles(maps, itiles)
             _write_fits(files[label], out[label], ht, hist)
         # parameters table
         rows = []

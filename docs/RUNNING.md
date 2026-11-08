@@ -278,6 +278,25 @@ start.  `final_results.json` records both, and `klip_stitched_params.txt` adds t
 another, or the same zone twice, is refused, and so is `--ann-extra` with `--opt-width`.  Without
 `--ann-extra` the tiles are the zones and every product is as before.
 
+### The stitched images reach the whole zones at the ends
+
+Since 2026-11-08 (the MWC 758 ALES session's note of 2026-11-07, Kevin Wagner) the stitched
+images reach the whole KLIP zone of the innermost and the outermost annulus.  The innermost tile
+reaches in to the star and the outermost out past the frame's edge, so the stitch takes those
+annuli' images wherever they are finite.  That is their whole zone, with its pads and `zone_in` /
+`zone_out`, since a reducer's image is NaN outside its zone.  A one-annulus run's stitch is then
+its winner's image.  The boundaries between annuli are as before.  This holds for the clean,
+injected, running and per-partition stitches, their S/N maps and the tile-wise S/N maps.  The
+stitched verify then measures a source near the run's innermost or outermost edge with the
+zone's residuals beyond that edge, where it took zeros.
+
+The scored annuli still set where sources are injected and measured, the contrast grid, the
+candidate search and the `EDGES` header, and `final_results.json` and `rereduce` keep the scored
+tiles.  A finished run gets the new stitch from `rereduce`, which on the run's own frames
+reproduces its images.  For an instrument the command line does not cover, the call is
+`Runner.resume(run_dir, reducer, objective, sampler, same_frames=False).rereduce(out_dir)`.
+`legacy_stitch` keeps the stitch inside the scored tiles, as the IDL cropped it.
+
 ### The final stitch's injections and the per-tile measure
 
 The final verify measures the validation sources on the injected stitch,

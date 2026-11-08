@@ -16,17 +16,19 @@ import numpy as np
 
 from .injection import GaussianPSF, inject_sources
 from .metrics import Source
-from .reducer import Dataset, KLIPReducer, ReductionRequest, ReductionResult, Reducer, _flag
+from .reducer import Dataset, KLIPReducer, ReductionRequest, ReductionResult, Reducer, _flag, _zone_ext
 
 __all__ = ["SyntheticReducer", "make_synthetic_partitions", "synthetic_klip_dataset"]
 
 
 def _outside_zone(rr: np.ndarray, p: Dict[str, Any]) -> np.ndarray:
     """Pixels outside the zone a KLIP reduction would cover: the annulus padded by 2 px on
-    each edge the runner marks (``pad_in`` / ``pad_out``, both by default)."""
+    each edge the runner marks (``pad_in`` / ``pad_out``, both by default), and widened by
+    ``zone_in`` / ``zone_out`` as the KLIP reducer widens it."""
     pin = 2.0 if _flag(p.get("pad_in", True)) else 0.0
     pout = 2.0 if _flag(p.get("pad_out", True)) else 0.0
-    return (rr < float(p.get("inrad", 0)) - pin) | (rr > float(p.get("outrad", 45)) + pout)
+    z_in, z_out = _zone_ext(p)
+    return (rr < float(p.get("inrad", 0)) - pin - z_in) | (rr > float(p.get("outrad", 45)) + pout + z_out)
 
 
 class SyntheticReducer(Reducer):
