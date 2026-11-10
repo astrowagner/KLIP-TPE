@@ -97,8 +97,15 @@ def test_the_finished_fm_panel_models_the_winners_injections(finished):
     last = [f for f in frames if getattr(f, "note", None) == "annulus complete"][-1]
     assert np.array_equal(np.nan_to_num(last.fm_image), np.nan_to_num(winner["fm_inj"]["fm_image"]))
     assert "winner's injections" in last.fm_label
-    drawn = [src for src, img in models if img is not None and img is last.inj_model]
-    assert drawn and np.allclose(drawn[-1], committed), "the injected-PSF square is not the best cells' injections"
+    # the injected-PSF square: the model of the best cells' injections, which the runner keeps
+    # beside best_inj.fits (best_inj_model.fits, its header listing them) and the frame shows
+    from astropy.io import fits
+    mpath = os.path.join(d, "annulus01", "best_inj_model.fits")
+    h = fits.getheader(mpath)
+    listed = [(h[f"INJRHO{j}"], h[f"INJPA{j}"]) for j in range(1, int(h["INJNSRC"]) + 1)]
+    assert np.allclose(listed, committed), "the kept model is not of the best cells' injections"
+    assert last.inj_model is not None and np.allclose(np.nan_to_num(last.inj_model), np.nan_to_num(read_fits(mpath))), \
+        "the injected-PSF square is not the best cells' injections"
 
 
 @pytest.mark.slow

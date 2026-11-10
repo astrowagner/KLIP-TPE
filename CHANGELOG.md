@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased — 2026-11-10 (the redrawn annulus-done frame)
+
+- **`klip-tpe render` draws an annulus' last frame as the live annulus-done frame drew it** (the
+  WISPIT 2 ALES session, 2026-11-10, Kevin Wagner).  On `wispit2_ales2` the redrawn last frame of
+  annulus 4 showed the search's best (eval 994) in the best cells and the BEST block, annulus 4's
+  image alone in the stitched cells, no injected PSF, and annulus 4's own 2 h 19 m as "Elapsed".
+  The live frame showed the validated winner (eval 854), the stitch of annuli 1 to 4, the
+  injected PSF of the winner's sources and the run's 14 h 42 m.  The redrawn frame now shows
+  them too, with the live frame's labels and contrast curves.  An annulus drawn alone
+  (`--annulus`) keeps the earlier annuli' curves.
+- **A run keeps what that frame shows at each annulus' end**: the running stitch
+  (`annulusNN/klip_stitched_running*.fits`), the injected-PSF model of the sources in
+  `best_inj.fits` (`best_inj_model.fits`) and the run's elapsed time (`annulus_done.json`, which
+  the live frame now shows too).  For a run made before, the redrawn frame takes the run's own
+  running stitch for the last annulus and makes the others' again from the winners' products
+  (`Runner.annulus_end_stitch`).  It estimates the time from `heartbeat.json` and the time the
+  live frame was written.  `klip-tpe render --with-data` loads the run's frames as `rereduce`
+  does and draws every frame's injected PSF, which those runs did not keep.
+- **The live annulus-done frame circles only the winners' sources in the stitch.**  It also
+  circled the search best's, which are not in the stitch at the annulus' end.
+- `display.injected_model_image` is now `injection.injected_model`, on a reducer.  The old name
+  calls it.
+- Tests in `tests/test_render_final_frame.py`.  Docs in DISPLAY.md, CLI.md regenerated.
+
 ## Unreleased — 2026-11-10 (the re-score's draws on narrow tiles)
 
 - **`klip-tpe rescore` places its draws on narrow tiles** (NEAR2's note of 2026-11-10, Kevin

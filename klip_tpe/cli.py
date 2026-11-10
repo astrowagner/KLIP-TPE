@@ -1689,12 +1689,32 @@ def cmd_render(a):
         raise SystemExit(f"no run directory {a.run_dir}")
     out = a.out or os.path.join(a.run_dir, "steps_rebuilt")
     annuli = None if not a.annulus else [int(k) - 1 for k in a.annulus]
+    fn = _injected_model_fn(a) if getattr(a, "with_data", False) else None
     paths = render_steps(a.run_dir, annuli=annuli, every=a.every, dpi=a.dpi, out_dir=out,
-                         movie=not a.no_movie, movie_dir=out)
+                         movie=not a.no_movie, movie_dir=out, inj_model_fn=fn)
     print(f"wrote {len(paths)} panels to {out}")
     gif = os.path.join(out, "opt_steps.gif")
     if not a.no_movie and paths and os.path.exists(gif):
         print(f"movie: {gif}")
+
+
+def _injected_model_fn(a):
+    """``render --with-data``: ``fn(sources, shape)``, the injected-PSF model of ``sources`` on
+    the run's reducer (:func:`klip_tpe.injection.injected_model`), the reducer built from the
+    data arguments as ``rereduce`` builds it, the ones left out filled from the run's record."""
+    from .injection import injected_model
+    try:
+        _fill_from_registry(a, getattr(a, "_argv", None))
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"  (could not read the run record: {exc!r}; carrying on with what was given)")
+    _klip_gram_for_run(a, record=False)    # the run directory is only read
+    _data_edits_for_rereduce(a)
+    _constants_for_run(a)
+    red = _near_objects(a)[0]
+    print("  the run's frames loaded: each frame's injected-PSF model drawn from them")
+    return lambda sources, shape: injected_model(red, sources, shape)
 
 
 def cmd_compare(a):
@@ -2022,6 +2042,7 @@ def _build_parser():
 
     p = sub.add_parser("render", help="draw every evaluation's panel after the fact, including the ones the "
                                       "live display skipped (from the run's log and saved crops)")
+    _add_near_args(p)
     p.add_argument("--run-dir", required=True)
     p.add_argument("--every", type=int, default=1,
                    help="every Nth evaluation of each annulus (its last is always drawn)")
@@ -2031,6 +2052,11 @@ def _build_parser():
                    help="output directory (default <run-dir>/steps_rebuilt; the live steps/ and "
                         "opt_steps.gif are left as they are)")
     p.add_argument("--no-movie", action="store_true", help="skip <out>/opt_steps.gif")
+    p.add_argument("--with-data", action="store_true",
+                   help="load the run's frames, from the data arguments as rereduce takes them (the ones left out "
+                        "filled from the run's record), to draw each frame's injected-PSF model, as the live "
+                        "frames did.  Without it the frames draw the one the run saved at each annulus' end "
+                        "(runs since 2026-11-10)")
     p.set_defaults(func=cmd_render)
 
     p = sub.add_parser("runs", help="what runs exist, which are actually running, and stop the strays")
