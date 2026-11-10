@@ -91,8 +91,8 @@ def test_the_rebuilt_frames_keep_the_finished_annuli_curves(tmp_path, monkeypatc
     monkeypatch.setattr(D, "render_step", capture)
     D.render_steps(d, every=100, out_dir=str(tmp_path / "steps"), movie=False)
     last = {a: labs for a, i, labs in seen}
-    assert "injection grid (annulus)" in last[0] and not any("annulus 1" in s for s in last[0])
-    assert "injection grid (median over PA) annulus 1" in last[1] and "injection grid (annulus)" in last[1]
+    assert "injection grid (median over PA)" in last[0] and not any("annulus 1" in s for s in last[0])
+    assert "injection grid (median over PA) annulus 1" in last[1] and "injection grid (median over PA)" in last[1]
     assert "KLIP-FM cross-check (winner) annulus 1" in last[1] or not results[0].fm_curve
     first2 = [labs for a, i, labs in seen if a == 1][0]
     assert "injection grid (median over PA) annulus 1" in first2, "on every frame of the later annulus"

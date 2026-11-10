@@ -2430,6 +2430,7 @@ class StepImages:
     stitch_inj: Optional[np.ndarray] = None
     stitch_sources: Optional[List[Tuple[float, float, float]]] = None
     inj_model: Optional[np.ndarray] = None         # injected-PSF model image of the best eval (IDL disp_injmdl)
+    inj_model_note: Optional[str] = None           # what the injected-PSF cell says without one
     cur_override: Optional[Dict[str, Any]] = None  # validation trials: sources / per_source / raw_per_source /
                                                    # clean_per_source / score / raw of the current cells
 
@@ -3490,7 +3491,8 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
                        vrange=(0.0, float(np.nanmax(images.inj_model)) or 1.0))
         else:
             ax.set_xticks([]); ax.set_yticks([])
-            ax.text(0.5, 0.5, "(after 1st best)", ha="center", va="center", transform=ax.transAxes, fontsize=6.5)
+            ax.text(0.5, 0.5, getattr(images, "inj_model_note", None) or "(after 1st best)", ha="center",
+                    va="center", transform=ax.transAxes, fontsize=6.5, wrap=True)
         ax.set_title("injected PSF (best)", fontsize=7.5)
         # ---- row B: partition inclusion | contrast -------------------------------------
         plabel = str(getattr(ad, "partition_label", None) or "night")
@@ -4103,16 +4105,115 @@ def load_eval_images(run_dir: str, ia: int, i: int) -> Tuple[Optional[np.ndarray
     return out[0], out[1]
 
 
+def _header_sources(path: str) -> Optional[List[Tuple[float, float, float]]]:
+    """The injected sources a product's FITS header lists (``INJRHOn`` / ``INJPAn`` / ``INJCONn``)."""
+    try:
+        from astropy.io import fits
+        h = fits.getheader(path)
+    except Exception:
+        return None
+    out = []
+    for j in range(1, int(h.get("INJNSRC", 0) or 0) + 1):
+        if f"INJRHO{j}" in h and f"INJPA{j}" in h:
+            out.append((float(h[f"INJRHO{j}"]), float(h[f"INJPA{j}"]), float(h.get(f"INJCON{j}", 0.0))))
+    return out or None
+
+
+def annulus_end_elapsed(run_dir: str, ia: int) -> Optional[float]:
+    """The run's elapsed time (s) at the end of annulus ``ia`` (0-based), its annulus-done
+    frame's "Elapsed": the runner's record (``annulus_done.json``, runs since 2026-11-10), else
+    estimated from ``heartbeat.json`` and the time the annulus-done frame was written
+    (``step_display_white.png``) or, without it, ``winner.json``, when the run was not resumed
+    after it.  None when neither tells."""
+    d = os.path.join(run_dir, f"annulus{ia + 1:02d}")
+    try:
+        with open(os.path.join(d, "annulus_done.json")) as f:
+            return float(json.load(f)["elapsed_s"])
+    except Exception:
+        pass
+    try:
+        with open(os.path.join(run_dir, "heartbeat.json")) as f:
+            hb = json.load(f)
+        el, t, t0 = float(hb["elapsed_s"]), float(hb["t"]), float(hb.get("started", -np.inf))
+    except Exception:
+        return None
+    for name in ("step_display_white.png", "winner.json"):
+        path = os.path.join(d, name)
+        if os.path.exists(path):
+            T = os.path.getmtime(path)
+            if t0 <= T <= t + 1.0:
+                return el - (t - T)
+            return None
+    return None
+
+
+def _redrawn_final_frame(run_dir: str, ia: int, full: "AnnulusData", i: int, c_inj, c_clean, b_inj, b_clean,
+                         fm_note: Optional[str], inj_model_fn=None) -> Tuple["StepImages", Dict[str, Any]]:
+    """What annulus ``ia``'s live annulus-done frame drew (:meth:`LiveDisplay.on_annulus_done`),
+    from the run's products: the validated winner in the best cells (its committed trial,
+    ``best_inj.fits``, circled at its own sources), the running stitch of the finished annuli
+    (:meth:`klip_tpe.runner.Runner.annulus_end_stitch`), the KLIP-FM model of the winner's
+    injections and their injected-PSF model, and the run's elapsed time at the annulus' end
+    (:func:`annulus_end_elapsed`).  Returns the cells and ``{"elapsed_s", "step_label"}``."""
+    from .runner import Runner
+    w = full.winner or {}
+    d = os.path.join(run_dir, f"annulus{ia + 1:02d}")
+    wi = int(w.get("winner_index", -1))
+    b_src = [tuple(float(v) for v in s[:3]) for s in (w.get("winner_sources") or [])] or None
+    if b_inj is None:                    # no committed trial on disk: the winner's own evaluation
+        b_inj, b_clean = load_eval_images(run_dir, ia, wi)
+        b_src = None
+    b_lab = None
+    if b_src is not None:
+        ps = list(w.get("per_source") or [])
+        b_lab = ps if len(ps) == len(b_src) else [None] * len(b_src)
+    m_src = b_src if b_src is not None else (full.sources[wi] if 0 <= wi < full.n else [])
+    fm_inj = _fits(os.path.join(d, "best_fm_inj.fits"))
+    fm_img = fm_inj if fm_inj is not None else _fits(os.path.join(d, "best_fm.fits"))
+    fm_src = (_header_sources(os.path.join(d, "best_fm_inj.fits" if fm_inj is not None else "best_fm.fits"))
+              or (b_src if fm_inj is not None else None))
+    inj_model = _fits(os.path.join(d, "best_inj_model.fits"))
+    inj_note = None
+    if inj_model is None and inj_model_fn is not None and b_inj is not None and m_src:
+        inj_model = inj_model_fn(m_src, np.shape(b_inj))
+    if inj_model is None:
+        inj_note = "not saved by this run\n(klip-tpe render\n--with-data draws it)"
+    stitch = {}
+    if ia > 0:                           # annulus 1 shows the best images, as the IDL does
+        st = Runner.annulus_end_stitch(run_dir, ia)
+        if st is not None and st.get("clean") is not None:
+            stitch = {"stitch_clean": st["clean"]}
+            if st.get("inj") is not None:
+                stitch.update(stitch_inj=st["inj"], stitch_sources=st.get("sources"))
+    imgs = StepImages(fm_unavailable=fm_note, cur_clean=c_clean, cur_inj=c_inj, best_inj=b_inj, best_clean=b_clean,
+                      best_index=wi, best_sources=b_src, best_labels=b_lab, note="annulus complete", fm_image=fm_img,
+                      fm_sources=fm_src,
+                      fm_label=("KLIP-FM model (winner's injections)" if fm_inj is not None
+                                else "KLIP-FM cross-check (winner, test spiral)"),
+                      cur_label=f"Ann {ia + 1}/{full.nann}  last eval {i + 1}", inj_model=inj_model,
+                      inj_model_note=inj_note, **stitch)
+    el = annulus_end_elapsed(run_dir, ia)
+    lab = "annulus done -- " + ("VALIDATED winner" if w.get("validated") else "winner NOT validated") + \
+        " (rebuilt from log)"
+    return imgs, {"elapsed_s": el, "step_label": lab}
+
+
 def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: int = 1, dpi: int = 90,
                  out_dir: Optional[str] = None, movie: bool = True,
-                 partition_label: Optional[str] = None, movie_dir: Optional[str] = None) -> List[str]:
+                 partition_label: Optional[str] = None, movie_dir: Optional[str] = None,
+                 inj_model_fn=None) -> List[str]:
     """Rebuild the step PNGs of a run from its log and the per-evaluation crops it saved
     (``annulusNN/evals/``); where a crop is missing the image cells show the annulus
     winner's FITS with a note.  ``every``-th evaluation of each annulus, and its last.
     Optionally assembles the movie, as ``opt_steps.gif`` / ``.mp4`` in ``movie_dir``
     (default: the run directory, where the live run's own movie is).
     ``partition_label`` overrides what the partition panels call the partitions, for a run
-    written before the reducer carried one.  ``klip-tpe render`` is this from a terminal."""
+    written before the reducer carried one.  ``klip-tpe render`` is this from a terminal.
+
+    An annulus' last frame is its annulus-done frame, as the live display drew it
+    (:func:`_redrawn_final_frame`).  ``inj_model_fn(sources, shape)``: the injected-PSF model of
+    ``sources`` (:func:`klip_tpe.injection.injected_model` on the run's reducer), for the best
+    eval of every frame and for a last frame whose run did not save it."""
     run = load_run(run_dir)
     out_dir = out_dir or os.path.join(run_dir, "steps")
     os.makedirs(out_dir, exist_ok=True)
@@ -4126,10 +4227,24 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
     paths: List[str] = []
     step = 0
     fig = None
-    # the finished annuli's curves stay on the panel, as on the live panel (LiveDisplay._curves)
-    done: List[Tuple[str, Dict[str, Any], Dict[str, Any]]] = []
+    # the finished annuli's curves stay on the panel, as on the live panel (LiveDisplay._curves):
+    # every annulus before the one drawn, whichever annuli this call draws
+    finished: Dict[int, List[Tuple[str, Dict[str, Any], Dict[str, Any]]]] = {}
+    for ja, wj in sorted((run.get("winners") or {}).items()):
+        wj = wj or {}
+        cj = wj.get("grid_curve") or wj.get("contrast_curve")
+        tag = f" annulus {int(ja) + 1}"
+        lst = []
+        if cj:
+            lst.append(("injection grid (median over PA)" + tag if wj.get("grid_curve") else
+                        "validated winner (injection-calibrated)" + tag, cj, {"color": VALID_COLOR, "lw": 1.6}))
+        if wj.get("fm_curve"):
+            lst.append(("KLIP-FM cross-check (winner)" + tag, wj["fm_curve"], {"color": FM_COLOR, "lw": 1.4}))
+        finished[int(ja)] = lst
+    inj_cache: Dict[Tuple[int, int], Optional[np.ndarray]] = {}
     for ia in ias:
         full = annulus_from_run(run_dir, ia, run)
+        done = [c for ja in sorted(finished) if ja < ia for c in finished[ja]]
         d = os.path.join(run_dir, f"annulus{ia + 1:02d}")
         b_inj, b_clean = _fits(os.path.join(d, "best_inj.fits")), _fits(os.path.join(d, "best_clean.fits"))
         b_fm = _fits(os.path.join(d, "best_fm_inj.fits"))           # the winner's injections, as live
@@ -4149,10 +4264,23 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
             c_inj, c_clean = load_eval_images(run_dir, ia, i)
             e_inj, e_clean = load_eval_images(run_dir, ia, bi) if bi != i else (c_inj, c_clean)
             have = c_inj is not None
-            imgs = StepImages(fm_unavailable=fm_note, cur_clean=c_clean, cur_inj=c_inj,
-                              best_inj=e_inj if e_inj is not None else b_inj,
-                              best_clean=e_clean if e_clean is not None else b_clean, best_index=bi,
-                              note=None if have else note, fm_image=b_fm if i == full.n - 1 else None)
+            final = i == full.n - 1 and bool(full.winner)
+            ff = {}
+            if final:
+                imgs, ff = _redrawn_final_frame(run_dir, ia, full, i, c_inj, c_clean, b_inj, b_clean, fm_note,
+                                                inj_model_fn)
+            else:
+                best_img = e_inj if e_inj is not None else b_inj
+                mdl = None
+                if inj_model_fn is not None and best_img is not None and 0 <= bi < ad.n and ad.sources[bi]:
+                    key = (ia, int(bi))
+                    if key not in inj_cache:
+                        inj_cache[key] = inj_model_fn(ad.sources[bi], np.shape(best_img))
+                    mdl = inj_cache[key]
+                imgs = StepImages(fm_unavailable=fm_note, cur_clean=c_clean, cur_inj=c_inj, best_inj=best_img,
+                                  best_clean=e_clean if e_clean is not None else b_clean, best_index=bi,
+                                  note=None if have else note, fm_image=b_fm if i == full.n - 1 else None,
+                                  inj_model=mdl)
             curves = []
             if have and i < full.n - 1:
                 lc = _live_curve(c_clean, ad, i)
@@ -4160,25 +4288,26 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
                     curves.append((f"eval {i + 1} preview", lc, {}))
             curves += done
             if wcurve and i == full.n - 1:
-                lab = ("injection grid (annulus)" if (full.winner or {}).get("grid_curve")
-                       else "validated winner (annulus)")
+                # the labels of the live frame's (LiveDisplay._curves)
+                lab = ("injection grid (median over PA)" if (full.winner or {}).get("grid_curve")
+                       else "validated winner (injection-calibrated)")
                 curves.append((lab, wcurve, {"color": VALID_COLOR, "lw": 1.6}))
                 if fmcurve:
-                    curves.append(("KLIP-FM cross-check", fmcurve, {"color": FM_COLOR, "lw": 1.2}))
+                    curves.append(("KLIP-FM cross-check (winner)", fmcurve, {"color": FM_COLOR, "lw": 1.4}))
             p = os.path.join(out_dir, f"step{step:04d}.png")
-            fig = render_step(ad, i, imgs, p, curves=curves, elapsed_s=float(np.nansum(full.wall[:i + 1])),
+            el = ff.get("elapsed_s")
+            if el is None:
+                el = float(np.nansum(full.wall[:i + 1]))
+            if final:
+                cnote = "no validated curve for this annulus" if not curves else None
+            else:
+                cnote = None if have else "rebuilt from log: no live images, so no per-eval preview"
+            fig = render_step(ad, i, imgs, p, curves=curves, elapsed_s=float(el),
                               eta_s=float(np.nanmean(full.wall[:i + 1]) * (full.n - i - 1)) if i + 1 < full.n else 0.0,
-                              dpi=dpi, fig=fig, step_label="(rebuilt from log)",
-                              contrast_note=None if have else "rebuilt from log: no live images, so no per-eval preview")
+                              dpi=dpi, fig=fig, step_label=ff.get("step_label") or "(rebuilt from log)",
+                              contrast_note=cnote)
             paths.append(p)
             step += 1
-        tag = f" annulus {ia + 1}"
-        if wcurve:
-            lab = "injection grid (median over PA)" if (full.winner or {}).get("grid_curve") else \
-                "validated winner (injection-calibrated)"
-            done.append((lab + tag, wcurve, {"color": VALID_COLOR, "lw": 1.6}))
-        if fmcurve:
-            done.append(("KLIP-FM cross-check (winner)" + tag, fmcurve, {"color": FM_COLOR, "lw": 1.4}))
     if movie and paths:
         try:
             from .animate import make_movie
@@ -4196,52 +4325,10 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
 # the live callback
 # ----------------------------------------------------------------------------
 def injected_model_image(runner, sources, shape) -> Optional[np.ndarray]:
-    """IDL ``disp_injmdl``: the injected-PSF model of ``sources`` (rho, theta, contrast)
-    as it appears in the final (north-up) image.
-
-    Built at the data's OWN roll angles, then derotated and combined the way the science
-    frames are.  It used to inject into a single ``parang = 0`` frame and derotate by the
-    true-north offset alone, which silently assumed the telescope had been pointed at
-    roll 0.  That was invisible while the injector span the stamp by the source's
-    azimuth, and glaring once the template became spacecraft-fixed (``815fc55``): the
-    lobe structure is carried into the sky frame entirely by the derotation, so a model
-    built at roll 0 shows its lobes rotated away from the data by the roll itself --
-    measured at ~112 degrees on HIP 65426's rolls of 108.0 and 117.4.
-
-    Frames sharing a roll give the same picture, so only the distinct angles are rotated,
-    weighted by how many frames carry each.  A multi-roll data set therefore shows the
-    superposition that is really in the combined image, not one arbitrary roll's version.
-    """
-    try:
-        from .injection import inject_sources
-        from .klip import rotate_ccw
-        from .metrics import Source
-        red = runner.reducer
-        sub = red if getattr(red, "model", None) is not None else next(
-            (r for r in getattr(red, "reducers", {}).values() if getattr(r, "model", None) is not None), None)
-        if sub is None or not sources or shape is None or len(shape) != 2:
-            return None
-        src = [Source(*tuple(float(v) for v in (s.as_tuple() if hasattr(s, "as_tuple") else s)[:3])) for s in sources]
-        tn = float(getattr(sub, "truenorth", 0.0))
-        try:
-            ang = np.asarray(sub.frame_angles(), float).ravel()
-            ang = ang[np.isfinite(ang)]
-        except Exception:
-            ang = np.zeros(0)
-        if ang.size == 0:
-            ang = np.zeros(1)
-        uang, cnt = np.unique(np.round(ang, 2), return_counts=True)
-        blank = np.zeros((uang.size,) + tuple(int(v) for v in shape), np.float32)
-        img = inject_sources(blank, uang, src, sub.model, sub.pxscale, truenorth=tn,
-                             fallback=getattr(sub, "fallback", None),
-                             angle_convention=getattr(sub, "angle_convention", "pa"))
-        # cval=0 rather than derotate()'s NaN fill: this is a display model, and NaN
-        # corners would drag the panel's robust stretch around.
-        der = np.stack([rotate_ccw(np.asarray(img[i], float), float(uang[i]) + tn, cval=0.0)
-                        for i in range(uang.size)])
-        return np.average(der, axis=0, weights=cnt.astype(float))
-    except Exception:
-        return None
+    """IDL ``disp_injmdl``: the injected-PSF model of ``sources`` as it appears in the final
+    (north-up) image, from ``runner``'s reducer (:func:`klip_tpe.injection.injected_model`)."""
+    from .injection import injected_model
+    return injected_model(getattr(runner, "reducer", None), sources, shape)
 
 
 class LiveDisplay(RunCallback):
@@ -4753,12 +4840,16 @@ class LiveDisplay(RunCallback):
                 out[key] = img
         if "stitch_inj" in out:
             src = []
+            done = False
             for r in getattr(runner, "results", []) or []:
                 if r is not None:
                     src.extend(tuple(t) for t in getattr(r, "winner_sources", []) or [])
+                    done = done or int(getattr(r, "annulus", -1)) == int(getattr(runner, "ia", -2))
+            # while the annulus runs, its running best is in the stitch with that eval's sources;
+            # once it is done, its winner is, with the winner's sources (counted above)
             b = self._best_images(runner)
             brec = b.get("record")
-            if brec is not None and getattr(brec, "sources", None):
+            if not done and brec is not None and getattr(brec, "sources", None):
                 src.extend(t.as_tuple() if hasattr(t, "as_tuple") else tuple(t) for t in brec.sources)
             out["stitch_sources"] = src or None
         return out
@@ -5426,6 +5517,11 @@ class LiveDisplay(RunCallback):
             # runner kept that picture with its sources
             m_src = b_src if b_src is not None else (ad.sources[int(result.winner_index)]
                                                      if 0 <= int(result.winner_index) < ad.n else [])
+            # the committed picture's sources: the runner kept their injected-PSF model
+            inj_mdl = _fits(os.path.join(d, "best_inj_model.fits")) if b_src is not None else None
+            if inj_mdl is None:
+                inj_mdl = injected_model_image(runner, m_src,
+                                               None if bimg.get("inj") is None else np.shape(bimg.get("inj")))
             imgs = StepImages(fm_unavailable=getattr(self, "_fm_note", None), cur_clean=li.get("clean"), cur_inj=li.get("inj"), best_inj=bimg.get("inj"),
                               best_clean=bimg.get("clean"), best_index=int(result.winner_index),
                               best_sources=b_src, best_labels=b_lab,
@@ -5433,14 +5529,16 @@ class LiveDisplay(RunCallback):
                               fm_label=("KLIP-FM model (winner's injections)" if winner.get("fm_inj")
                                         else "KLIP-FM cross-check (winner, test spiral)"),
                               cur_label=f"Ann {result.annulus + 1}/{ad.nann}  last eval {i + 1}",
-                              inj_model=injected_model_image(runner, m_src,
-                                                             None if bimg.get("inj") is None else np.shape(bimg.get("inj"))),
-                              **self._running_stitch(runner))
+                              inj_model=inj_mdl, **self._running_stitch(runner))
             curves = self._curves(runner, ad, None, done=True)
             png = os.path.join(self.run_dir, "steps", f"step{self._step:04d}.png")
+            # the run's time at the annulus' end, as the runner recorded it (annulus_done.json)
+            el_done = getattr(runner, "done_wall_s", None)
+            if el_done is None:
+                el_done = time.time() - runner.wall0 + runner.wall_prev
             self._wait_renders()
             r = self._guard(runner, "final frame", render_step, ad, i, imgs, png, None, curves=curves,
-                            elapsed_s=time.time() - runner.wall0 + runner.wall_prev, eta_s=0.0, cmap=self.cmap,
+                            elapsed_s=el_done, eta_s=0.0, cmap=self.cmap,
                             dpi=self.dpi, fig=self._figure(),
                             step_label="annulus done -- " + ("VALIDATED winner" if result.validated else "winner NOT validated"),
                             contrast_note="no validated curve for this annulus" if not curves else None)
@@ -5452,7 +5550,7 @@ class LiveDisplay(RunCallback):
                     self._submit_progress_movie(result.annulus)     # final per-annulus progress movie
                 self._guard(runner, "final frame (white)", render_step, ad, i, imgs,
                             os.path.join(d, "step_display_white.png"), None, curves=curves,
-                            elapsed_s=time.time() - runner.wall0 + runner.wall_prev, eta_s=0.0, cmap=self.cmap,
+                            elapsed_s=el_done, eta_s=0.0, cmap=self.cmap,
                             dpi=self.dpi, fig=self._figure(), white=True,
                             step_label="annulus done -- " + ("VALIDATED winner" if result.validated else "winner NOT validated"),
                             contrast_note="no validated curve for this annulus" if not curves else None)

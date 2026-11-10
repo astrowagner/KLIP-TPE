@@ -4389,6 +4389,15 @@ class Runner:
         # get a stage of their own, since under the last hook's name minutes of them read as a
         # candidate search in heartbeat.json and in the stall note.
         self.hb.stage(f"annulus {ia + 1} display books", annulus=ia)
+        # the run's time at the annulus' end: the annulus-done frame's "Elapsed", and the one
+        # ``klip-tpe render`` draws again
+        self.done_wall_s = time.time() - self.wall0 + self.wall_prev
+        try:
+            _atomic_write(os.path.join(self._ann_dir(ia), "annulus_done.json"),
+                          json.dumps({"annulus": ia + 1, "elapsed_s": float(self.done_wall_s),
+                                      "winner_index": int(res.winner_index)}, indent=1))
+        except OSError as exc:                       # a record for the display, never fatal
+            self.log(f"  annulus_done.json: {exc!r}")
         self._emit("on_annulus_done", res, winner)
         return res
 
@@ -4585,6 +4594,20 @@ class Runner:
                 # frame that stays on screen and is the one a notebook shows at the end.
                 self._best_images["sources"] = list(sources)
                 self._best_images["per_source"] = list(winner.get("per_source") or [])
+                # the injected-PSF model of those sources, which the annulus-done frame shows
+                # beside them and ``klip-tpe render`` draws again from this file
+                from .injection import injected_model
+                mdl = injected_model(self.reducer, sources, np.shape(inj_img)) if sources else None
+                mpath = os.path.join(d, "best_inj_model.fits")
+                if mdl is not None:
+                    hm = dict(hdr_inj, IMGTYPE="injected-PSF model of the sources in best_inj.fits")
+                    _write_fits(mpath, np.asarray(mdl, np.float32), hm)
+                    self._durable_later(mpath)
+                elif os.path.exists(mpath):
+                    try:
+                        os.remove(mpath)                 # another best_inj.fits' model
+                    except OSError:
+                        pass
             for key, hh in (("clean", hdr), ("inj", hdr_inj)):
                 ev = winner.get(key)
                 if ev is not None and getattr(ev, "stack", None) is not None:
@@ -4710,14 +4733,13 @@ class Runner:
     def _flat_tag(self) -> str:
         return " (radprof-flattened)" if self.flatten_products else ""
 
-    def _running_stitch(self, ia: int, at_end: bool = False) -> Optional[Dict[str, Any]]:
-        """Equal-weight NaN-aware running stitch (A §9.1): tiles of the previous annuli's
-        winners plus the current running best (or, ``at_end``, this annulus' winner).
-        Writes ``klip_stitched_running[_inj|_snr|_snr_inj].fits`` (+ the per-partition
-        ``klip_stitched_running_nights.fits.gz`` at annulus end) and returns the arrays."""
-        if not self.cfg.save_fits:
-            return None
-        from .stitch import stitch_tiles, stitch_stacks
+    def _running_stitch_images(self, ia: int, at_end: bool = False) -> Optional[Dict[str, Any]]:
+        """The running stitch's images, written nowhere: ``clean``, ``inj`` (None without an
+        injected image), ``sources`` (the injected ones), the annuli' ``zones`` and their
+        ``tiles``, ``itiles`` and ``pads``, and the inputs (``cleans``, ``injs``, ``stacks``,
+        ``istacks``, ``parts``).  :meth:`_running_stitch` writes them, and
+        :func:`annulus_end_stitch` makes them again from a finished run's products."""
+        from .stitch import stitch_tiles
         cleans, injs, zones, stacks, istacks, parts, sources = [], [], [], [], [], [], []
         for ja in range(ia + (1 if at_end else 0)):
             dj = self._annulus_images(ja)
@@ -4735,30 +4757,56 @@ class Runner:
             sources.extend([s.as_tuple() for s in self._best_images.get("sources", [])])
         if not cleans:
             return None
-        neval = 0 if self.history is None else len(self.history)
         # the annuli done so far tile the image among themselves (nearest centre where they overlap)
         tiles = self._tiles(zones)
+        pads = self._tile_pads(tiles, annuli=zones)
+        itiles = self._image_tiles(tiles)       # the innermost and outermost annuli' whole zones
+        st = self._maybe_flatten(stitch_tiles(cleans, itiles, pads=pads))
+        sti = None
+        if any(i is not None for i in injs):
+            sti = self._maybe_flatten(stitch_tiles([i if i is not None else c for i, c in zip(injs, cleans)], itiles,
+                                                   pads=pads))
+        return {"clean": st, "inj": sti, "sources": sources, "zones": zones, "tiles": tiles, "itiles": itiles,
+                "pads": pads, "cleans": cleans, "injs": injs, "stacks": stacks, "istacks": istacks, "parts": parts}
+
+    def _running_stitch(self, ia: int, at_end: bool = False) -> Optional[Dict[str, Any]]:
+        """Equal-weight NaN-aware running stitch (A §9.1): tiles of the previous annuli's
+        winners plus the current running best (or, ``at_end``, this annulus' winner).
+        Writes ``klip_stitched_running[_inj|_snr|_snr_inj].fits`` (+ the per-partition
+        ``klip_stitched_running_nights.fits.gz`` at annulus end) and returns the arrays.
+        At annulus end the clean and injected stitches are also kept in the annulus'
+        directory, as the annulus-done frame shows them (``klip-tpe render`` draws them)."""
+        if not self.cfg.save_fits:
+            return None
+        from .stitch import stitch_stacks
+        im = self._running_stitch_images(ia, at_end)
+        if im is None:
+            return None
+        cleans, zones, stacks, parts, sources = im["cleans"], im["zones"], im["stacks"], im["parts"], im["sources"]
+        tiles, pads, itiles, st = im["tiles"], im["pads"], im["itiles"], im["clean"]
+        neval = 0 if self.history is None else len(self.history)
         hdr = {"ANNULUS": ia + 1, "NEVAL": neval, "RUNNING": 1, "NANN": len(cleans), "PHASE": "final" if at_end else "eval",
                "IMGTYPE": f"running equal-weight stitch{self._flat_tag}", "EDGES": ",".join(f"{z[0]:.1f}" for z in tiles)
                + f",{tiles[-1][1]:.1f}"}
         hdr.update(self._north_header())
-        pads = self._tile_pads(tiles, annuli=zones)
-        itiles = self._image_tiles(tiles)       # the innermost and outermost annuli' whole zones
-        st = self._maybe_flatten(stitch_tiles(cleans, itiles, pads=pads))
         files = {"clean": os.path.join(self.run_dir, "klip_stitched_running.fits")}
         _write_fits(files["clean"], st, hdr)
+        keep = os.path.join(self._ann_dir(ia), "klip_stitched_running.fits") if at_end else None
+        if keep:
+            _write_fits(keep, st, hdr)
         snr, hs, _ = self._snr_product(st, dict(hdr, IMGTYPE="running stitched S/N map (Mawet)"))
         files["snr"] = os.path.join(self.run_dir, "klip_stitched_running_snr.fits")
         _write_fits(files["snr"], snr, hs)
         out = {"clean": st, "snr": snr, "zones": zones, "tiles": tiles}
-        if any(i is not None for i in injs):
-            sti = self._maybe_flatten(stitch_tiles([i if i is not None else c for i, c in zip(injs, cleans)], itiles,
-                                                   pads=pads))
+        sti = im["inj"]
+        if sti is not None:
             hi = dict(hdr, IMGTYPE="running equal-weight stitch (injected)", INJNSRC=len(sources))
             for j, s in enumerate(sources):
                 hi[f"INJRHO{j+1}"], hi[f"INJPA{j+1}"] = float(s[0]), float(s[1])
             files["inj"] = os.path.join(self.run_dir, "klip_stitched_running_inj.fits")
             _write_fits(files["inj"], sti, hi)
+            if keep:
+                _write_fits(os.path.join(self._ann_dir(ia), "klip_stitched_running_inj.fits"), sti, hi)
             files["snr_inj"] = os.path.join(self.run_dir, "klip_stitched_running_snr_inj.fits")
             si, hs, _ = self._snr_product(sti, dict(hi, IMGTYPE="running stitched S/N map (injected)"),
                                           exclude_xy=self._inj_xy(sources, sti.shape))
@@ -6008,6 +6056,65 @@ class Runner:
             self.log(f"  no readable checkpoint in {self.run_dir}; starting fresh")
             return
         self._apply_checkpoint(st, project=getattr(self.space, "project", None))
+
+    @classmethod
+    def annulus_end_stitch(cls, run_dir: str, ia: int) -> Optional[Dict[str, Any]]:
+        """The running stitch at the end of annulus ``ia`` (0-based), which its annulus-done frame
+        shows: ``{"clean", "inj", "sources", "how"}`` or None.  Reads only.
+
+        Runs since 2026-11-10 keep it in the annulus' directory.  Otherwise the run's
+        ``klip_stitched_running*.fits`` are it when their header says so (``ANNULUS`` and
+        ``PHASE final``: the last annulus of a finished run).  Otherwise it is made again from
+        the winners' products of annuli 1 to ``ia + 1`` (:meth:`_running_stitch_images`), with
+        the run's tiles, pads and flattening as the code draws them now."""
+        from types import SimpleNamespace
+        from .stitch import read_fits
+        res = None
+        try:
+            st, _ = load_checkpoint(run_dir, log=lambda m: None)
+            res = [None if d is None else AnnulusResult.from_dict(d) for d in (st or {}).get("results", [])]
+        except Exception:
+            st = None
+        src = []
+        for r in (res or [])[:ia + 1]:
+            if r is not None:
+                src.extend(tuple(t) for t in (r.winner_sources or []))
+        d = os.path.join(run_dir, f"annulus{ia + 1:02d}")
+        own = read_fits(os.path.join(d, "klip_stitched_running.fits"))
+        if own is not None:
+            return {"clean": own, "inj": read_fits(os.path.join(d, "klip_stitched_running_inj.fits")),
+                    "sources": src or None, "how": "kept at the annulus' end"}
+        try:
+            from astropy.io import fits
+            with fits.open(os.path.join(run_dir, "klip_stitched_running.fits")) as h:
+                hd = h[0].header
+                if int(hd.get("ANNULUS", 0)) == ia + 1 and str(hd.get("PHASE", "")) == "final":
+                    return {"clean": np.asarray(h[0].data, float),
+                            "inj": read_fits(os.path.join(run_dir, "klip_stitched_running_inj.fits")),
+                            "sources": src or None, "how": "the run's running stitch, of this annulus' end"}
+        except Exception:
+            pass
+        if st is None or not res or ia >= len(res) or res[ia] is None:
+            return None
+        try:
+            shell = cls.__new__(cls)
+            shell.run_dir = run_dir
+            shell.cfg = RunConfig.from_dict(st["config"])
+            shell.results = res
+            shell._ann_images, shell._best_images, shell.history = {}, {}, None
+            setup = {}
+            if os.path.exists(os.path.join(run_dir, "run_setup.json")):
+                with open(os.path.join(run_dir, "run_setup.json")) as f:
+                    setup = json.load(f)
+            flat = bool((((setup.get("objective") or {}).get("metric")) or {}).get("flatten", False))
+            shell.objective = SimpleNamespace(metric=SimpleNamespace(flatten=flat))
+            im = shell._running_stitch_images(ia, at_end=True)
+        except Exception:
+            return None
+        if im is None:
+            return None
+        return {"clean": im["clean"], "inj": im["inj"], "sources": [tuple(t) for t in im["sources"]] or None,
+                "how": "made again from the winners' products"}
 
     @classmethod
     def resume(cls, run_dir: str, reducer: Reducer, objective: Objective, sampler: PositionSampler,

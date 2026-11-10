@@ -164,6 +164,17 @@ resumes with every edge padded.
 (`render_steps`) draws every evaluation's step panel again from the saved crops, including the
 ones the live display skipped, into `steps_rebuilt/` with its own movie.
 
+An annulus' last redrawn frame is its annulus-done frame as the live display drew it.  The best
+cells and the BEST block show the validated winner, its committed image circled at its own
+sources.  The stitched cells show the running stitch of the finished annuli, the KLIP-FM and
+injected-PSF squares the winner's injections, and "Elapsed" the run's time at the annulus' end.
+At each annulus' end a run keeps that stitch (`annulusNN/klip_stitched_running*.fits`), the
+injected-PSF model (`best_inj_model.fits`) and the time (`annulus_done.json`).  A run made
+before 2026-11-10 gets the stitch from its own running stitch for the last annulus and makes it
+again from the winners' products for the others.  The time is estimated from `heartbeat.json`.
+The injected-PSF model needs the run's frames, which `--with-data` loads as `rereduce` does, and
+then every frame shows its best eval's model, as the live frames did.
+
 ## Reading the numbers
 
 * **search score** (`results.txt`, the convergence trace) — the clean-subtracted median
