@@ -36,10 +36,22 @@ import numpy as np
 from .metrics import Source
 
 __all__ = ["Entrant", "StitchScorer", "config_key", "run_entrants", "parse_annuli", "rescore", "rescore_plan",
-           "paired_summary"]
+           "paired_summary", "PlacementError", "RescoreStop"]
 
 #: the S/N the base winners should read on the stitch, at the calibrated contrasts
 TARGET = (5.0, 8.0)
+
+#: the clearance between the tiles' sources (FWHM) a draw falls back to when the sampler's own
+#: finds no placement (NEAR2, 2026-11-10: s7's tiles are 4.7 px wide against a FWHM of 6.4 px)
+RELAXED_FWHM = 1.5
+
+
+class RescoreStop(RuntimeError):
+    """An annulus of the re-score stops here; the re-score goes on with the next one."""
+
+
+class PlacementError(RescoreStop):
+    """No placement of a draw's sources under the rule asked."""
 
 
 @dataclass
@@ -326,31 +338,58 @@ class StitchScorer:
         return np.array([np.nan if r.get("snr") is None else float(r["snr"]) for r in rows], float)
 
     # ---------------------------------------------------------------- draws
-    def draw(self, tiles: Sequence[int], contrasts: Dict[int, float], rng: np.random.Generator
+    @property
+    def clear_fwhm(self) -> float:
+        """The run's sampler's distance between sources (FWHM), the draws' clearance by default."""
+        return float(getattr(self.r.sampler, "min_mutual_fwhm", 2.0))
+
+    @property
+    def fwhm_px(self) -> float:
+        return float(getattr(self.r.sampler, "fwhm_as", self.r.fwhm * self.r.pxscale)) / float(self.r.pxscale)
+
+    def draw(self, tiles: Sequence[int], contrasts: Dict[int, float], rng: np.random.Generator,
+             counts: Optional[Dict[int, int]] = None, clear_fwhm: Optional[float] = None, restarts: int = 20
              ) -> List[Tuple[int, Source]]:
-        """One draw: the run's number of sources in each of ``tiles`` (annuli), placed by the run's
-        sampler in the tile's radii, each at its tile's contrast, at least the sampler's mutual
-        distance from the sources of the other tiles."""
+        """One draw: ``counts[j]`` sources in each of ``tiles`` (annuli; default the run's number),
+        placed by the run's sampler in the tile's radii, each at its tile's contrast, at least
+        ``clear_fwhm`` FWHM (default the sampler's distance) from the sources of the other tiles.
+
+        The tile with the most sources is placed first: a pair 180 deg apart, placed after the
+        other tiles' sources, has to clear all of them at once.  A tile that finds no place in 300
+        tries starts the draw again, ``restarts`` times, before :class:`PlacementError`.  The
+        sources come back in the order of ``tiles``."""
         smp = self.r.sampler
         px = float(self.r.pxscale)
         fwhm_as = float(getattr(smp, "fwhm_as", self.r.fwhm * px))
-        dmin = float(getattr(smp, "min_mutual_fwhm", 2.0)) * fwhm_as
-        out: List[Tuple[int, Source]] = []
-        for j in tiles:
-            t0, t1 = self.tile(j)
-            for _ in range(300):
-                src = smp.sample(self.r._nsrc(j), t0 * px, t1 * px, rng, float(contrasts[j]))
-                ok = all(_dist(s, o) >= dmin for s in src for _, o in out)
-                if ok and out and hasattr(smp, "_in_sidelobes"):
-                    allr = [o.rho for _, o in out] + [s.rho for s in src]
-                    allt = [o.theta for _, o in out] + [s.theta for s in src]
-                    ok = not smp._in_sidelobes(allr, allt)
-                if ok:
+        cf = self.clear_fwhm if clear_fwhm is None else float(clear_fwhm)
+        dmin = cf * fwhm_as
+        n_of = {j: int(self.r._nsrc(j)) if counts is None or j not in counts else int(counts[j]) for j in tiles}
+        order = sorted(tiles, key=lambda j: -n_of[j])
+        rank = {j: i for i, j in enumerate(tiles)}
+        hard = None
+        for _ in range(max(int(restarts), 1)):
+            out: List[Tuple[int, Source]] = []
+            for j in order:
+                if n_of[j] <= 0:
+                    continue
+                t0, t1 = self.tile(j)
+                for _t in range(300):
+                    src = smp.sample(n_of[j], t0 * px, t1 * px, rng, float(contrasts[j]))
+                    ok = all(_dist(s, o) >= dmin for s in src for _, o in out)
+                    if ok and out and hasattr(smp, "_in_sidelobes"):
+                        allr = [o.rho for _, o in out] + [s.rho for s in src]
+                        allt = [o.theta for _, o in out] + [s.theta for s in src]
+                        ok = not smp._in_sidelobes(allr, allt)
+                    if ok:
+                        break
+                else:
+                    hard = j
                     break
+                out += [(j, s) for s in src]
             else:
-                raise RuntimeError(f"no placement in tile {j + 1} clear of the other tiles' sources")
-            out += [(j, s) for s in src]
-        return out
+                return sorted(out, key=lambda js: rank[js[0]])
+        raise PlacementError(f"no placement in tile {hard + 1} clear of the other tiles' sources by {cf:g} FWHM "
+                             f"({max(int(restarts), 1)} starts)")
 
     def score_draws(self, draws: Sequence[Sequence[Tuple[int, Source]]], k: int, window: int,
                     cfg_k=None) -> List[np.ndarray]:
@@ -372,16 +411,17 @@ class StitchScorer:
         return [self.measure(self.stitch(imgs[t]), [s for _, s in d]) for t, d in enumerate(draws)]
 
     def calibrate(self, j: int, rng: np.random.Generator, n_cal: int = 8, target: Tuple[float, float] = TARGET,
-                  max_iter: int = 4, window: int = 2) -> Dict[str, Any]:
+                  max_iter: int = 4, window: int = 2, n_src: Optional[int] = None) -> Dict[str, Any]:
         """The contrast of tile ``j``'s sources at which the base winners read a median S/N inside
         ``target`` on the stitch, on ``n_cal`` draws of tile ``j`` alone, the same positions at
         every step: from the base run's contrast for annulus ``j``, each step as
-        :meth:`_next_contrast` takes it."""
+        :meth:`_next_contrast` takes it.  ``n_src``: the sources per draw (default the run's)."""
         c = float(self.results[j].contrast or 0.0)
         if not np.isfinite(c) or c <= 0:
             c = 1e-4
         hist = []
-        places = [self.draw([j], {j: c}, rng) for _ in range(n_cal)]
+        places = [self.draw([j], {j: c}, rng, counts=None if n_src is None else {j: int(n_src)})
+                  for _ in range(n_cal)]
         for it in range(max_iter):
             draws = [[(jj, Source(s.rho, s.theta, c)) for jj, s in d] for d in places]
             snr = self.score_draws(draws, j, window)
@@ -441,6 +481,93 @@ def _neighbors(scorer: StitchScorer, k: int) -> List[int]:
     return [scorer.order[q] for q in (p - 1, p, p + 1) if 0 <= q < len(scorer.order)]
 
 
+def _placements(scorer: StitchScorer, k: int, sources_per_tile: Optional[int] = None,
+                clear_fwhm: Optional[float] = None) -> List[Dict[str, Any]]:
+    """The rules annulus ``k``'s draws are placed by, in the order they are tried: the sources in
+    each tile (``counts``) and their clearance (``clear_fwhm``).  Asked for, ``sources_per_tile``
+    (at most that many in each tile) and ``clear_fwhm`` are the one rule.  Otherwise the run's
+    numbers at the sampler's distance, then at :data:`RELAXED_FWHM`, then one source in each
+    neighbor's tile, annulus ``k``'s own keeping the run's number."""
+    tiles = _neighbors(scorer, k)
+    run_n = {j: int(scorer.r._nsrc(j)) for j in tiles}
+    cf0 = scorer.clear_fwhm
+    if sources_per_tile is not None or clear_fwhm is not None:
+        n = {j: run_n[j] if sources_per_tile is None else min(run_n[j], int(sources_per_tile)) for j in tiles}
+        return [{"counts": n, "clear_fwhm": cf0 if clear_fwhm is None else float(clear_fwhm), "rule": "asked"}]
+    out = [{"counts": dict(run_n), "clear_fwhm": cf0, "rule": "the run's"}]
+    if cf0 > RELAXED_FWHM:
+        out.append({"counts": dict(run_n), "clear_fwhm": RELAXED_FWHM, "rule": "relaxed"})
+    one = {j: run_n[j] if j == k else min(run_n[j], 1) for j in tiles}
+    if one != run_n:
+        out.append({"counts": one, "clear_fwhm": min(cf0, RELAXED_FWHM), "rule": "relaxed"})
+    return out
+
+
+def _rule_text(rule: Dict[str, Any], fwhm_px: float) -> str:
+    """``1 source in tile 1, 1 in tile 2 and 2 in tile 3, 2 FWHM (12.8 px) apart``"""
+    items = sorted((int(j), int(n)) for j, n in rule["counts"].items())
+    parts = [f"{n} in tile {j + 1}" for j, n in items]
+    parts[0] = parts[0].replace(" in ", " source in " if items[0][1] == 1 else " sources in ", 1)
+    txt = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+    cf = float(rule["clear_fwhm"])
+    return f"{txt}, {cf:g} FWHM ({cf * fwhm_px:.1f} px) apart"
+
+
+def _rule_json(rule: Dict[str, Any]) -> Dict[str, Any]:
+    return {"counts": {str(int(j) + 1): int(n) for j, n in rule["counts"].items()},
+            "clear_fwhm": float(rule["clear_fwhm"]), "rule": rule["rule"]}
+
+
+def _rule_from_json(d: Dict[str, Any]) -> Dict[str, Any]:
+    return {"counts": {int(j) - 1: int(n) for j, n in d["counts"].items()}, "clear_fwhm": float(d["clear_fwhm"]),
+            "rule": d.get("rule", "")}
+
+
+def _annulus_draws(scorer: StitchScorer, k: int, contrasts: Dict[int, float], n_draws: int, seed: int, sd: str,
+                   rules: Sequence[Dict[str, Any]], log: Callable[[str], None]
+                   ) -> Tuple[List[List[Tuple[int, Source]]], Dict[str, Any]]:
+    """Annulus ``k``'s draws and the rule they were placed by: the ones kept in ``sd`` from an
+    earlier start, else placed by the first of ``rules`` that places every draw, each rule with
+    its own random stream (the first the stream of the code before the rules).  Raises
+    :class:`RescoreStop` when the kept draws do not fit the options or no rule places them."""
+    dpath = os.path.join(sd, f"ann{k + 1:02d}_draws.json")
+    ppath = os.path.join(sd, f"ann{k + 1:02d}_placement.json")
+    fw = scorer.fwhm_px
+    if os.path.exists(dpath):
+        draws = [_draw_from_json(d) for d in _read_json(dpath)]
+        if len(draws) != int(n_draws):
+            raise RescoreStop(f"{dpath} holds {len(draws)} draws, not {n_draws}: give the re-score another "
+                              f"directory, or the same number of draws")
+        # draws kept before the rules were recorded were placed by the run's numbers and distance
+        rule = _rule_from_json(_read_json(ppath)) if os.path.exists(ppath) else \
+            {"counts": {j: int(scorer.r._nsrc(j)) for j in _neighbors(scorer, k)}, "clear_fwhm": scorer.clear_fwhm,
+             "rule": "the run's"}
+        if len(rules) == 1 and rules[0]["rule"] == "asked" and (
+                rules[0]["counts"] != rule["counts"] or abs(rules[0]["clear_fwhm"] - rule["clear_fwhm"]) > 1e-9):
+            raise RescoreStop(f"its draws in {sd} have {_rule_text(rule, fw)}, not {_rule_text(rules[0], fw)}: give "
+                              f"the re-score another directory, or the same options")
+        log(f"annulus {k + 1}: {len(draws)} draws kept from the last start, {_rule_text(rule, fw)} ({rule['rule']})")
+        return draws, rule
+    tiles = _neighbors(scorer, k)
+    last = None
+    for i, rule in enumerate(rules):
+        rk = np.random.default_rng([int(seed), k] if i == 0 else [int(seed), k, i])
+        try:
+            draws = [scorer.draw(tiles, contrasts, rk, counts=rule["counts"], clear_fwhm=rule["clear_fwhm"])
+                     for _ in range(int(n_draws))]
+        except PlacementError as exc:
+            last = exc
+            log(f"annulus {k + 1}: no placement with {_rule_text(rule, fw)}: {exc}")
+            continue
+        _atomic_json(dpath, [_draw_json(d) for d in draws])
+        _atomic_json(ppath, _rule_json(rule))
+        log(f"annulus {k + 1}: {len(draws)} draws, {_rule_text(rule, fw)} ({rule['rule']})")
+        return draws, rule
+    tried = "the rule asked" if len(rules) == 1 else f"any of {len(rules)} rules"
+    raise PlacementError(f"its draws find no placement under {tried} ({last}); --sources-per-tile and "
+                         f"--clear-fwhm set the rule")
+
+
 def rescore_plan(scorer: StitchScorer, entrants: Dict[int, List[Entrant]], n_draws: int, n_cal: int = 8,
                  max_iter: int = 4) -> Dict[str, Any]:
     """How many reductions a re-score makes, at most: the base winners' clean images, the
@@ -483,7 +610,8 @@ def _base_reduce_seconds(run_dir: str) -> Optional[float]:
 def rescore(runner, entrant_runs: Sequence[str], out_dir: str, *, annuli: Sequence[int], n_draws: int = 50,
             top: int = 0, seed: int = 1, target: Tuple[float, float] = TARGET, n_cal: int = 8, max_iter: int = 4,
             window: Optional[int] = None, overlap_pads: Optional[bool] = None, plan: bool = False,
-            card: bool = False, log: Callable[[str], None] = print) -> Dict[str, Any]:
+            card: bool = False, sources_per_tile: Optional[int] = None, clear_fwhm: Optional[float] = None,
+            log: Callable[[str], None] = print) -> Dict[str, Any]:
     """Score the candidates of ``annuli`` (0-based) on the base run's stitch, the other annuli at
     the base run's winners.  ``runner`` is the base run resumed read-only, ``entrant_runs`` the
     other runs of the same setup whose candidates enter too (the base run's always do).
@@ -491,7 +619,17 @@ def rescore(runner, entrant_runs: Sequence[str], out_dir: str, *, annuli: Sequen
     Writes ``rescore.json`` and ``rescore.txt`` to ``out_dir`` after each annulus, and keeps its
     draws, its calibration and each entrant's S/N in ``out_dir/state``, from which a re-score
     started again on the same directory resumes.  ``plan``: count the reductions and return,
-    making none.  ``card``: the injected reductions may go to the card workers."""
+    making none.  ``card``: the injected reductions may go to the card workers.
+
+    ``sources_per_tile`` (at most that many sources in each tile of a draw) and ``clear_fwhm``
+    (the distance between the tiles' sources, FWHM) set the rule the draws are placed by.  Without
+    them an annulus whose draws find no place under the run's rule falls back as
+    :func:`_placements` lists.  An annulus whose draws find no place under any rule stops with a
+    message, and the re-score goes on with the next."""
+    if sources_per_tile is not None and int(sources_per_tile) < 1:
+        raise ValueError("sources_per_tile must be at least 1")
+    if clear_fwhm is not None and not float(clear_fwhm) > 0:
+        raise ValueError("clear_fwhm must be positive")
     t0 = time.time()
     base_dir = os.path.abspath(runner.run_dir)
     runs = [base_dir] + [os.path.abspath(p) for p in entrant_runs if os.path.abspath(p) != base_dir]
@@ -557,24 +695,28 @@ def rescore(runner, entrant_runs: Sequence[str], out_dir: str, *, annuli: Sequen
     for j in sorted({j for k in annuli for j in _neighbors(scorer, k)}):
         if j not in cal:
             cal[j] = scorer.calibrate(j, np.random.default_rng([int(seed), 1000 + j]), n_cal=n_cal, target=target,
-                                      max_iter=max_iter, window=w)
+                                      max_iter=max_iter, window=w,
+                                      n_src=None if sources_per_tile is None
+                                      else min(int(scorer.r._nsrc(j)), int(sources_per_tile)))
             _atomic_json(cpath, {str(a): v for a, v in cal.items()})
     contrasts = {j: float(v["contrast"]) for j, v in cal.items()}
     report: Dict[str, Any] = {"base": base_dir, "runs": runs, "annuli": {}, "seed": int(seed), "n_draws": int(n_draws),
                               "target": list(target), "calibration": {str(j + 1): v for j, v in cal.items()},
                               "tiles_px": [list(t) for t in scorer.tiles], "weights": [float(v) for v in scorer.weights],
                               "weights_from": scorer.weights_from, "overlap_pads": scorer.overlap_pads}
+    stopped: Dict[int, str] = {}
     for k in annuli:
-        dpath = os.path.join(sd, f"ann{k + 1:02d}_draws.json")
-        if os.path.exists(dpath):
-            draws = [_draw_from_json(d) for d in _read_json(dpath)]
-            if len(draws) != int(n_draws):
-                raise ValueError(f"{dpath} holds {len(draws)} draws, not {n_draws}: give the re-score another "
-                                 f"directory, or the same number of draws")
-        else:
-            rk = np.random.default_rng([int(seed), k])
-            draws = [scorer.draw(_neighbors(scorer, k), contrasts, rk) for _ in range(int(n_draws))]
-            _atomic_json(dpath, [_draw_json(d) for d in draws])
+        try:
+            draws, rule = _annulus_draws(scorer, k, contrasts, int(n_draws), int(seed), sd,
+                                         _placements(scorer, k, sources_per_tile, clear_fwhm), log)
+        except RescoreStop as exc:
+            stopped[k] = str(exc)
+            log(f"annulus {k + 1}: stopped, {exc}")
+            report["annuli"][str(k + 1)] = {"tile_px": list(scorer.tile(k)),
+                                            "draw_tiles": [j + 1 for j in _neighbors(scorer, k)],
+                                            "stopped": str(exc), "position": scorer.pos(k)}
+            _write_reports(out_dir, report, log=None)
+            continue
         srcs = [[s for _, s in d] for d in draws]
         tiles_of = [[j for j, _ in d] for d in draws]
         # the neighbors' reductions of each draw, shared by every candidate
@@ -618,7 +760,11 @@ def rescore(runner, entrant_runs: Sequence[str], out_dir: str, *, annuli: Sequen
                     f"about {left / 60:.0f} min left in this annulus)")
                 del acc[e.tag]
         report["annuli"][str(k + 1)] = _annulus_report(scorer, k, ents[k], draws, tiles_of, sd, base_key[k])
+        report["annuli"][str(k + 1)]["placement"] = dict(_rule_json(rule), text=_rule_text(rule, scorer.fwhm_px))
         _write_reports(out_dir, report, log=None)
+    if stopped:
+        ks = [str(k + 1) for k in stopped]
+        log(f"stopped: {'annulus' if len(ks) == 1 else 'annuli'} {', '.join(ks)}, for the reasons logged above")
     report["reductions"] = scorer.n_reductions
     report["wall_s"] = time.time() - t0
     report["finished"] = _dt.datetime.now().isoformat(timespec="seconds")
@@ -676,9 +822,15 @@ def _write_reports(out_dir: str, report: Dict[str, Any], log: Optional[Callable[
                                              for j, v in report["calibration"].items()))
     for ann, a in report["annuli"].items():
         t = a["tile_px"]
-        L += ["", f"== annulus {ann}  tile {t[0]:.2f}-{t[1]:.2f} px  draws in tiles "
-                  f"{'-'.join(str(v) for v in (a['draw_tiles'][0], a['draw_tiles'][-1]))}  "
+        tiles = '-'.join(str(v) for v in (a['draw_tiles'][0], a['draw_tiles'][-1]))
+        if a.get("stopped"):
+            L += ["", f"== annulus {ann}  tile {t[0]:.2f}-{t[1]:.2f} px  draws in tiles {tiles}  stopped ==",
+                  f"  {a['stopped']}"]
+            continue
+        L += ["", f"== annulus {ann}  tile {t[0]:.2f}-{t[1]:.2f} px  draws in tiles {tiles}  "
                   f"(the base winner ranks {a['base_rank']} of {len(a['entrants'])}) =="]
+        if a.get("placement"):
+            L.append(f"  draws: {a['placement']['text']} ({a['placement']['rule']})")
         L.append(f"  {'rank':>4}  {'run':<24} {'kind':<10} {'eval':>6}  {'S/N all (16-84%)':>20}  "
                  f"{'diff all':>16}  {'P':>4}  {'S/N tile':>8}  {'diff tile':>16}")
         for r in a["entrants"]:

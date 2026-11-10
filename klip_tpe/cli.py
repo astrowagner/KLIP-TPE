@@ -1629,7 +1629,8 @@ def cmd_rescore(a):
     try:
         rescore(r, a.entrants_from or [], out, annuli=parse_annuli(a.annuli, r.cfg.nann), n_draws=a.draws,
                 top=a.top, seed=a.seed, target=(float(a.target[0]), float(a.target[1])), n_cal=a.n_cal,
-                window=a.window, overlap_pads=a.overlap_pads, plan=a.plan, card=a.card, log=log)
+                window=a.window, overlap_pads=a.overlap_pads, plan=a.plan, card=a.card,
+                sources_per_tile=a.sources_per_tile, clear_fwhm=a.clear_fwhm, log=log)
     except ValueError as exc:
         raise SystemExit(f"rescore: {exc}")
     finally:
@@ -1965,6 +1966,12 @@ def _build_parser():
     p.add_argument("--n-cal", type=int, default=8, help="draws per step of each tile's contrast calibration "
                                                         "(default 8)")
     p.add_argument("--seed", type=int, default=1, help="seed of the draws (default 1)")
+    p.add_argument("--sources-per-tile", type=int, default=None, metavar="N",
+                   help="at most N sources in each tile of a draw (default: the run's number in each tile)")
+    p.add_argument("--clear-fwhm", type=float, default=None, metavar="F",
+                   help="the distance between the tiles' sources, in FWHM (default: the run's sampler's, 2).  "
+                        "Without either option, an annulus whose draws find no place falls back to 1.5 FWHM, then "
+                        "to one source in each neighbor's tile")
     p.add_argument("--window", type=int, default=None,
                    help="reductions in flight (default: enough to fill the reducer's workers)")
     pads = p.add_mutually_exclusive_group()
