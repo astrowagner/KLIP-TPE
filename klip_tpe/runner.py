@@ -451,6 +451,10 @@ class RunConfig:
     edge_padding: str = "between"         # "between" (only where annuli meet) | "all" (every edge, the IDL)
     stitch_overlap_pads: bool = False     # pad the stitch's tile edges between overlapping annuli
     stitch_injections: str = "all"        # "all" (every annulus' validation sources in each) | "own"
+    #: the library the run rotates its frames with, "scipy" | "opencv" (klip.set_rotation_backend):
+    #: a new run takes KLIP_TPE_ROTATE (default auto: OpenCV 5 when installed, else scipy) and
+    #: records it, and a resume keeps it.  None in a run recorded before 2026-11-10: scipy.
+    rotation: Optional[str] = None
     partition_weighting: Optional[str] = None
     fm_curve: bool = True
     fm_preview: bool = True              # live KLIP-FM preview at each new best (IDL: 'after 1st best')
@@ -843,6 +847,12 @@ def load_checkpoint(run_dir: str, log: Optional[Callable[[str], None]] = None
     return best[1], best[2]
 
 
+def _rotation_info() -> str:
+    """The library this process rotates frames with, and its version (``run_setup.json``)."""
+    from .klip import rotation_info
+    return rotation_info()
+
+
 def _write_fits(path: str, data: np.ndarray, header: Optional[Dict[str, Any]] = None,
                 history: Sequence[str] = ()) -> None:
     """FITS writer with the provenance header of :func:`klip_tpe.stitch.fits_header`."""
@@ -1083,6 +1093,7 @@ class Runner:
         self._apply_sampler_config()
         self._install_sidelobes()
         self._install_fmmf_turn()
+        self._install_rotation(from_checkpoint=_from_checkpoint)
         self.callbacks: List[RunCallback] = list(callbacks)
         self._last_images: Dict[str, Any] = {}
         os.makedirs(run_dir, exist_ok=True)
@@ -5060,6 +5071,7 @@ class Runner:
             "sampler": self.sampler.describe(),
             "projection": getattr(self.space.project, "describe", lambda: None)() if self.space.project else None,
             "fwhm_px": self.fwhm, "pxscale": self.pxscale,
+            "rotation": _rotation_info(),
             "partition_label": getattr(self.reducer, "partition_label", "night"),
         }
         with open(os.path.join(self.run_dir, "run_setup.json"), "w") as f:
@@ -5973,6 +5985,7 @@ class Runner:
         self._apply_sampler_config()
         self._install_sidelobes()
         self._install_fmmf_turn()
+        self._install_rotation(from_checkpoint=True)
         self.space = SearchSpace.from_dict(
             st["space"], project=project if project is not None else getattr(self.space, "project", None))
         self.rng.bit_generator.state = st["rng_state"]
@@ -6056,6 +6069,35 @@ class Runner:
             self.log(f"  no readable checkpoint in {self.run_dir}; starting fresh")
             return
         self._apply_checkpoint(st, project=getattr(self.space, "project", None))
+
+    def render(self, out_dir: Optional[str] = None, **kw) -> List[str]:
+        """Every evaluation's panel drawn again (:func:`klip_tpe.display.render_steps`), into
+        ``out_dir`` (default ``<run>/steps_rebuilt``), with this runner's reducer drawing each
+        frame's injected-PSF model: ``Runner.resume(run_dir, reducer, objective, sampler,
+        same_frames=False).render()`` for a run started from a script, which ``klip-tpe render
+        --with-data`` cannot rebuild.  ``kw``: ``render_steps``' (``annuli``, ``every``,
+        ``dpi``, ``movie`` ...)."""
+        from .display import render_steps
+        out = out_dir or os.path.join(self.run_dir, "steps_rebuilt")
+        kw.setdefault("movie_dir", out)
+        return render_steps(self.run_dir, out_dir=out, reducer=self.reducer, **kw)
+
+    def _install_rotation(self, from_checkpoint: bool = False) -> None:
+        """Rotate the run's frames with its library (:attr:`RunConfig.rotation`,
+        :func:`klip_tpe.klip.set_rotation_backend`).  A new run takes the process's choice
+        (``KLIP_TPE_ROTATE``) and records it.  A run recorded before the field rotated with
+        scipy and resumes with it, so its evaluations stay comparable.  Workers started
+        afterwards inherit the choice."""
+        from .klip import rotation_backend, set_rotation_backend
+        want = self.cfg.rotation
+        if want is None:
+            want = "scipy" if from_checkpoint else rotation_backend()
+        got = rotation_backend()
+        if got != want:
+            got = set_rotation_backend(want)
+        if got != want:
+            self.log(f"  rotation: the run rotates its frames with {want}, which is not usable here: {got} instead")
+        self.cfg.rotation = want
 
     @classmethod
     def annulus_end_stitch(cls, run_dir: str, ia: int) -> Optional[Dict[str, Any]]:

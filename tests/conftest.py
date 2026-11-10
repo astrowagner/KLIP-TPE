@@ -101,5 +101,10 @@ def _never_skip_panels():
     # rule (tests/test_sidelobe_rings.py).  KLIP_TPE_TEST_SIDELOBES runs the suite with another
     # default.
     mp.setitem(runner._SIDELOBES_DEFAULT, "mode", os.environ.get("KLIP_TPE_TEST_SIDELOBES", "off"))
+    # Frames rotate with scipy, the reference the expectations were written with, whether or not
+    # OpenCV is installed.  tests/test_rotation_backend.py asks for OpenCV.
+    from klip_tpe import klip
+    mp.setenv("KLIP_TPE_ROTATE", "scipy")
+    klip.set_rotation_backend("scipy")
     yield
     mp.undo()

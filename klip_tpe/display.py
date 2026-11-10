@@ -4201,7 +4201,7 @@ def _redrawn_final_frame(run_dir: str, ia: int, full: "AnnulusData", i: int, c_i
 def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: int = 1, dpi: int = 90,
                  out_dir: Optional[str] = None, movie: bool = True,
                  partition_label: Optional[str] = None, movie_dir: Optional[str] = None,
-                 inj_model_fn=None) -> List[str]:
+                 inj_model_fn=None, reducer=None) -> List[str]:
     """Rebuild the step PNGs of a run from its log and the per-evaluation crops it saved
     (``annulusNN/evals/``); where a crop is missing the image cells show the annulus
     winner's FITS with a note.  ``every``-th evaluation of each annulus, and its last.
@@ -4213,8 +4213,17 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
     An annulus' last frame is its annulus-done frame, as the live display drew it
     (:func:`_redrawn_final_frame`).  ``inj_model_fn(sources, shape)``: the injected-PSF model of
     ``sources`` (:func:`klip_tpe.injection.injected_model` on the run's reducer), for the best
-    eval of every frame and for a last frame whose run did not save it."""
+    eval of every frame and for a last frame whose run did not save it.  ``reducer``: the run's
+    reducer, built as the run built it (a run started from a script), from which that model is
+    drawn; its plate scale has to be the run's (``run_setup.json``)."""
     run = load_run(run_dir)
+    if reducer is not None and inj_model_fn is None:
+        from .injection import injected_model
+        px = ((run.get("setup") or {}).get("reducer") or {}).get("pxscale")
+        if px is not None and abs(float(getattr(reducer, "pxscale", px)) - float(px)) > 1e-9 * max(abs(float(px)), 1.0):
+            raise ValueError(f"the reducer has {float(reducer.pxscale):g}\"/px, the run {float(px):g}\"/px "
+                             f"(run_setup.json): its injected PSF would be drawn at another scale")
+        inj_model_fn = lambda sources, shape: injected_model(reducer, sources, shape)   # noqa: E731
     out_dir = out_dir or os.path.join(run_dir, "steps")
     os.makedirs(out_dir, exist_ok=True)
     try:

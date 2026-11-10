@@ -23,8 +23,9 @@ test = ["pytest>=7"]
 pyklip = ["pyklip>=2.7"]
 gpu = ["cupy-cuda12x[ctk]"]
 vip = ["vip_hci>=1.6"]
+fast = ["opencv-python-headless>=5"]
 jupyter = ["matplotlib>=3.5", "pillow>=9", "imageio>=2.20", "jupyter", "ipython"]
-all = ["matplotlib>=3.5", "pillow>=9", "imageio>=2.20", "jupyter", "ipython", "pytest>=7", "pyklip>=2.7", "vip_hci>=1.6", "nbformat", "nbconvert"]
+all = ["matplotlib>=3.5", "pillow>=9", "imageio>=2.20", "jupyter", "ipython", "pytest>=7", "pyklip>=2.7", "vip_hci>=1.6", "nbformat", "nbconvert", "opencv-python-headless>=5"]
 
 [project.urls]
 Homepage = "https://github.com/astrowagner/KLIP-TPE"
