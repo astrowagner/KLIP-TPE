@@ -2418,6 +2418,12 @@ class StepImages:
     #: image's own sources here and the cells circle what is actually in the picture.
     best_sources: Optional[List[Tuple[float, float, float]]] = None
     best_labels: Optional[List[Any]] = None        # per-source values that go with best_sources
+    #: what the best cells' picture is when ``best_sources`` are not the history's at
+    #: ``best_index`` (the annulus-done frame: ``"validation trial"``).  The S/N cell's title
+    #: then gives the statistic of the values circled in the picture, under this name, and
+    #: not that evaluation's search score: the README run's finished frame (2026-11-10) read
+    #: "Best mean S/N orig 12.12 / corr 11.41" over two sources circled 10.0 and 10.5.
+    best_trial: Optional[str] = None
     note: Optional[str] = None
     fm_image: Optional[np.ndarray] = None          # KLIP-FM response (preview at the best, or the winner's cross-check)
     #: why ``fm_image`` will stay empty for the WHOLE run (a backend with no KLIP-FM), so the
@@ -3390,12 +3396,18 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
         b_ok = 0 <= bi < ad.n
         best_src = ad.sources[bi] if b_ok else []
         best_ps, best_rps = (ad.per_source[bi], ad.raw_per_source[bi]) if b_ok else ([], [])
+        y_i, y_b = (ad.y[i] if n_ok else np.nan), (ad.y[bi] if b_ok else np.nan)
+        raw_i, raw_b = (ad.raw[i] if n_ok else np.nan), (ad.raw[bi] if b_ok else np.nan)
+        who_b = "Best"
         if images.best_sources is not None:        # the image's own injections; see StepImages
+            other = not _same_sources(images.best_sources, best_src)
             best_src = list(images.best_sources)
             best_ps = list(images.best_labels or [])
             best_rps = [None] * len(best_src)
-        y_i, y_b = (ad.y[i] if n_ok else np.nan), (ad.y[bi] if b_ok else np.nan)
-        raw_i, raw_b = (ad.raw[i] if n_ok else np.nan), (ad.raw[bi] if b_ok else np.nan)
+            if other:                              # another trial than the history's at bi
+                y_b, raw_b = _label_stat(best_ps), np.nan
+                if images.best_trial:
+                    who_b = f"Best ({images.best_trial})"
         if images.cur_override:                    # validation trial in the current cells
             ov = images.cur_override
             cur_src = list(ov.get("sources") or [])
@@ -3453,7 +3465,7 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
         d_i = None if (images.cur_override or not n_ok) else _eval_draws(ad, i)
         d_b = None if (images.best_sources is not None or not b_ok) else _eval_draws(ad, bi)
         tt = _snr_title("Test", raw_i, y_i, len(cur_src), d_i)
-        tb = _snr_title("Best", raw_b, y_b, len(best_src), d_b)
+        tb = _snr_title(who_b, raw_b, y_b, len(best_src), d_b)
         for x0, d, img_, src_, lab_, title_ in ((xs[0], d_i, images.cur_inj, cur_src, cur_lab, tt),
                                                  (xs[2], d_b, images.best_inj, best_src, best_lab, tb)):
             ax_ = cell(x0, st_y0, st_y1, _snr_map(img_, ad, src_), title_, sources=src_, labels=lab_, snr=True)
@@ -3717,6 +3729,37 @@ def _fits(path: str) -> Optional[np.ndarray]:
         return np.asarray(fits.getdata(path), float)
     except Exception:
         return None
+
+
+def _same_sources(a, b, tol_as: float = 1e-3, tol_deg: float = 0.01) -> bool:
+    """Whether two source lists hold the same positions in any order: separations within
+    ``tol_as`` arcsec, angles within ``tol_deg`` degrees."""
+    a, left = list(a or []), list(b or [])
+    if len(a) != len(left):
+        return False
+    for p in a:
+        for j, q in enumerate(left):
+            dth = abs((float(p[1]) - float(q[1]) + 180.0) % 360.0 - 180.0)
+            if abs(float(p[0]) - float(q[0])) <= tol_as and dth <= tol_deg:
+                del left[j]
+                break
+        else:
+            return False
+    return True
+
+
+def _label_stat(vals) -> float:
+    """The median of the finite values circled in a S/N cell (for two sources, their mean), as
+    its title gives it (:func:`_snr_title`); nan when none is finite."""
+    v = []
+    for x in vals or []:
+        try:
+            f = float(x)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(f):
+            v.append(f)
+    return float(np.median(v)) if v else float("nan")
 
 
 # ----------------------------------------------------------------------------
@@ -4186,8 +4229,9 @@ def _redrawn_final_frame(run_dir: str, ia: int, full: "AnnulusData", i: int, c_i
             if st.get("inj") is not None:
                 stitch.update(stitch_inj=st["inj"], stitch_sources=st.get("sources"))
     imgs = StepImages(fm_unavailable=fm_note, cur_clean=c_clean, cur_inj=c_inj, best_inj=b_inj, best_clean=b_clean,
-                      best_index=wi, best_sources=b_src, best_labels=b_lab, note="annulus complete", fm_image=fm_img,
-                      fm_sources=fm_src,
+                      best_index=wi, best_sources=b_src, best_labels=b_lab,
+                      best_trial="validation trial" if w.get("validated") else None,
+                      note="annulus complete", fm_image=fm_img, fm_sources=fm_src,
                       fm_label=("KLIP-FM model (winner's injections)" if fm_inj is not None
                                 else "KLIP-FM cross-check (winner, test spiral)"),
                       cur_label=f"Ann {ia + 1}/{full.nann}  last eval {i + 1}", inj_model=inj_model,
@@ -5534,6 +5578,7 @@ class LiveDisplay(RunCallback):
             imgs = StepImages(fm_unavailable=getattr(self, "_fm_note", None), cur_clean=li.get("clean"), cur_inj=li.get("inj"), best_inj=bimg.get("inj"),
                               best_clean=bimg.get("clean"), best_index=int(result.winner_index),
                               best_sources=b_src, best_labels=b_lab,
+                              best_trial="validation trial" if result.validated else None,
                               note="annulus complete", fm_image=fm.get("fm_image"), fm_sources=fm_src,
                               fm_label=("KLIP-FM model (winner's injections)" if winner.get("fm_inj")
                                         else "KLIP-FM cross-check (winner, test spiral)"),

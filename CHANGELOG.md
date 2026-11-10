@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased — 2026-11-11 (the best S/N title of the picture it circles)
+
+- **The best S/N cell's title gives the values circled in its picture** (RX J0534's
+  three-annulus README run, 2026-11-10, Kevin Wagner).  Its finished frame read "Best mean S/N
+  orig 12.12 / corr 11.41", the search trial's scores, over two sources circled 10.0 and 10.5
+  from the committed trial.  When the picture is another trial than the history holds at its
+  index, the title is the median (for two sources, the mean) of the circled values.  On a
+  validated annulus' done frame, live or redrawn by `klip-tpe render`, it is named, as in "Best
+  (validation trial) mean S/N = 10.25".  A picture of the search trial keeps its orig / corr.
+  The classic layout (`render_step_classic`) is unchanged.
+- Tests in `tests/test_display_stitch_circles.py`, with the same frame's stitch circles: the
+  search trial's two sources beside the six the stitch holds, which the annulus-done frame no
+  longer circles (0e9c172).
+
 ## Unreleased — 2026-11-11 (klip_annular's inputs and outputs, documented)
 
 - **`klip_annular` documents its inputs and outputs** (Vivek Vijayakumar's question,
