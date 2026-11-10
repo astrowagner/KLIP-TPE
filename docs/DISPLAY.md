@@ -203,7 +203,8 @@ ones the live display skipped, into `steps_rebuilt/` with its own movie.
   Under arcs, where fewer than 4 apertures are left beside them, the 4 or more farthest from the
   source stand in under `--sidelobes farthest`, or the clean reduction's ring through the source
   under `--sidelobes clean`, and the log counts the positions measured so and the ones that
-  failed, with the reason.  The final frame draws the median over position angle with its 16-84 % band.
+  failed, with the reason.  The contrast panel draws each separation's median over position angle
+  as a point with its 16-84 % as a bar, and one line joins the points of every annulus.
   `contrast_grid.json` keeps every position's trials, `contrast_grid.txt` the curve.  The
   KLIP-FM section is an independent forward-model estimate on the built-in engine.  Without
   the grid (`--contrast-grid off`, or a run saved before it) the curve is the fit to the
