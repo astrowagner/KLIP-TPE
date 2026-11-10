@@ -2803,19 +2803,38 @@ def panel_snrhist_h(ax, ad: AnnulusData, yr):
     ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(3))
 
 
+def _num(v) -> np.ndarray:
+    """A curve's list as floats, None as NaN."""
+    return np.array([np.nan if x is None else x for x in v], float)
+
+
 def panel_contrast_idl(ax, curves, contrast: float, placeholder: Optional[str] = None):
     """IDL ``near2m_cpanel``: SNR=5 contrast (fg, solid) with the KLIP-FM cross-check dashed green.
-    A curve with ``p16`` / ``p84`` (the injection grid's spread over position angle) gets its
-    band, shaded."""
+    A curve with ``p16`` / ``p84`` gets its band, shaded.
+
+    The injection grid's curves (``injection grid ...``, one per annulus) are points: the median
+    over position angle at each separation, with its 16-84 % as a bar, and one line joins the
+    points of every annulus in order of separation.  A narrow annulus' grid has one separation,
+    which a line and a band alone do not draw (WISPIT 2 ALES, 2026-11-10)."""
     grid = any(lab.startswith("injection grid") for lab, cc, _ in curves if cc)
     ax.set_title("SNR=5 contrast (injection grid)" if grid else "SNR=5 contrast (inj-calibrated)", fontsize=7.5)
     any_c = False
+    pts = []                                # the injection grid's points: (r, median, p16, p84)
     for lab, cc, st in curves:
         if not cc:
             continue
-        r = np.array([np.nan if v is None else v for v in cc.get("r_as", [])], float)
-        c = np.array([np.nan if v is None else v for v in cc.get("curve", [])], float)
+        r = _num(cc.get("r_as", []))
+        c = _num(cc.get("curve", []))
         if r.size and np.isfinite(c).any() and (c[np.isfinite(c)] > 0).any():
+            if lab.startswith("injection grid") and c.size == r.size:
+                lo = hi = np.full(r.size, np.nan)
+                if cc.get("p16") is not None and cc.get("p84") is not None \
+                        and len(cc["p16"]) == len(cc["p84"]) == r.size:
+                    lo, hi = _num(cc["p16"]), _num(cc["p84"])
+                ok = np.isfinite(r) & np.isfinite(c) & (c > 0)
+                pts.append(np.stack([r[ok], c[ok], lo[ok], hi[ok]]))
+                any_c = True
+                continue
             fm = "KLIP-FM" in lab
             this = lab.startswith("this eval") or lab.startswith("eval ")
             col = "#3cb44b" if fm else ("#8a8a8a" if this else _fg())
@@ -2828,10 +2847,28 @@ def panel_contrast_idl(ax, curves, contrast: float, placeholder: Optional[str] =
             ax.plot(r, np.where(c > 0, c, np.nan), color=col,
                     ls="--" if (fm or this) else "-", lw=1.3 if fm else (0.9 if this else 1.5))
             any_c = True
+    if pts:
+        r, c, lo, hi = np.concatenate(pts, axis=1)
+        o = np.argsort(r, kind="stable")
+        r, c, lo, hi = r[o], c[o], lo[o], hi[o]
+        col = _fg()
+        if r.size >= 2:
+            ax.plot(r, c, color=col, ls="-", lw=1.2, zorder=2)
+        bar = np.isfinite(lo) & np.isfinite(hi) & (lo > 0) & (hi > 0)
+        if bar.any():
+            ax.errorbar(r[bar], c[bar], yerr=[np.clip(c[bar] - lo[bar], 0, None), np.clip(hi[bar] - c[bar], 0, None)],
+                        fmt="o", ms=3.5, color=col, ecolor=col, elinewidth=0.9, capsize=2.0, zorder=3)
+        if (~bar).any():
+            ax.plot(r[~bar], c[~bar], "o", ms=3.5, color=col, zorder=3)
     if any_c:
         ax.set_yscale("log")
         if np.isfinite(contrast) and contrast > 0:
             ax.axhline(contrast, color="#777777", ls=":", lw=0.7)
+        if grid:
+            # room above the points and their bars for the labels in the top right corner
+            y0, y1 = ax.get_ylim()
+            if 0 < y0 < y1:
+                ax.set_ylim(y0, y1 * (y1 / y0) ** 0.4)
         if any("KLIP-FM" in lab for lab, cc, _ in curves if cc):
             # beside the grid's label on the finished frame, where the falling curves leave room;
             # at the foot of the panel the KLIP-FM curve ran through it at the outer edge
@@ -2845,7 +2882,7 @@ def panel_contrast_idl(ax, curves, contrast: float, placeholder: Optional[str] =
             ax.text(0.98, 0.12, "gray dashed = this eval", transform=ax.transAxes, ha="right", color="#8a8a8a", fontsize=6.5)
         if grid:
             # top right: the curves fall with separation, so that corner stays clear
-            ax.text(0.98, 0.92, "solid = injection grid (median, 16-84 % band over PA)",
+            ax.text(0.98, 0.92, "points = injection grid, bars 16-84 % over PA",
                     transform=ax.transAxes, ha="right", va="top", color=_fg(), fontsize=6.5)
     else:
         msg = placeholder or "after first best..."
@@ -4089,6 +4126,8 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
     paths: List[str] = []
     step = 0
     fig = None
+    # the finished annuli's curves stay on the panel, as on the live panel (LiveDisplay._curves)
+    done: List[Tuple[str, Dict[str, Any], Dict[str, Any]]] = []
     for ia in ias:
         full = annulus_from_run(run_dir, ia, run)
         d = os.path.join(run_dir, f"annulus{ia + 1:02d}")
@@ -4119,6 +4158,7 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
                 lc = _live_curve(c_clean, ad, i)
                 if lc:
                     curves.append((f"eval {i + 1} preview", lc, {}))
+            curves += done
             if wcurve and i == full.n - 1:
                 lab = ("injection grid (annulus)" if (full.winner or {}).get("grid_curve")
                        else "validated winner (annulus)")
@@ -4132,6 +4172,13 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
                               contrast_note=None if have else "rebuilt from log: no live images, so no per-eval preview")
             paths.append(p)
             step += 1
+        tag = f" annulus {ia + 1}"
+        if wcurve:
+            lab = "injection grid (median over PA)" if (full.winner or {}).get("grid_curve") else \
+                "validated winner (injection-calibrated)"
+            done.append((lab + tag, wcurve, {"color": VALID_COLOR, "lw": 1.6}))
+        if fmcurve:
+            done.append(("KLIP-FM cross-check (winner)" + tag, fmcurve, {"color": FM_COLOR, "lw": 1.4}))
     if movie and paths:
         try:
             from .animate import make_movie

@@ -27,7 +27,7 @@ import numpy as np
 from .injection import (InjectionModel, _check_float32_headroom, add_crop, cube_peak, inject_frames,
                         place_source, prepare_sources)
 from .klip import (BLOCK_BYTES, KLIPParams, _highpass_frames, arcdist_deg, bin_by_groups, bin_frames,
-                   bin_groups, bin_values, derotate, destripe, frame_blocks, frame_selection_mask, group_bounds,
+                   bin_groups, bin_values, bins_with_data, derotate, destripe, frame_blocks, frame_selection_mask, group_bounds,
                    group_mean, highpass_stack, klip_annular, nw_ang_comb, run_blocks)
 from .metrics import Source
 from .space import Config
@@ -876,9 +876,9 @@ class KLIPReducer(Reducer):
 
         The SELECTION -- the groups and the similarity matrix that ranks each target's
         references -- is built once per distinct (binning, frame selection, filter, annulus)
-        and reused; ``key_extra`` carries the binning and the frame-selection mask, and
-        ``sim_cube`` is the same binned cube WITHOUT injections, so that the ranking does not
-        depend on what was injected or on which evaluation came first.  The BASIS rows are
+        and reused; ``key_extra`` carries the binning, the frame-selection mask and the bins
+        kept, and ``sim_cube`` is the same bins of the cube WITHOUT injections, so that the
+        ranking does not depend on what was injected or on which evaluation came first.  The BASIS rows are
         always this evaluation's own cube, ``[bcube | SDI rows | ref]``.
 
         ``sdi`` (from :meth:`_sdi_rows`) is this evaluation's SDI pool: its rows go between
@@ -970,7 +970,7 @@ class KLIPReducer(Reducer):
         roll -- which would let a target draw references from its own roll, exactly the
         failure the exclusion exists to prevent.  ``keep`` is the frame-selection mask over
         the raw frames; ``grp`` is the bin index of each SELECTED frame; ``bkeep`` drops
-        all-zero bins.  A bin takes the label of its first frame, and binning never spans
+        the bins without data.  A bin takes the label of its first frame, and binning never spans
         partitions because the frames of a roll are contiguous.
         """
         lab = np.asarray(self._reflib_spec["partition"])
@@ -1077,10 +1077,10 @@ class KLIPReducer(Reducer):
                     mb = bin_by_groups(mcube, grp, threads=nth) if bin_ > 1 else np.asarray(mcube, np.float32)
                 mcube = mb[bkeep]
         if bcube.shape[0] == 0:
-            # bin_frames drops bins whose nansum is zero.  np.nansum of an ALL-NaN frame is
-            # 0.0, so a cube that is mostly NaN -- a subarray padded into a larger grid, say
-            # -- is wiped out entirely by the high-pass, which at nan_aware=False spreads NaN
-            # over the whole frame.  Every downstream shape then goes to zero and the failure
+            # the binning drops the bins without a pixel that is neither NaN nor zero
+            # (bins_with_data), so a cube that is mostly NaN -- a subarray padded into a
+            # larger grid, say -- is wiped out entirely by the high-pass, which at
+            # nan_aware=False spreads NaN over the whole frame.  Every downstream shape then goes to zero and the failure
             # surfaces somewhere far away and unrecognisable.
             nan_frac = float(np.mean(~np.isfinite(np.asarray(ds.cube, float))))
             raise ValueError(
@@ -1094,10 +1094,12 @@ class KLIPReducer(Reducer):
                               bnorth=self.binned_north(keep, grp, bkeep, bin_))
 
     # ------------------------------------------------------------------ the fused path
-    def _prep_fused(self, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth, injections=None, fm_sources=None):
+    def _prep_fused(self, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth, injections=None, fm_sources=None,
+                    bkeep=None):
         """The frames before KLIP, one bin group at a time: ``(bcube, bang, grp, bkeep,
         mcube)`` as the whole-cube steps make them (:meth:`_prep_cube`, :meth:`_inject`,
         :meth:`model_cube`, and the model's binning in :meth:`prepare`), to the bit.
+        ``bkeep``: the bins to keep in place of the test for data (:func:`bins_with_data`).
 
         A group's kept frames are copied out of the cube (``float32`` when they take
         sources, as the injected cube held them), given each source's stamp in the order of
@@ -1126,8 +1128,12 @@ class KLIPReducer(Reducer):
         clip = float(p["destripe_clip"]) if (p["do_destripe"] and not hp_binned) else None
         place = self._placer(injections, "inj") if injections else None
         bc = self._fused_bins(ds.cube, kidx, bounds, bin_, filt, hp_nan, hp_binned, nth, place, clip)
-        tot = np.array([np.nansum(f) for f in bc])
-        bkeep = tot != 0
+        if bkeep is None:
+            bkeep = bins_with_data(bc)
+        else:
+            bkeep = np.asarray(bkeep, bool)
+            if bkeep.shape != (bc.shape[0],):
+                raise ValueError(f"bkeep has {bkeep.size} bins, the binning {bc.shape[0]}")
         mcube = None
         if fm_sources:
             mb = self._fused_bins(None, kidx, bounds, bin_, filt, hp_nan, hp_binned, nth,
@@ -1231,16 +1237,18 @@ class KLIPReducer(Reducer):
         run_blocks(block, frame_blocks(ng, nth), nth)
         return out
 
-    def _clean_bins(self, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth) -> np.ndarray:
+    def _clean_bins(self, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth, bkeep=None) -> np.ndarray:
         """The binned frames of the cube without injections (the reference library's
-        ranking cube), by the path :meth:`prepare` takes."""
+        ranking cube), by the path :meth:`prepare` takes.  ``bkeep``: the bins to take, the
+        ones the reduction's own cube kept, so that the ranking cube matches it bin for bin."""
         if _flag(p.get("prep_fused", True)):
-            return self._prep_fused(p, keep, bin_, filt, dth, hp_nan, hp_binned, nth)[0]
-        return self._prep_cube(self.data.cube, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth)[0]
+            return self._prep_fused(p, keep, bin_, filt, dth, hp_nan, hp_binned, nth, bkeep=bkeep)[0]
+        return self._prep_cube(self.data.cube, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth, bkeep=bkeep)[0]
 
-    def _prep_cube(self, c, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth, selected=False):
+    def _prep_cube(self, c, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth, selected=False, bkeep=None):
         """frame selection, high-pass, destripe and binning of a science cube
-        (``selected``: ``c`` holds only the kept frames already)"""
+        (``selected``: ``c`` holds only the kept frames already; ``bkeep``: the bins to keep in
+        place of the test for data)"""
         a_ = self.data.angles
         if not keep.all():
             a_ = a_[keep]
@@ -1248,14 +1256,14 @@ class KLIPReducer(Reducer):
                 c = c[keep]
         if hp_binned:
             return bin_frames(c, a_, bin_, dth, return_groups=True, threads=nth, dtype=np.float64,
-                              then=lambda bc: highpass_stack(bc, filt, nan_aware=hp_nan, threads=nth))
+                              then=lambda bc: highpass_stack(bc, filt, nan_aware=hp_nan, threads=nth), bkeep=bkeep)
         if filt > 1:
             c = highpass_stack(c, filt, nan_aware=hp_nan, threads=nth)
         if p["do_destripe"]:
             # reduce_near_2 L1672-1677: 90 deg (columns) then 0 deg (rows); science only
             clip = float(p["destripe_clip"])
             c = np.stack([destripe(destripe(f, 90.0, clip), 0.0, clip) for f in c])
-        return bin_frames(c, a_, bin_, dth, return_groups=True, threads=nth)
+        return bin_frames(c, a_, bin_, dth, return_groups=True, threads=nth, bkeep=bkeep)
 
     def reduce(self, req: ReductionRequest) -> ReductionResult:
         if str(getattr(req, "stage", "reduce")) == "prepare":
@@ -1348,15 +1356,19 @@ class KLIPReducer(Reducer):
                 # separate modes here -- an all-zero altroll count IS pure RDI, and the
                 # optimizer can elect it rather than being told.
                 bpart = self._binned_partition(keep, grp, bkeep)
-                kx = (bin_, round(float(dth), 6), hash(np.asarray(keep, bool).tobytes()))
+                # the key: the binning, the frame selection and the bins kept, so that a
+                # ranking is reused only for the same bins
+                kx = (bin_, round(float(dth), 6), hash(np.asarray(keep, bool).tobytes()),
+                      hash(np.asarray(bkeep, bool).tobytes()))
                 sim_cube = None
                 if req.injections:
                     # the ranking is computed once per key, on the frames WITHOUT injections
-                    # -- rebuilt here only if the key is new
+                    # at this cube's bins -- rebuilt here only if the key is new
                     k0 = (int(bcube.shape[0]), int(filt), round(float(inrad), 3), round(float(outrad), 3),
                           spec["metric"], spec["shift_px"]) + kx
                     if k0 not in self._reflib_cache:
-                        sim_cube = self._clean_bins(p, keep, bin_, filt, dth, prep.hp_nan, prep.hp_binned, nth)
+                        sim_cube = self._clean_bins(p, keep, bin_, filt, dth, prep.hp_nan, prep.hp_binned, nth,
+                                                    bkeep=bkeep)
                 ref_lib, ref_basis = self._reflib(bcube, ref, bpart, filt, inrad, outrad, key_extra=kx,
                                                   sim_cube=sim_cube, bang=bang, sdi=sdi,
                                                   mid_px=0.5 * (ann[0] + ann[1]) if widened else None)

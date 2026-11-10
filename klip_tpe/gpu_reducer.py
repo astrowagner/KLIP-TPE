@@ -280,9 +280,11 @@ class GPUKLIPReducer(KLIPReducer):
             bc = kg.highpass(be, bc, filt, nan_aware=hp_nan, dtype=np.float64)
         bc = bc.astype(xp.float32)
         del cube
-        # bins whose frames are all NaN (or sum to 0) are dropped, as bin_frames drops them
-        tot = xp.nansum(bc.reshape(bc.shape[0], -1), axis=1)
-        bkeep = be.asnumpy(tot != 0)
+        # bins without a pixel that is neither NaN nor zero are dropped, as bin_frames drops
+        # them (bins_with_data)
+        b2 = bc.reshape(bc.shape[0], -1)
+        bkeep = be.asnumpy(xp.any((b2 != 0) & ~xp.isnan(b2), axis=1))
+        del b2
         bnorth = None if n_ is None else bin_values(n_, grp, bin_)[bkeep]
         if not bkeep.all():
             bc = bc[xp.asarray(np.flatnonzero(bkeep))]

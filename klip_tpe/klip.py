@@ -18,7 +18,7 @@ from scipy import ndimage
 
 __all__ = ["frame_selection_mask", "bin_frames", "bin_groups", "bin_by_groups", "bin_angles", "bin_values",
            "highpass", "highpass_stack", "destripe", "rotate_ccw", "rotate_ccw_many", "derotate",
-           "group_mean", "group_bounds",
+           "group_mean", "group_bounds", "bins_with_data",
            "nw_ang_comb", "nw_ang_comb_ref", "klip_basis", "zone_indices", "klip_annular", "klip_fm_zone",
            "arcdist_deg", "reference_mask", "KLIPParams"]
 
@@ -173,15 +173,32 @@ def bin_by_groups(cube: np.ndarray, grp: np.ndarray, threads: int = 1, dtype=np.
     return bc
 
 
+def bins_with_data(bc: np.ndarray) -> np.ndarray:
+    """Which frames of ``bc`` carry data: those with a pixel that is neither NaN nor zero.
+
+    A bin of all-NaN frames or of all-zero frames carries none, and the binning drops it
+    (``bads``, reduce_near_2 L1747-1761).  Until 2026-11-10 the test was the frame's
+    ``nansum``, as the IDL tests its ``total``.  A high-passed frame sums to nearly zero by
+    design, and in float32 a frame with data then sums to exactly zero now and then.  On the
+    WISPIT 2 ALES search it happened in 1 draw of 3000: the injected sources moved a bin's
+    sum onto zero, and the injected cube lost a bin the clean cube kept."""
+    out = np.zeros(len(bc), bool)
+    for i, f in enumerate(bc):
+        f = np.asarray(f)
+        out[i] = bool(np.any(f[~np.isnan(f)] != 0))
+    return out
+
+
 def bin_frames(cube: np.ndarray, angles: np.ndarray, bin_: int, dth_max_deg: float,
-               return_groups: bool = False, threads: int = 1, then=None, dtype=np.float32):
+               return_groups: bool = False, threads: int = 1, then=None, dtype=np.float32, bkeep=None):
     """Mean-combine consecutive frames into bins of at most ``bin_`` frames, closing
-    a bin early when its PA span would exceed ``dth_max_deg``.  Drops all-zero bins
-    (``bads``, reduce_near_2 L1747-1761).  With ``return_groups`` also returns
-    ``(grp, keep)`` so a companion cube can be binned identically
-    (:func:`bin_by_groups` followed by ``[keep]``).  ``then``: applied to the binned
-    cube before the all-zero test (the high-pass, when it follows the binning); ``dtype``
-    the precision of the means (:func:`bin_by_groups`)."""
+    a bin early when its PA span would exceed ``dth_max_deg``.  Drops the bins without
+    data (:func:`bins_with_data`; ``bads``, reduce_near_2 L1747-1761).  With
+    ``return_groups`` also returns ``(grp, keep)`` so a companion cube can be binned
+    identically (:func:`bin_by_groups` followed by ``[keep]``).  ``then``: applied to the
+    binned cube before the test (the high-pass, when it follows the binning); ``dtype``
+    the precision of the means (:func:`bin_by_groups`).  ``bkeep``: the bins to keep in
+    place of the test, the ones another cube of the same frames kept."""
     angles = np.asarray(angles, float)
     grp = bin_groups(angles, bin_, dth_max_deg)
     if int(round(max(bin_, 1))) <= 1:
@@ -192,8 +209,12 @@ def bin_frames(cube: np.ndarray, angles: np.ndarray, bin_: int, dth_max_deg: flo
         ba = np.bincount(grp, weights=angles, minlength=ng) / np.bincount(grp, minlength=ng)
     if then is not None:
         bc = then(bc)
-    tot = np.array([np.nansum(f) for f in bc])
-    keep = tot != 0
+    if bkeep is None:
+        keep = bins_with_data(bc)
+    else:
+        keep = np.asarray(bkeep, bool)
+        if keep.shape != (bc.shape[0],):
+            raise ValueError(f"bkeep has {keep.size} bins, the binning {bc.shape[0]}")
     if return_groups:
         return bc[keep], ba[keep], grp, keep
     return bc[keep], ba[keep]

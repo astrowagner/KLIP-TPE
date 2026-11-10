@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased — 2026-11-10 (a bin with data is kept, and the grid's points on the contrast panel)
+
+- **A bin is dropped only when it carries no data** (the WISPIT 2 ALES session, 2026-11-10,
+  Kevin Wagner).  The binning dropped a bin whose pixels summed to zero, as the IDL does.  A
+  high-passed bin sums to nearly zero by design, and in float32 a bin with data then sums to
+  exactly zero now and then.  On `wispit2_ales2` one draw in 3000 failed with "similarity cube
+  (32, 62, 62) does not match the binned cube (31, 62, 62)".  The draw's sources had moved a
+  bin's sum onto zero, and the injected cube lost a bin that the clean cube kept.  A bin is now
+  dropped when none of its pixels is neither NaN nor zero (`klip.bins_with_data`), so all-NaN
+  and all-zero bins go as before.  The fused path, the whole-cube path and the GPU reducer take
+  the same test.  A reduction that met such a bin kept one bin fewer than it does now, and every
+  other reduction is unchanged.
+- **The searched library ranks on the clean frames at the reduction's own bins**, and its cache
+  key holds the bins.  A reduction whose injected cube keeps other bins than its clean cube now
+  runs, where it failed with the same message.  That happens with frames of zeros, which only
+  the injected sources fill.  Their clean frames rank as zeros.
+- **The contrast panel draws the injection grid as points** (the same session).  Each
+  separation's median over position angle is a point with its 16-84 % as a bar, and one line
+  joins the points of every annulus.  The annuli of `wispit2_ales2` are 4.5 to 6 px wide, so
+  each annulus' grid has one separation, and the line and the band it was drawn with showed
+  nothing.  The panel leaves room above the points for its labels.
+- Tests in `tests/test_empty_bins.py` and `tests/test_contrast_panel_grid.py`.  Docs in
+  DISPLAY.md.
+
 ## Unreleased — 2026-11-10 (the re-score: candidates scored on the stitch)
 
 - **`klip-tpe rescore`** (`klip_tpe.refine`, NEAR2's notes of 2026-11-06 to 11-09, Kevin Wagner)
