@@ -630,7 +630,17 @@ annuli and search space (`--entrants-from`), and with `--top N` the best N of ea
 is the first piece of `refine`, whose scoring it is.
 
 * Each annulus gets `--draws` common draws (default 50).  A draw puts the run's number of
-  sources in the annulus' tile and in the tiles on either side, placed by the run's sampler.
+  sources in the annulus' tile and in the tiles on either side, placed by the run's sampler, the
+  tiles' sources at least the sampler's 2 FWHM apart.  The tile with the most sources goes first,
+  and a draw that finds no place starts again.
+* Narrow tiles can leave no room: on NEAR2's s7, a pair 180° apart in a tile 4.7 px wide has to
+  clear the inner tiles' sources by 2 FWHM, 12.8 px.  An annulus whose draws find no place falls
+  back to 1.5 FWHM, then to one source in each neighbor's tile, its own tile keeping the run's
+  number.  `--sources-per-tile N` (at most N in each tile) and `--clear-fwhm F` set the rule
+  instead.  The log and `rescore.txt` say which rule each annulus' draws used.  The scoring
+  leaves every source's neighbors out of its ring under any rule.
+* An annulus whose draws find no place under any rule stops with the reason, and the re-score
+  goes on with the next.
 * Each tile's sources are at the contrast that gives the base winners a median S/N of 5 to 8 on
   the stitch (`--target`).  The contrast is found on 8 draws of that tile alone (`--n-cal`), from
   the run's contrast, in up to 4 steps.

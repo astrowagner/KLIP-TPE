@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — 2026-11-10 (the re-score's draws on narrow tiles)
+
+- **`klip-tpe rescore` places its draws on narrow tiles** (NEAR2's note of 2026-11-10, Kevin
+  Wagner).  On s7 annulus 2's draws stopped the command with "no placement in tile 3 clear of
+  the other tiles' sources".  The tiles are 4.7 px wide against a FWHM of 6.4 px, and tile 3's
+  pair, placed last, had to clear the inner tiles' sources by 2 FWHM.  A draw now places the
+  tile with the most sources first and starts again when a tile finds no place.  An annulus whose
+  draws still find none falls back to 1.5 FWHM, then to one source in each neighbor's tile, its
+  own tile keeping the run's number.  `--sources-per-tile N` and `--clear-fwhm F` set the rule
+  instead.  The log, `rescore.txt` and `rescore.json` give each annulus' rule, and
+  `state/annKK_placement.json` keeps it.  Where the tiles hold as many sources each, the draws
+  are the ones the code drew before.
+- **An annulus that cannot go on stops, and the re-score goes on with the next.**  That is one
+  whose draws find no place under any rule, or whose kept draws were made with another rule or
+  number of draws.  `rescore.txt` and `rescore.json` give the reason.
+- Tests in `tests/test_rescore.py`.  Docs in RUNNING.md, CLI.md regenerated.
+
 ## Unreleased — 2026-11-10 (a bin with data is kept, and the grid's points on the contrast panel)
 
 - **A bin is dropped only when it carries no data** (the WISPIT 2 ALES session, 2026-11-10,

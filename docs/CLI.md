@@ -2626,6 +2626,7 @@ usage: klip-tpe rescore [-h] [--instrument {near,nomic,generic,ales}]
                         [--run-dir RUN_DIR] [--entrants-from [RUN ...]]
                         [--annuli ANNULI] [--draws DRAWS] [--top TOP]
                         [--target LO HI] [--n-cal N_CAL] [--seed SEED]
+                        [--sources-per-tile N] [--clear-fwhm F]
                         [--window WINDOW] [--overlap-pads | --no-overlap-pads]
                         [--verify-snr {search,idl}] [--out DIR] [--card]
                         [--plan]
@@ -2784,6 +2785,13 @@ options:
   --n-cal N_CAL         draws per step of each tile's contrast calibration
                         (default 8)
   --seed SEED           seed of the draws (default 1)
+  --sources-per-tile N  at most N sources in each tile of a draw (default: the
+                        run's number in each tile)
+  --clear-fwhm F        the distance between the tiles' sources, in FWHM
+                        (default: the run's sampler's, 2). Without either
+                        option, an annulus whose draws find no place falls
+                        back to 1.5 FWHM, then to one source in each
+                        neighbor's tile
   --window WINDOW       reductions in flight (default: enough to fill the
                         reducer's workers)
   --overlap-pads        pad the stitch's tile edges between overlapping annuli

@@ -12,6 +12,11 @@ What must hold:
   say so.
 * The runs are only read, and a re-score started again on its directory resumes without
   scoring a candidate twice.
+* A draw places the tile with the most sources first, starts again when a tile finds no place,
+  and draws as before where the tiles hold as many sources each.  An annulus whose draws find
+  no place under the run's rule falls back to 1.5 FWHM, then to one source in each neighbor's
+  tile, and says so.  One that finds none under any rule, or whose kept draws do not fit the
+  options, stops with the reason and the re-score goes on (NEAR2, 2026-11-10).
 """
 from __future__ import annotations
 
@@ -21,8 +26,8 @@ import os
 import numpy as np
 import pytest
 
-from klip_tpe.refine import (Entrant, StitchScorer, config_key, paired_summary, parse_annuli, rescore,
-                             run_entrants)
+from klip_tpe.refine import (Entrant, PlacementError, StitchScorer, _dist, _placements, _rule_text, config_key,
+                             paired_summary, parse_annuli, rescore, run_entrants)
 from klip_tpe.runner import CalibrationConfig, Runner, ValidationConfig
 
 from conftest import build_synthetic_run
@@ -135,8 +140,9 @@ def test_a_rescore_ranks_both_runs_candidates_and_resumes(runs, tmp_path):
     rep2 = rescore(_resume(a), [b], out, annuli=[1], n_draws=3, n_cal=2, max_iter=2, window=2, log=QUIET)
     assert rep2["reductions"] == len(EDGES) - 1, "only the base winners' clean images again"
     assert [e["all"] for e in rep2["annuli"]["2"]["entrants"]] == [e["all"] for e in ann["entrants"]]
-    with pytest.raises(ValueError, match="holds 3 draws"):
-        rescore(_resume(a), [b], out, annuli=[1], n_draws=4, n_cal=2, max_iter=2, window=2, log=QUIET)
+    # another number of draws on the same directory stops the annulus, with the reason
+    rep3 = rescore(_resume(a), [b], out, annuli=[1], n_draws=4, n_cal=2, max_iter=2, window=2, log=QUIET)
+    assert "holds 3 draws" in rep3["annuli"]["2"]["stopped"]
 
 
 @pytest.mark.slow
@@ -169,3 +175,89 @@ def test_an_entrant_tag_is_stable():
     assert e.key == f.key and e.tag == f.tag and len(e.tag) == 12
     g = Entrant("run_b", "winner", 3, dict(e.config))
     assert g.key == e.key and g.tag != e.tag, "the same configuration from another run is another entrant's file"
+
+
+def _old_draw(sc, tiles, contrasts, rng):
+    """The draw of the code before the placement rules (0531e2f), for the comparison."""
+    smp, px = sc.r.sampler, float(sc.r.pxscale)
+    dmin = float(getattr(smp, "min_mutual_fwhm", 2.0)) * float(getattr(smp, "fwhm_as", sc.r.fwhm * px))
+    out = []
+    for j in tiles:
+        t0, t1 = sc.tile(j)
+        for _ in range(300):
+            src = smp.sample(sc.r._nsrc(j), t0 * px, t1 * px, rng, float(contrasts[j]))
+            ok = all(_dist(s, o) >= dmin for s in src for _, o in out)
+            if ok and out and hasattr(smp, "_in_sidelobes"):
+                ok = not smp._in_sidelobes([o.rho for _, o in out] + [s.rho for s in src],
+                                           [o.theta for _, o in out] + [s.theta for s in src])
+            if ok:
+                break
+        else:
+            raise RuntimeError("no placement")
+        out += [(j, s) for s in src]
+    return out
+
+
+def test_a_draw_places_the_most_sources_first_and_the_rules_fall_back(runs):
+    a, _ = runs
+    sc = StitchScorer(_resume(a), log=QUIET)
+    contrasts = {j: 4e-3 for j in sc.order}
+    run_n = {j: int(sc.r._nsrc(j)) for j in sc.order}
+    # the tiles hold as many sources each: the draws of the code before, stream for stream
+    if len({run_n[j] for j in (0, 1, 2)}) == 1:
+        r1, r2 = np.random.default_rng([1, 1]), np.random.default_rng([1, 1])
+        for _ in range(5):
+            assert sc.draw([0, 1, 2], contrasts, r1) == _old_draw(sc, [0, 1, 2], contrasts, r2)
+    # a pair in the outer tile: placed first, given back in the tiles' order, all clear of each other
+    d = sc.draw([0, 1, 2], contrasts, np.random.default_rng(3), counts={0: 1, 1: 1, 2: 2})
+    assert [j for j, _ in d] == [0, 1, 2, 2]
+    px = float(sc.r.pxscale)
+    assert all(sc.tile(j)[0] - 1e-6 <= s.rho / px <= sc.tile(j)[1] + 1e-6 for j, s in d)
+    dmin = sc.clear_fwhm * sc.fwhm_px * px
+    assert all(_dist(s, o) >= dmin - 1e-9 for j, s in d for i, o in d if i != j)
+    with pytest.raises(PlacementError, match="no placement in tile .* by 1000 FWHM"):
+        sc.draw([0, 1, 2], contrasts, np.random.default_rng(3), clear_fwhm=1e3, restarts=2)
+    # the rules: the run's, 1.5 FWHM, then one source in each neighbor's tile; or the one asked
+    rules = _placements(sc, 1)
+    assert rules[0] == {"counts": {j: run_n[j] for j in (0, 1, 2)}, "clear_fwhm": sc.clear_fwhm, "rule": "the run's"}
+    assert rules[1] == {"counts": rules[0]["counts"], "clear_fwhm": 1.5, "rule": "relaxed"}
+    if run_n[0] > 1 or run_n[2] > 1:
+        assert rules[2]["counts"] == {0: 1, 1: run_n[1], 2: 1}
+    assert _placements(sc, 1, sources_per_tile=1, clear_fwhm=1.0) == [
+        {"counts": {0: 1, 1: 1, 2: 1}, "clear_fwhm": 1.0, "rule": "asked"}]
+    assert _rule_text({"counts": {0: 1, 1: 1, 2: 2}, "clear_fwhm": 2.0}, 6.39) == \
+        "1 source in tile 1, 1 in tile 2 and 2 in tile 3, 2 FWHM (12.8 px) apart"
+    assert _rule_text({"counts": {3: 2}, "clear_fwhm": 1.5}, 4.0) == "2 sources in tile 4, 1.5 FWHM (6.0 px) apart"
+
+
+@pytest.mark.slow
+def test_an_annulus_without_a_placement_falls_back_or_stops(runs, tmp_path):
+    a, _ = runs
+    out = str(tmp_path / "rs")
+    logs = []
+    r = _resume(a)
+    r.sampler.min_mutual_fwhm = 1e3                  # the run's distance places nothing
+    rep = rescore(r, [], out, annuli=[0, 1], n_draws=2, n_cal=2, max_iter=1, window=2, log=logs.append)
+    for ann in ("1", "2"):
+        pl = rep["annuli"][ann]["placement"]
+        assert pl["rule"] == "relaxed" and pl["clear_fwhm"] == 1.5, pl
+    assert any(m.startswith("annulus 2: no placement with") and "1000 FWHM" in m for m in logs)
+    assert any(m.startswith("annulus 2: 2 draws, ") and "1.5 FWHM" in m and m.endswith("(relaxed)") for m in logs)
+    assert json.load(open(os.path.join(out, "state", "ann02_placement.json")))["clear_fwhm"] == 1.5
+    text = open(os.path.join(out, "rescore.txt")).read()
+    assert "  draws: " in text and "1.5 FWHM" in text
+    # started again with another clearance: the kept annuli stop with the reason, the next is placed
+    logs.clear()
+    rep2 = rescore(_resume(a), [], out, annuli=[0, 1, 2], n_draws=2, n_cal=2, max_iter=1, window=2,
+                   clear_fwhm=2.0, log=logs.append)
+    for ann in ("1", "2"):
+        assert "1.5 FWHM" in rep2["annuli"][ann]["stopped"] and "same options" in rep2["annuli"][ann]["stopped"]
+    assert rep2["annuli"]["3"]["placement"]["rule"] == "asked" and rep2["annuli"]["3"]["entrants"]
+    assert any(m.startswith("stopped: annuli 1, 2,") for m in logs)
+    text = open(os.path.join(out, "rescore.txt")).read()
+    assert text.count("stopped ==") == 2 and "== annulus 3" in text
+    # the same options again: the kept draws, with their rule
+    logs.clear()
+    rep3 = rescore(_resume(a), [], out, annuli=[1], n_draws=2, n_cal=2, max_iter=1, window=2, log=logs.append)
+    assert rep3["annuli"]["2"]["placement"]["clear_fwhm"] == 1.5
+    assert any("kept from the last start" in m for m in logs)
