@@ -1593,6 +1593,50 @@ def cmd_rereduce(a):
         raise SystemExit(f"rereduce: {exc}")
 
 
+def cmd_rescore(a):
+    """``klip-tpe rescore``: candidates for annuli of a finished run scored on its stitch, the
+    other annuli at its winners, with the candidates of other runs of the same setup
+    (:func:`klip_tpe.refine.rescore`).  The runs are only read."""
+    from .refine import parse_annuli, rescore
+    from .runner import Runner
+    try:
+        _fill_from_registry(a, getattr(a, "_argv", None))
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"  (could not read the run record: {exc!r}; carrying on with what was given)")
+    _resolve_run_dir(a)
+    _klip_gram_for_run(a, record=False)    # the run directory is only read
+    _data_edits_for_rereduce(a)
+    _constants_for_run(a)
+    out = os.path.abspath(a.out or (os.path.abspath(a.run_dir).rstrip(os.sep) + "_rescore"))
+    red, objective, sampler, guard, thr = _near_objects(a)
+    r = Runner.resume(a.run_dir, red, objective, sampler, project=guard, throughput_fn=thr, same_frames=False)
+    if getattr(a, "verify_snr", None):
+        print(f"  verify: --verify-snr {a.verify_snr}, the run's own is {r.cfg.verify_snr}")
+        r.cfg.verify_snr = a.verify_snr
+    logf = None
+    if not a.plan:
+        os.makedirs(out, exist_ok=True)
+        logf = open(os.path.join(out, "rescore.log"), "a")
+
+    def log(msg: str) -> None:
+        print(msg, flush=True)
+        if logf is not None:
+            logf.write(msg + "\n")
+            logf.flush()
+
+    try:
+        rescore(r, a.entrants_from or [], out, annuli=parse_annuli(a.annuli, r.cfg.nann), n_draws=a.draws,
+                top=a.top, seed=a.seed, target=(float(a.target[0]), float(a.target[1])), n_cal=a.n_cal,
+                window=a.window, overlap_pads=a.overlap_pads, plan=a.plan, card=a.card, log=log)
+    except ValueError as exc:
+        raise SystemExit(f"rescore: {exc}")
+    finally:
+        if logf is not None:
+            logf.close()
+
+
 def cmd_replay(a):
     import numpy as np
     from .idl_replay import read_idl_log, replay, summarize
@@ -1900,6 +1944,44 @@ def _build_parser():
                    help="output directory (default <run>_rereduce beside the run, which is left as it is)")
     p.add_argument("--overwrite", action="store_true", help="write over an earlier re-reduction in --out")
     p.set_defaults(func=cmd_rereduce)
+
+    p = sub.add_parser("rescore", help="candidates for annuli of a finished run (its own and other runs' winners and "
+                                       "validation entrants) scored on its stitch, the other annuli at its winners, "
+                                       "on common draws: the first piece of refine")
+    _add_near_args(p)
+    p.add_argument("--run-dir", default="last", help="the base run, whose stitch and winners the candidates are "
+                                                     "scored in (default: the newest on record)")
+    p.add_argument("--entrants-from", nargs="*", default=[], metavar="RUN",
+                   help="other finished runs of the same frames, annuli and search space, whose candidates enter "
+                        "too (the base run's always do)")
+    p.add_argument("--annuli", default="all", help="the annuli to score, 1-based: 1-7, 2,3,5 or all (default all)")
+    p.add_argument("--draws", type=int, default=50, help="common draws per annulus (default 50)")
+    p.add_argument("--top", type=int, default=0,
+                   help="each run's best N configurations of its history also enter (default 0: the winners and the "
+                        "validation's entrants)")
+    p.add_argument("--target", type=float, nargs=2, default=[5.0, 8.0], metavar=("LO", "HI"),
+                   help="the median S/N the base winners should read on the stitch at each tile's contrast "
+                        "(default 5 8)")
+    p.add_argument("--n-cal", type=int, default=8, help="draws per step of each tile's contrast calibration "
+                                                        "(default 8)")
+    p.add_argument("--seed", type=int, default=1, help="seed of the draws (default 1)")
+    p.add_argument("--window", type=int, default=None,
+                   help="reductions in flight (default: enough to fill the reducer's workers)")
+    pads = p.add_mutually_exclusive_group()
+    pads.add_argument("--overlap-pads", dest="overlap_pads", action="store_const", const=True, default=None,
+                      help="pad the stitch's tile edges between overlapping annuli (default: the base run's pads)")
+    pads.add_argument("--no-overlap-pads", dest="overlap_pads", action="store_const", const=False,
+                      help="no pads between overlapping annuli, as rereduce --no-overlap-pads")
+    p.add_argument("--verify-snr", default=None, choices=["search", "idl"],
+                   help="how each source is measured (default: as the base run's verify)")
+    p.add_argument("--out", default=None, metavar="DIR",
+                   help="output directory (default <run>_rescore beside the run).  A re-score started again on "
+                        "the same directory resumes")
+    p.add_argument("--card", action="store_true",
+                   help="the injected reductions may go to the card workers, as the search's draws do (default: "
+                        "the CPU workers, as rereduce)")
+    p.add_argument("--plan", action="store_true", help="count the candidates and the reductions, reduce nothing")
+    p.set_defaults(func=cmd_rescore)
 
     p = sub.add_parser("replay", help="re-score configurations from an IDL optimize_tpe_results.txt")
     _add_near_args(p)
