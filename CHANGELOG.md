@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased — 2026-11-10 (OpenCV rotation, and render --with-data on a script's run)
+
+- **Frames rotate with OpenCV when it is installed and precise** (Vivek Vijayakumar's question
+  and Kevin Wagner, 2026-11-10).  OpenCV's `warpAffine` rotates a 150 x 150 frame about 5 times
+  faster than scipy's `map_coordinates`.  A reduction of a synthetic 800-frame sequence took 17 %
+  less time at bin 5 and 31 % less at bin 20.  `--rotate auto` (the default, or
+  `KLIP_TPE_ROTATE`) takes OpenCV when it samples where scipy does, which OpenCV 5 does to
+  float32 rounding.  OpenCV 4 rounds the sample positions to 1/32 px and fails the check, so
+  scipy stays.  `--rotate scipy` and `--rotate opencv` choose, and the `[fast]` extra installs
+  OpenCV 5.  A new run records its library (`RunConfig.rotation`, and `rotation` in
+  `run_setup.json`), and a resume, `extend`, `rereduce`, `rescore` and `render --with-data`
+  keep it.  A run recorded before rotated with scipy and keeps it.  The test suite rotates
+  with scipy.
+- **`render --with-data` takes the run's instrument and plate scale from `run_setup.json`** (the
+  WISPIT 2 ALES session, 2026-11-10).  On `wispit2_ales2`, a run started from a script, it took
+  NEAR's scale and north and then asked for `--root`.  It now refuses a run whose record does
+  not give the instrument, or whose data arguments were never recorded, and points to the
+  Python entry.  A command on a run another instrument made no longer takes NEAR's constants.
+- **A Python entry draws a script's run with its reducer**: `render_steps(run_dir, reducer=red)`,
+  or `Runner.resume(run_dir, red, objective, sampler, same_frames=False).render()`.  The
+  reducer's plate scale has to be the run's.
+- Tests in `tests/test_rotation_backend.py` and `tests/test_render_final_frame.py`.  Docs in
+  RUNNING.md and DISPLAY.md, CLI.md regenerated.
+
 ## Unreleased — 2026-11-10 (the redrawn annulus-done frame)
 
 - **`klip-tpe render` draws an annulus' last frame as the live annulus-done frame drew it** (the

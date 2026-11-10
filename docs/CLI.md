@@ -31,7 +31,8 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--ales-cache DIR]
                         [--ales-selection {binary,two_slot}]
                         [--nights NIGHTS [NIGHTS ...]]
-                        [--backend {klip,pyklip,vip}] [--obj OBJ [OBJ ...]]
+                        [--backend {klip,pyklip,vip}]
+                        [--rotate {auto,scipy,opencv}] [--obj OBJ [OBJ ...]]
                         [--frames FRAMES] [--binned] [--pre-bin PRE_BIN]
                         [--parang-sign PARANG_SIGN] [--truenorth TRUENORTH]
                         [--fwhm-px FWHM_PX] [--name NAME] [--r-ee R_EE]
@@ -112,6 +113,11 @@ options:
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
                         (default), pyKLIP or VIP (must be installed)
+  --rotate {auto,scipy,opencv}
+                        the library a new run rotates its frames with: auto
+                        (default, or KLIP_TPE_ROTATE): OpenCV 5 when
+                        installed, about 5x faster, else scipy. A resumed run
+                        keeps the one it recorded
   --max-frames MAX_FRAMES
                         use only the first N frames per night (tests)
   --workers WORKERS     worker budget, the threads the jobs running together
@@ -625,7 +631,8 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--ales-angle-offset DEG] [--ales-tag-r-in PX]
                      [--ales-cache DIR] [--ales-selection {binary,two_slot}]
                      [--nights NIGHTS [NIGHTS ...]]
-                     [--backend {klip,pyklip,vip}] [--obj OBJ [OBJ ...]]
+                     [--backend {klip,pyklip,vip}]
+                     [--rotate {auto,scipy,opencv}] [--obj OBJ [OBJ ...]]
                      [--frames FRAMES] [--binned] [--pre-bin PRE_BIN]
                      [--parang-sign PARANG_SIGN] [--truenorth TRUENORTH]
                      [--fwhm-px FWHM_PX] [--name NAME] [--r-ee R_EE]
@@ -701,6 +708,11 @@ options:
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
                         (default), pyKLIP or VIP (must be installed)
+  --rotate {auto,scipy,opencv}
+                        the library a new run rotates its frames with: auto
+                        (default, or KLIP_TPE_ROTATE): OpenCV 5 when
+                        installed, about 5x faster, else scipy. A resumed run
+                        keeps the one it recorded
   --max-frames MAX_FRAMES
                         use only the first N frames per night (tests)
   --workers WORKERS     worker budget, the threads the jobs running together
@@ -1214,7 +1226,8 @@ usage: klip-tpe resume [-h] [--instrument {near,nomic,generic,ales}]
                        [--ales-angle-offset DEG] [--ales-tag-r-in PX]
                        [--ales-cache DIR] [--ales-selection {binary,two_slot}]
                        [--nights NIGHTS [NIGHTS ...]]
-                       [--backend {klip,pyklip,vip}] [--obj OBJ [OBJ ...]]
+                       [--backend {klip,pyklip,vip}]
+                       [--rotate {auto,scipy,opencv}] [--obj OBJ [OBJ ...]]
                        [--frames FRAMES] [--binned] [--pre-bin PRE_BIN]
                        [--parang-sign PARANG_SIGN] [--truenorth TRUENORTH]
                        [--fwhm-px FWHM_PX] [--name NAME] [--r-ee R_EE]
@@ -1257,6 +1270,11 @@ options:
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
                         (default), pyKLIP or VIP (must be installed)
+  --rotate {auto,scipy,opencv}
+                        the library a new run rotates its frames with: auto
+                        (default, or KLIP_TPE_ROTATE): OpenCV 5 when
+                        installed, about 5x faster, else scipy. A resumed run
+                        keeps the one it recorded
   --max-frames MAX_FRAMES
                         use only the first N frames per night (tests)
   --workers WORKERS     worker budget, the threads the jobs running together
@@ -1551,7 +1569,8 @@ usage: klip-tpe extend [-h] [--instrument {near,nomic,generic,ales}]
                        [--ales-angle-offset DEG] [--ales-tag-r-in PX]
                        [--ales-cache DIR] [--ales-selection {binary,two_slot}]
                        [--nights NIGHTS [NIGHTS ...]]
-                       [--backend {klip,pyklip,vip}] [--obj OBJ [OBJ ...]]
+                       [--backend {klip,pyklip,vip}]
+                       [--rotate {auto,scipy,opencv}] [--obj OBJ [OBJ ...]]
                        [--frames FRAMES] [--binned] [--pre-bin PRE_BIN]
                        [--parang-sign PARANG_SIGN] [--truenorth TRUENORTH]
                        [--fwhm-px FWHM_PX] [--name NAME] [--r-ee R_EE]
@@ -1591,6 +1610,11 @@ options:
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
                         (default), pyKLIP or VIP (must be installed)
+  --rotate {auto,scipy,opencv}
+                        the library a new run rotates its frames with: auto
+                        (default, or KLIP_TPE_ROTATE): OpenCV 5 when
+                        installed, about 5x faster, else scipy. A resumed run
+                        keeps the one it recorded
   --max-frames MAX_FRAMES
                         use only the first N frames per night (tests)
   --workers WORKERS     worker budget, the threads the jobs running together
@@ -1881,7 +1905,8 @@ usage: klip-tpe fit-chain [-h] [--instrument {near,nomic,generic,ales}]
                           [--ales-cache DIR]
                           [--ales-selection {binary,two_slot}]
                           [--nights NIGHTS [NIGHTS ...]]
-                          [--backend {klip,pyklip,vip}] [--obj OBJ [OBJ ...]]
+                          [--backend {klip,pyklip,vip}]
+                          [--rotate {auto,scipy,opencv}] [--obj OBJ [OBJ ...]]
                           [--frames FRAMES] [--binned] [--pre-bin PRE_BIN]
                           [--parang-sign PARANG_SIGN] [--truenorth TRUENORTH]
                           [--fwhm-px FWHM_PX] [--name NAME] [--r-ee R_EE]
@@ -1926,6 +1951,11 @@ options:
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
                         (default), pyKLIP or VIP (must be installed)
+  --rotate {auto,scipy,opencv}
+                        the library a new run rotates its frames with: auto
+                        (default, or KLIP_TPE_ROTATE): OpenCV 5 when
+                        installed, about 5x faster, else scipy. A resumed run
+                        keeps the one it recorded
   --max-frames MAX_FRAMES
                         use only the first N frames per night (tests)
   --workers WORKERS     worker budget, the threads the jobs running together
@@ -2241,7 +2271,8 @@ usage: klip-tpe rereduce [-h] [--instrument {near,nomic,generic,ales}]
                          [--ales-tag-r-in PX] [--ales-cache DIR]
                          [--ales-selection {binary,two_slot}]
                          [--nights NIGHTS [NIGHTS ...]]
-                         [--backend {klip,pyklip,vip}] [--obj OBJ [OBJ ...]]
+                         [--backend {klip,pyklip,vip}]
+                         [--rotate {auto,scipy,opencv}] [--obj OBJ [OBJ ...]]
                          [--frames FRAMES] [--binned] [--pre-bin PRE_BIN]
                          [--parang-sign PARANG_SIGN] [--truenorth TRUENORTH]
                          [--fwhm-px FWHM_PX] [--name NAME] [--r-ee R_EE]
@@ -2285,6 +2316,11 @@ options:
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
                         (default), pyKLIP or VIP (must be installed)
+  --rotate {auto,scipy,opencv}
+                        the library a new run rotates its frames with: auto
+                        (default, or KLIP_TPE_ROTATE): OpenCV 5 when
+                        installed, about 5x faster, else scipy. A resumed run
+                        keeps the one it recorded
   --max-frames MAX_FRAMES
                         use only the first N frames per night (tests)
   --workers WORKERS     worker budget, the threads the jobs running together
@@ -2602,7 +2638,8 @@ usage: klip-tpe rescore [-h] [--instrument {near,nomic,generic,ales}]
                         [--ales-cache DIR]
                         [--ales-selection {binary,two_slot}]
                         [--nights NIGHTS [NIGHTS ...]]
-                        [--backend {klip,pyklip,vip}] [--obj OBJ [OBJ ...]]
+                        [--backend {klip,pyklip,vip}]
+                        [--rotate {auto,scipy,opencv}] [--obj OBJ [OBJ ...]]
                         [--frames FRAMES] [--binned] [--pre-bin PRE_BIN]
                         [--parang-sign PARANG_SIGN] [--truenorth TRUENORTH]
                         [--fwhm-px FWHM_PX] [--name NAME] [--r-ee R_EE]
@@ -2649,6 +2686,11 @@ options:
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
                         (default), pyKLIP or VIP (must be installed)
+  --rotate {auto,scipy,opencv}
+                        the library a new run rotates its frames with: auto
+                        (default, or KLIP_TPE_ROTATE): OpenCV 5 when
+                        installed, about 5x faster, else scipy. A resumed run
+                        keeps the one it recorded
   --max-frames MAX_FRAMES
                         use only the first N frames per night (tests)
   --workers WORKERS     worker budget, the threads the jobs running together
@@ -2984,7 +3026,8 @@ usage: klip-tpe render [-h] [--instrument {near,nomic,generic,ales}]
                        [--ales-angle-offset DEG] [--ales-tag-r-in PX]
                        [--ales-cache DIR] [--ales-selection {binary,two_slot}]
                        [--nights NIGHTS [NIGHTS ...]]
-                       [--backend {klip,pyklip,vip}] [--obj OBJ [OBJ ...]]
+                       [--backend {klip,pyklip,vip}]
+                       [--rotate {auto,scipy,opencv}] [--obj OBJ [OBJ ...]]
                        [--frames FRAMES] [--binned] [--pre-bin PRE_BIN]
                        [--parang-sign PARANG_SIGN] [--truenorth TRUENORTH]
                        [--fwhm-px FWHM_PX] [--name NAME] [--r-ee R_EE]
@@ -3026,6 +3069,11 @@ options:
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
                         (default), pyKLIP or VIP (must be installed)
+  --rotate {auto,scipy,opencv}
+                        the library a new run rotates its frames with: auto
+                        (default, or KLIP_TPE_ROTATE): OpenCV 5 when
+                        installed, about 5x faster, else scipy. A resumed run
+                        keeps the one it recorded
   --max-frames MAX_FRAMES
                         use only the first N frames per night (tests)
   --workers WORKERS     worker budget, the threads the jobs running together
@@ -3325,7 +3373,8 @@ usage: klip-tpe replay [-h] [--instrument {near,nomic,generic,ales}]
                        [--ales-angle-offset DEG] [--ales-tag-r-in PX]
                        [--ales-cache DIR] [--ales-selection {binary,two_slot}]
                        [--nights NIGHTS [NIGHTS ...]]
-                       [--backend {klip,pyklip,vip}] [--obj OBJ [OBJ ...]]
+                       [--backend {klip,pyklip,vip}]
+                       [--rotate {auto,scipy,opencv}] [--obj OBJ [OBJ ...]]
                        [--frames FRAMES] [--binned] [--pre-bin PRE_BIN]
                        [--parang-sign PARANG_SIGN] [--truenorth TRUENORTH]
                        [--fwhm-px FWHM_PX] [--name NAME] [--r-ee R_EE]
@@ -3368,6 +3417,11 @@ options:
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
                         (default), pyKLIP or VIP (must be installed)
+  --rotate {auto,scipy,opencv}
+                        the library a new run rotates its frames with: auto
+                        (default, or KLIP_TPE_ROTATE): OpenCV 5 when
+                        installed, about 5x faster, else scipy. A resumed run
+                        keeps the one it recorded
   --max-frames MAX_FRAMES
                         use only the first N frames per night (tests)
   --workers WORKERS     worker budget, the threads the jobs running together
@@ -3662,7 +3716,8 @@ usage: klip-tpe compare [-h] [--instrument {near,nomic,generic,ales}]
                         [--ales-cache DIR]
                         [--ales-selection {binary,two_slot}]
                         [--nights NIGHTS [NIGHTS ...]]
-                        [--backend {klip,pyklip,vip}] [--obj OBJ [OBJ ...]]
+                        [--backend {klip,pyklip,vip}]
+                        [--rotate {auto,scipy,opencv}] [--obj OBJ [OBJ ...]]
                         [--frames FRAMES] [--binned] [--pre-bin PRE_BIN]
                         [--parang-sign PARANG_SIGN] [--truenorth TRUENORTH]
                         [--fwhm-px FWHM_PX] [--name NAME] [--r-ee R_EE]
@@ -3711,6 +3766,11 @@ options:
   --backend {klip,pyklip,vip}
                         PSF-subtraction engine: built-in annular KLIP
                         (default), pyKLIP or VIP (must be installed)
+  --rotate {auto,scipy,opencv}
+                        the library a new run rotates its frames with: auto
+                        (default, or KLIP_TPE_ROTATE): OpenCV 5 when
+                        installed, about 5x faster, else scipy. A resumed run
+                        keeps the one it recorded
   --max-frames MAX_FRAMES
                         use only the first N frames per night (tests)
   --workers WORKERS     worker budget, the threads the jobs running together

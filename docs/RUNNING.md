@@ -19,7 +19,8 @@ klip-tpe --help
 (`[plots]` pulls in numpy, scipy, astropy, threadpoolctl, matplotlib, pillow, imageio; jupyter is
 only needed for the notebook.  zsh treats a trailing `# comment` as arguments, so keep the
 lines bare.)  Python ≥ 3.9.  `ffmpeg` (e.g. `brew install ffmpeg`) is optional and only adds the `.mp4`
-next to the `.gif` progress movie.
+next to the `.gif` progress movie.  `python3 -m pip install -e ".[plots,fast]"` adds OpenCV, which
+rotates the frames faster (see [Frame rotation](#frame-rotation-scipy-or-opencv)).
 
 ## Terminal
 
@@ -665,6 +666,27 @@ klip-tpe rescore --run-dir runA --entrants-from runB runC runD --annuli 1-7 --no
 
 A run stitched with `--no-overlap-pads`, as a `rereduce` made it, takes the same flag here, so
 the candidates are scored on the stitch its campaigns used.
+
+## Frame rotation: scipy or OpenCV
+
+Every reduction rotates its frames, bilinearly as the IDL's `rot(/interp)` does: the
+derotation and three rotations per frame in the noise-weighted combination.  OpenCV's
+`warpAffine` does it about 5 times faster than scipy's `map_coordinates` on a 150 x 150 frame.
+On a synthetic sequence of 800 such frames a reduction took 17 % less time at bin 5 and 31 %
+less at bin 20, and about 2 % less unbinned, where KLIP itself takes the time.
+
+* `--rotate auto` (the default, or `KLIP_TPE_ROTATE=auto`) rotates with OpenCV when it is
+  installed and samples where scipy does, else with scipy.  OpenCV 5 agrees with scipy to
+  float32 rounding.  OpenCV 4 rounds the sample positions to 1/32 px (0.5 % of a peak), fails
+  the check made at the first rotation, and leaves scipy in charge.
+* `--rotate scipy` and `--rotate opencv` choose.  OpenCV asked for and not usable falls back to
+  scipy with a warning.
+* `pip install opencv-python-headless` (or the `[fast]` extra) installs OpenCV 5.
+* A new run records its library (`RunConfig.rotation`, `rotation` in `run_setup.json` with the
+  version), and a resume, `extend`, `rereduce`, `rescore` and `render` keep the run's.  A run
+  recorded before 2026-11-10 rotated with scipy and keeps it.
+* klip-tpe sets OpenCV to one thread, since it runs the frames on threads of its own.  The test
+  suite rotates with scipy, and `tests/test_rotation_backend.py` checks that the two agree.
 
 ## Knowing what is running, and getting a run back
 

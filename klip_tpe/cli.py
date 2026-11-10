@@ -17,12 +17,17 @@ import math
 import os
 import sys
 import time
+from typing import Any, Dict, Optional
 
 
 def _near_objects(a, log=print):
     """Reducer / objective / sampler / guard / throughput for the selected instrument
     (``--instrument near`` reads the NEAR campaign tree; ``--instrument nomic`` reads a
     pyNOMIC working directory -- see ``klip_tpe.instruments.nomic``)."""
+    if getattr(a, "rotate", None):
+        # before the reducer and its workers: a new run records it, a resume takes its own
+        from .klip import set_rotation_backend
+        set_rotation_backend(a.rotate)
     if getattr(a, "instrument", "near") == "nomic":
         return _nomic_objects(a, log)
     if getattr(a, "instrument", "near") == "generic":
@@ -293,6 +298,10 @@ def _constants_for_run(a) -> None:
                 prov = (json.load(f).get("reducer") or {}).get("provenance") or None
         except (OSError, ValueError):
             prov = None
+    other = _run_instrument(run_dir) if existed else None
+    if other not in (None, "near"):
+        raise SystemExit(f"{os.path.basename(os.path.abspath(str(run_dir)))} was made with --instrument {other} "
+                         f"(run_setup.json), not NEAR: give --instrument {other} and its data arguments")
     prov = prov if isinstance(prov, dict) and prov.get("instrument") == "NEAR" else None
     if "pxscale" not in given:
         if prov is not None and prov.get("pxscale") is not None:
@@ -867,6 +876,9 @@ def _add_near_args(p):
     p.add_argument("--nights", type=int, nargs="+", default=[1, 2, 3, 4, 5, 6])
     p.add_argument("--backend", default="klip", choices=["klip", "pyklip", "vip"],
                    help="PSF-subtraction engine: built-in annular KLIP (default), pyKLIP or VIP (must be installed)")
+    p.add_argument("--rotate", default=None, choices=["auto", "scipy", "opencv"],
+                   help="the library a new run rotates its frames with: auto (default, or KLIP_TPE_ROTATE): OpenCV 5 "
+                        "when installed, about 5x faster, else scipy.  A resumed run keeps the one it recorded")
     g = p.add_argument_group("pyNOMIC (--instrument nomic)")
     g.add_argument("--obj", nargs="+", default=None, help="pyNOMIC object name(s) (the <obj>_NOMIC_*.npz prefix)")
     g.add_argument("--frames", default="masked", help="frame directory under the working dir (masked | aligned)")
@@ -1698,10 +1710,41 @@ def cmd_render(a):
         print(f"movie: {gif}")
 
 
+#: run_setup.json's reducer name -> the CLI's --instrument
+_RUN_INSTRUMENTS = {"near": "near", "ales": "ales", "nomic": "nomic", "generic": "generic"}
+
+
+def _run_setup_reducer(run_dir) -> Dict[str, Any]:
+    """``run_setup.json``'s reducer record of a run directory, or ``{}``."""
+    import json
+    try:
+        with open(os.path.join(str(run_dir), "run_setup.json")) as f:
+            return dict(json.load(f).get("reducer") or {})
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _run_instrument(run_dir) -> Optional[str]:
+    """The ``--instrument`` a run was made with, from its ``run_setup.json`` (the reducer's name,
+    else its provenance), or None when the record does not say."""
+    rec = _run_setup_reducer(run_dir)
+    name = str(rec.get("name") or "").lower()
+    if name in _RUN_INSTRUMENTS:
+        return _RUN_INSTRUMENTS[name]
+    inst = str(((rec.get("provenance") or {}).get("instrument")) or "").lower()
+    return inst if inst in _RUN_INSTRUMENTS else None
+
+
 def _injected_model_fn(a):
     """``render --with-data``: ``fn(sources, shape)``, the injected-PSF model of ``sources`` on
     the run's reducer (:func:`klip_tpe.injection.injected_model`), the reducer built from the
-    data arguments as ``rereduce`` builds it, the ones left out filled from the run's record."""
+    data arguments as ``rereduce`` builds it, the ones left out filled from the run's record.
+
+    The instrument and the plate scale are the run's, from ``run_setup.json``: the command
+    refuses rather than take another instrument's defaults (the WISPIT 2 ALES session,
+    2026-11-10), and so does a run whose data arguments were never recorded (one started from
+    a script), which the Python entry draws instead (:func:`klip_tpe.display.render_steps`
+    with ``reducer=``)."""
     from .injection import injected_model
     try:
         _fill_from_registry(a, getattr(a, "_argv", None))
@@ -1709,10 +1752,44 @@ def _injected_model_fn(a):
         raise
     except Exception as exc:
         print(f"  (could not read the run record: {exc!r}; carrying on with what was given)")
+    given = _explicit_dests(getattr(a, "_argv", None))
+    rec = _run_setup_reducer(a.run_dir)
+    inst = _run_instrument(a.run_dir)
+    script = ("this run did not record the data arguments it was made with (a run started from a script). "
+              "Give them here, or draw from Python with the reducer the script built: "
+              "klip_tpe.display.render_steps(run_dir, reducer=red, out_dir=...)")
+    if "instrument" in given:
+        if inst is not None and inst != a.instrument:
+            raise SystemExit(f"render --with-data: the run was made with --instrument {inst} (run_setup.json), "
+                             f"not {a.instrument}")
+    elif inst is None:
+        raise SystemExit("render --with-data: run_setup.json does not say which instrument made this run: give "
+                         "--instrument and the data arguments, or " + script.split(". ", 1)[1])
+    elif inst != getattr(a, "instrument", None):
+        print(f"  --instrument {inst}, as run_setup.json records")
+        a.instrument = inst
+    px = rec.get("pxscale")
+    if "pxscale" not in given and px is not None and a.instrument != "near":
+        a.pxscale = float(px)                # NEAR's comes from its provenance (_constants_for_run)
+    # the run's rotation library (RunConfig.rotation; scipy for a run recorded before it)
+    from .klip import set_rotation_backend
+    try:
+        with open(os.path.join(str(a.run_dir), "run_setup.json")) as f:
+            rot = (json.load(f).get("config") or {}).get("rotation")
+    except (OSError, ValueError, TypeError):
+        rot = None
+    a.rotate = None                          # _near_objects is not to choose another
+    set_rotation_backend(rot or "scipy")
     _klip_gram_for_run(a, record=False)    # the run directory is only read
     _data_edits_for_rereduce(a)
     _constants_for_run(a)
-    red = _near_objects(a)[0]
+    try:
+        red = _near_objects(a)[0]
+    except SystemExit as exc:
+        raise SystemExit(f"render --with-data: {exc}\n  {script}")
+    if px is not None and abs(float(red.pxscale) - float(px)) > 1e-9 * max(abs(float(px)), 1.0):
+        raise SystemExit(f"render --with-data: the reducer built here has {red.pxscale:g}\"/px, the run "
+                         f"{float(px):g}\"/px (run_setup.json): its injected PSF would be drawn at another scale")
     print("  the run's frames loaded: each frame's injected-PSF model drawn from them")
     return lambda sources, shape: injected_model(red, sources, shape)
 

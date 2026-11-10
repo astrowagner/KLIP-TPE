@@ -150,3 +150,69 @@ def test_a_run_made_before_gets_the_frame_where_it_can(live, tmp_path):
     red2 = _redraw(d, tmp_path, inj_model_fn=lambda src, shape: injected_model(build, src, shape))
     for ia in range(3):
         assert _same(red2[ia]["images"].inj_model, done[ia]["images"].inj_model), ia
+
+
+def test_a_reducer_given_from_python_draws_the_injected_psf(live, tmp_path):
+    """A run started from a script recorded no data arguments, so ``render --with-data`` cannot
+    rebuild its reducer: the script's reducer goes to ``render_steps`` or ``Runner.render``."""
+    import shutil
+    d0, results, done = live
+    d = str(tmp_path / "old")
+    shutil.copytree(d0, d)
+    for ia in range(3):
+        os.remove(os.path.join(d, f"annulus{ia + 1:02d}", "best_inj_model.fits"))
+    red = build_synthetic_run()[0]
+    got = _redraw(d, tmp_path, reducer=red)
+    for ia in range(3):
+        assert _same(got[ia]["images"].inj_model, done[ia]["images"].inj_model), ia
+    # a reducer at another plate scale is refused
+    import types
+    with pytest.raises(ValueError, match="another scale"):
+        render_steps(d, every=1000, out_dir=str(tmp_path / "x"), movie=False,
+                     reducer=types.SimpleNamespace(pxscale=float(red.pxscale) * 1.5))
+    # Runner.render: the resumed runner's reducer, into steps_rebuilt
+    cap = _Captured()
+    mp = pytest.MonkeyPatch()
+    mp.setattr(D, "render_step", cap)
+    try:
+        r2, space, obj, samp, _ = build_synthetic_run()
+        runner = Runner.resume(d, r2, obj, samp, log=QUIET, same_frames=False)
+        runner.render(every=1000, movie=False)
+    finally:
+        mp.undo()
+    last = [f for f in cap.frames if str(f["label"]).startswith("annulus done")]
+    assert len(last) == 3 and all(f["images"].inj_model is not None for f in last)
+    assert os.path.isdir(os.path.join(d, "steps_rebuilt"))
+
+
+def test_render_with_data_takes_the_runs_instrument_or_refuses(tmp_path, capsys):
+    """``render --with-data`` on a run another instrument made: the instrument and scale come
+    from run_setup.json, never NEAR's defaults, and a run without recorded data arguments is
+    refused with the Python entry to use instead."""
+    import json
+    from klip_tpe import cli
+    d = tmp_path / "wispit2_like"
+    d.mkdir()
+    (d / "run_setup.json").write_text(json.dumps({"reducer": {"name": "ales", "pxscale": 0.0345,
+                                                             "provenance": {"instrument": "ALES"}}}))
+    assert cli._run_instrument(str(d)) == "ales"
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["render", "--run-dir", str(d), "--with-data", "--no-movie"])
+    msg = str(ei.value)
+    assert "--root" in msg and "render_steps(run_dir, reducer=red" in msg
+    out = capsys.readouterr().out
+    assert "--instrument ales, as run_setup.json records" in out
+    assert "0.0456" not in out and "--north constant" not in out, "NEAR's defaults on an ALES run"
+    # an instrument typed that is not the run's is refused
+    with pytest.raises(SystemExit, match="made with --instrument ales"):
+        cli.main(["render", "--run-dir", str(d), "--with-data", "--instrument", "nomic", "--no-movie"])
+    # a run whose record does not say is refused
+    (d / "run_setup.json").write_text(json.dumps({"reducer": {"name": "synthetic"}}))
+    with pytest.raises(SystemExit, match="does not say which instrument"):
+        cli.main(["render", "--run-dir", str(d), "--with-data", "--no-movie"])
+    # and the NEAR constants never land on another instrument's run
+    (d / "run_setup.json").write_text(json.dumps({"reducer": {"name": "ales", "pxscale": 0.0345}}))
+    import types
+    a = types.SimpleNamespace(instrument="near", run_dir=str(d), _argv=["resume", "--run-dir", str(d)])
+    with pytest.raises(SystemExit, match="--instrument ales"):
+        cli._constants_for_run(a)

@@ -173,7 +173,12 @@ injected-PSF model (`best_inj_model.fits`) and the time (`annulus_done.json`).  
 before 2026-11-10 gets the stitch from its own running stitch for the last annulus and makes it
 again from the winners' products for the others.  The time is estimated from `heartbeat.json`.
 The injected-PSF model needs the run's frames, which `--with-data` loads as `rereduce` does, and
-then every frame shows its best eval's model, as the live frames did.
+then every frame shows its best eval's model, as the live frames did.  `--with-data` takes the
+instrument and the plate scale from `run_setup.json` and the data arguments from the run's
+record.  A run started from a script recorded none, and `--with-data` refuses it.  Draw it from
+Python with the reducer the script built: `render_steps(run_dir, reducer=red, out_dir=...)`, or
+`Runner.resume(run_dir, red, objective, sampler, same_frames=False).render()`, which writes to
+`steps_rebuilt/`.
 
 ## Reading the numbers
 

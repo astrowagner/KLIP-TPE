@@ -10,6 +10,8 @@ in the ``(x, y)`` frame (IDL ``rot(img, a)`` is clockwise by ``a``, so IDL
 """
 from __future__ import annotations
 
+import os
+import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -18,7 +20,8 @@ from scipy import ndimage
 
 __all__ = ["frame_selection_mask", "bin_frames", "bin_groups", "bin_by_groups", "bin_angles", "bin_values",
            "highpass", "highpass_stack", "destripe", "rotate_ccw", "rotate_ccw_many", "derotate",
-           "group_mean", "group_bounds", "bins_with_data",
+           "group_mean", "group_bounds", "bins_with_data", "rotation_backend", "set_rotation_backend",
+           "rotation_info",
            "nw_ang_comb", "nw_ang_comb_ref", "klip_basis", "zone_indices", "klip_annular", "klip_fm_zone",
            "arcdist_deg", "reference_mask", "KLIPParams"]
 
@@ -350,6 +353,104 @@ def destripe(img: np.ndarray, angle_deg: float, clip_level: float = 0.0, max_ite
 #: a NaN (strict; gives a noisy 1-2 px rim of few-frame coverage after derotation).
 ROT_NAN_MODE = "zero"
 
+#: the libraries :func:`rotate_ccw` can rotate with, bilinearly either way
+ROTATION_BACKENDS = ("auto", "scipy", "opencv")
+_ROT: Dict[str, Any] = {"backend": None, "cv2": None, "why": "", "checked": False}
+
+
+def _cv_warp(cv2, img: np.ndarray, ca: float, sa: float) -> np.ndarray:
+    """``img`` sampled where :func:`_rotation_coords` samples it, by OpenCV's bilinear
+    ``warpAffine`` (float32, the precise path of OpenCV 5), as float64."""
+    ny, nx = img.shape
+    cx, cy = (nx - 1) / 2.0, (ny - 1) / 2.0
+    M = np.array([[ca, sa, cx - ca * cx - sa * cy], [-sa, ca, cy + sa * cx - ca * cy]], np.float64)
+    out = cv2.warpAffine(np.ascontiguousarray(img, np.float32), M, (nx, ny),
+                         flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_CONSTANT,
+                         borderValue=0.0)
+    return np.asarray(out, np.float64)
+
+
+def _opencv_check():
+    """``(cv2, why)``: OpenCV when it rotates as scipy's bilinear does, to 1e-4 of the peak of a
+    smooth test image, else ``(None, why)``.  OpenCV 4 rounds the sample positions to 1/32 px
+    (5e-3 of the peak) and fails; OpenCV 5 agrees to float32 rounding (4e-6)."""
+    if _ROT["checked"]:
+        return _ROT["cv2"], _ROT["why"]
+    _ROT["checked"] = True
+    try:
+        import cv2
+    except Exception as exc:              # noqa: BLE001 - absent, or a broken install
+        _ROT["cv2"], _ROT["why"] = None, f"OpenCV is not installed ({exc.__class__.__name__})"
+        return _ROT["cv2"], _ROT["why"]
+    n = 64
+    yy, xx = np.mgrid[0:n, 0:n]
+    img = (np.exp(-0.5 * ((xx - 30.3) ** 2 + (yy - 35.7) ** 2) / 9.0)
+           + 0.5 * np.exp(-0.5 * ((xx - 20.0) ** 2 + (yy - 41.0) ** 2) / 4.0))
+    worst = 0.0
+    try:
+        for ang in (13.7, -41.2, 97.3):
+            a = np.deg2rad(ang)
+            ca, sa = float(np.cos(a)), float(np.sin(a))
+            xs, ys = _rotation_coords(n, n, ca, sa)
+            inside = (xs >= 0) & (xs <= n - 1) & (ys >= 0) & (ys <= n - 1)
+            ref = ndimage.map_coordinates(img, [ys, xs], order=1, mode="constant", cval=0.0)
+            got = _cv_warp(cv2, img, ca, sa)
+            worst = max(worst, float(np.max(np.abs(got - ref)[inside])) / float(img.max()))
+    except Exception as exc:              # noqa: BLE001
+        _ROT["cv2"], _ROT["why"] = None, f"OpenCV {getattr(cv2, '__version__', '?')} failed the check ({exc!r})"
+        return _ROT["cv2"], _ROT["why"]
+    if worst > 1e-4:
+        _ROT["cv2"], _ROT["why"] = None, (f"OpenCV {cv2.__version__} rotates to {worst:.0e} of the peak: it rounds "
+                                          f"the sample positions, as OpenCV 5 does not")
+    else:
+        _ROT["cv2"], _ROT["why"] = cv2, f"OpenCV {cv2.__version__}"
+    return _ROT["cv2"], _ROT["why"]
+
+
+def set_rotation_backend(name: str = "auto") -> str:
+    """Choose the library :func:`rotate_ccw` rotates with, and return the one in use.
+
+    ``"scipy"``: ``scipy.ndimage.map_coordinates``, the reference.  ``"opencv"``: OpenCV's
+    ``warpAffine`` in float32, about 5 times faster on a 150 x 150 frame, the same numbers to
+    float32 rounding (about 1e-5 of the image's gradient per pixel).  ``"auto"``: OpenCV when
+    it passes :func:`_opencv_check` (OpenCV 5), else scipy.  OpenCV asked for and not usable
+    falls back to scipy with a warning.  The choice goes to ``KLIP_TPE_ROTATE`` too, so worker
+    processes started later rotate alike, and OpenCV is set to one thread
+    (``cv2.setNumThreads(1)``): klip-tpe runs its frames on threads of its own."""
+    key = str(name or "auto").strip().lower()
+    if key not in ROTATION_BACKENDS:
+        raise ValueError(f"rotation backend {name!r}: one of {', '.join(ROTATION_BACKENDS)}")
+    use = "scipy"
+    if key in ("auto", "opencv"):
+        cv2, why = _opencv_check()
+        if cv2 is not None:
+            use = "opencv"
+            try:
+                cv2.setNumThreads(1)
+            except Exception:             # noqa: BLE001
+                pass
+        elif key == "opencv":
+            warnings.warn(f"rotation: {why}; rotating with scipy", RuntimeWarning, stacklevel=2)
+    _ROT["backend"] = use
+    os.environ["KLIP_TPE_ROTATE"] = use
+    return use
+
+
+def rotation_backend() -> str:
+    """The library :func:`rotate_ccw` rotates with: ``KLIP_TPE_ROTATE`` (``auto`` | ``scipy`` |
+    ``opencv``, default ``auto``) the first time, else what :func:`set_rotation_backend` chose."""
+    if _ROT["backend"] is None:
+        set_rotation_backend(os.environ.get("KLIP_TPE_ROTATE", "auto"))
+    return _ROT["backend"]
+
+
+def rotation_info() -> str:
+    """``"opencv 5.0.0"`` or ``"scipy 1.15.3"``, for a run's record."""
+    if rotation_backend() == "opencv" and _ROT["cv2"] is not None:
+        return f"opencv {_ROT['cv2'].__version__}"
+    import scipy
+    return f"scipy {scipy.__version__}"
+
 
 def rotate_ccw(img: np.ndarray, angle_deg: float, cval: float = np.nan, order: int = 1,
                nan_mode: Optional[str] = None) -> np.ndarray:
@@ -367,15 +468,21 @@ def rotate_ccw(img: np.ndarray, angle_deg: float, cval: float = np.nan, order: i
     xs, ys = _rotation_coords(ny, nx, ca, sa)
     fin = np.isfinite(img)
     inside = (xs >= 0) & (xs <= nx - 1) & (ys >= 0) & (ys <= ny - 1)
+    cv = _ROT["cv2"] if order == 1 and rotation_backend() == "opencv" else None
     if order == 1 and fin.all():
         # Every bilinear stencil of a point inside the frame lies on finite input pixels,
         # so the validity weight below would be 1 there and mark nothing: skip it.  A
         # finite input is every rotation nw_ang_comb makes, three per frame.
-        out = ndimage.map_coordinates(img, [ys, xs], order=1, mode="constant", cval=0.0)
+        out = _cv_warp(cv, img, ca, sa) if cv is not None else \
+            ndimage.map_coordinates(img, [ys, xs], order=1, mode="constant", cval=0.0)
+    elif cv is not None:
+        out = _cv_warp(cv, np.where(fin, img, 0.0), ca, sa)
+        w = _cv_warp(cv, fin.astype(np.float32), ca, sa)
     else:
         out = ndimage.map_coordinates(np.where(fin, img, 0.0), [ys, xs], order=order, mode="constant", cval=0.0)
         # stencil validity: 1 where every contributing input pixel is finite and inside
         w = ndimage.map_coordinates(fin.astype(float), [ys, xs], order=order, mode="constant", cval=0.0)
+    if not (order == 1 and fin.all()):
         if mode == "propagate":
             out[(w < 1.0 - 1e-6) & inside] = np.nan
         else:                                  # "zero": NaN neighbours count as 0, no-coverage -> NaN
@@ -411,7 +518,11 @@ def rotate_ccw_many(img: np.ndarray, angles_deg: Sequence[float], cval: float = 
         ca[j], sa[j] = np.cos(a), np.sin(a)
     xs, ys = _rotation_coords(ny, nx, ca[:, None, None], sa[:, None, None])
     inside = (xs >= 0) & (xs <= nx - 1) & (ys >= 0) & (ys <= ny - 1)
-    out = ndimage.map_coordinates(img, [ys, xs], order=1, mode="constant", cval=0.0)
+    cv = _ROT["cv2"] if rotation_backend() == "opencv" else None
+    if cv is not None:
+        out = np.stack([img if zero[j] else _cv_warp(cv, img, float(ca[j]), float(sa[j])) for j in range(n)])
+    else:
+        out = ndimage.map_coordinates(img, [ys, xs], order=1, mode="constant", cval=0.0)
     out[~inside] = cval
     if zero.any():
         out[zero] = img
