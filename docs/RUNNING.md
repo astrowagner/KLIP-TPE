@@ -618,6 +618,44 @@ or, for a library ablation, `scripts/library_ablation.py ... --draws-from other/
 `run_setup.json` says which frames a run used (`reducer.partitions.<id>.frames`: files,
 pipeline version, pixel scale, repaired hot pixels).
 
+## Candidates scored on the stitch (`klip-tpe rescore`)
+
+A search scores each annulus on its own image, while the paper measures the stitch, where an
+annulus' sources also take its neighbors' residuals.  On NEAR2's runs the two disagreed inside
+about 1.3", and runs of the same setup differed by up to 2.5 times there on the stitch (NEAR2's
+notes of 2026-11-06 to 11-09).  `klip-tpe rescore` scores candidates for annuli of a finished
+run, the base run, on its stitch, with the other annuli at its winners.  The candidates are the
+winners and the validation's entrants of the base run and of other runs of the same frames,
+annuli and search space (`--entrants-from`), and with `--top N` the best N of each history.  It
+is the first piece of `refine`, whose scoring it is.
+
+* Each annulus gets `--draws` common draws (default 50).  A draw puts the run's number of
+  sources in the annulus' tile and in the tiles on either side, placed by the run's sampler.
+* Each tile's sources are at the contrast that gives the base winners a median S/N of 5 to 8 on
+  the stitch (`--target`).  The contrast is found on 8 draws of that tile alone (`--n-cal`), from
+  the run's contrast, in up to 4 steps.
+* The annuli whose zones a draw's sources reach are reduced with all of them, the base winners
+  for the neighbors and the candidate for the annulus scored, as the final stitch reduces every
+  annulus with every source.  The other annuli take the base winners' clean images, which the
+  sources do not reach.
+* The injected stitch is built as the final stitch builds it, with the run's tiles, pads, weights
+  and flattening.  Each source is measured as the stitched verify measures it.  The seam patches
+  go into the clean stitch only, which the sources are not measured on.
+* `rescore.txt` lists each annulus' candidates by their median S/N over the draws, with its
+  16-84 %.  Beside it are the paired difference from the base winner (the mean and its standard
+  error) and the share of draws where the candidate reads higher, both for all the draw's sources
+  and for the annulus' own tile.  `rescore.json` holds the draws and every source's S/N.
+* The runs are only read.  The re-score writes to `--out` (default `<run>_rescore`), and started
+  again on that directory it resumes.  `--plan` counts the candidates and the reductions and
+  makes none.  `--card` lets the injected reductions go to the card workers.
+
+```
+klip-tpe rescore --run-dir runA --entrants-from runB runC runD --annuli 1-7 --no-overlap-pads --plan
+```
+
+A run stitched with `--no-overlap-pads`, as a `rereduce` made it, takes the same flag here, so
+the candidates are scored on the stitch its campaigns used.
+
 ## Knowing what is running, and getting a run back
 
 A run is a long-lived process that outlives the terminal it was started from, and a

@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased — 2026-11-10 (the re-score: candidates scored on the stitch)
+
+- **`klip-tpe rescore`** (`klip_tpe.refine`, NEAR2's notes of 2026-11-06 to 11-09, Kevin Wagner)
+  scores candidates for annuli of a finished run on its stitch, with the other annuli at its
+  winners.  The candidates are the winners and the validation's entrants of that run and of
+  other runs of the same frames, annuli and search space (`--entrants-from`), with `--top N` the
+  best of each history.  Each annulus gets common draws with sources in its tile and the tiles
+  on either side.  Each tile's contrast gives the base winners a median S/N of 5 to 8 on the
+  stitch.  Every annulus a draw reaches is reduced with its sources, the injected stitch is
+  built as the final stitch builds it, and each source is measured as the stitched verify
+  measures it.  On a synthetic run a draw's S/N matches `rereduce` with the same sources.
+  `rescore.txt` and `rescore.json` give each candidate's median S/N, its 16-84 % and its paired
+  difference from the base winner.  The runs are only read, a re-score resumes on its
+  directory, and `--plan` counts the reductions.  It is the first piece of `refine`.
+- Tests in `tests/test_rescore.py`.  Docs in RUNNING.md, CLI.md regenerated.
+
 ## Unreleased — 2026-11-08 (the stitched images reach the whole zones at the ends)
 
 - **The stitched images reach the whole KLIP zone of the innermost and the outermost annulus**
