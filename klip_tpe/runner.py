@@ -5625,7 +5625,7 @@ class Runner:
 
     def rereduce(self, out_dir: str, *, verify_sources: Optional[Sequence[Any]] = None, verify: bool = True,
                  log: Optional[Callable[[str], None]] = None, stitch_injections: Optional[str] = None,
-                 overlap_pads: Optional[bool] = None) -> Dict[str, Any]:
+                 overlap_pads: Optional[bool] = None, winners: Optional[Dict[int, Any]] = None) -> Dict[str, Any]:
         """A finished run's winners reduced again, on this runner's reducer, with the final
         stitch, its S/N map and the final verify written to ``out_dir``.  The run directory is
         only read.
@@ -5647,9 +5647,18 @@ class Runner:
         Writes ``klip_stitched.fits``, ``klip_stitched_snr.fits``, the injected and
         per-partition stitches, the tile-wise S/N maps, ``klip_stitched_params.txt``,
         ``stitched_verify_report.txt`` and ``tile_verify_report.txt`` (unless ``verify`` is
-        False) and ``rereduce.json``.  Returns that record."""
+        False) and ``rereduce.json``.  Returns that record.
+
+        ``winners``: a composite, annulus (0-based) -> candidate
+        (:class:`~klip_tpe.refine.Entrant`, from :func:`~klip_tpe.refine.resolve_picks`) whose
+        configuration is reduced in place of the run's winner.  The run's verify injections,
+        weights, tiles and pads stay, so the composite's verify pairs with the run's."""
         log = log or self.log
         t0 = time.time()
+        winners = dict(winners or {})
+        bad = sorted(a + 1 for a in winners if a not in {r.annulus for r in (self.results or []) if r is not None})
+        if bad:
+            raise ValueError(f"composite: annuli {bad} are not among the run's")
         mode = str(stitch_injections or getattr(self.cfg, "stitch_injections", "own")).lower()
         if mode not in ("all", "own"):
             raise ValueError(f"stitch_injections {stitch_injections!r}: all or own")
@@ -5721,6 +5730,9 @@ class Runner:
             f"{run_frames}), stitch weights from {w_from}, verify injections: {v_from}"
             + (f", pads between overlapping annuli {'on' if pads_now else 'off'} (the run's: "
                f"{'on' if pads_run else 'off'})" if pads_now != pads_run else ""))
+        for a, w in sorted(winners.items()):
+            log(f"  composite: annulus {a + 1} reduces {w.run} {w.kind} eval {w.eval_index} (counted from 0, as "
+                f"rescore.json counts) in place of the run's winner")
         self._start_workers()
         new: Dict[int, Dict[str, Any]] = {}
         per_ann = []
@@ -5729,7 +5741,8 @@ class Runner:
             for (r, d), z in zip(items, zones):
                 t1 = time.time()
                 self.ia = r.annulus
-                cfg = self._config_from_dict(r.winner_config)
+                w = winners.get(r.annulus)
+                cfg = self._config_from_dict(r.winner_config if w is None else w.config)
                 ev_c = self._reduce(cfg, None, tag=f"rereduce_a{r.annulus + 1}_clean")
                 src = put_in[r.annulus]
                 # no KLIP-FM pass: the stitch and the verify take the image alone
@@ -5744,15 +5757,28 @@ class Runner:
                     "inj_sources": [s.as_tuple() for s in src], "weights": ev_c.weights}
                 per_ann.append({"annulus": r.annulus + 1, "zone_px": list(z),
                                 **({"tile_px": list(tiles[len(per_ann)])} if self.cfg.ann_extra else {}),
-                                "winner_eval": int(r.winner_index) + 1,
+                                "winner_eval": int(r.winner_index) + 1 if w is None else None,
+                                **({} if w is None else {"winner_from": {"run": w.run, "kind": w.kind,
+                                                                         "eval_index": w.eval_index}}),
                                 "injected": len(src), "listed": len(listed[r.annulus]),
                                 "seconds": round(time.time() - t1, 1)})
-                log(f"  annulus {r.annulus + 1}: the winner (eval {r.winner_index + 1}) reduced clean"
+                who = (f"the winner (eval {r.winner_index + 1})" if w is None else
+                       f"{w.run} {w.kind} eval {w.eval_index}")
+                log(f"  annulus {r.annulus + 1}: {who} reduced clean"
                     + (f" and with {len(src)} injection(s)" if src else "") + f" ({time.time() - t1:.1f} s)")
         finally:
             self.ia = ia_keep
         os.makedirs(out_dir, exist_ok=True)
-        mod = [replace(r, winner_sources=[s.as_tuple() for s in listed[r.annulus]]) for r in results]
+
+        def _composite(r: AnnulusResult) -> AnnulusResult:
+            w = winners.get(r.annulus)
+            if w is None:
+                return r
+            sc = w.validated_score if w.validated_score is not None else w.search_score
+            return replace(r, winner_config=dict(w.config), winner_index=-1 if w.eval_index is None else int(w.eval_index),
+                           winner_score=float("nan") if sc is None else float(sc),
+                           partitions=[str(p) for p in (w.config.get("selected") or r.partitions)])
+        mod = [replace(_composite(r), winner_sources=[s.as_tuple() for s in listed[r.annulus]]) for r in results]
         keep = (self.run_dir, self._ann_images, self.results, self.cfg.stitch_overlap_pads)
         nsub, nadd = len(edits.get("subtracted_sources") or []), len(edits.get("injected_sources") or [])
         ndrop = sum(len(v) for v in _dropped(edits.get("dropped_frames")).values())
@@ -5761,11 +5787,13 @@ class Runner:
             self.cfg.stitch_overlap_pads = pads_now
             stitched = self._final_stitch(mod, weights=weights, extra_header={
                 "REREDUCE": 1, "FROMRUN": os.path.basename(src_run)[:60], "NSUBSRC": nsub, "NADDSRC": nadd,
-                "NDROPFR": ndrop})
+                "NDROPFR": ndrop, **({"NCOMPOS": len(winners)} if winners else {})})
             ver = None
             if verify and stitched is not None:
                 ver = self._final_verify(stitched, header={
-                    "run": f"{out_dir} (the winners of {src_run} reduced again on {frames})"})
+                    "run": f"{out_dir} (the winners of {src_run} reduced again on {frames}"
+                           + (f", annuli {', '.join(str(a + 1) for a in sorted(winners))} from the composite"
+                              if winners else "") + ")"})
         finally:
             self.run_dir, self._ann_images, self.results, self.cfg.stitch_overlap_pads = keep
         rec = {"run_dir": src_run, "out_dir": out_dir, "frames": frames, "run_frames": run_frames,
@@ -5774,6 +5802,8 @@ class Runner:
                "verify_sources": None if verify_sources is None else [s.as_tuple() for s in vs],
                "stitch_injections": "all" if verify_sources is not None else mode,
                "overlap_pads": pads_now,
+               "composite": {str(a + 1): {"run": w.run, "kind": w.kind, "eval_index": w.eval_index,
+                                          "config": dict(w.config)} for a, w in sorted(winners.items())} or None,
                "annuli": per_ann, "files": dict((stitched or {}).get("files") or {}),
                "verify_report": None if ver is None else ver.get("report"),
                "tile_verify_report": None if not (ver or {}).get("tiles") else ver["tiles"].get("report"),

@@ -2296,7 +2296,8 @@ usage: klip-tpe rereduce [-h] [--instrument {near,nomic,generic,ales}]
                          [--run-dir RUN_DIR] [--verify-sources FILE]
                          [--stitch-injections {all,own}] [--overlap-pads |
                          --no-overlap-pads] [--no-verify]
-                         [--verify-snr {search,idl}] [--out DIR] [--overwrite]
+                         [--verify-snr {search,idl}] [--base-winners FILE]
+                         [--out DIR] [--overwrite]
 
 options:
   -h, --help            show this help message and exit
@@ -2469,8 +2470,15 @@ options:
                         search: the search's own S/N under the run's rules and
                         the pixel mask in every ring and map. idl: the IDL
                         verify's S/N and no mask outside the search
+  --base-winners FILE   a composite: each listed annulus reduces another
+                        configuration in place of the run's winner. One per
+                        line: the annulus (from 1), the run (a directory, or a
+                        run beside this one) and the evaluation (from 0, as
+                        rescore.json counts). The run's verify injections,
+                        weights, tiles and pads stay
   --out DIR             output directory (default <run>_rereduce beside the
-                        run, which is left as it is)
+                        run, which is left as it is, or <run>_composite with
+                        --base-winners)
   --overwrite           write over an earlier re-reduction in --out
 
 generic cubes (--instrument generic / klip-tpe generic):
@@ -2661,7 +2669,9 @@ usage: klip-tpe rescore [-h] [--instrument {near,nomic,generic,ales}]
                         [--subtract-sources FILE] [--subtract-line FILE]
                         [--inject-sources FILE] [--metric {mawet,fmmf}]
                         [--run-dir RUN_DIR] [--entrants-from [RUN ...]]
-                        [--annuli ANNULI] [--draws DRAWS] [--top TOP]
+                        [--annuli ANNULI] [--draws DRAWS]
+                        [--tiles {apart,together}] [--base-winners FILE]
+                        [--candidates FILE] [--draws-from DIR] [--top TOP]
                         [--target LO HI] [--n-cal N_CAL] [--seed SEED]
                         [--sources-per-tile N] [--clear-fwhm F]
                         [--window WINDOW] [--overlap-pads | --no-overlap-pads]
@@ -2818,7 +2828,32 @@ options:
                         run's always do)
   --annuli ANNULI       the annuli to score, 1-based: 1-7, 2,3,5 or all
                         (default all)
-  --draws DRAWS         common draws per annulus (default 50)
+  --draws DRAWS         common draws per annulus (default 50, or all of
+                        --draws-from's)
+  --tiles {apart,together}
+                        apart: each tile's sources reduced and stitched on
+                        their own and measured there, at the contrast set with
+                        them alone (the default for a new directory).
+                        together: all of a draw's sources in each reduction,
+                        as re-scores before 2026-11-11 did. A directory
+                        started before keeps its own, and with --draws-from
+                        the default is that re-score's
+  --base-winners FILE   a composite base: each listed annulus' base winner is
+                        another configuration, for the stitch, the neighbors'
+                        reductions and the paired differences, and the base
+                        run's own winner enters as a candidate. One per line:
+                        the annulus (from 1), the run (a directory, the base
+                        run, a run of --entrants-from or a run beside the base
+                        run) and the evaluation (from 0, as rescore.json
+                        counts)
+  --candidates FILE     only these candidates enter (lines as --base-winners),
+                        with each annulus' base winner. An annulus without a
+                        line scores its base winner alone
+  --draws-from DIR      an earlier re-score of the same base run: its draws,
+                        their rule and its contrasts, without a calibration,
+                        its first --draws of each annulus. Each annulus' base
+                        winner is then compared with DIR's, draw for draw and
+                        tile by tile
   --top TOP             each run's best N configurations of its history also
                         enter (default 0: the winners and the validation's
                         entrants)

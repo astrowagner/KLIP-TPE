@@ -645,10 +645,11 @@ is the first piece of `refine`, whose scoring it is.
 * Each tile's sources are at the contrast that gives the base winners a median S/N of 5 to 8 on
   the stitch (`--target`).  The contrast is found on 8 draws of that tile alone (`--n-cal`), from
   the run's contrast, in up to 4 steps.
-* The annuli whose zones a draw's sources reach are reduced with all of them, the base winners
-  for the neighbors and the candidate for the annulus scored, as the final stitch reduces every
-  annulus with every source.  The other annuli take the base winners' clean images, which the
-  sources do not reach.
+* The annuli whose zones a tile's sources reach are reduced with them, the base winners for the
+  neighbors and the candidate for the annulus scored.  Each tile's sources go in on their own
+  (`--tiles apart`, below), or with `--tiles together` all of a draw's sources at once, as the
+  final stitch reduces every annulus with every source.  The other annuli take the base
+  winners' clean images, which the sources do not reach.
 * The injected stitch is built as the final stitch builds it, with the run's tiles, pads, weights
   and flattening.  Each source is measured as the stitched verify measures it.  The seam patches
   go into the clean stitch only, which the sources are not measured on.
@@ -666,6 +667,71 @@ klip-tpe rescore --run-dir runA --entrants-from runB runC runD --annuli 1-7 --no
 
 A run stitched with `--no-overlap-pads`, as a `rereduce` made it, takes the same flag here, so
 the candidates are scored on the stitch its campaigns used.
+
+### Tiles apart or together
+
+Each tile's contrast is set with its sources alone, and the inner tiles' sources are brighter.
+On NEAR2's s7, tile 2's sources were 7 and 28 times as bright as tiles 3 and 4's.  With all of
+a draw's sources in each reduction, s7's winner read 3.47 and 1.77 in tiles 3 and 4 of annulus
+3's draws, against the calibration's 5 to 8.  The bright sources' residuals, and the KL modes
+they take, reach the faint ones.
+
+* `--tiles apart`, the default for a new directory, reduces each tile's sources on their own.
+  The annuli they reach are reduced with them alone, they are stitched on their own, and they
+  are measured there, as their contrast was set.  The candidate is reduced once for each tile
+  whose sources reach its zone, about 3 times as often as together for an annulus between two
+  others.  A tile whose sources do not reach the candidate's zone reads the same for every
+  candidate and is measured once.
+* `--tiles together` puts all of a draw's sources in each reduction, as the re-score did
+  before.  A directory started before 2026-11-11 keeps it.
+* `rescore.json` gives each candidate's statistics for each tile (`tiles`), and `rescore.txt`
+  the base winner's median S/N in each tile.
+
+### A composite base
+
+`--base-winners FILE` takes other configurations as the base winners of the annuli it lists.
+They serve in the stitch, the neighbors' reductions, the calibration and the paired
+differences, and the base run's own winner of those annuli enters as a candidate.  One line per
+annulus:
+
+```
+# annulus  run                  eval (from 0, as rescore.json counts)
+1          run_20261107_074404  4999
+3          run_20261106_114808  9414
+```
+
+* The run is a directory, the base run, a run of `--entrants-from`, or a run beside the base
+  run.  The evaluation counts from 0, as `rescore.json` does.  `rescore.txt` and
+  `results.txt` count from 1.
+* Each line's run is checked against the base run's annuli, search space and frames.  The log
+  names what the line found: the validation's entrant, the winner, or a configuration of the
+  history.
+* `--candidates FILE` takes the same lines.  Only those candidates enter, with each annulus'
+  base winner, and an annulus without a line scores its base winner alone.
+* `rereduce --base-winners FILE` reduces the composite with the run's verify injections,
+  weights, tiles and pads, into `<run>_composite` (or `--out`).  Its stitch, S/N map and
+  verify then pair with the run's.
+* A re-score directory keeps its base winners, tiles mode and draws.  Started again with
+  others, it refuses and asks for another `--out`.
+
+### Draws from another re-score
+
+`--draws-from DIR` takes DIR's draws, the rule they were placed by and DIR's contrasts, without
+a calibration, and the first `--draws` of each annulus (default all).  DIR has to be a re-score
+of the same base run, and the tiles mode defaults to DIR's.  Each annulus' base winner is then
+compared with DIR's on the same draws: the paired differences of their per-draw medians for all
+of a draw's sources and for each tile, in `rescore.json` (`against`) and in `rescore.txt`.
+
+On the same base and tiles mode the comparison is 0.  With a composite base it shows whether
+the chosen winners' gains hold together.  With `--tiles apart` on a directory scored together,
+it shows how much the tiles took from each other:
+
+```
+klip-tpe rescore --run-dir runA --draws-from runA_rescore --tiles apart --candidates picks.txt --out runA_apart
+klip-tpe rescore --run-dir runA --draws-from runA_apart --base-winners picks.txt --candidates picks.txt \
+    --out runA_composite_rescore
+klip-tpe rereduce --run-dir runA --base-winners picks.txt --no-overlap-pads
+```
 
 ## Frame rotation: scipy or OpenCV
 

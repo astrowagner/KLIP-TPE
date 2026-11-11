@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased — 2026-11-10 (the re-score's tiles apart, a composite base, draws from another re-score)
+
+- **The re-score reduces each tile's sources on their own** (NEAR2, 2026-11-10).  Each tile's
+  contrast was set with its sources alone, and then all of a draw's tiles went into every
+  reduction.  On s7, tile 2's sources were 7 and 28 times as bright as tiles 3 and 4's, and
+  s7's winner read 3.47 and 1.77 in tiles 3 and 4 of annulus 3's draws, against the
+  calibration's 5 to 8.  With `--tiles apart`, the default for a new directory, each tile's
+  sources are reduced, stitched and measured on their own, as their contrast was set.  The
+  candidate is then reduced once for each tile whose sources reach its zone.  `--tiles
+  together` scores as before, and a directory started before keeps it.  `rescore.json` gives
+  each candidate's statistics for each tile, and `rescore.txt` the base winner's S/N per tile.
+- **A composite base** (NEAR2, 2026-11-10, its first ask).  `rescore --base-winners FILE` takes
+  other configurations as the base winners of the annuli listed (annulus, run, evaluation
+  counted from 0 as `rescore.json` counts), and the base run's own winner of those annuli
+  enters as a candidate.  `--candidates FILE` lets only the listed candidates enter.
+  `rereduce --base-winners FILE` reduces the composite with the run's verify injections,
+  weights, tiles and pads, into `<run>_composite`.
+- **Draws from another re-score**: `rescore --draws-from DIR` takes DIR's draws, their rule and
+  its contrasts without a calibration, and compares each annulus' base winner with DIR's, draw
+  for draw and tile by tile.  On the same base and tiles mode the difference is 0.
+- A re-score directory keeps its tiles mode, base winners and draws (`state/options.json`), and
+  started again with others it refuses.
+- Tests in `tests/test_rescore_composite.py`.  Docs in RUNNING.md, CLI.md regenerated.
+
 ## Unreleased — 2026-11-10 (OpenCV rotation, and render --with-data on a script's run)
 
 - **Frames rotate with OpenCV when it is installed and precise** (Vivek Vijayakumar's question

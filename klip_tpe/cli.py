@@ -1587,7 +1587,16 @@ def cmd_rereduce(a):
     _data_edits_for_rereduce(a)
     _constants_for_run(a)
     vs = _sources_file(a.verify_sources, "--verify-sources") if a.verify_sources else None
-    out = os.path.abspath(a.out or (os.path.abspath(a.run_dir).rstrip(os.sep) + "_rereduce"))
+    winners = None
+    if getattr(a, "base_winners", None):
+        from .refine import read_picks, resolve_picks
+        try:
+            picks = read_picks(a.base_winners, a.run_dir, one_per_annulus=True)
+            winners = {p.annulus: e for p, e in resolve_picks(a.run_dir, picks)}
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"rereduce: --base-winners: {exc}")
+    tail = "_composite" if winners else "_rereduce"
+    out = os.path.abspath(a.out or (os.path.abspath(a.run_dir).rstrip(os.sep) + tail))
     if os.path.exists(os.path.join(out, "rereduce.json")) and not a.overwrite:
         raise SystemExit(f"{out} already holds a re-reduction (rereduce.json): give --out another directory, or "
                          f"--overwrite")
@@ -1600,7 +1609,7 @@ def cmd_rereduce(a):
     try:
         r.rereduce(out, verify_sources=vs, verify=not a.no_verify,
                    stitch_injections=getattr(a, "stitch_injections", None),
-                   overlap_pads=getattr(a, "overlap_pads", None))
+                   overlap_pads=getattr(a, "overlap_pads", None), winners=winners)
     except ValueError as exc:
         raise SystemExit(f"rereduce: {exc}")
 
@@ -1639,11 +1648,19 @@ def cmd_rescore(a):
             logf.flush()
 
     try:
+        from .refine import read_picks
+        known = list(a.entrants_from or [])
+        bw = cand = None
+        if getattr(a, "base_winners", None):
+            bw = read_picks(a.base_winners, a.run_dir, known, r.cfg.nann, one_per_annulus=True)
+        if getattr(a, "candidates", None):
+            cand = read_picks(a.candidates, a.run_dir, known, r.cfg.nann)
         rescore(r, a.entrants_from or [], out, annuli=parse_annuli(a.annuli, r.cfg.nann), n_draws=a.draws,
                 top=a.top, seed=a.seed, target=(float(a.target[0]), float(a.target[1])), n_cal=a.n_cal,
                 window=a.window, overlap_pads=a.overlap_pads, plan=a.plan, card=a.card,
-                sources_per_tile=a.sources_per_tile, clear_fwhm=a.clear_fwhm, log=log)
-    except ValueError as exc:
+                sources_per_tile=a.sources_per_tile, clear_fwhm=a.clear_fwhm, base_winners=bw, candidates=cand,
+                draws_from=getattr(a, "draws_from", None), tiles=getattr(a, "tiles", None), log=log)
+    except (OSError, ValueError) as exc:
         raise SystemExit(f"rescore: {exc}")
     finally:
         if logf is not None:
@@ -2038,8 +2055,14 @@ def _build_parser():
                    help="how the verify and the S/N map measure (default: as the run did, idl for a run saved "
                         "before 2026-11-01). search: the search's own S/N under the run's rules and the pixel mask "
                         "in every ring and map. idl: the IDL verify's S/N and no mask outside the search")
+    p.add_argument("--base-winners", default=None, metavar="FILE",
+                   help="a composite: each listed annulus reduces another configuration in place of the run's "
+                        "winner.  One per line: the annulus (from 1), the run (a directory, or a run beside this "
+                        "one) and the evaluation (from 0, as rescore.json counts).  The run's verify injections, "
+                        "weights, tiles and pads stay")
     p.add_argument("--out", default=None, metavar="DIR",
-                   help="output directory (default <run>_rereduce beside the run, which is left as it is)")
+                   help="output directory (default <run>_rereduce beside the run, which is left as it is, or "
+                        "<run>_composite with --base-winners)")
     p.add_argument("--overwrite", action="store_true", help="write over an earlier re-reduction in --out")
     p.set_defaults(func=cmd_rereduce)
 
@@ -2053,7 +2076,26 @@ def _build_parser():
                    help="other finished runs of the same frames, annuli and search space, whose candidates enter "
                         "too (the base run's always do)")
     p.add_argument("--annuli", default="all", help="the annuli to score, 1-based: 1-7, 2,3,5 or all (default all)")
-    p.add_argument("--draws", type=int, default=50, help="common draws per annulus (default 50)")
+    p.add_argument("--draws", type=int, default=None,
+                   help="common draws per annulus (default 50, or all of --draws-from's)")
+    p.add_argument("--tiles", default=None, choices=["apart", "together"],
+                   help="apart: each tile's sources reduced and stitched on their own and measured there, at the "
+                        "contrast set with them alone (the default for a new directory).  together: all of a draw's "
+                        "sources in each reduction, as re-scores before 2026-11-11 did.  A directory started before "
+                        "keeps its own, and with --draws-from the default is that re-score's")
+    p.add_argument("--base-winners", default=None, metavar="FILE",
+                   help="a composite base: each listed annulus' base winner is another configuration, for the "
+                        "stitch, the neighbors' reductions and the paired differences, and the base run's own winner "
+                        "enters as a candidate.  One per line: the annulus (from 1), the run (a directory, the base "
+                        "run, a run of --entrants-from or a run beside the base run) and the evaluation (from 0, as "
+                        "rescore.json counts)")
+    p.add_argument("--candidates", default=None, metavar="FILE",
+                   help="only these candidates enter (lines as --base-winners), with each annulus' base winner. An "
+                        "annulus without a line scores its base winner alone")
+    p.add_argument("--draws-from", default=None, metavar="DIR",
+                   help="an earlier re-score of the same base run: its draws, their rule and its contrasts, without "
+                        "a calibration, its first --draws of each annulus.  Each annulus' base winner is then "
+                        "compared with DIR's, draw for draw and tile by tile")
     p.add_argument("--top", type=int, default=0,
                    help="each run's best N configurations of its history also enter (default 0: the winners and the "
                         "validation's entrants)")
