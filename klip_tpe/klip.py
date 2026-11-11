@@ -757,6 +757,19 @@ def reference_mask(angles: np.ndarray, target: int, angsep_deg: float, anglemax:
 
 @dataclass
 class KLIPParams:
+    """The settings of one :func:`klip_annular` reduction.
+
+    ``k_klip``: the KL modes subtracted (0: none).  ``inrad``, ``outrad``: the zone's radii
+    (px), cut into ``n_ang`` sectors, each with a basis of its own.  ``fast``: one basis per
+    zone from all frames, else one per target frame.  ``angsep``: the least rotation between
+    a target and its references, in lambda/D of arc at the zone's mid radius.  ``anglemax``:
+    the most (deg).  ``n_min_ref``: target frames with fewer references are dropped.
+    ``spat_mean``: each frame's mean over the zone is subtracted.  ``temp_mean``: the
+    references' mean frame is subtracted.  ``k_scan``: the residuals for every k up to
+    ``k_klip``.  ``zone_center``: the zones' centre ``(x, y)`` px, by default
+    ``(nx/2, ny/2)`` as the IDL's ``getzone`` takes it, half a pixel from the star at
+    ``((nx-1)/2, (ny-1)/2)``.  ``threads``: the per-target path's frames go to that many
+    threads.  The other fields are described where they are defined."""
     k_klip: int = 10
     inrad: float = 0.0
     outrad: float = 70.0
@@ -866,34 +879,82 @@ def klip_fm_zone(R: np.ndarray, Mref: Optional[np.ndarray], T: np.ndarray, Mtar:
 def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d_px: float,
                  log=None, fm_cube: Optional[np.ndarray] = None, ref_cube: Optional[np.ndarray] = None,
                  fm_ref_cube: Optional[np.ndarray] = None, fm_selfsub: bool = True):
-    """Annular KLIP of a (binned, high-passed) cube.
+    """Annular KLIP PSF subtraction of a cube: each frame's residuals, not yet derotated or
+    combined.
 
-    fast=True   : one basis per zone from all frames, all frames projected;
-    fast=False  : per-target basis from the frames with
-                  ``angsep*arcdist <= |dPA| <= anglemax`` (fewer than 4 -> all
-                  other frames, the ``multiklip`` fallback).  Targets with fewer
-                  than ``n_min_ref`` references are dropped (NaN frame) unless that
-                  would leave fewer than ``max(n_min_ref, ceil(0.25 n))`` targets, in
-                  which case dropping is disabled (``reduce_near_2`` safety floor).
-    k_scan=True : residuals for k = 1..k_klip; result shape ``(k, n, ny, nx)``.
-    k_klip=0    : no subtraction (residual = input inside the zones).
+    Inputs:
 
-    ref_cube    : (RDI / ARDI, ``multiklip style='rdi'``) build the basis from these
-                  frames instead of the science cube -- for ARDI pass the
-                  concatenation ``[ref, science]``.  Forces the single-basis path.
-    fm_cube     : KLIP-FM planet-model cube, frame-aligned with ``cube``; the
-                  forward-modelled residuals are returned as a third element.
-    fm_ref_cube : the model as it appears in ``ref_cube`` (zeros for planet-free
-                  reference frames); when ``ref_cube`` is None the science model
-                  is reused (ADI).  ``fm_selfsub=False`` keeps only the
-                  over-subtraction term (the ``fm_selfsub_g`` diagnostic toggle).
-                  FM is not supported together with ``k_scan``.
+    ``cube``
+        ``(n, ny, nx)``, the science frames as observed (pupil-stabilized, not derotated),
+        the star at ``((nx-1)/2, (ny-1)/2)``, the centre the rotations use.  klip-tpe's
+        reducer passes them frame-selected, injected, high-passed and binned
+        (:meth:`~klip_tpe.reducer.KLIPReducer._subtract`).  NaN pixels enter the basis and
+        the projection as 0, so their residuals come out finite.
+    ``angles``
+        ``(n,)``, each frame's parallactic angle in degrees (a bin's mean angle).  Only the
+        differences between frames are used here, to choose each target's references, so
+        a constant offset such as true north does not matter.  :func:`derotate` applies the
+        angles afterward.
+    ``p``
+        A :class:`KLIPParams`: ``k_klip`` modes (0: no subtraction), the zone
+        ``inrad``-``outrad`` (px) in ``n_ang`` sectors, the reference window from
+        ``angsep`` (lambda/D of arc at the zone's mid radius) to ``anglemax`` (deg),
+        ``n_min_ref``, ``fast`` and ``k_scan``.
+    ``lam_over_d_px``
+        lambda/D in px, ``(lam / D) * 206265 / pxscale``, which turns ``angsep`` into
+        degrees of rotation (:func:`arcdist_deg`).
+    ``log``
+        None, or a callable that takes a message when ``k_klip`` is capped (below).
+    ``ref_cube``
+        ``(m, ny, nx)`` or None.  RDI / ARDI (``multiklip style='rdi'``): the basis comes
+        from these frames instead of the science cube, and for ARDI from the concatenation
+        ``[ref, science]``.  One basis serves every target, unless ``p.ref_lib`` searches a
+        library in these frames.
+    ``fm_cube``
+        ``(n, ny, nx)`` or None.  KLIP-FM: a planet model, frame-aligned with ``cube``,
+        whose forward-modelled residuals come back as a third element.  Not with
+        ``k_scan``.
+    ``fm_ref_cube``
+        ``(m, ny, nx)`` or None: the model as it appears in ``ref_cube`` (zeros for
+        planet-free reference frames).  Without ``ref_cube`` the science model serves
+        (ADI).
+    ``fm_selfsub``
+        False keeps only the over-subtraction term (the ``fm_selfsub_g`` diagnostic).
 
-    Pixels outside the zones are NaN.  Returns ``(residuals, info)``, or
-    ``(residuals, info, fm_residuals)`` when ``fm_cube`` is given.  ``info['nref']``
-    is the per-target reference count (census window, before the <4 fallback),
-    ``info['nref_used']`` the count actually used, ``info['dropped']`` the mask of
-    NaN'd targets.
+    Modes:
+
+    * ``fast=True``: one basis per zone from all frames, all frames projected on it.
+    * ``fast=False``: a basis per target from the frames with
+      ``angsep*arcdist <= |dPA| <= anglemax``, all the other frames when fewer than 4 qualify
+      (the ``multiklip`` fallback).  Targets with fewer than ``n_min_ref`` references are
+      dropped (NaN frame), unless that would leave fewer than ``max(n_min_ref, ceil(0.25 n))``
+      targets, and then none is dropped (the ``reduce_near_2`` safety floor).  With
+      ``angsep`` 0 and ``anglemax`` past the sequence's PA span every target's references are
+      all the other frames, and the fast path runs (``info['auto_fast']``).
+    * ``k_scan=True``: the residuals for k = 1 to ``k_klip``.
+    * ``k_klip=0``: no subtraction, the residual is the input inside the zones.
+    * A basis made from the science frames themselves (fast, no RDI) caps ``k_klip`` at
+      n - 1.  With n modes every frame would subtract itself to round-off.
+
+    Returns ``(residuals, info)``, or ``(residuals, info, fm_residuals)`` with ``fm_cube``:
+
+    * ``residuals``: float32 ``(n, ny, nx)``, or ``(k_klip, n, ny, nx)`` with ``k_scan``.  NaN
+      outside the zones and in dropped targets.
+    * ``fm_residuals``: float32 ``(n, ny, nx)``.
+    * ``info``: the path taken (``fast``, ``auto_fast``, ``rdi``, ``klip_gram``,
+      ``library_as_adi``), ``arcdist`` (deg of rotation per lambda/D of arc), ``n_frames``,
+      ``n_basis_frames``, the k (``k_requested``, ``k_effective``, ``k_capped``), ``fm`` and
+      ``fm_selfsub``.  ``nref`` is each target's reference count in the window (before the
+      fallback to all frames), ``nref_used`` the count used, ``dropped`` the mask of dropped
+      targets and ``n_dropped`` their number.  The per-target path adds ``n_starved`` and
+      ``drop_enabled``, and a searched library ``ref_keep`` and ``ref_metric``.
+
+    The reducer then high-passes the residuals again, derotates them (:func:`derotate`, CCW
+    by angle + true north, north up) and combines them, by default with :func:`nw_ang_comb`::
+
+        p = KLIPParams(k_klip=10, inrad=8, outrad=30, angsep=0.5, anglemax=90, n_min_ref=10)
+        res, info = klip_annular(cube, angles, p, lam_over_d_px)
+        image = nw_ang_comb(derotate(res, angles, truenorth), angles)
     """
     n, ny, nx = cube.shape
     angles = np.asarray(angles, float)
