@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — 2026-11-11 (klip_annular's inputs and outputs, documented)
+
+- **`klip_annular` documents its inputs and outputs** (Vivek Vijayakumar's question,
+  2026-11-11).  The docstring gave the modes and the outputs, but not what `cube`, `angles` and
+  `lam_over_d_px` are.  It now gives each input's shape, units and conventions, the outputs
+  and every `info` key, and the chain that follows (`derotate`, then `nw_ang_comb`).
+  `KLIPParams` describes its fields.  docs/BACKENDS.md has a section on calling the built-in
+  KLIP from Python, and `tests/test_klip_annular_doc.py` checks the documented shapes, NaNs,
+  keys and chain against the code.
+
 ## Unreleased — 2026-11-10 (the re-score's tiles apart, a composite base, draws from another re-score)
 
 - **The re-score reduces each tile's sources on their own** (NEAR2, 2026-11-10).  Each tile's

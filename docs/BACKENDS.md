@@ -267,6 +267,42 @@ correlated too, and gives the same map if a 180 deg turn leaves it as it is. A r
 VIP keeps cubes as plain arrays: `Dataset(cube, angle_list, texp=...)` is all that is
 needed (VIP's `angle_list` has the same sign as klip-tpe's `angles`).
 
+## The built-in KLIP from Python
+
+`klip_tpe.klip.klip_annular(cube, angles, p, lam_over_d_px)` is the PSF subtraction of the
+built-in reducer.  It returns each frame's residuals, not yet derotated or combined.
+
+| input | what it is |
+|---|---|
+| `cube` | `(n, ny, nx)` science frames as observed (not derotated), the star at `((nx-1)/2, (ny-1)/2)`.  The reducer passes them frame-selected, injected, high-passed and binned.  NaN pixels enter as 0. |
+| `angles` | `(n,)` parallactic angles in degrees, one per frame.  Only their differences are used here, to choose each frame's references. |
+| `p` | a `KLIPParams`: `k_klip` modes, the zone `inrad`-`outrad` (px) in `n_ang` sectors, the reference window from `angsep` (λ/D of arc at the zone's mid radius) to `anglemax` (deg), `n_min_ref`, `fast` (one basis per zone) and `k_scan` |
+| `lam_over_d_px` | λ/D in px, `(lam / D) * 206265 / pxscale`, which turns `angsep` into degrees |
+| `ref_cube` | optional RDI basis frames `(m, ny, nx)`, or `[ref, science]` for ARDI |
+| `fm_cube`, `fm_ref_cube` | optional KLIP-FM planet model, in the science and the reference frames |
+
+It returns `(residuals, info)`, or `(residuals, info, fm_residuals)` with `fm_cube`:
+
+* `residuals`: float32 `(n, ny, nx)`, or `(k_klip, n, ny, nx)` with `k_scan`.  NaN outside
+  the zones and in the frames dropped for having fewer than `n_min_ref` references.
+* `info`: the path taken (`fast`, `auto_fast`), each frame's reference count (`nref`,
+  `nref_used`), the dropped frames (`dropped`, `n_dropped`) and the k used (`k_requested`,
+  `k_effective`, `k_capped`).  The docstring lists every key.
+
+The reducer then high-passes the residuals again, derotates them and combines them:
+
+```python
+from klip_tpe.klip import KLIPParams, derotate, klip_annular, nw_ang_comb
+
+p = KLIPParams(k_klip=10, inrad=8, outrad=30, n_ang=1, angsep=0.5, anglemax=90, n_min_ref=10)
+res, info = klip_annular(cube, angles, p, lam_over_d_px)
+image = nw_ang_comb(derotate(res, angles, truenorth), angles)    # or np.nanmedian(..., axis=0)
+```
+
+`derotate` turns each frame CCW by its angle plus true north, which puts north up.
+`KLIPReducer._subtract` is this chain, and `tests/test_klip_annular_doc.py` checks that the
+example gives what the reducer gives.
+
 ## Adding another engine
 
 Subclass `KLIPReducer` and override `_subtract(bcube, bang, kp, p, filt, req, mcube,
