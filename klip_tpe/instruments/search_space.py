@@ -1,8 +1,11 @@
 """The production search space, shared by every instrument.
 
-:func:`make_space` builds the per-partition KLIP parameter block (9 parameters per night, plus
-the selection) that NEAR, the generic adapter, NOMIC and ALES search.  It lived in
-:mod:`klip_tpe.instruments.near` until 2026-11-01, and ``near.make_space`` and
+:func:`make_space` builds the per-partition KLIP parameter block, 9 parameters per night, and the
+night selection that NEAR, the generic adapter, NOMIC and ALES search.
+
+Notes
+-----
+It lived in :mod:`klip_tpe.instruments.near` until 2026-11-01.  ``near.make_space`` and
 ``near.production_defaults`` still name these same objects, so an instrument's change to its
 space no longer edits another instrument's module.
 """
@@ -25,7 +28,18 @@ production_defaults: Dict[str, Any] = {
 
 
 def pa_span_max(reducer: PartitionedReducer) -> float:
-    """The largest parallactic-angle span of any partition (deg)."""
+    """Return the largest parallactic-angle span of any partition.
+
+    Parameters
+    ----------
+    reducer : PartitionedReducer
+        The reducer.
+
+    Returns
+    -------
+    span : float
+        The span, in degrees.
+    """
     return max(float(np.ptp(reducer.frame_angles(p))) for p in reducer.partitions())
 
 
@@ -38,45 +52,83 @@ def make_space(reducer: PartitionedReducer, per_night: bool = True, k_klip_max: 
                pin: Optional[Dict[str, Any]] = None,
                angsep_range: Optional[Tuple[float, float]] = None,
                corr_range: Optional[Tuple[float, float]] = None) -> SearchSpace:
-    """The production search space: 9 parameters per night (+ drop1/drop2).
+    """Build the production search space, a KLIP parameter block per night and the night selection.
 
-    ``width_range=(w0, w1)`` adds the searched global integer ``width`` dim of the
-    adaptive-annulus protocol (A §3.1, ``RunConfig.opt_width``; default = the range
-    midpoint); ``search_k=False`` leaves the ``k_klip`` dims out (scan k-modes, where k
-    comes from the per-eval k-scan).  ``max_drop`` = number of drop slots of the two-slot
-    selection (2 = IDL drop1/drop2; raise it when nights x image groups give many
-    partitions).  ``bin_range`` = (lo, hi) frames per temporal bin (default the NEAR
-    production 5-30; short sequences need a smaller range -- see
-    :func:`klip_tpe.instruments.generic.make_space`).
+    The block holds ``bin``, ``n_ang``, ``filter``, ``angsep``, ``anglemax``, the frame selection
+    (``corr_thresh``, ``noise_max``, ``coronoise_max``) and ``k_klip``.  A parameter whose range
+    collapses to a point is pinned in ``SearchSpace.fixed`` rather than searched.
 
-    Two dimensions of the built-in KLIP that the production space leaves at their reference
-    values can be searched too (both off by default, so the space is the one it was):
-    ``zone_range=(lo, hi)`` adds ``zone_in`` and ``zone_out``, px by which the KLIP zone
-    reaches inside and outside the annulus the run scores (0 = the annulus; the reducer's
-    ``outrad_cap`` still bounds the outer edge), and ``search_post_hp=True`` adds the 0/1
-    ``post_hp``, whether the residuals are high-passed again before derotation (1, the
-    reference).  Their defaults come from ``defaults`` (else 0, 0 and 1).
+    Parameters
+    ----------
+    reducer : PartitionedReducer
+        The reducer, whose partitions and frames set the ranges.
+    per_night : bool, default True
+        Whether each partition gets its own block.  False shares one block.
+    k_klip_max : int or None, default None
+        Maximum ``k_klip``.  None takes ``nframes / 5``, from 10 to 100.
+    opt_framesel : bool, default True
+        Whether to search the frame selection.
+    search_angles : bool, default True
+        Whether to search ``angsep`` and ``anglemax``.
+    selection : str or None, default "two_slot"
+        Night-selection scheme (:meth:`klip_tpe.space.SearchSpace.with_selection`).  None searches no
+        selection.
+    anglemax_hi : float or None, default None
+        Upper bound of ``anglemax``, in degrees.  None takes the largest PA span, or 360 for a span of
+        5 degrees or less, and a bound of 20 or less pins ``anglemax`` at 360.
+    defaults : dict or None, default None
+        Defaults that replace those of :data:`production_defaults`.
+    width_range : tuple of 2 floats or None, default None
+        Range of the global ``width`` of the adaptive-annulus protocol, in pixels
+        (``RunConfig.opt_width``), its default at the midpoint.  None leaves it out.
+    search_k : bool, default True
+        Whether to search ``k_klip``.  False leaves it to the per-evaluation k-scan.
+    max_drop : int, default 2
+        Number of drop slots of the two-slot selection, the IDL predecessor's ``drop1`` and
+        ``drop2``.  Raise it when nights times image groups give many partitions.
+    bin_range : tuple of 2 ints or None, default None
+        Range of frames per temporal bin.  None takes the NEAR production 5 to 30, and short
+        sequences need a smaller one (:func:`klip_tpe.instruments.generic.make_space`).
+    zone_range : tuple of 2 floats or None, default None
+        Range of ``zone_in`` and ``zone_out``, how far the KLIP zone reaches inside and outside the
+        scored annulus, in pixels.  None leaves them out, and their defaults come from ``defaults``,
+        else 0.
+    search_post_hp : bool, default False
+        Whether to search ``post_hp`` (0 or 1), the residuals' second high-pass, its default from
+        ``defaults``, else 1.
+    pin : dict or None, default None
+        Parameters held at a value for every evaluation.  A block parameter leaves the search, and any
+        other name goes to the reducer as given (``SearchSpace.fixed``).
+    angsep_range : tuple of 2 floats or None, default None
+        Range of ``angsep``, in lambda/D.  None takes 0 to 3.
+    corr_range : tuple of 2 floats or None, default None
+        Range of ``corr_thresh``.  None takes 0 to 1, and a floor just below the data's lowest
+        correlation spends the draws where the cut acts.
 
-    ``pin={name: value}`` holds reduction parameters at a value for every evaluation: a
-    parameter of the block is taken out of the search, and any other name (``zone_in`` without
-    ``zone_range``, say) is passed to the reducer as given (``SearchSpace.fixed``).
+    Returns
+    -------
+    space : SearchSpace
+        The search space.
 
-    ``angsep_range=(lo, hi)`` (lambda/D) replaces the 0-3 that ``angsep`` is searched over.  A
-    floor above 0 keeps the search off ``angsep = 0``, which with ``anglemax`` at the PA span is
-    another algorithm: :func:`klip_tpe.klip.klip_annular` then builds one basis per zone from all
-    the frames, each target frame inside its own basis (the IDL's auto-fast rule), where any
-    positive ``angsep`` leaves the target out.  The bound is not a point of measure zero: a
-    proposal past it is clipped onto it, and the reference-count guard projects onto 0 too, so
-    a search lands there often and keeps it when it scores (MWC 758 with ALES: every winner, at
-    the cost of most of the spiral arms' flux).  The default is clipped into the range.
+    Raises
+    ------
+    ValueError
+        If ``angsep_range`` or ``corr_range`` is out of order or out of bounds.
 
-    ``corr_range=(lo, hi)`` replaces the 0-1 that ``corr_thresh`` is searched over.  Frame
-    correlations sit just below 1 (MWC 758's ALES frames: 0.944-0.999), so most of 0-1 cuts no
-    frame, and the frame-selection guard records every such proposal at the floor, the no-cut
-    corner: of the random draws only the few that land in the thin band where the cut acts try
-    a cut at all.  A range from just below the data's lowest correlation spends the draws there.
-    Its floor is then the no-cut value, so keep it at or below every partition's lowest
-    correlation.  The default is clipped into the range."""
+    Notes
+    -----
+    A floor of ``angsep`` above 0 keeps the search off ``angsep = 0``, which with ``anglemax`` at the
+    PA span is another algorithm.  :func:`klip_tpe.klip.klip_annular` then builds one basis per zone
+    from all the frames, each target inside its own basis, as the IDL predecessor's auto-fast rule
+    does.  The bound is not of measure zero, since a proposal past it is clipped onto it and the
+    reference-count guard projects onto 0 too, so a search lands there often (MWC 758 with ALES,
+    every winner, at the cost of most of the spiral arms' flux).
+
+    Frame correlations sit just below 1 (MWC 758's ALES frames, 0.944-0.999), so most of 0 to 1 cuts
+    no frame, and the frame-selection guard records every such proposal at the no-cut floor.  Keep
+    ``corr_range``'s floor at or below every partition's lowest correlation, since it is then the
+    no-cut value.  The defaults of ``angsep`` and ``corr_thresh`` are clipped into their ranges.
+    """
     d = dict(production_defaults)
     d.update(defaults or {})
     if k_klip_max is None:

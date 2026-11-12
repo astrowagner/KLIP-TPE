@@ -1,14 +1,12 @@
-"""LBTI/NOMIC adapter for data pre-processed with **pyNOMIC**
-(https://github.com/vivekv7323/pyNOMIC).
+"""LBTI/NOMIC adapter for data pre-processed with pyNOMIC (https://github.com/vivekv7323/pyNOMIC).
 
-pyNOMIC ends with registered (star-centred), background-subtracted, per-frame FITS
-files plus a handful of ``.npz`` side files written by its notebooks.  This module
-turns those into :class:`~klip_tpe.reducer.Dataset` objects -- one per *partition*
-(chop state, and night if you pass several) -- and builds the reducer / search space /
-guardrail / objective exactly like the NEAR adapter does, so ``Runner`` and the CLI
-work unchanged.
+pyNOMIC ends with registered, background-subtracted per-frame FITS files and a few ``.npz`` side
+files written by its notebooks.  This module turns them into one
+:class:`~klip_tpe.reducer.Dataset` per partition, a chop state and night, and builds the reducer,
+search space, guardrail and objective as the NEAR adapter does, so the runner and the command
+line work unchanged.
 
-What is read (positional arrays, in the order the pyNOMIC notebooks ``np.savez`` them):
+The positional arrays read, in the order the notebooks ``np.savez`` them:
 
 ==============================  ==================================================
 ``<obj>_NOMIC_chop_correction``  ``files, chops, header_info``  (``header_info[1]`` =
@@ -21,38 +19,36 @@ What is read (positional arrays, in the order the pyNOMIC notebooks ``np.savez``
                                  ``binned_files, binned_chops, binned_angles``
 ==============================  ==================================================
 
-Frame-quality tags map onto the optimizer's three frame-selection dimensions as
+The frame-quality tags map onto the optimizer's three frame-selection dimensions:
 
-* ``corrs``     <- ``correlations``  (cross-correlation with the reference PSF; the
-  searched ``corr_thresh`` keeps frames with ``corrs >= corr_thresh``),
-* ``noises``    <- ``background_dev / median``  (``noise_max`` multiplier),
-* ``coronoise`` <- ``residual_dev / median``    (``coronoise_max`` multiplier; PSF-fit
-  residual is the closest NOMIC analogue of NEAR's coronagraphic-residual tag).
+* ``corrs`` from ``correlations``, the cross-correlation with the reference PSF, which the
+  searched ``corr_thresh`` keeps at or above.
+* ``noises`` from ``background_dev`` over its median, for ``noise_max``.
+* ``coronoise`` from ``residual_dev`` over its median, for ``coronoise_max``, the PSF-fit residual
+  being the closest NOMIC analog of NEAR's coronagraphic-residual tag.
 
-The injection model is pyNOMIC's own: the obstructed-Airy fit of **each frame**
-(``reffits`` row ``j`` for frame ``j``), so a companion of contrast ``c`` in frame ``j``
-is exactly pyNOMIC's ``inject_source`` -> ``airy_disk(c * amp_j, sigmax_j, sigmay_j, p_j)``.
-``psf='frame'`` (each frame's own star as an empirical template) is available as an option.
+The injection model is pyNOMIC's own, the obstructed-Airy fit of each frame (``reffits`` row ``j``
+for frame ``j``), so a companion of contrast ``c`` in frame ``j`` is exactly pyNOMIC's
+``inject_source``, ``airy_disk(c * amp_j, sigmax_j, sigmay_j, p_j)``.  ``psf="frame"``, each
+frame's own star as an empirical template, is an option.
 
-**Groups.**  pyNOMIC's notebooks split a sequence into *image groups* -- contiguous
-time segments separated by jumps of the star position on the detector (nod / pointing
-offsets), ``hf.image_groups(header_info[2], maxima[:, 0])`` -- and drop the shifted ones
-by hand.  Here a group can be a *partition of its own*: ``groups="auto"`` runs the same
-split (ported below as :func:`image_groups`, the star positions read from
-``<obj>_NOMIC_psf_subtraction.npz`` ``maxima`` or ``<obj>_NOMIC_aligned.npz``
-``original_psf_locs``), ``groups=<per-frame labels>`` or ``groups=[JD split times]`` use
-your own, and every (night x chop state x group) then becomes one partition
-``<name><A|B>g<k>`` with its own KLIP basis and parameter block.  The optimizer treats
-nights and groups identically -- they are all partitions: the drop1/drop2 selection dims
-(or the binary scheme) decide which ones enter the combination, the per-partition blocks
-tune each one, and the products / display panels ("night inclusion", "night effect") show
-them side by side.  Groups with fewer than ``group_min_frames`` frames are left out.
+Image groups are contiguous time segments separated by jumps of the star's position on the
+detector, from nod or pointing offsets, which pyNOMIC's notebooks split
+(``hf.image_groups(header_info[2], maxima[:, 0])``) and drop by hand.  Here a group can be a
+partition of its own.  ``groups="auto"`` runs the same split (:func:`image_groups`, with the star
+positions from ``<obj>_NOMIC_psf_subtraction.npz`` ``maxima`` or ``<obj>_NOMIC_aligned.npz``
+``original_psf_locs``), and per-frame labels or JD split times give your own.  Every night, chop
+state and group then becomes one partition ``<name><A|B>g<k>`` with its own KLIP basis and
+parameter block, which the optimizer treats as it treats nights.  Groups with fewer than
+``group_min_frames`` frames are left out.
 
-Conventions to confirm on a known binary before trusting position angles: the
-loader assumes pyNOMIC's ``header_info[1]`` is the parallactic angle such that a
-counter-clockwise rotation by ``parang_sign * parang + truenorth`` puts north up
-(this is the convention pyNOMIC's ``inject_source`` uses: detector azimuth
-``PA - parang``).  ``parang_sign=-1`` flips it; ``truenorth`` adds a fixed offset.
+Notes
+-----
+Confirm the angle convention on a known binary before trusting position angles.  The loader takes
+pyNOMIC's ``header_info[1]`` as the parallactic angle such that a counter-clockwise rotation by
+``parang_sign * parang + truenorth`` puts north up, the convention of pyNOMIC's ``inject_source``
+(detector azimuth ``PA - parang``).  ``parang_sign=-1`` flips it, and ``truenorth`` adds a fixed
+offset.
 """
 from __future__ import annotations
 
@@ -76,9 +72,29 @@ __all__ = ["NOMIC", "read_frames", "datasets_from_arrays", "load_pynomic", "imag
 
 
 class NOMIC:
-    """Instrument constants (single-aperture LBT, N' band)."""
+    """NOMIC's instrument constants, for a single LBT aperture in the N' band.
+
+    Attributes
+    ----------
+    pxscale : float
+        Plate scale, in arcsec per pixel, pyNOMIC's default.
+    lam : float
+        Center of the N' band, in meters.
+    diam : float
+        Diameter of one LBT aperture, in meters.  Override it in :func:`make_reducer` for Fizeau data.
+    truenorth : float
+        True-north offset added to the parallactic angle at derotation, in degrees.
+    crop_half : int
+        Half size of the KLIP crop, in pixels, as pyNOMIC's ``crop_size=150``.
+    lam_over_d_px : float
+        lambda/D in pixels, 15.23.
+    fwhm_px : float
+        ``1.028`` lambda/D in pixels, 15.66, where pyNOMIC's notebooks use about 14.
+    outrad_cap : float
+        Maximum outer radius of a zone, in pixels.
+    """
     pxscale = 0.0179                 # arcsec / px (pyNOMIC default)
-    lam = 11.1e-6                    # m, N' band centre
+    lam = 11.1e-6                    # m, N' band center
     diam = 8.4                       # m (one LBT aperture; Fizeau data: override in make_reducer)
     truenorth = 0.0                  # deg, added to the parallactic angle at derotation
     crop_half = 75                   # KLIP crop half size (150 px, like pyNOMIC's crop_size=150)
@@ -94,6 +110,18 @@ production_defaults = dict(_space.production_defaults)
 # reading pyNOMIC products
 # ----------------------------------------------------------------------------
 def _fits_data(path: str) -> np.ndarray:
+    """Read a FITS file's data, as float32.
+
+    Parameters
+    ----------
+    path : str
+        Path of the file.
+
+    Returns
+    -------
+    data : ndarray
+        The data of extension 0, or of extension 1 when 0 is empty.
+    """
     from astropy.io import fits
     with fits.open(path, memmap=False) as h:
         d = h[0].data
@@ -105,11 +133,36 @@ def _fits_data(path: str) -> np.ndarray:
 def read_frames(files: Sequence[Union[str, os.PathLike]], crop_half: int = NOMIC.crop_half,
                 center: Optional[Tuple[float, float]] = None, nan_policy: str = "zero",
                 progress: Optional[Callable[[int, int], None]] = None) -> np.ndarray:
-    """Read per-frame FITS files into a ``(n, 2h, 2h)`` float32 cube cropped around
-    ``center`` (default: the frame centre ``((nx-1)/2, (ny-1)/2)``, which is where pyNOMIC's
-    ``frame_registration`` puts the star; after cropping the star sits at ``(h-0.5, h-0.5)``
-    exactly like the NEAR cubes).  ``nan_policy``: ``'zero'`` replaces NaN (pyNOMIC's
-    ``mask_files`` NaN-masks the over-subtracted PSF ghosts) by 0, ``'keep'`` leaves them."""
+    """Read per-frame FITS files into a cropped float32 cube.
+
+    After the crop the star sits at ``(h - 0.5, h - 0.5)`` for ``h = crop_half``, as in the NEAR
+    cubes.
+
+    Parameters
+    ----------
+    files : sequence of str or path
+        The frame files, one frame each, the first plane of a 3-d file.
+    crop_half : int, default NOMIC.crop_half
+        Half size of the crop, in pixels.
+    center : tuple of 2 floats or None, default None
+        The star's ``(x, y)`` pixel.  None takes ``((nx-1)/2, (ny-1)/2)``, where pyNOMIC's
+        ``frame_registration`` puts it.
+    nan_policy : {"zero", "keep"}, default "zero"
+        "zero" replaces NaN by 0, such as the over-subtracted PSF ghosts pyNOMIC's ``mask_files``
+        masks, and "keep" leaves them.
+    progress : callable or None, default None
+        Function called as ``progress(done, total)`` every 500 frames and at the end.
+
+    Returns
+    -------
+    cube : ndarray, shape (n, 2 crop_half, 2 crop_half)
+        The frames, in float32.
+
+    Raises
+    ------
+    ValueError
+        If there are no files or the crop does not fit in the frames.
+    """
     files = [str(f) for f in files]
     if not files:
         raise ValueError("no frames")
@@ -134,8 +187,31 @@ def read_frames(files: Sequence[Union[str, os.PathLike]], crop_half: int = NOMIC
 
 
 def _pre_bin(cube: np.ndarray, angles: np.ndarray, tags: Optional[Dict[str, np.ndarray]], m: int):
-    """Plain consecutive mean-binning by ``m`` frames (memory relief before the search;
-    the searched ``bin`` then acts on these pre-binned frames)."""
+    """Mean-bin consecutive frames by ``m``, to relieve memory before the search.
+
+    The searched ``bin`` then acts on the pre-binned frames, and frames past the last full bin are
+    dropped.
+
+    Parameters
+    ----------
+    cube : ndarray, shape (n, ny, nx)
+        The frames.
+    angles : ndarray, shape (n,)
+        Parallactic angle of each frame, in degrees.
+    tags : dict of str to ndarray or None
+        Per-frame quality tags.
+    m : int
+        Frames per bin.  1 or less leaves everything as it is.
+
+    Returns
+    -------
+    cube : ndarray
+        The binned frames, in float32.
+    angles : ndarray
+        Mean angle of each bin, in degrees.
+    tags : dict or None
+        Mean tags of each bin.
+    """
     n = cube.shape[0] // m * m
     if m <= 1 or n == 0:
         return cube, angles, tags
@@ -156,16 +232,65 @@ def datasets_from_arrays(files: Sequence, chops: Sequence[str], angles: Sequence
                          pre_bin: int = 1, nan_policy: str = "zero", max_frames: Optional[int] = None,
                          groups: Optional[np.ndarray] = None, group_min_frames: int = 20,
                          log: Callable[[str], None] = print) -> Dict[str, Dataset]:
-    """Build one :class:`Dataset` per chop state (x image group) from pyNOMIC's arrays.
+    """Build one :class:`~klip_tpe.reducer.Dataset` per chop state, or per chop state and image group, from pyNOMIC's arrays.
 
-    ``groups`` = per-frame integer labels (see :func:`group_labels`): each (chop state,
-    group) with at least ``group_min_frames`` frames becomes its own partition
-    ``<name><A|B>g<k>``; without ``groups`` the partitions are ``<name>A`` / ``<name>B``.
+    Without ``groups`` the partitions are ``<name>A`` and ``<name>B``.  With them, each chop state and
+    group with at least ``group_min_frames`` frames becomes its own partition ``<name><A|B>g<k>``.
 
-    ``frame_bool`` (pyNOMIC ``frame_rejection`` output) pre-drops frames; the searched
-    ``corr_thresh / noise_max / coronoise_max`` then act on the survivors through the tags.
-    ``reffits`` (n, 7) Airy-fit parameters go to ``Dataset.meta['airy']`` (median) for the
-    injection model.  Partition ids are ``f"{name}{suffix}"`` with suffix ``A``/``B``.
+    Parameters
+    ----------
+    files : sequence
+        Path of each frame's FITS file.
+    chops : sequence of str
+        Chop state of each frame.
+    angles : sequence of float
+        Parallactic angle of each frame, in degrees.
+    correlations : sequence of float or None, default None
+        Each frame's cross-correlation with the reference PSF, the ``corrs`` tag.
+    background_dev : sequence of float or None, default None
+        Each frame's background scatter, whose ratio to its median is the ``noises`` tag.
+    residual_dev : sequence of float or None, default None
+        Each frame's PSF-fit residual scatter, whose ratio to its median is the ``coronoise`` tag.
+    reffits : ndarray or None, default None
+        pyNOMIC's Airy-fit parameters, shape (n, 7).  Their median goes to ``meta["airy"]`` and,
+        without pre-binning, each frame's own to ``meta["airy_frames"]``, for the injection model.
+    frame_bool : sequence of bool or None, default None
+        pyNOMIC's ``frame_rejection`` output, the frames kept beforehand.  The searched frame
+        selection then acts on the survivors through the tags.
+    chop_states : sequence of str, default ("CHOP_A", "CHOP_B")
+        The chop states, each a partition.
+    name : str, default "nomic"
+        Prefix of the partition identifiers.
+    crop_half : int, default NOMIC.crop_half
+        Half size of the crop, in pixels.
+    center : tuple of 2 floats or None, default None
+        The star's ``(x, y)`` pixel in the frames (:func:`read_frames`).
+    parang_sign : float, default 1.0
+        Factor on the angles, -1 for the opposite convention.
+    texp_per_frame : float or None, default None
+        Exposure time of a frame, in seconds.  None counts frames.
+    pre_bin : int, default 1
+        Consecutive frames averaged at load (:func:`_pre_bin`).
+    nan_policy : {"zero", "keep"}, default "zero"
+        What to do with NaN pixels (:func:`read_frames`).
+    max_frames : int or None, default None
+        Maximum number of frames per partition.  None takes all.
+    groups : ndarray of int or None, default None
+        Image-group label of each frame (:func:`group_labels`).
+    group_min_frames : int, default 20
+        Minimum number of frames of a group's partition.
+    log : callable, default print
+        Function called with each log line.
+
+    Returns
+    -------
+    datasets : dict of str to Dataset
+        The partitions, by identifier.
+
+    Raises
+    ------
+    ValueError
+        If the files, chops, angles or group labels differ in length.
     """
     files = np.asarray([str(f) for f in files])
     chops = np.asarray([str(c) for c in chops])
@@ -237,12 +362,27 @@ def datasets_from_arrays(files: Sequence, chops: Sequence[str], angles: Sequence
 
 
 def image_groups(times: np.ndarray, positions: np.ndarray, smooth: float = 100.0) -> np.ndarray:
-    """Port of pyNOMIC ``helper_functions.image_groups``: split a sequence where the
-    (smoothed) star position jumps.  Returns an integer group label per frame
-    (0 .. G-1, contiguous in time).  Same recipe as pyNOMIC: Gaussian-smooth the
-    positions (kernel ``smooth`` frames), cubic-spline them onto a fine time grid,
-    take |d position / d t|, smooth again, and call every peak above five standard
-    deviations of the quiet part (``derivative < 2 * mean``) a split."""
+    """Split a sequence where the smoothed star position jumps, as pyNOMIC's ``helper_functions.image_groups`` does.
+
+    The positions are Gaussian-smoothed over ``smooth`` frames and cubic-splined onto a fine time
+    grid.  ``|d position / d t|`` is smoothed again, and every peak above five standard deviations of
+    the quiet part (``derivative < 2 * mean``) is a split.
+
+    Parameters
+    ----------
+    times : ndarray, shape (n,)
+        Time of each frame, such as its JD.
+    positions : ndarray, shape (n,)
+        The star's position on the detector in each frame, in pixels.
+    smooth : float, default 100.0
+        Width of the Gaussian smoothing, in frames.
+
+    Returns
+    -------
+    labels : ndarray of int, shape (n,)
+        Group of each frame, from 0 and contiguous in time.  Times out of order are sorted first, and
+        fewer than 3 frames or repeated times give one group.
+    """
     from scipy.interpolate import CubicSpline
     from scipy.ndimage import gaussian_filter1d
     from scipy.signal import find_peaks
@@ -274,9 +414,35 @@ def image_groups(times: np.ndarray, positions: np.ndarray, smooth: float = 100.0
 
 def group_labels(spec, times: Optional[np.ndarray], positions: Optional[np.ndarray], n: int,
                  smooth: float = 100.0, log: Callable[[str], None] = print) -> Optional[np.ndarray]:
-    """Resolve a ``groups`` specification into per-frame labels: ``None``/``'none'`` -> no
-    grouping; ``'auto'`` -> :func:`image_groups` on ``(times, positions)``; a sequence of
-    ``n`` integers -> used as is; a shorter sequence of floats -> JD split times."""
+    """Resolve a ``groups`` specification into per-frame labels.
+
+    Parameters
+    ----------
+    spec : str, sequence or None
+        None, "none" or "off" for no grouping, "auto" for :func:`image_groups` on the times and
+        positions, ``n`` whole numbers for labels as they are, or a shorter sequence of JD split
+        times.
+    times : ndarray or None
+        Time of each frame.
+    positions : ndarray or None
+        The star's position in each frame, in pixels, for "auto".
+    n : int
+        Number of frames.
+    smooth : float, default 100.0
+        Width of :func:`image_groups`' smoothing, in frames.
+    log : callable, default print
+        Function called with the groups' sizes.
+
+    Returns
+    -------
+    labels : ndarray of int or None
+        Group of each frame, renumbered from 0, or None without grouping.
+
+    Raises
+    ------
+    ValueError
+        If ``spec`` is an unknown string, or the times or positions it needs are missing.
+    """
     if spec is None or (isinstance(spec, str) and spec.lower() in ("", "none", "off")):
         return None
     if isinstance(spec, str):
@@ -303,6 +469,18 @@ def group_labels(spec, times: Optional[np.ndarray], positions: Optional[np.ndarr
 
 
 def _npz_arrays(path: str) -> List[Any]:
+    """Read an ``.npz`` file's positional arrays, ``arr_0`` onward, in order.
+
+    Parameters
+    ----------
+    path : str
+        Path of the file.
+
+    Returns
+    -------
+    arrays : list
+        The arrays.
+    """
     z = np.load(path, allow_pickle=True)
     return [z[k] for k in sorted(z.files, key=lambda s: int(s.split("_")[1]) if s.startswith("arr_") else 0)]
 
@@ -310,18 +488,42 @@ def _npz_arrays(path: str) -> List[Any]:
 def load_pynomic(workdir: str, obj: str, frames: Union[str, Sequence] = "masked", binned: bool = False,
                  name: Optional[str] = None, use_frame_rejection: Optional[Sequence[bool]] = None,
                  groups=None, group_smooth: float = 100.0, **kw) -> Dict[str, Dataset]:
-    """Load a pyNOMIC reduction directory (where the notebook ran).
+    """Load a pyNOMIC reduction directory, where the notebook ran.
 
-    ``groups``: ``None`` (partitions = chop states), ``'auto'`` (pyNOMIC's image-group split
-    of the sequence on the star position, :func:`image_groups`; ``group_smooth`` = its
-    kernel), per-frame integer labels, or a list of JD split times -> one partition per
-    (chop state, group).  ``group_min_frames`` (keyword, default 20) drops tiny groups.
+    Parameters
+    ----------
+    workdir : str
+        The directory.
+    obj : str
+        Name of the object, the prefix of the ``.npz`` files.
+    frames : str or sequence, default "masked"
+        A directory under ``workdir`` whose sorted ``*.fits`` are the frames, such as "masked" or
+        "aligned", or a list of paths.
+    binned : bool, default False
+        Whether to use ``<obj>_NOMIC_binned_evaluated.npz``, pyNOMIC's own temporal bins with their
+        angles, chops and tags, instead of the unbinned frames.
+    name : str or None, default None
+        Prefix of the partition identifiers.  None takes ``obj``.
+    use_frame_rejection : sequence of bool or None, default None
+        pyNOMIC's ``frame_rejection`` output, the frames kept beforehand.
+    groups : str, sequence or None, default None
+        Image-group specification (:func:`group_labels`), one partition per chop state and group.
+        None makes the chop states the partitions.
+    group_smooth : float, default 100.0
+        Width of the "auto" split's smoothing, in frames.
+    kw : dict
+        More keywords for :func:`datasets_from_arrays`, such as ``crop_half``, ``parang_sign``,
+        ``pre_bin``, ``max_frames`` or ``group_min_frames``.
 
-    ``frames``: ``'masked'`` / ``'aligned'`` (a directory under ``workdir`` whose sorted
-    ``*.fits`` are the frames, as in the notebooks), or an explicit list of paths.
-    ``binned=True`` uses ``<obj>_NOMIC_binned_evaluated.npz`` (pyNOMIC's own temporal bins,
-    with their angles/chops/tags) instead of the unbinned frames.  Other keywords go to
-    :func:`datasets_from_arrays` (``crop_half, parang_sign, pre_bin, max_frames, ...``).
+    Returns
+    -------
+    datasets : dict of str to Dataset
+        The partitions, by identifier.
+
+    Raises
+    ------
+    ValueError
+        If the frame files do not match the chop entries.
     """
     name = name or obj
     if binned:
@@ -368,15 +570,30 @@ def load_pynomic(workdir: str, obj: str, frames: Union[str, Sequence] = "masked"
 # ----------------------------------------------------------------------------
 def injection_model_for(ds: Dataset, fwhm_px: float, psf: str = "airy", lam_over_d_px: float = NOMIC.lam_over_d_px,
                         r_ee_px: Optional[float] = None) -> InjectionModel:
-    """Injection PSF for one partition.
+    """Build the injection PSF of one partition.
 
-    ``psf='airy'`` (default, = pyNOMIC): frame ``j`` is injected with pyNOMIC's Airy fit of
-    frame ``j`` (``ds.meta['airy_frames']``, the ``reffits`` rows); the median fit gives the
-    matched filter, the FWHM and the reported flux unit.  This is what pyNOMIC's own
-    ``inject_source`` does, so contrasts are directly comparable between the two tools.
-    ``psf='frame'``: :class:`~klip_tpe.injection.FramePSF`, each frame's own star as an
-    empirical template (needs the unsaturated core in the frames).
-    ``psf='gaussian'``: instrument-FWHM Gaussian with flux unit 1 (smoke tests only)."""
+    Parameters
+    ----------
+    ds : Dataset
+        The partition.
+    fwhm_px : float
+        FWHM of the Gaussian fallback, in pixels.
+    psf : {"airy", "frame", "gaussian"}, default "airy"
+        "airy" injects frame ``j`` with pyNOMIC's Airy fit of frame ``j`` (``meta["airy_frames"]``), as
+        pyNOMIC's ``inject_source`` does, with the median fit for the matched filter, the FWHM and the
+        flux unit.  "frame" takes each frame's own star as an empirical template
+        (:class:`~klip_tpe.injection.FramePSF`), and "gaussian" a Gaussian of flux unit 1, for smoke
+        tests only.
+    lam_over_d_px : float, default NOMIC.lam_over_d_px
+        lambda/D in pixels, which sets the default radius of "frame".
+    r_ee_px : float or None, default None
+        Radius of the unit-flux normalization of "frame", in pixels.  None takes ``1.5`` lambda/D.
+
+    Returns
+    -------
+    model : InjectionModel
+        The model.  "airy" without a usable median fit falls back to the Gaussian.
+    """
     a = ds.meta.get("airy")
     if psf == "frame":
         r_ee = float(r_ee_px) if r_ee_px else 1.5 * lam_over_d_px
@@ -390,7 +607,18 @@ def injection_model_for(ds: Dataset, fwhm_px: float, psf: str = "airy", lam_over
 
 
 def fitted_fwhm(ds: Dataset) -> Optional[float]:
-    """Core FWHM (px) from pyNOMIC's median Airy fit, ``1.028 * mean(sigmax, sigmay)``."""
+    """Return the core FWHM from pyNOMIC's median Airy fit, ``1.028 * mean(sigmax, sigmay)``.
+
+    Parameters
+    ----------
+    ds : Dataset
+        The partition.
+
+    Returns
+    -------
+    fwhm : float or None
+        FWHM in pixels, or None without a usable fit.
+    """
     a = ds.meta.get("airy")
     if a is not None and len(a) >= 3 and np.isfinite(a[1:3]).all() and a[1] > 0 and a[2] > 0:
         return float(1.028 * 0.5 * (a[1] + a[2]))
@@ -403,9 +631,53 @@ def make_reducer(datasets: Dict[str, Dataset], weighting: str = "equal", max_wor
                  fwhm_px: Optional[float] = None, outrad_cap: float = NOMIC.outrad_cap,
                  do_destripe: bool = False, psf: str = "airy", r_ee_px: Optional[float] = None,
                  backend: str = "klip", log: Callable[[str], None] = print) -> PartitionedReducer:
-    """One :class:`KLIPReducer` per partition (chop state x night x image group).  ``psf`` selects the
-    injection model (see :func:`injection_model_for`; default pyNOMIC's per-frame Airy fit).  ``fwhm_px`` defaults to the median fitted core FWHM when pyNOMIC's Airy fits are
-    available, else ``1.028 lambda/D``."""
+    """Build one reducer per partition, combined by a :class:`~klip_tpe.reducer.PartitionedReducer`.
+
+    A partition is a chop state, night and image group.
+
+    Parameters
+    ----------
+    datasets : dict of str to Dataset
+        The partitions.
+    weighting : {"equal", "sqrt_texp"}, default "equal"
+        Weights of the combination.
+    max_workers : int or str, default "auto"
+        The thread budget.
+    pool : {"auto", "processes", "threads"}, default "auto"
+        Kind of worker pool.
+    fast : bool, default False
+        Default of the reducers' ``fast``.
+    n_min_ref : int, default 10
+        Default minimum number of references per target.
+    pxscale : float, default NOMIC.pxscale
+        Plate scale, in arcsec per pixel.
+    lam_m : float, default NOMIC.lam
+        Wavelength, in meters.
+    diam_m : float, default NOMIC.diam
+        Telescope diameter, in meters.
+    truenorth : float, default NOMIC.truenorth
+        True-north offset, in degrees.
+    fwhm_px : float or None, default None
+        FWHM of the PSF, in pixels.  None takes the median fitted core FWHM (:func:`fitted_fwhm`),
+        else ``1.028`` lambda/D.
+    outrad_cap : float, default NOMIC.outrad_cap
+        Maximum outer radius of a zone, in pixels.
+    do_destripe : bool, default False
+        Default of the reducers' destriping.
+    psf : {"airy", "frame", "gaussian"}, default "airy"
+        The injection model (:func:`injection_model_for`).
+    r_ee_px : float or None, default None
+        Radius of the unit-flux normalization of "frame", in pixels.
+    backend : {"klip", "pyklip", "vip"}, default "klip"
+        The reduction backend.
+    log : callable, default print
+        Function called with each log line.
+
+    Returns
+    -------
+    reducer : PartitionedReducer
+        The combined reducer.
+    """
     reducers = {}
     lod = (lam_m / diam_m) * 206265.0 / pxscale
     for pid, ds in datasets.items():
@@ -426,15 +698,47 @@ def make_reducer(datasets: Dict[str, Dataset], weighting: str = "equal", max_wor
 
 
 def make_space(reducer: PartitionedReducer, **kw) -> SearchSpace:
-    """Same parameterisation as the NEAR production space (9 per partition + drop dims);
-    see :func:`klip_tpe.instruments.search_space.make_space` for the keywords."""
+    """Build the NEAR production parameterization, 9 parameters per partition and the drop dimensions.
+
+    Parameters
+    ----------
+    reducer : PartitionedReducer
+        The reducer.
+    kw : dict
+        Keywords of :func:`klip_tpe.instruments.search_space.make_space`.
+
+    Returns
+    -------
+    space : SearchSpace
+        The search space.
+    """
     return _space.make_space(reducer, **kw)
 
 
 def make_guard(reducer: PartitionedReducer, n_min_ref: int = 10, ref_frac: float = 0.95, k_max: int = 100,
                frame_selection: bool = True):
-    """Frame-selection no-cut snapping followed by the reference-count guardrail, with the
-    binning-span rule and ``angsep`` unit taken from the reducer itself."""
+    """Build the frame-selection snapping and the reference-count guardrail, from the reducer's own lambda/D.
+
+    The binning-span rule and the unit of ``angsep`` come from the reducer.
+
+    Parameters
+    ----------
+    reducer : PartitionedReducer
+        The reducer.
+    n_min_ref : int, default 10
+        Minimum number of references per target.
+    ref_frac : float, default 0.95
+        Fraction of the target frames that must keep ``n_min_ref`` references.
+    k_max : int, default 100
+        Maximum number of KL modes.
+    frame_selection : bool, default True
+        Whether to snap the frame-selection dimensions to the no-cut value.
+
+    Returns
+    -------
+    guard : callable
+        The guard.
+    """
     r0 = next(iter(reducer.reducers.values()))
     ref = ReferenceCountGuard(angles_fn=reducer.frame_angles, tags_fn=reducer.frame_tags,
                               fwhm_px=1.028 * r0.lam_over_d_px, lam_over_d_px=r0.lam_over_d_px,
@@ -447,8 +751,26 @@ def make_guard(reducer: PartitionedReducer, n_min_ref: int = 10, ref_frac: float
 
 def default_config(reducer: PartitionedReducer, clean_subtract: bool = True, known=(),
                    metric: str = "mawet"):
-    """Objective (matched-filter Mawet S/N with the Airy kernel) + position sampler;
-    ``metric='fmmf'`` forward-models that kernel through each subtraction instead."""
+    """Build the objective, the matched-filter Mawet S/N with the Airy kernel, and the position sampler.
+
+    Parameters
+    ----------
+    reducer : PartitionedReducer
+        The reducer, whose plate scale, FWHM and matched filter the metric takes.
+    clean_subtract : bool, default True
+        Whether the objective subtracts the clean image's score.
+    known : sequence of tuple of 2 floats, default ()
+        Real companions, as ``(rho_arcsec, pa_deg)``.
+    metric : {"mawet", "fmmf"}, default "mawet"
+        The metric.  "fmmf" forward-models the kernel through each subtraction.
+
+    Returns
+    -------
+    objective : Objective
+        The objective.
+    sampler : PositionSampler
+        The sampler of injection positions.
+    """
     kw = dict(pxscale=reducer.pxscale, fwhm=reducer.fwhm, kernel_fn=reducer.matched_filter_kernel,
               known=list(known))
     if str(metric).lower() == "fmmf":

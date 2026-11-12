@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — 2026-11-12 (the NEAR, NOMIC and generic adapters documented to the rule)
+
+- **`instruments/generic.py`, `near.py`, `nomic.py` and `search_space.py` follow the
+  documentation rule.**  The generic adapter's module docstring no longer says a missing PSF
+  falls back to a Gaussian, since `injection_model_for` has required a template for a while.
+  Only docstrings and comments changed.
+
 ## Unreleased — 2026-11-12 (reducer.py documented to the rule)
 
 - **`reducer.py` follows the documentation rule**: its module docstring, the request, result
