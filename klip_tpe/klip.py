@@ -1,12 +1,15 @@
-"""Generic KLIP / ADI engine (port of ``multiklip.pro`` + ``get_klip_basis_new.pro``
-+ the processing chain of ``reduce_near_2.pro``: frame selection, angle-aware
-temporal binning, boxcar high-pass, annular KLIP with per-target reference
-selection, derotation and noise-weighted combination ``nw_ang_comb``).
+"""KLIP and ADI engine: frame selection, angle-aware binning, high-pass filtering, annular KLIP,
+derotation and noise-weighted combination.
 
-Array convention: cubes are ``(nframes, ny, nx)``; images ``(ny, nx)``; the star is
-at ``((nx-1)/2, (ny-1)/2)``.  Angles are degrees.  Rotations are counter-clockwise
-in the ``(x, y)`` frame (IDL ``rot(img, a)`` is clockwise by ``a``, so IDL
-``rot(img, -a)`` == :func:`rotate_ccw` ``(img, a)``).
+Cubes are ``(n, ny, nx)`` for n frames of ny by nx pixels, and images ``(ny, nx)``.  The star is
+at ``((nx-1)/2, (ny-1)/2)``, angles are in degrees, and rotations are counter-clockwise with x to
+the right and y up.
+
+Notes
+-----
+These routines succeed the IDL predecessor's ``multiklip.pro``, ``get_klip_basis_new.pro`` and
+the processing chain of ``reduce_near_2.pro``.  That code rotates with IDL's ``rot(img, a)``,
+which turns clockwise by ``a``, so its ``rot(img, -a)`` is :func:`rotate_ccw` ``(img, a)``.
 """
 from __future__ import annotations
 
@@ -35,8 +38,27 @@ BLOCK_BYTES = 1_000_000
 
 
 def frame_blocks(n: int, threads: int = 1, frame_px: int = 0) -> List[Tuple[int, int]]:
-    """Contiguous ``[lo, hi)`` ranges over ``n`` frames: at least two per thread, and none
-    whose float64 copy (``frame_px`` pixels a frame) exceeds :data:`BLOCK_BYTES`."""
+    """Split n frames into contiguous blocks for worker threads.
+
+    Use it with :func:`run_blocks`.  There are two blocks per thread, and no block's float64 copy
+    exceeds :data:`BLOCK_BYTES`, so a block stays in the CPU cache.
+
+    Parameters
+    ----------
+    n : int
+        Number of frames.  0 or less gives no blocks.
+    threads : int, default 1
+        Number of threads the blocks will run on.  1 gives one block unless ``frame_px`` caps its
+        size.
+    frame_px : int, default 0
+        Number of pixels in one frame, which caps a block's size.  0 sets no cap.
+
+    Returns
+    -------
+    blocks : list of tuple of int
+        The ``(lo, hi)`` frame ranges, ``lo`` included and ``hi`` excluded, in order and covering
+        all n frames.
+    """
     n = int(n)
     if n <= 0:
         return []
@@ -49,9 +71,21 @@ def frame_blocks(n: int, threads: int = 1, frame_px: int = 0) -> List[Tuple[int,
 
 
 def run_blocks(fn, blocks: Sequence[Tuple[int, int]], threads: int = 1) -> None:
-    """``fn(lo, hi)`` for every block, on ``threads`` threads of the process-wide pool.
-    Each block writes only its own frames, so the result is the same whatever the order
-    the blocks run in."""
+    """Call ``fn(lo, hi)`` for every block of frames, on the given number of threads.
+
+    The threads come from the process-wide pool (:func:`klip_tpe.parallel.target_pool`).  Each
+    block must write only its own frames.
+
+    Parameters
+    ----------
+    fn : callable
+        Function called as ``fn(lo, hi)`` for frames ``lo`` to ``hi - 1``.  Its return value is
+        ignored.
+    blocks : sequence of tuple of int
+        The ``(lo, hi)`` frame ranges, as :func:`frame_blocks` gives them.
+    threads : int, default 1
+        Number of threads.  1 runs the blocks in turn in the calling thread.
+    """
     blocks = list(blocks)
     if int(threads) <= 1 or len(blocks) <= 1:
         for lo, hi in blocks:
@@ -67,10 +101,39 @@ def run_blocks(fn, blocks: Sequence[Tuple[int, int]], threads: int = 1) -> None:
 def frame_selection_mask(nf: int, tags: Optional[Dict[str, np.ndarray]], corr_thresh: Optional[float],
                          noise_max: Optional[float], coronoise_max: Optional[float],
                          bin_: int, k_klip: int) -> np.ndarray:
-    """Boolean keep-mask.  ``keep = corr >= corr_thresh & noise <= noise_max*mean(noise)
-    & coronoise <= coronoise_max*mean(coronoise)`` (NaN tags pass).  The cut is
-    skipped entirely (all True) when it would keep fewer than
-    ``max(round(bin)*round(k_klip), 3)`` frames or would cull nothing."""
+    """Choose the frames to keep from per-frame quality tags.
+
+    A frame is kept when its correlation is at least ``corr_thresh``, its background noise at most
+    ``noise_max`` times the mean, and its residual noise at most ``coronoise_max`` times the mean.
+    A NaN tag does not reject a frame.  The cut is skipped, keeping every frame, when it would keep
+    fewer than ``max(bin_ * k_klip, 3)`` frames or reject none.
+
+    Parameters
+    ----------
+    nf : int
+        Number of frames.
+    tags : dict of str to ndarray, or None
+        Per-frame tags of length ``nf``: ``"corrs"`` (correlation with the reference PSF),
+        ``"noises"`` (background noise) and ``"coronoise"`` (coronagraphic or PSF-fit residual
+        noise).  None, or ``"corrs"`` missing or of another length, keeps every frame.
+    corr_thresh : float or None
+        Minimum correlation a frame needs.  None keeps every frame.
+    noise_max : float or None
+        Maximum background noise, as a multiple of the mean of ``tags["noises"]``.  None applies no
+        background-noise cut.
+    coronoise_max : float or None
+        Maximum residual noise, as a multiple of the mean of ``tags["coronoise"]``.  None applies no
+        residual-noise cut.
+    bin_ : int
+        Temporal binning factor that follows, used only in the floor on the frames kept.
+    k_klip : int
+        Number of KL modes the reduction uses, used only in the floor on the frames kept.
+
+    Returns
+    -------
+    keep : ndarray of bool, shape (nf,)
+        True for each frame to keep.
+    """
     keep = np.ones(nf, bool)
     if not tags or corr_thresh is None:
         return keep
@@ -96,6 +159,25 @@ def frame_selection_mask(nf: int, tags: Optional[Dict[str, np.ndarray]], corr_th
 # angle-aware temporal binning
 # ----------------------------------------------------------------------------
 def _bin_groups(angles: np.ndarray, bin_: int, dth_max: float) -> np.ndarray:
+    """Number the frames into bins of consecutive frames, the work of :func:`bin_groups`.
+
+    A bin closes when it holds ``bin_`` frames or when the next frame would widen its span of
+    parallactic angle past ``dth_max``.
+
+    Parameters
+    ----------
+    angles : ndarray, shape (n,)
+        Parallactic angles of the n frames in time order, in degrees.
+    bin_ : int
+        Maximum number of frames in a bin.
+    dth_max : float
+        Maximum span of parallactic angle in a bin, in degrees.
+
+    Returns
+    -------
+    grp : ndarray of int, shape (n,)
+        Bin number of each frame, counting from 0.
+    """
     grp = np.zeros(angles.size, int)
     g, cnt = 0, 0
     amn = amx = angles[0] if angles.size else 0.0
@@ -116,7 +198,25 @@ def _bin_groups(angles: np.ndarray, bin_: int, dth_max: float) -> np.ndarray:
 
 
 def bin_angles(angles: np.ndarray, bin_: int, dth_max_deg: float) -> np.ndarray:
-    """Binned parallactic angles only (used by the reference-count guardrail)."""
+    """Compute the mean parallactic angle of each bin of the angle-aware binning.
+
+    Use it to count the references a binning leaves without binning any frames.  The angles are
+    those :func:`bin_frames` computes before it drops the bins without data.
+
+    Parameters
+    ----------
+    angles : ndarray
+        Parallactic angles of the frames in time order, in degrees.
+    bin_ : int
+        Maximum number of frames per bin.  1 or less returns a copy of ``angles``.
+    dth_max_deg : float
+        Maximum span of parallactic angle in a bin, in degrees.
+
+    Returns
+    -------
+    bin_angles : ndarray
+        Mean parallactic angle of each bin, in degrees.
+    """
     angles = np.asarray(angles, float)
     b = int(round(max(bin_, 1)))
     if b <= 1 or angles.size == 0:
@@ -127,9 +227,26 @@ def bin_angles(angles: np.ndarray, bin_: int, dth_max_deg: float) -> np.ndarray:
 
 
 def bin_groups(angles: np.ndarray, bin_: int, dth_max_deg: float) -> np.ndarray:
-    """Group index per frame of the angle-aware binning (``bin_grp`` in
-    ``reduce_near_2``, reused verbatim for the KLIP-FM model cube).  ``bin_ <= 1``
-    -> every frame its own group."""
+    """Assign each frame its bin number in the angle-aware binning.
+
+    A bin holds at most ``bin_`` consecutive frames and closes early when the next frame would widen
+    its span of parallactic angle past ``dth_max_deg``.  Use it with :func:`bin_by_groups` to bin a
+    second cube of the same frames as :func:`bin_frames` binned the first.
+
+    Parameters
+    ----------
+    angles : ndarray, shape (n,)
+        Parallactic angles of the n frames in time order, in degrees.
+    bin_ : int
+        Maximum number of frames per bin.  1 or less puts every frame in a bin of its own.
+    dth_max_deg : float
+        Maximum span of parallactic angle in a bin, in degrees.
+
+    Returns
+    -------
+    grp : ndarray of int, shape (n,)
+        Bin number of each frame, counting from 0.
+    """
     angles = np.asarray(angles, float)
     b = int(round(max(bin_, 1)))
     if b <= 1:
@@ -138,19 +255,45 @@ def bin_groups(angles: np.ndarray, bin_: int, dth_max_deg: float) -> np.ndarray:
 
 
 def group_mean(frames: np.ndarray, dtype=np.float32) -> np.ndarray:
-    """The mean of one bin group's frames ``(m, ny, nx)``, as :func:`bin_by_groups` takes
-    it: summed in the frames' own precision for ``dtype=np.float32``, in double for
-    ``np.float64``.  A group of one frame is that frame.  Pass a C-contiguous array (a copy
-    or a leading-axis slice of one), so the sum runs frame after frame as it always has."""
+    """Average the frames of one bin, as :func:`bin_by_groups` does.
+
+    Parameters
+    ----------
+    frames : ndarray, shape (m, ny, nx)
+        The bin's m frames, ny by nx pixels each.
+    dtype : numpy dtype, default numpy.float32
+        Precision of the sum and the mean.
+
+    Returns
+    -------
+    mean : ndarray, shape (ny, nx)
+        Mean frame.  A bin of one frame gives that frame itself, not a copy.
+    """
     if frames.shape[0] > 1:
         return frames.mean(axis=0, dtype=None if np.dtype(dtype) == np.float32 else dtype)
     return frames[0]
 
 
 def group_bounds(grp: np.ndarray) -> np.ndarray:
-    """First frame of every group, and the frame count at the end: ``[s_0, s_1, ..., n]``.
-    The angle-aware binning numbers its groups along the frames, so group ``g`` is the
-    frames ``s_g:s_(g+1)``."""
+    """Find where each bin starts, from the frames' bin numbers.
+
+    Parameters
+    ----------
+    grp : ndarray of int, shape (n,)
+        Bin number of each of the n frames, as :func:`bin_groups` gives it.  The numbers must not
+        decrease along the frames.
+
+    Returns
+    -------
+    starts : ndarray of int
+        ``[s_0, s_1, ..., n]``, the first frame of each bin and then n, so bin ``g`` holds frames
+        ``s_g`` to ``s_(g+1) - 1``.  ``[0]`` when there are no frames.
+
+    Raises
+    ------
+    ValueError
+        If the bin numbers decrease somewhere.
+    """
     grp = np.asarray(grp)
     if grp.size == 0:
         return np.zeros(1, int)
@@ -161,10 +304,24 @@ def group_bounds(grp: np.ndarray) -> np.ndarray:
 
 
 def bin_by_groups(cube: np.ndarray, grp: np.ndarray, threads: int = 1, dtype=np.float32) -> np.ndarray:
-    """Mean-combine the frames of each group (``bin_type='mean'``; the model cube is
-    always mean-binned, reduce_near_2 L1792-1806).  ``threads``: groups go to that many
-    threads, each group combined as before.  ``dtype=np.float64`` sums and keeps the means
-    in double precision, for frames that still carry their background."""
+    """Average the frames of each bin into one frame.
+
+    Parameters
+    ----------
+    cube : ndarray, shape (n, ny, nx)
+        The n frames, ny by nx pixels each.
+    grp : ndarray of int, shape (n,)
+        Bin number of each frame, as :func:`bin_groups` gives it.
+    threads : int, default 1
+        Number of threads the bins are spread over.
+    dtype : numpy dtype, default numpy.float32
+        Precision of the means.  float64 keeps frames that still carry a large background accurate.
+
+    Returns
+    -------
+    binned : ndarray, shape (nbin, ny, nx)
+        Mean frame of each of the nbin bins, in ``dtype``.
+    """
     ng = int(grp.max()) + 1 if grp.size else 0
     bc = np.empty((ng,) + cube.shape[1:], dtype)
 
@@ -177,14 +334,27 @@ def bin_by_groups(cube: np.ndarray, grp: np.ndarray, threads: int = 1, dtype=np.
 
 
 def bins_with_data(bc: np.ndarray) -> np.ndarray:
-    """Which frames of ``bc`` carry data: those with a pixel that is neither NaN nor zero.
+    """Find the frames that hold data, those with a pixel that is neither NaN nor 0.
 
-    A bin of all-NaN frames or of all-zero frames carries none, and the binning drops it
-    (``bads``, reduce_near_2 L1747-1761).  Until 2026-11-10 the test was the frame's
-    ``nansum``, as the IDL tests its ``total``.  A high-passed frame sums to nearly zero by
-    design, and in float32 a frame with data then sums to exactly zero now and then.  On the
-    WISPIT 2 ALES search it happened in 1 draw of 3000: the injected sources moved a bin's
-    sum onto zero, and the injected cube lost a bin the clean cube kept."""
+    The binning drops the frames that hold none.  The test looks at the pixels rather than the
+    frame's sum, since a high-passed frame can sum to exactly 0 in float32.
+
+    Parameters
+    ----------
+    bc : ndarray, shape (n, ny, nx)
+        The n binned frames, ny by nx pixels each.
+
+    Returns
+    -------
+    has_data : ndarray of bool, shape (n,)
+        True for each frame with data.
+
+    Notes
+    -----
+    Until 2026-11-10 the test was the frame's ``nansum``, as the IDL predecessor
+    (``reduce_near_2.pro`` L1747-1761, ``bads``) tests its ``total``.  On the WISPIT 2 ALES search
+    a bin's sum landed on 0 in 1 draw of 3000, and the injected cube lost a bin the clean cube kept.
+    """
     out = np.zeros(len(bc), bool)
     for i, f in enumerate(bc):
         f = np.asarray(f)
@@ -194,14 +364,51 @@ def bins_with_data(bc: np.ndarray) -> np.ndarray:
 
 def bin_frames(cube: np.ndarray, angles: np.ndarray, bin_: int, dth_max_deg: float,
                return_groups: bool = False, threads: int = 1, then=None, dtype=np.float32, bkeep=None):
-    """Mean-combine consecutive frames into bins of at most ``bin_`` frames, closing
-    a bin early when its PA span would exceed ``dth_max_deg``.  Drops the bins without
-    data (:func:`bins_with_data`; ``bads``, reduce_near_2 L1747-1761).  With
-    ``return_groups`` also returns ``(grp, keep)`` so a companion cube can be binned
-    identically (:func:`bin_by_groups` followed by ``[keep]``).  ``then``: applied to the
-    binned cube before the test (the high-pass, when it follows the binning); ``dtype``
-    the precision of the means (:func:`bin_by_groups`).  ``bkeep``: the bins to keep in
-    place of the test, the ones another cube of the same frames kept."""
+    """Average consecutive frames into bins, then drop the bins without data.
+
+    A bin holds at most ``bin_`` frames and closes early when the next frame would widen its span of
+    parallactic angle past ``dth_max_deg``.  Use it to cut the number of frames before KLIP.
+
+    Parameters
+    ----------
+    cube : ndarray, shape (n, ny, nx)
+        The n frames in time order, ny by nx pixels each.
+    angles : ndarray, shape (n,)
+        Parallactic angle of each frame, in degrees.
+    bin_ : int
+        Maximum number of frames per bin.  1 or less keeps every frame, as float32.
+    dth_max_deg : float
+        Maximum span of parallactic angle in a bin, in degrees.
+    return_groups : bool, default False
+        Whether to also return each frame's bin number and the mask of the bins kept, to bin a
+        second cube of the same frames the same way.
+    threads : int, default 1
+        Number of threads the bins are spread over.
+    then : callable or None, default None
+        Function applied to the binned cube before the bins without data are found, such as a
+        high-pass filter.
+    dtype : numpy dtype, default numpy.float32
+        Precision of the bin means.
+    bkeep : ndarray of bool or None, default None
+        Bins to keep in place of the test for data, such as those another cube of the same frames
+        kept.  None keeps the bins with data (:func:`bins_with_data`).
+
+    Returns
+    -------
+    binned : ndarray, shape (nkeep, ny, nx)
+        The nkeep bins kept.
+    binned_angles : ndarray, shape (nkeep,)
+        Mean parallactic angle of each bin kept, in degrees.
+    grp : ndarray of int, shape (n,)
+        [return_groups=True] Bin number of each input frame.
+    keep : ndarray of bool
+        [return_groups=True] True for each bin kept, one value per bin before the drop.
+
+    Raises
+    ------
+    ValueError
+        If ``bkeep`` does not have one value per bin.
+    """
     angles = np.asarray(angles, float)
     grp = bin_groups(angles, bin_, dth_max_deg)
     if int(round(max(bin_, 1))) <= 1:
@@ -224,11 +431,26 @@ def bin_frames(cube: np.ndarray, angles: np.ndarray, bin_: int, dth_max_deg: flo
 
 
 def bin_values(values: np.ndarray, grp: np.ndarray, bin_: int) -> np.ndarray:
-    """A per-frame quantity averaged over the bin groups ``grp`` exactly as
-    :func:`bin_frames` averages the angles (each frame's own value at ``bin_ <= 1``), before
-    the empty bins are dropped: index the result with ``bin_frames``' ``keep``.  For the
-    frames' true north, so a bin is derotated by its frames' mean angle plus their mean
-    north."""
+    """Average a per-frame quantity over the bins, as :func:`bin_frames` averages the angles.
+
+    Use it for each frame's true north, so a bin is derotated by its mean angle plus its mean north.
+    The result has one value per bin before the bins without data are dropped, so index it with the
+    ``keep`` that :func:`bin_frames` returns.
+
+    Parameters
+    ----------
+    values : ndarray, shape (n,)
+        The quantity's value for each of the n frames.
+    grp : ndarray of int, shape (n,)
+        Bin number of each frame.
+    bin_ : int
+        Binning factor.  1 or less returns a copy of ``values``.
+
+    Returns
+    -------
+    means : ndarray
+        Mean value of each bin.
+    """
     v = np.asarray(values, float)
     if int(round(max(bin_, 1))) <= 1:
         return v.copy()
@@ -237,13 +459,30 @@ def bin_values(values: np.ndarray, grp: np.ndarray, bin_: int) -> np.ndarray:
 
 
 # ----------------------------------------------------------------------------
-# spatial high-pass (IDL smooth() unsharp mask)
+# spatial high-pass (the unsharp mask the IDL predecessor makes with smooth())
 # ----------------------------------------------------------------------------
 def highpass(img: np.ndarray, width: int, nan_aware: bool = False) -> np.ndarray:
-    """``img - smooth(img, width)`` with IDL semantics: boxcar of odd width (even
-    widths are bumped by one); pixels within ``width//2`` of the edge are left
-    unchanged by ``smooth`` so their high-passed value is 0.  ``nan_aware``
-    mirrors ``smooth(/nan)``.  ``width <= 1`` returns the input."""
+    """Subtract a boxcar-smoothed copy of an image from it, an unsharp mask.
+
+    It removes structure wider than about ``width`` pixels, such as the stellar halo, before KLIP.
+    The boxcar width is made odd, and the pixels within ``width // 2`` of the edges come out 0.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx) or (n, ny, nx)
+        One image, or a stack of n images filtered one by one.
+    width : int
+        Width of the boxcar in pixels, raised by one when even.  1 or less returns the input
+        unfiltered, as float32.
+    nan_aware : bool, default False
+        Whether to leave NaN pixels out of the boxcar average.  False lets a NaN spread through the
+        average around it, and either way a NaN pixel stays NaN.
+
+    Returns
+    -------
+    filtered : ndarray
+        Filtered image, the shape of ``img``, in float32.
+    """
     w = int(width)
     if w <= 1:
         return np.asarray(img, np.float32)
@@ -251,9 +490,22 @@ def highpass(img: np.ndarray, width: int, nan_aware: bool = False) -> np.ndarray
 
 
 def _highpass_frames(img: np.ndarray, width: int, nan_aware: bool) -> np.ndarray:
-    """:func:`highpass` of one frame ``(ny, nx)`` or of a block of frames ``(n, ny, nx)``,
-    each frame filtered on its own: the boxcar spans the last two axes only, which
-    ``ndimage`` computes line by line exactly as it does for a single frame."""
+    """Filter one frame or a block of frames as :func:`highpass` does.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx) or (n, ny, nx)
+        One frame, or a block of n frames filtered one by one.
+    width : int
+        Width of the boxcar in pixels, at least 2, raised by one when even.
+    nan_aware : bool
+        Whether to leave NaN pixels out of the boxcar average.
+
+    Returns
+    -------
+    filtered : ndarray
+        Filtered frame or frames, the shape of ``img``, in float32.
+    """
     w = int(width)
     if w % 2 == 0:
         w += 1
@@ -279,11 +531,27 @@ def _highpass_frames(img: np.ndarray, width: int, nan_aware: bool) -> np.ndarray
 
 
 def highpass_stack(cube: np.ndarray, width: int, nan_aware: bool = False, threads: int = 1) -> np.ndarray:
-    """:func:`highpass` of every frame of ``cube``, the same numbers frame for frame.
+    """Apply :func:`highpass` to every frame of a cube, spread over threads.
 
-    The frames are filtered a block at a time, one ``ndimage`` call per block, which runs
-    its loop without holding the GIL, so the blocks can share ``threads`` threads.  Frame
-    by frame, the per-call overhead held the GIL and left a job's other threads idle."""
+    The frames are filtered a block at a time so the threads can run at once.  Each frame comes out
+    as :func:`highpass` gives it.
+
+    Parameters
+    ----------
+    cube : ndarray, shape (n, ny, nx)
+        The n frames, ny by nx pixels each.
+    width : int
+        Width of the boxcar in pixels.  1 or less returns the cube unfiltered, as float32.
+    nan_aware : bool, default False
+        Whether to leave NaN pixels out of the boxcar average.
+    threads : int, default 1
+        Number of threads.
+
+    Returns
+    -------
+    filtered : ndarray, shape (n, ny, nx)
+        Filtered cube, in float32.
+    """
     cube = np.asarray(cube)
     if int(width) <= 1:
         return np.asarray(cube, np.float32)
@@ -301,16 +569,33 @@ def highpass_stack(cube: np.ndarray, width: int, nan_aware: bool = False, thread
 # row / column destriping (reduce_near_2 L1672-1677: destripe(img, 90) then destripe(img, 0))
 # ----------------------------------------------------------------------------
 def destripe(img: np.ndarray, angle_deg: float, clip_level: float = 0.0, max_iter: int = 5) -> np.ndarray:
-    """Subtract a robust offset from every stripe of ``img`` along ``angle_deg``.
+    """Subtract a robust offset from every column or row of an image.
 
-    ``destripe.pro`` is not available; this is the standard robust median
-    destriper it is assumed to be (**assumption**, documented here): ``angle=90``
-    subtracts from each *column* the median of its finite pixels, ``angle=0`` does
-    the same for each *row*.  ``clip_level > 0`` sigma-clips the stripe first
-    (iterated ``max_iter`` times, sigma = 1.4826 MAD about the running median) so
-    bright sources do not bias the offset; ``clip_level = 0`` (the reduce_near_2
-    call) is the plain NaN-median.  Only multiples of 90 degrees are supported.
-    NaNs are preserved.
+    Use it to remove detector stripes.  With ``angle_deg`` 90 each column loses the median of its
+    finite pixels, with 0 each row.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image.  NaN pixels stay NaN.
+    angle_deg : float
+        Direction of the stripes in degrees, 90 for columns and 0 for rows.  Other multiples of 90
+        map onto these, and any other angle raises ValueError.
+    clip_level : float, default 0.0
+        Clipping threshold in sigma, 1.4826 times the median absolute deviation, for leaving bright
+        pixels out of a stripe's median.  0 takes the plain median.
+    max_iter : int, default 5
+        Maximum number of clipping rounds when ``clip_level`` is positive.
+
+    Returns
+    -------
+    destriped : ndarray, shape (ny, nx)
+        Destriped image, in float32.
+
+    Notes
+    -----
+    The IDL predecessor (``reduce_near_2.pro`` L1672-1677) calls a ``destripe.pro`` that was not
+    available.  This is the standard robust median destriper it is assumed to be.
     """
     img = np.asarray(img, np.float64)
     a = float(angle_deg) % 180.0
@@ -345,8 +630,8 @@ def destripe(img: np.ndarray, angle_deg: float, clip_level: float = 0.0, max_ite
 # rotation
 # ----------------------------------------------------------------------------
 #: How NaN input pixels enter the bilinear stencil of :func:`rotate_ccw`.
-#: ``"zero"`` (default) reproduces IDL ``rot(img, -a, /interp)`` as measured on the NEAR
-#: production images: a NaN neighbour contributes 0, so a pixel whose stencil is partly
+#: ``"zero"`` (default) reproduces the IDL predecessor's ``rot(img, -a, /interp)`` as measured
+#: on its NEAR production images: a NaN neighbor contributes 0, so a pixel whose stencil is partly
 #: outside the KLIP zone is damped toward 0 instead of dropped (the zone rim stays
 #: smooth, ~1 px of "coverage" is gained at the rim); the output is NaN only where no
 #: finite input pixel contributes.  ``"propagate"`` NaNs any pixel whose stencil touches
@@ -359,8 +644,24 @@ _ROT: Dict[str, Any] = {"backend": None, "cv2": None, "why": "", "checked": Fals
 
 
 def _cv_warp(cv2, img: np.ndarray, ca: float, sa: float) -> np.ndarray:
-    """``img`` sampled where :func:`_rotation_coords` samples it, by OpenCV's bilinear
-    ``warpAffine`` (float32, the precise path of OpenCV 5), as float64."""
+    """Rotate an image with OpenCV's bilinear ``warpAffine``, sampling where :func:`_rotation_coords` does.
+
+    Parameters
+    ----------
+    cv2 : module
+        The imported OpenCV module.
+    img : ndarray, shape (ny, nx)
+        Image without NaN pixels, which the callers replace.
+    ca : float
+        Cosine of the rotation angle.
+    sa : float
+        Sine of the rotation angle.
+
+    Returns
+    -------
+    rotated : ndarray, shape (ny, nx)
+        Rotated image, in float64.  Pixels whose sample falls outside the image are 0.
+    """
     ny, nx = img.shape
     cx, cy = (nx - 1) / 2.0, (ny - 1) / 2.0
     M = np.array([[ca, sa, cx - ca * cx - sa * cy], [-sa, ca, cy + sa * cx - ca * cy]], np.float64)
@@ -371,9 +672,19 @@ def _cv_warp(cv2, img: np.ndarray, ca: float, sa: float) -> np.ndarray:
 
 
 def _opencv_check():
-    """``(cv2, why)``: OpenCV when it rotates as scipy's bilinear does, to 1e-4 of the peak of a
-    smooth test image, else ``(None, why)``.  OpenCV 4 rounds the sample positions to 1/32 px
-    (5e-3 of the peak) and fails; OpenCV 5 agrees to float32 rounding (4e-6)."""
+    """Check whether OpenCV is installed and rotates as scipy's bilinear interpolation does.
+
+    It rotates a smooth test image with both at three angles and accepts OpenCV when they agree to
+    1e-4 of the image's peak.  OpenCV 5 agrees to float32 rounding, and OpenCV 4, which rounds its
+    sample positions to 1/32 px, does not.  The answer is worked out once and kept.
+
+    Returns
+    -------
+    cv2 : module or None
+        The OpenCV module when it passes, else None.
+    why : str
+        Version of OpenCV that passed, or the reason it did not.
+    """
     if _ROT["checked"]:
         return _ROT["cv2"], _ROT["why"]
     _ROT["checked"] = True
@@ -408,15 +719,29 @@ def _opencv_check():
 
 
 def set_rotation_backend(name: str = "auto") -> str:
-    """Choose the library :func:`rotate_ccw` rotates with, and return the one in use.
+    """Choose the library :func:`rotate_ccw` rotates frames with.
 
-    ``"scipy"``: ``scipy.ndimage.map_coordinates``, the reference.  ``"opencv"``: OpenCV's
-    ``warpAffine`` in float32, about 5 times faster on a 150 x 150 frame, the same numbers to
-    float32 rounding (about 1e-5 of the image's gradient per pixel).  ``"auto"``: OpenCV when
-    it passes :func:`_opencv_check` (OpenCV 5), else scipy.  OpenCV asked for and not usable
-    falls back to scipy with a warning.  The choice goes to ``KLIP_TPE_ROTATE`` too, so worker
-    processes started later rotate alike, and OpenCV is set to one thread
-    (``cv2.setNumThreads(1)``): klip-tpe runs its frames on threads of its own."""
+    Both interpolate bilinearly.  OpenCV's ``warpAffine`` is about 5 times faster than scipy's
+    ``map_coordinates`` on a 150 x 150 frame and gives the same numbers to float32 rounding.  The
+    choice also goes into the environment variable ``KLIP_TPE_ROTATE``, so worker processes started
+    later rotate alike, and OpenCV is set to one thread.
+
+    Parameters
+    ----------
+    name : {"auto", "scipy", "opencv"}, default "auto"
+        Library to use.  "opencv" falls back to scipy with a RuntimeWarning when OpenCV is not
+        usable, and "auto" takes OpenCV when it passes :func:`_opencv_check`, else scipy.
+
+    Returns
+    -------
+    backend : str
+        Library now in use, "scipy" or "opencv".
+
+    Raises
+    ------
+    ValueError
+        If ``name`` is not one of the three.
+    """
     key = str(name or "auto").strip().lower()
     if key not in ROTATION_BACKENDS:
         raise ValueError(f"rotation backend {name!r}: one of {', '.join(ROTATION_BACKENDS)}")
@@ -437,15 +762,29 @@ def set_rotation_backend(name: str = "auto") -> str:
 
 
 def rotation_backend() -> str:
-    """The library :func:`rotate_ccw` rotates with: ``KLIP_TPE_ROTATE`` (``auto`` | ``scipy`` |
-    ``opencv``, default ``auto``) the first time, else what :func:`set_rotation_backend` chose."""
+    """Return the library :func:`rotate_ccw` rotates with.
+
+    The first call reads the environment variable ``KLIP_TPE_ROTATE`` ("auto", "scipy" or "opencv",
+    default "auto") and passes it to :func:`set_rotation_backend`.
+
+    Returns
+    -------
+    backend : str
+        "scipy" or "opencv".
+    """
     if _ROT["backend"] is None:
         set_rotation_backend(os.environ.get("KLIP_TPE_ROTATE", "auto"))
     return _ROT["backend"]
 
 
 def rotation_info() -> str:
-    """``"opencv 5.0.0"`` or ``"scipy 1.15.3"``, for a run's record."""
+    """Return the rotation library and its version, for a run's record.
+
+    Returns
+    -------
+    info : str
+        Library and version, such as "opencv 5.0.0" or "scipy 1.15.3".
+    """
     if rotation_backend() == "opencv" and _ROT["cv2"] is not None:
         return f"opencv {_ROT['cv2'].__version__}"
     import scipy
@@ -454,10 +793,31 @@ def rotation_info() -> str:
 
 def rotate_ccw(img: np.ndarray, angle_deg: float, cval: float = np.nan, order: int = 1,
                nan_mode: Optional[str] = None) -> np.ndarray:
-    """Rotate an image counter-clockwise by ``angle_deg`` about ``((nx-1)/2, (ny-1)/2)``
-    with bilinear interpolation (IDL ``rot(img, -angle, /interp)``).  NaN handling per
-    ``nan_mode`` (default :data:`ROT_NAN_MODE`); pixels mapping outside the input are
-    ``cval`` (NaN by default; IDL leaves them 0 and the callers mask them by coverage)."""
+    """Rotate an image counter-clockwise about the star with bilinear interpolation.
+
+    The center of rotation is ``((nx-1)/2, (ny-1)/2)``, where klip-tpe keeps the star, and
+    counter-clockwise is with x to the right and y up.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image, ny by nx pixels.  NaN pixels are handled as ``nan_mode`` says.
+    angle_deg : float
+        Rotation angle, counter-clockwise, in degrees.  0 returns a copy.
+    cval : float, default numpy.nan
+        Value of output pixels whose sample falls outside the image.
+    order : int, default 1
+        Spline order of the interpolation, 1 for bilinear.  Higher orders always go through scipy.
+    nan_mode : {"zero", "propagate"} or None, default None
+        "zero" counts a NaN neighbor as 0, giving NaN only where no finite pixel contributes.
+        "propagate" gives NaN wherever a NaN pixel contributes.  None takes :data:`ROT_NAN_MODE`,
+        which is "zero".
+
+    Returns
+    -------
+    rotated : ndarray, shape (ny, nx)
+        Rotated image, in float64.
+    """
     img = np.asarray(img, float)
     if angle_deg == 0.0:
         return img.copy()
@@ -485,21 +845,32 @@ def rotate_ccw(img: np.ndarray, angle_deg: float, cval: float = np.nan, order: i
     if not (order == 1 and fin.all()):
         if mode == "propagate":
             out[(w < 1.0 - 1e-6) & inside] = np.nan
-        else:                                  # "zero": NaN neighbours count as 0, no-coverage -> NaN
+        else:                                  # "zero": NaN neighbors count as 0, no-coverage -> NaN
             out[(w <= 1e-6) & inside] = np.nan
     out[~inside] = cval
     return out
 
 
 def rotate_ccw_many(img: np.ndarray, angles_deg: Sequence[float], cval: float = np.nan) -> np.ndarray:
-    """:func:`rotate_ccw` of one image by each of ``angles_deg``, as an ``(n, ny, nx)`` array
-    whose plane ``j`` holds the numbers ``rotate_ccw(img, angles_deg[j], cval=cval)`` gives.
+    """Rotate one image by each of several angles, as :func:`rotate_ccw` does one angle at a time.
 
-    The sines and cosines are taken angle by angle as :func:`rotate_ccw` takes them, the
-    sample positions come from the same :func:`_rotation_coords`, and one interpolation
-    call samples them all.  It computes every output pixel from its own position alone,
-    so the planes do not depend on each other, and it runs without the GIL.  An image
-    with a non-finite pixel is rotated angle by angle by :func:`rotate_ccw` itself."""
+    A finite image is sampled for all the angles in one interpolation call, and an image with a NaN
+    pixel is rotated angle by angle.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image, ny by nx pixels.
+    angles_deg : sequence of float
+        The n rotation angles, counter-clockwise, in degrees.
+    cval : float, default numpy.nan
+        Value of output pixels whose sample falls outside the image.
+
+    Returns
+    -------
+    rotated : ndarray, shape (n, ny, nx)
+        Rotated images, plane ``j`` equal to ``rotate_ccw(img, angles_deg[j], cval=cval)``.
+    """
     img = np.asarray(img, float)
     n = len(angles_deg)
     ny, nx = img.shape
@@ -530,10 +901,26 @@ def rotate_ccw_many(img: np.ndarray, angles_deg: Sequence[float], cval: float = 
 
 
 def _rotation_coords(ny: int, nx: int, ca, sa) -> Tuple[np.ndarray, np.ndarray]:
-    """Input positions ``(xs, ys)`` that a CCW rotation with cosine ``ca`` and sine ``sa``
-    samples for each output pixel, about ``((nx-1)/2, (ny-1)/2)``.  ``ca``/``sa`` are
-    scalars for one rotation or ``(n, 1, 1)`` arrays for ``n`` of them, with the same
-    arithmetic element by element either way."""
+    """Compute the input position a counter-clockwise rotation samples for each output pixel.
+
+    Parameters
+    ----------
+    ny : int
+        Number of rows in the image.
+    nx : int
+        Number of columns in the image.
+    ca : float or ndarray
+        Cosine of the angle, a number for one rotation or an (n, 1, 1) array for n of them.
+    sa : float or ndarray
+        Sine of the angle, shaped as ``ca``.
+
+    Returns
+    -------
+    xs : ndarray, shape (ny, nx) or (n, ny, nx)
+        The x position sampled for each output pixel.
+    ys : ndarray
+        The y position sampled for each output pixel, shaped as ``xs``.
+    """
     cx, cy = (nx - 1) / 2.0, (ny - 1) / 2.0
     dx, dy = _centred_grid(ny, nx)
     xs = cx + ca * dx + sa * dy
@@ -545,8 +932,22 @@ _GRIDS: Dict[Tuple[int, int], Tuple[np.ndarray, np.ndarray]] = {}
 
 
 def _centred_grid(ny: int, nx: int) -> Tuple[np.ndarray, np.ndarray]:
-    """Pixel offsets ``(x - cx, y - cy)`` from the frame centre, kept per frame shape
-    (read-only) instead of rebuilt for every rotation."""
+    """Return each pixel's offset from the frame center ``((nx-1)/2, (ny-1)/2)``, cached per shape.
+
+    Parameters
+    ----------
+    ny : int
+        Number of rows in the frame.
+    nx : int
+        Number of columns in the frame.
+
+    Returns
+    -------
+    dx : ndarray, shape (ny, nx)
+        The x offset of each pixel, read-only.
+    dy : ndarray, shape (ny, nx)
+        The y offset of each pixel, read-only.
+    """
     g = _GRIDS.get((ny, nx))
     if g is None:
         yy, xx = np.mgrid[0:ny, 0:nx]
@@ -560,10 +961,31 @@ def _centred_grid(ny: int, nx: int) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def derotate(cube: np.ndarray, angles: np.ndarray, truenorth=0.0, threads: int = 1) -> np.ndarray:
-    """Rotate every frame CCW by ``angle + truenorth`` (sky North up after this).
-    ``truenorth``: one angle (deg), or one per frame (the frames' own true north, averaged
-    over each bin as the angles are: :func:`bin_values`).  ``threads``: the frames go to that
-    many threads, each rotated as before."""
+    """Rotate each frame to north up.
+
+    Frame ``i`` turns counter-clockwise by ``angles[i] + truenorth`` about the star.
+
+    Parameters
+    ----------
+    cube : ndarray, shape (n, ny, nx)
+        The n frames to rotate, ny by nx pixels each.
+    angles : ndarray, shape (n,)
+        Parallactic angle of each frame, in degrees.
+    truenorth : float or ndarray, default 0.0
+        True-north offset added to each frame's angle, in degrees.  One value, or one per frame.
+    threads : int, default 1
+        Number of threads the frames are spread over.
+
+    Returns
+    -------
+    derot : ndarray, shape (n, ny, nx)
+        Derotated frames, in float32.  Pixels rotated in from outside the frame are NaN.
+
+    Raises
+    ------
+    ValueError
+        If ``truenorth`` has one value per frame but not n of them.
+    """
     out = np.empty_like(cube, dtype=np.float32)
     per = np.ndim(truenorth) > 0
     if per:
@@ -583,18 +1005,31 @@ def derotate(cube: np.ndarray, angles: np.ndarray, truenorth=0.0, threads: int =
 # ----------------------------------------------------------------------------
 def nw_ang_comb(derot_cube: np.ndarray, angles: np.ndarray, ref_cube: Optional[np.ndarray] = None,
                 threads: int = 1) -> np.ndarray:
-    """Coverage-weighted inverse-variance mean of an already-derotated cube.  The
-    per-pixel temporal variance is measured in the pupil frame (frames rotated back
-    by ``angles``), floored at ``median(var>0)*1e-6``, rotated forward again and
-    used as the weight; frames that are NaN at a pixel get zero weight there.
+    """Combine derotated frames into one image, each pixel weighted by its inverse variance.
 
-    ``ref_cube`` (``nw_ang_comb_ref.pro``): measure the variance -- i.e. the
-    weights -- on this derotated cube (the SCIENCE residuals) instead of on the
-    input, so a noiseless model cube is averaged with exactly the weights the
-    science frames received (the linear forward model of the nwadi combine).
+    This is the noise-weighted ADI combination.  Each pixel's variance over time is measured in the
+    pupil frame, floored at 1e-6 of the median variance, and rotated with each frame.  A frame that
+    is NaN at a pixel gives no weight there.
 
-    ``threads``: the rotations, three per frame, go to that many threads.  The weighted
-    sums are still taken in frame order, so the result is the one-thread result."""
+    Parameters
+    ----------
+    derot_cube : ndarray, shape (n, ny, nx)
+        The n derotated frames, ny by nx pixels each.
+    angles : ndarray, shape (n,)
+        Parallactic angle of each frame, in degrees, used to turn the frames back to the pupil
+        frame.  A true-north offset common to all frames can be left out.
+    ref_cube : ndarray or None, default None
+        Derotated cube of the same shape whose variance sets the weights, such as the science
+        residuals when combining KLIP-FM model frames.  None weighs ``derot_cube`` by its own
+        variance.
+    threads : int, default 1
+        Number of threads for the rotations.
+
+    Returns
+    -------
+    image : ndarray, shape (ny, nx)
+        Combined image, NaN where no frame has data.  A single frame comes back as it is.
+    """
     n = derot_cube.shape[0]
     if n == 1:
         return np.asarray(derot_cube[0], float)
@@ -656,9 +1091,25 @@ def nw_ang_comb(derot_cube: np.ndarray, angles: np.ndarray, ref_cube: Optional[n
 
 
 def nw_ang_comb_ref(in_cube: np.ndarray, angles: np.ndarray, ref_cube: np.ndarray) -> np.ndarray:
-    """``nw_ang_comb_ref.pro``: combine ``in_cube`` (e.g. derotated KLIP-FM
-    residuals) with the per-pixel inverse-variance weights of ``ref_cube`` (the
-    derotated science residuals).  Coverage comes from ``in_cube``."""
+    """Combine one derotated cube with the noise weights of another, as :func:`nw_ang_comb` does.
+
+    Use it to combine derotated KLIP-FM model frames with the weights of the derotated science
+    residuals.
+
+    Parameters
+    ----------
+    in_cube : ndarray, shape (n, ny, nx)
+        The n derotated frames to combine.  Its NaN pixels set the coverage.
+    angles : ndarray, shape (n,)
+        Parallactic angle of each frame, in degrees.
+    ref_cube : ndarray, shape (n, ny, nx)
+        Derotated frames whose variance sets the weights.
+
+    Returns
+    -------
+    image : ndarray, shape (ny, nx)
+        Combined image.
+    """
     return nw_ang_comb(in_cube, angles, ref_cube=ref_cube)
 
 
@@ -666,15 +1117,40 @@ def nw_ang_comb_ref(in_cube: np.ndarray, angles: np.ndarray, ref_cube: np.ndarra
 # KLIP core
 # ----------------------------------------------------------------------------
 def _eig_desc(C: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Eigenvalues and eigenvectors of the symmetric ``C``, the largest first."""
+    """Eigen-decompose a symmetric matrix, the largest eigenvalue first.
+
+    Parameters
+    ----------
+    C : ndarray, shape (m, m)
+        Symmetric matrix.
+
+    Returns
+    -------
+    lam : ndarray, shape (m,)
+        Eigenvalues, from the largest to the smallest.
+    V : ndarray, shape (m, m)
+        Eigenvectors as columns, in the order of ``lam``.
+    """
     lam, V = np.linalg.eigh(C)
     order = np.argsort(lam)[::-1]
     return lam[order], V[:, order]
 
 
 def _basis_scale(lam: np.ndarray, tol: float) -> np.ndarray:
-    """``1 / sqrt(lambda)`` for the modes :func:`klip_basis` keeps (eigenvalue at least
-    ``tol``), 0 for the others."""
+    """Compute each KL mode's normalization ``1 / sqrt(lam)``, 0 for the modes dropped.
+
+    Parameters
+    ----------
+    lam : ndarray
+        Eigenvalues of the references' covariance matrix, the largest first.
+    tol : float
+        Minimum eigenvalue a mode keeps.  Modes below it get a scale of 0.
+
+    Returns
+    -------
+    scale : ndarray
+        Scale of each mode, one per eigenvalue.
+    """
     lam = np.where(lam < tol, 0.0, lam)
     with np.errstate(divide="ignore", invalid="ignore"):
         return np.where(lam > 0, 1.0 / np.sqrt(np.where(lam > 0, lam, 1.0)), 0.0)
@@ -682,11 +1158,35 @@ def _basis_scale(lam: np.ndarray, tol: float) -> np.ndarray:
 
 def _klip_basis_eig(R: np.ndarray, k: int, spat_mean: bool = False, temp_mean: bool = False,
                     tol: float = 1e-6, only_k: bool = False):
-    """:func:`klip_basis` and what it decomposed: ``(Z, lam, V, R)``, the modes, the
-    eigenvalues of ``R R^T`` (the largest first, before the ``tol`` cut), its eigenvectors
-    and ``R`` as decomposed (float64, centred when asked).  ``only_k`` forms the first
-    ``k`` modes alone, where the default forms all ``M`` and keeps the first ``k``.  They
-    are the same modes, though not necessarily to the bit."""
+    """Compute the KL modes of a set of reference frames, with the eigen-decomposition behind them.
+
+    Parameters
+    ----------
+    R : ndarray, shape (m, p) or (p,)
+        Pixels of the m reference frames, p pixels each, or of one frame.
+    k : int
+        Number of modes to return, clamped to 1 to m.
+    spat_mean : bool, default False
+        Whether to subtract each frame's mean over its pixels first.
+    temp_mean : bool, default False
+        Whether to subtract the frames' mean frame first.
+    tol : float, default 1e-6
+        Minimum eigenvalue a mode keeps.  Modes below it are rows of zeros.
+    only_k : bool, default False
+        Whether to form only the first ``k`` modes.  False forms all m and keeps the first ``k``,
+        the same modes though not always to the bit.
+
+    Returns
+    -------
+    Z : ndarray, shape (k, p)
+        KL modes as rows.
+    lam : ndarray
+        Eigenvalues of ``R R^T``, the largest first, before the ``tol`` cut.
+    V : ndarray
+        Eigenvectors of ``R R^T`` as columns, in the order of ``lam``.
+    R : ndarray
+        Reference frames as decomposed, in float64, with the means subtracted when asked.
+    """
     R = np.asarray(R, np.float64)
     if R.ndim == 1:
         R = R[None, :]
@@ -707,10 +1207,30 @@ def _klip_basis_eig(R: np.ndarray, k: int, spat_mean: bool = False, temp_mean: b
 
 def klip_basis(R: np.ndarray, k: int, spat_mean: bool = False, temp_mean: bool = False,
                tol: float = 1e-6) -> np.ndarray:
-    """KL basis of the reference matrix ``R`` (M frames x N pixels), Soummer et al.
-    2012 as in ``get_klip_basis_new``: eigen-decompose ``R R^T`` (float64), drop
-    eigenvalues below ``tol``, ``Z_m = R^T v_m / sqrt(lambda_m)``.  Returns the first
-    ``min(k, M)`` modes as rows (modes with zero eigenvalue are zero rows)."""
+    """Compute the KL basis of a set of reference frames (Soummer et al. 2012).
+
+    It eigen-decomposes ``R R^T`` in float64, drops the eigenvalues below ``tol`` and forms the
+    modes ``Z_j = R^T v_j / sqrt(lam_j)``, where ``v_j`` and ``lam_j`` are the j-th eigenvector
+    and eigenvalue.
+
+    Parameters
+    ----------
+    R : ndarray, shape (m, p)
+        Pixels of the m reference frames, p pixels each.
+    k : int
+        Number of modes to return, clamped to 1 to m.
+    spat_mean : bool, default False
+        Whether to subtract each frame's mean over its pixels first.
+    temp_mean : bool, default False
+        Whether to subtract the frames' mean frame first.
+    tol : float, default 1e-6
+        Minimum eigenvalue a mode keeps.  Modes below it are rows of zeros.
+
+    Returns
+    -------
+    Z : ndarray, shape (min(k, m), p)
+        The first ``min(k, m)`` modes, as rows of unit norm.
+    """
     return _klip_basis_eig(R, k, spat_mean, temp_mean, tol)[0]
 
 
@@ -719,12 +1239,45 @@ ZONE_ANGLES = ("ccw", "getzone2015")
 
 def zone_indices(shape: Tuple[int, int], inrad: float, outrad: float, a0_deg: float, a1_deg: float,
                  center: Optional[Tuple[float, float]] = None, angles: str = "ccw") -> np.ndarray:
-    """Flat indices of the pixels with ``inrad <= r <= outrad`` and ``a0 <= ang <= a1``
-    (inclusive, degrees).  ``center`` defaults to ``(nx/2, ny/2)`` -- the
-    IDL ``getzone`` convention (half a pixel off the star for even sizes; kept for
-    fidelity, only the zone mask is affected).  ``angles='ccw'``: ``ang`` CCW from +x in
-    ``[0, 360)``; ``'getzone2015'``: ``atan2 + 180`` in ``(0, 360]``, as the 2015 ``getzone`` /
-    ``angmask`` measure it (CCW from -x), so its sectors are the same pixels in the same order."""
+    """Return the pixels of an annular sector, as flat indices into an image.
+
+    A pixel belongs when its distance ``r`` from ``center`` has ``inrad <= r <= outrad`` and its
+    azimuth lies from ``a0_deg`` to ``a1_deg``, both ends included.
+
+    Parameters
+    ----------
+    shape : tuple of int
+        Shape of the image, ``(ny, nx)``.
+    inrad : float
+        Inner radius of the sector, in pixels.
+    outrad : float
+        Outer radius of the sector, in pixels.
+    a0_deg : float
+        First azimuth of the sector, in degrees.
+    a1_deg : float
+        Last azimuth of the sector, in degrees.
+    center : tuple of 2 floats or None, default None
+        The ``(x, y)`` position the radii and azimuths are measured from.  None takes
+        ``(nx/2, ny/2)``, half a pixel from the star at ``((nx-1)/2, (ny-1)/2)``.
+    angles : {"ccw", "getzone2015"}, default "ccw"
+        Azimuth convention.  "ccw" counts counter-clockwise from +x over [0, 360), and
+        "getzone2015" counter-clockwise from -x over (0, 360].
+
+    Returns
+    -------
+    idx : ndarray of int
+        Flat indices ``row * nx + column`` of the sector's pixels, in increasing order.
+
+    Raises
+    ------
+    ValueError
+        If ``angles`` is not one of the two.
+
+    Notes
+    -----
+    "getzone2015" reproduces the sectors of the IDL predecessor's 2015 ``getzone`` routine, the
+    same pixels in the same order.
+    """
     ny, nx = shape
     if center is None:
         center = (nx / 2.0, ny / 2.0)
@@ -741,14 +1294,52 @@ def zone_indices(shape: Tuple[int, int], inrad: float, outrad: float, a0_deg: fl
 
 
 def arcdist_deg(inrad: float, outrad: float, lam_over_d_px: float) -> float:
-    """Degrees of parallactic rotation per unit ``angsep`` (one lambda/D of arc at the
-    annulus mid-radius)."""
+    """Compute the field rotation that moves a source by lambda/D at an annulus' middle radius.
+
+    Multiply ``angsep``, in lambda/D, by it to get degrees.
+
+    Parameters
+    ----------
+    inrad : float
+        Inner radius of the annulus, in pixels.
+    outrad : float
+        Outer radius of the annulus, in pixels.
+    lam_over_d_px : float
+        lambda/D in pixels.
+
+    Returns
+    -------
+    arcdist : float
+        Field rotation in degrees, ``360 * lam_over_d_px / (2 pi r_mid)`` for the middle radius
+        ``r_mid = (inrad + outrad) / 2``, at least 1 px.
+    """
     mid = inrad + abs(outrad - inrad) / 2.0
     mid = max(mid, 1.0)
     return 360.0 * lam_over_d_px / (2.0 * np.pi * mid)
 
 
 def reference_mask(angles: np.ndarray, target: int, angsep_deg: float, anglemax: float) -> np.ndarray:
+    """Select the frames that may serve as references for a target frame, by the ADI rule.
+
+    A frame qualifies when its parallactic angle differs from the target's by at least
+    ``angsep_deg`` and at most ``anglemax`` degrees.  The target itself never does.
+
+    Parameters
+    ----------
+    angles : ndarray, shape (n,)
+        Parallactic angles of the n frames, in degrees.
+    target : int
+        Index of the target frame.
+    angsep_deg : float
+        Minimum difference of angle, in degrees.
+    anglemax : float
+        Maximum difference of angle, in degrees.
+
+    Returns
+    -------
+    mask : ndarray of bool, shape (n,)
+        True for each frame that qualifies.
+    """
     dpa = np.abs(angles - angles[target])
     m = (dpa >= angsep_deg) & (dpa <= anglemax)
     m[target] = False
@@ -757,92 +1348,68 @@ def reference_mask(angles: np.ndarray, target: int, angsep_deg: float, anglemax:
 
 @dataclass
 class KLIPParams:
-    """Settings for one KLIP reduction made by :func:`klip_annular`.
+    """Settings for one annular KLIP PSF subtraction (Soummer et al. 2012) by :func:`klip_annular`.
 
-    KLIP (Karhunen-Loeve Image Projection) removes the star's light from each frame of an
-    observation.  For each frame being cleaned, the *target* frame, it builds a model of the
-    starlight from other frames, the *reference* frames, and subtracts that model.  What is
-    left of a frame after the subtraction is its *residual* frame, ideally noise plus the
-    light of any planet.  The subtraction is done in a ring around the star, the *zone*,
-    which may be cut into sectors.
+    The subtraction runs in an annulus around the star, the zone, optionally cut into azimuthal
+    sectors with a KL basis each.  The cube holds n frames of ny by nx pixels.
 
     Attributes
     ----------
     k_klip : int, default 10
-        The number of KL modes subtracted from each frame.  KL modes are the main patterns in
-        which the starlight varies from one reference frame to the next, ordered from the
-        strongest to the weakest.  More modes remove more starlight but also more of a
-        planet's light, and 0 subtracts nothing.
+        Number of KL modes in the PSF model.  0 subtracts nothing.
     inrad : float, default 0.0
-        The inner radius of the zone, in pixels from the star.  Pixels closer to the star are
-        not reduced and are NaN ("not a number", an empty pixel) in the output.
+        Inner radius of the zone, in pixels.  Pixels inside it come out NaN.
     outrad : float, default 70.0
-        The outer radius of the zone, in pixels from the star.  Pixels farther from the star
-        are not reduced and are NaN in the output.
+        Outer radius of the zone, in pixels.  Pixels beyond it come out NaN.
     n_ang : int, default 1
-        The number of equal sectors, like slices of a pie, that the zone is cut into.  Each
-        sector gets its own model of the starlight, which can follow patterns that differ
-        around the star.  1 reduces the whole ring at once.
+        Number of equal azimuthal sectors in the zone.
     fast : bool, default False
-        False builds a separate starlight model for every target frame, from only the
-        reference frames that ``angsep`` and ``anglemax`` allow.  True builds one model per
-        zone from all the frames, the target included, and subtracts it from every frame.
-        That is quicker but removes more of a planet's light.
+        Whether to build one KL basis per sector from all frames, the target included, instead of
+        one per target frame from the references ``angsep`` and ``anglemax`` allow.  It is faster
+        and self-subtracts more.
     angsep : float, default 0.0
-        The least rotation of the sky a reference frame needs relative to the target frame,
-        in lambda/D of arc at the middle of the zone (lambda/D, the wavelength over the
-        telescope's diameter, is about the width of the star's image).  The sky, and so a
-        planet, turns around the star during the night, so a reference frame taken long
-        enough before or after the target holds the planet elsewhere and does not subtract
-        it.  0 allows every other frame.
+        Minimum field rotation between a target frame and its references, in lambda/D at the
+        zone's middle radius.
     anglemax : float, default 360.0
-        The most rotation of the sky, in degrees, a reference frame may have relative to the
-        target frame.  Frames taken long before or after the target match its starlight less
-        well.  360 sets no limit.
+        Maximum field rotation between a target frame and its references, in degrees.
     n_min_ref : int, default 10
-        The fewest reference frames a target frame needs when ``fast`` is False.  A frame with
-        fewer is left out of the result (all NaN).  If that would leave out so many frames
-        that fewer than ``max(n_min_ref, n/4)`` remain, no frame is left out.
+        Minimum number of references for a target frame when ``fast`` is False.  A frame with
+        fewer comes out NaN, unless that would leave fewer than ``max(n_min_ref, ceil(n/4))``
+        frames, and then none is dropped.
     spat_mean : bool, default False
-        True subtracts each frame's average over the zone (or sector) before the modelling,
-        so that only the variations around the average are modelled.  False leaves the
-        frames as they are.
+        Whether to subtract each frame's mean over the sector before the projection.
     temp_mean : bool, default False
-        True subtracts the average of the reference frames, pixel by pixel, from the target
-        and from the references before the modelling.  False leaves them as they are.
+        Whether to subtract the references' mean frame from the target and the references before
+        the projection.
     k_scan : bool, default False
-        True returns the residual frames for every number of KL modes from 1 to ``k_klip``,
-        not only for ``k_klip``.  The output then has an extra first dimension of length
-        ``k_klip``, so one call compares all those numbers of modes.
-    zone_center : tuple of 2 floats, or None, default None
-        The ``(x, y)`` pixel position the zone's radii and sectors are measured from.  None
-        takes ``(nx/2, ny/2)`` as the IDL code does, half a pixel from the star at
-        ``((nx-1)/2, (ny-1)/2)``, where the rotations of the frames are centred.
+        Whether to return the residuals for every number of KL modes from 1 to ``k_klip``, as a
+        first axis of length ``k_klip``.
+    zone_center : tuple of 2 floats or None, default None
+        The ``(x, y)`` pixel the zone's radii and sectors are measured from.  None takes
+        ``(nx/2, ny/2)``, half a pixel from the star at ``((nx-1)/2, (ny-1)/2)``.
     threads : int, default 1
-        The number of CPU threads that share the target frames when ``fast`` is False.  More
-        threads finish sooner on a computer with several cores, and the result is the same.
+        Number of CPU threads that share the target frames when ``fast`` is False.
     ref_lib : ReferenceLibrary or None, default None
-        A library of candidate reference frames, for RDI (reference-star differential
-        imaging), ranked by how well each matches each target frame
-        (:class:`klip_tpe.reflib.ReferenceLibrary`).  With one, the ``ref_cube`` given to
-        :func:`klip_annular` is the pool of candidates, and every target frame takes its own
-        best-matching frames from it.  None uses no library.
-    ref_keep : dict or None, default None
-        With ``ref_lib``, how many frames each group of the library gives every target, as
-        ``{group name: count}``.  A group not listed gives its most.
+        Library of RDI reference frames ranked by similarity to each target frame
+        (:class:`klip_tpe.reflib.ReferenceLibrary`).  With one, each target takes its best matches
+        from the ``ref_cube`` given to :func:`klip_annular`.
+    ref_keep : dict of str to int, or None, default None
+        Number of frames each group of ``ref_lib`` gives each target, as ``{group: count}``.  A
+        group left out gives its most.
     gram : {"target", "zone"}, default "target"
-        How the starlight model is computed when ``fast`` is False.  "target" computes it from
-        the reference frames' pixels for every target frame.  "zone" computes the product of
-        every pair of frames once per zone and reads each target's model off those products,
-        which is quicker and gives the same result to rounding.
-    arc_radii : tuple of 2 floats, or None, default None
-        The ``(inner, outer)`` radii in pixels whose middle is the radius at which ``angsep``
-        is turned into degrees of rotation.  klip-tpe sets it when the zone reaches beyond
-        the ring being optimized.  None takes ``inrad`` and ``outrad``.
+        How the per-target projection is computed when ``fast`` is False.  "target" builds each
+        target's KL modes from its references, and "zone" projects through the sector's Gram
+        matrix, computed once, which is faster and equal to rounding.
+    arc_radii : tuple of 2 floats or None, default None
+        The ``(inner, outer)`` radii in pixels whose middle sets where ``angsep`` converts to
+        degrees.  None takes ``inrad`` and ``outrad``.
     zone_angles : {"ccw", "getzone2015"}, default "ccw"
-        How the sectors' angles are measured around ``zone_center``.  "ccw" measures
-        counterclockwise from the +x axis.  "getzone2015" measures as the 2015 IDL
-        ``getzone`` does, so the sectors hold the same pixels in the same order.
+        Axis the sector azimuths are counted from.  "ccw" counts counter-clockwise from +x, and
+        "getzone2015" counter-clockwise from -x.
+
+    Notes
+    -----
+    "getzone2015" reproduces the sectors of the IDL predecessor's 2015 ``getzone`` routine.
     """
     k_klip: int = 10
     inrad: float = 0.0
@@ -884,26 +1451,49 @@ _FM_TOL = 1e-6                   # eigenvalue tolerance of get_klip_basis_new / 
 def klip_fm_zone(R: np.ndarray, Mref: Optional[np.ndarray], T: np.ndarray, Mtar: np.ndarray, k: int,
                  fm_selfsub: bool = True, eig: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None
                  ) -> np.ndarray:
-    """KLIP-FM (Pueyo 2016, first order) of one zone -- ``multiklip.pro`` L365-403
-    (fast path) / L494-527 (per-target path), same math.
+    """Forward-model a planet through KLIP in one zone (KLIP-FM, Pueyo 2016, to first order).
 
-    ``R``    (nref, npx)  raw basis-building frames (NaN already zeroed);
-    ``Mref`` (nref, npx)  the planet model as it appears in those frames, or None
-                          (planet-free reference library -> no basis perturbation);
-    ``T``    (ntar, npx)  the target (stellar) frames as projected by KLIP;
-    ``Mtar`` (ntar, npx)  the model in the target frames.
+    The forward model includes the planet's over-subtraction and its self-subtraction, the change of
+    the KL modes the planet in the references causes.  With the references' KL modes ``Z_k`` and
+    their first-order change ``dZ_k``::
 
-    Returns ``FM = M - sum_k [<M,Z_k>Z_k + <S,dZ_k>Z_k + <S,Z_k>dZ_k]`` (the two
-    perturbation terms only when ``fm_selfsub``), with ``Z_k = R^T u_k / sqrt(l_k)``
-    and the first-order eigen-perturbation from ``dC = R M^T + M R^T``::
+        FM = Mtar - sum_k [ <Mtar, Z_k> Z_k + <T, dZ_k> Z_k + <T, Z_k> dZ_k ]
 
-        dl_k  = u_k . dC u_k
-        du_k  = sum_{j != k, |l_k - l_j| > 1e-6 max(|l_k|, 1)} (u_j . dC u_k) / (l_k - l_j) u_j
-        dZ_k  = -dl_k / (2 l_k) Z_k + (R^T du_k + M^T u_k) / sqrt(l_k)
+    where ``<a, b>`` is a dot product over the zone's pixels.
 
-    ``eig``: ``(lam, U, Zb)`` already worked out for this ``R`` -- the eigenvalues of
-    ``R R^T`` (the largest first), its eigenvectors and, or None, the first ``k`` modes as
-    above -- so that the decomposition the KLIP basis made is not made a second time.
+    Parameters
+    ----------
+    R : ndarray, shape (nref, npx)
+        Pixels of the nref reference frames in the zone, npx of them, NaN replaced by 0.
+    Mref : ndarray or None
+        Planet model in the reference frames, shape (nref, npx).  None, for a planet-free RDI
+        library, leaves the KL modes unperturbed.
+    T : ndarray, shape (ntar, npx)
+        Pixels of the ntar target frames in the zone, as KLIP projects them.
+    Mtar : ndarray, shape (ntar, npx)
+        Planet model in the target frames.
+    k : int
+        Number of KL modes.  0 returns ``Mtar`` unchanged.
+    fm_selfsub : bool, default True
+        Whether to include the self-subtraction terms, the two with ``dZ_k``.  False keeps only the
+        over-subtraction, as a diagnostic.
+    eig : tuple or None, default None
+        Decomposition of ``R R^T`` already made for this ``R``, as its eigenvalues (the largest
+        first), its eigenvectors, and its first ``k`` modes or None.  None decomposes again.
+
+    Returns
+    -------
+    fm : ndarray, shape (ntar, npx)
+        Forward-modeled planet.
+
+    Notes
+    -----
+    The first-order change comes from ``dC = R Mref^T + Mref R^T``, with ``l_k`` and ``u_k`` the
+    eigenvalues and eigenvectors of ``R R^T`` and ``Z_k = R^T u_k / sqrt(l_k)``:
+    ``dl_k = u_k . dC u_k``, ``du_k = sum_{j != k} (u_j . dC u_k) / (l_k - l_j) u_j`` over
+    eigenvalues that differ by more than 1e-6 of ``max(|l_k|, 1)``, and
+    ``dZ_k = -dl_k / (2 l_k) Z_k + (R^T du_k + Mref^T u_k) / sqrt(l_k)``.  The IDL predecessor
+    does the same in ``multiklip.pro`` L365-403 (one basis) and L494-527 (per target).
     """
     R = np.asarray(R, np.float64)
     T = np.asarray(T, np.float64)
@@ -953,81 +1543,79 @@ def klip_fm_zone(R: np.ndarray, Mref: Optional[np.ndarray], T: np.ndarray, Mtar:
 def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d_px: float,
                  log=None, fm_cube: Optional[np.ndarray] = None, ref_cube: Optional[np.ndarray] = None,
                  fm_ref_cube: Optional[np.ndarray] = None, fm_selfsub: bool = True):
-    """Annular KLIP PSF subtraction of a cube: each frame's residuals, not yet derotated or
-    combined.
+    """Run annular KLIP PSF subtraction on a cube and return each frame's residuals.
 
-    Inputs:
+    For every target frame and every sector of the zone, it projects the frame onto the first
+    ``p.k_klip`` KL modes of its references and subtracts that PSF model.  The modes come from one
+    basis per sector (``p.fast``) or from each target's own references, chosen by the ADI rule
+    (:func:`reference_mask`).  The residuals are neither derotated nor combined.
 
-    ``cube``
-        ``(n, ny, nx)``, the science frames as observed (pupil-stabilized, not derotated),
-        the star at ``((nx-1)/2, (ny-1)/2)``, the centre the rotations use.  klip-tpe's
-        reducer passes them frame-selected, injected, high-passed and binned
-        (:meth:`~klip_tpe.reducer.KLIPReducer._subtract`).  NaN pixels enter the basis and
-        the projection as 0, so their residuals come out finite.
-    ``angles``
-        ``(n,)``, each frame's parallactic angle in degrees (a bin's mean angle).  Only the
-        differences between frames are used here, to choose each target's references, so
-        a constant offset such as true north does not matter.  :func:`derotate` applies the
-        angles afterward.
-    ``p``
-        A :class:`KLIPParams`: ``k_klip`` modes (0: no subtraction), the zone
-        ``inrad``-``outrad`` (px) in ``n_ang`` sectors, the reference window from
-        ``angsep`` (lambda/D of arc at the zone's mid radius) to ``anglemax`` (deg),
-        ``n_min_ref``, ``fast`` and ``k_scan``.
-    ``lam_over_d_px``
-        lambda/D in px, ``(lam / D) * 206265 / pxscale``, which turns ``angsep`` into
-        degrees of rotation (:func:`arcdist_deg`).
-    ``log``
-        None, or a callable that takes a message when ``k_klip`` is capped (below).
-    ``ref_cube``
-        ``(m, ny, nx)`` or None.  RDI / ARDI (``multiklip style='rdi'``): the basis comes
-        from these frames instead of the science cube, and for ARDI from the concatenation
-        ``[ref, science]``.  One basis serves every target, unless ``p.ref_lib`` searches a
-        library in these frames.
-    ``fm_cube``
-        ``(n, ny, nx)`` or None.  KLIP-FM: a planet model, frame-aligned with ``cube``,
-        whose forward-modelled residuals come back as a third element.  Not with
-        ``k_scan``.
-    ``fm_ref_cube``
-        ``(m, ny, nx)`` or None: the model as it appears in ``ref_cube`` (zeros for
-        planet-free reference frames).  Without ``ref_cube`` the science model serves
-        (ADI).
-    ``fm_selfsub``
-        False keeps only the over-subtraction term (the ``fm_selfsub_g`` diagnostic).
+    Parameters
+    ----------
+    cube : ndarray, shape (n, ny, nx)
+        The n science frames, ny by nx pixels each, not derotated, with the star at
+        ``((nx-1)/2, (ny-1)/2)``.  NaN pixels enter the PSF model as 0, so their residuals come
+        out finite.
+    angles : ndarray, shape (n,)
+        Parallactic angle of each frame, in degrees.  Only the differences matter, so a constant
+        offset such as true north can be left out.
+    p : KLIPParams
+        Settings of the subtraction.
+    lam_over_d_px : float
+        lambda/D in pixels, which converts ``p.angsep`` to degrees (:func:`arcdist_deg`).
+    log : callable or None, default None
+        Function called with a message when ``p.k_klip`` is capped (see Notes).  None stays silent.
+    fm_cube : ndarray or None, default None
+        Planet model cube aligned with ``cube``, for KLIP-FM.  Its forward-modeled residuals come
+        back as a third output, and it does not go with ``p.k_scan``.
+    ref_cube : ndarray or None, default None
+        Reference frames for RDI, shape (m, ny, nx), or for ARDI the concatenation
+        ``[ref, science]``.  The KL basis then comes from these frames, one basis for all targets
+        unless ``p.ref_lib`` selects from them per target.  None takes the references from ``cube``.
+    fm_ref_cube : ndarray or None, default None
+        Planet model in ``ref_cube``, zeros for planet-free reference frames.  None leaves the modes
+        unperturbed when ``ref_cube`` is given and takes ``fm_cube`` otherwise.
+    fm_selfsub : bool, default True
+        Whether to include KLIP-FM's self-subtraction terms.  False keeps only the
+        over-subtraction, as a diagnostic.
 
-    Modes:
+    Returns
+    -------
+    residuals : ndarray, shape (n, ny, nx) or (k_klip, n, ny, nx)
+        Residual frames in float32, with a first axis over the number of KL modes when
+        ``p.k_scan``.  Pixels outside the zone, and frames dropped for too few references, are NaN.
+    info : dict
+        How the subtraction ran.  Its keys are listed under Notes.
+    fm_residuals : ndarray, shape (n, ny, nx)
+        [fm_cube given] Forward-modeled planet frames, in float32.
 
-    * ``fast=True``: one basis per zone from all frames, all frames projected on it.
-    * ``fast=False``: a basis per target from the frames with
-      ``angsep*arcdist <= |dPA| <= anglemax``, all the other frames when fewer than 4 qualify
-      (the ``multiklip`` fallback).  Targets with fewer than ``n_min_ref`` references are
-      dropped (NaN frame), unless that would leave fewer than ``max(n_min_ref, ceil(0.25 n))``
-      targets, and then none is dropped (the ``reduce_near_2`` safety floor).  With
-      ``angsep`` 0 and ``anglemax`` past the sequence's PA span every target's references are
-      all the other frames, and the fast path runs (``info['auto_fast']``).
-    * ``k_scan=True``: the residuals for k = 1 to ``k_klip``.
-    * ``k_klip=0``: no subtraction, the residual is the input inside the zones.
-    * A basis made from the science frames themselves (fast, no RDI) caps ``k_klip`` at
-      n - 1.  With n modes every frame would subtract itself to round-off.
+    Raises
+    ------
+    ValueError
+        If ``p.gram`` is unknown, if ``fm_cube`` comes with ``p.k_scan`` or does not match ``cube``,
+        or if ``ref_cube``'s frames are not the science frames' size.
 
-    Returns ``(residuals, info)``, or ``(residuals, info, fm_residuals)`` with ``fm_cube``:
+    Notes
+    -----
+    ``info`` holds the path taken (``fast``, ``auto_fast``, ``rdi``, ``klip_gram``,
+    ``library_as_adi``), ``arcdist`` (degrees of field rotation per lambda/D), the frame counts
+    (``n_frames``, ``n_basis_frames``), the modes used (``k_requested``, ``k_effective``,
+    ``k_capped``), each target's reference count before and after the fallback to all frames
+    (``nref``, ``nref_used``) and the frames dropped (``dropped``, ``n_dropped``).  The per-target
+    path also reports ``n_starved`` and ``drop_enabled``, and a searched library ``ref_keep`` and
+    ``ref_metric``.
 
-    * ``residuals``: float32 ``(n, ny, nx)``, or ``(k_klip, n, ny, nx)`` with ``k_scan``.  NaN
-      outside the zones and in dropped targets.
-    * ``fm_residuals``: float32 ``(n, ny, nx)``.
-    * ``info``: the path taken (``fast``, ``auto_fast``, ``rdi``, ``klip_gram``,
-      ``library_as_adi``), ``arcdist`` (deg of rotation per lambda/D of arc), ``n_frames``,
-      ``n_basis_frames``, the k (``k_requested``, ``k_effective``, ``k_capped``), ``fm`` and
-      ``fm_selfsub``.  ``nref`` is each target's reference count in the window (before the
-      fallback to all frames), ``nref_used`` the count used, ``dropped`` the mask of dropped
-      targets and ``n_dropped`` their number.  The per-target path adds ``n_starved`` and
-      ``drop_enabled``, and a searched library ``ref_keep`` and ``ref_metric``.
+    The per-target path (``p.fast`` False) drops targets with fewer than ``p.n_min_ref``
+    references, unless that would leave fewer than ``max(n_min_ref, ceil(n/4))`` targets, and falls
+    back to all other frames when fewer than 4 qualify.  With ``p.angsep`` 0 and ``p.anglemax`` past
+    the sequence's PA span every target's references are all the other frames, so the fast path
+    runs (``info['auto_fast']``).  A basis built from the science frames themselves (fast, no RDI)
+    caps ``k_klip`` at n - 1, since n modes would subtract every frame from itself.
 
-    The reducer then high-passes the residuals again, derotates them (:func:`derotate`, CCW
-    by angle + true north, north up) and combines them, by default with :func:`nw_ang_comb`::
+    The reducer then high-passes the residuals again, derotates them (:func:`derotate`) and combines
+    them, by default with :func:`nw_ang_comb`::
 
-        p = KLIPParams(k_klip=10, inrad=8, outrad=30, angsep=0.5, anglemax=90, n_min_ref=10)
-        res, info = klip_annular(cube, angles, p, lam_over_d_px)
+        res, info = klip_annular(cube, angles, KLIPParams(k_klip=10, inrad=8, outrad=30), lam_over_d_px)
         image = nw_ang_comb(derotate(res, angles, truenorth), angles)
     """
     n, ny, nx = cube.shape
@@ -1054,8 +1642,9 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
         if ref_cube.shape[1:] != (ny, nx):
             raise ValueError("ref_cube must have the science frame size")
         # A fixed reference cube is one basis for every target (refsel=0 + /fast in the
-        # IDL).  A searched library is not: each target keeps its own best-matched subset,
-        # so the basis changes frame to frame and the per-target path has to run.
+        # IDL predecessor).  A searched library is not: each target keeps its own
+        # best-matched subset, so the basis changes frame to frame and the per-target path
+        # has to run.
         fast = not use_lib
     paspan = float(angles.max() - angles.min()) if n >= 2 else 0.0
     auto_fast = False
@@ -1205,7 +1794,7 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
     # gram="zone": one Gram matrix per zone, made before the targets.  A target's covariance
     # is the submatrix of it at its references, its products with them are its row, and its
     # projection on the first k modes is a weighted sum of the reference frames, so no target
-    # forms its covariance or its modes from the pixels.  temp_mean centres on each target's
+    # forms its covariance or its modes from the pixels.  temp_mean centers on each target's
     # own reference set, which no single Gram holds, so it keeps the per-target path.
     zone_gram = gram == "zone" and k > 0 and not p.temp_mean
     info["klip_gram"] = "zone" if zone_gram else "target"
@@ -1235,7 +1824,7 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
 
     def _zone_target(t, r, zi, idx, D, BD, refs):
         zd, bzd, G, X = zgram[zi]
-        T = zd[t]                                       # zero-filled (and centred), as T below
+        T = zd[t]                                       # zero-filled (and centered), as T below
         kk_max = min(k, r.size)
         if kk_max == 0:
             res = T[None, :]
@@ -1262,7 +1851,7 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
         if do_fm:
             Mref, Mtar = _fm_models(t, refs, idx)
             if p.spat_mean or lam is None:
-                # the FM decomposes the raw frames, which the centred Gram does not hold
+                # the FM decomposes the raw frames, which the centered Gram does not hold
                 R = _zero_nan(BD[refs])
                 fm = klip_fm_zone(R, Mref, _zero_nan(D[t:t + 1]), Mtar, k, fm_selfsub)
             else:

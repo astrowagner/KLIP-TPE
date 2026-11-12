@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased — 2026-11-12 (the documentation rule, and klip.py documented to it)
+
+- **The documentation rule** is Kevin Wagner's of 2026-11-12, modeled on VIP's docstrings after
+  Vivek Vijayakumar's review.  Every function, method, class and script gets a numpydoc
+  docstring, clear and direct for a researcher who knows the field but not the code.  It opens
+  with a one-line summary.  The field's terms stand without a definition, and every variable
+  that is not a parameter is defined.  Each parameter, field and output gets an entry whose type
+  line carries the type, shape and default, then one sentence with units, and a second or third
+  only where a reader needs it.  The code's history, such as the IDL predecessor these routines
+  succeed, goes under Notes.
+- **`tests/test_docstrings.py` checks the rule** on every module brought up to it: a docstring
+  for every function, method and class, a numpydoc entry for every parameter and dataclass
+  field, a Returns or Yields section where there is a value, and 1 to 3 sentences per entry.
+  `python tests/test_docstrings.py klip_tpe/MODULE.py` lists what a module still lacks.
+- **`klip.py` follows it**, from its module docstring to its 37 functions and `KLIPParams`.
+  Vivek Vijayakumar's cuts are in: `threads` and `angsep` down to one sentence, the PSF model
+  and field rotation in the field's words, and no history in `zone_center`.  Only docstrings and
+  comments changed.
+
 ## Unreleased — 2026-11-12 (KLIPParams explained for a novice)
 
 - **`KLIPParams` explains every field for a newcomer** (Vivek Vijayakumar and Kevin Wagner,

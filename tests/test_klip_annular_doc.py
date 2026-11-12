@@ -11,8 +11,8 @@ documented anywhere.  What must hold:
 * Only the angles' differences matter: an offset gives the same residuals.
 * The documented chain, ``nw_ang_comb(derotate(res, angles, truenorth), angles)``, is what the
   reducer's ``_subtract`` gives without its second high-pass.
-* Every field of ``KLIPParams`` has an entry in its docstring, of 1 to 3 sentences (Vivek
-  Vijayakumar and Kevin Wagner, 2026-11-12: written for a novice).
+* Every field of ``KLIPParams`` has an entry in its docstring, of 1 to 3 sentences, as the
+  documentation rule of ``tests/test_docstrings.py`` asks.
 """
 from __future__ import annotations
 
@@ -32,11 +32,30 @@ DOCUMENTED = {"fast", "auto_fast", "rdi", "klip_gram", "library_as_adi", "arcdis
 
 
 def _data(n=24, size=61):
+    """Make a small synthetic ADI dataset.
+
+    Parameters
+    ----------
+    n : int, default 24
+        Number of frames.
+    size : int, default 61
+        Width and height of each frame, in pixels.
+
+    Returns
+    -------
+    ds : object
+        The dataset :func:`klip_tpe.synthetic.synthetic_klip_dataset` gives.
+    cube : ndarray, shape (n, size, size)
+        Its frames, in float32.
+    ang : ndarray, shape (n,)
+        Its parallactic angles, in degrees.
+    """
     ds = synthetic_klip_dataset(nframes=n, size=size, pa_span=40, seed=2)
     return ds, np.asarray(ds.cube, np.float32), np.asarray(ds.angles, float)
 
 
 def test_the_documented_inputs_and_outputs():
+    """Check the shapes, NaN pattern and ``info`` keys the docstring of ``klip_annular`` documents."""
     _, cube, ang = _data()
     cube = cube.copy()
     cube[:, 30, 45] = np.nan                            # a pixel inside the zone, NaN in every frame
@@ -68,6 +87,7 @@ def test_the_documented_inputs_and_outputs():
 
 
 def test_the_documented_chain_is_the_reducers():
+    """Check that the documented chain gives the image the reducer's ``_subtract`` gives."""
     ds, cube, ang = _data()
     red = KLIPReducer(ds, pxscale=0.05, lam_m=3.8e-6, diam_m=8.2, injection_model=GaussianPSF(3.0, star_flux=1e4),
                       fwhm_px=3.0, outrad_cap=28)
@@ -81,7 +101,18 @@ def test_the_documented_chain_is_the_reducers():
 
 
 def _doc_entries(doc: str):
-    """The ``name : type`` entries of a numpydoc section, each with its description's text."""
+    """Read the ``name : type`` entries of a numpydoc docstring, each with its description.
+
+    Parameters
+    ----------
+    doc : str
+        The docstring.
+
+    Returns
+    -------
+    out : dict of str to str
+        Description of each entry, its lines joined by spaces.
+    """
     lines = doc.splitlines()
     out = {}
     for i, ln in enumerate(lines):
@@ -99,10 +130,10 @@ def _doc_entries(doc: str):
 
 
 def test_every_klipparams_field_is_explained_in_one_to_three_sentences():
+    """Check that every field of ``KLIPParams`` has an entry of 1 to 3 sentences."""
     from klip_tpe.klip import KLIPParams
     entries = _doc_entries(KLIPParams.__doc__)
     for f in dataclasses.fields(KLIPParams):
         assert f.name in entries, f"KLIPParams.{f.name} has no entry in the docstring"
         n = len([x for x in re.split(r"(?<=[.!?])\s+", entries[f.name]) if x])
         assert 1 <= n <= 3, f"KLIPParams.{f.name}: {n} sentences"
-    assert "residual" in KLIPParams.__doc__.split("Attributes")[0], "the residuals are explained before they are used"
