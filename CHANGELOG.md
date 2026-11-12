@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — 2026-11-12 (reducer.py documented to the rule)
+
+- **`reducer.py` follows the documentation rule**: its module docstring, the request, result
+  and dataset records, `Reducer`, `KLIPReducer` with its request parameters listed under Notes,
+  `PartitionedReducer`, and the module's functions.  Only docstrings and comments changed.
+
 ## Unreleased — 2026-11-12 (metrics.py documented to the rule)
 
 - **`metrics.py` follows the documentation rule**: its module docstring, the S/N functions
