@@ -1,16 +1,18 @@
-"""The black box being optimized.
+"""Reducers, the black box the search optimizes.
 
-A :class:`Reducer` turns a parameter dictionary (plus optional synthetic
-injections) into a derotated, combined image.  :class:`KLIPReducer` is the
-reference implementation on top of :mod:`klip_tpe.klip`; anything else (pyKLIP,
-VIP, a shell script) can be wrapped by subclassing :class:`Reducer` and
-implementing :meth:`Reducer.reduce`.
+A :class:`Reducer` turns a parameter dictionary, with optional synthetic injections, into a
+derotated, combined image.  :class:`KLIPReducer` is the reference implementation on top of
+:mod:`klip_tpe.klip`.  Another engine (pyKLIP, VIP, a shell script) is wrapped by subclassing
+:class:`Reducer` and implementing :meth:`Reducer.reduce`.
 
-:class:`PartitionedReducer` handles datasets made of several independent
-partitions (nights, epochs, detector sides, rolls ...): each selected partition is
-reduced with its own parameter block and the results are combined with
-``equal`` or ``sqrt_texp`` weights.  This is the multi-night machinery of the IDL
-code with the night-specific plumbing removed.
+:class:`PartitionedReducer` handles a dataset made of independent partitions, such as nights,
+epochs, detector sides or rolls.  Each selected partition is reduced with its own parameter
+block, and the results are combined with ``equal`` or ``sqrt_texp`` weights.
+
+Notes
+-----
+The partitions generalize the multi-night machinery of the IDL predecessor, without its
+night-specific plumbing.
 """
 from __future__ import annotations
 
@@ -38,6 +40,37 @@ __all__ = ["reducer_class", "set_klip_gram", "set_zone_center", "KLIP_GRAM_MODES
 
 @dataclass
 class ReductionRequest:
+    """One reduction asked of a reducer.
+
+    Attributes
+    ----------
+    params : dict
+        Parameters of the reduction, a configuration of the search space.
+    injections : sequence of Source or None, default None
+        Sources to inject before the reduction.  None injects nothing.
+    k_scan : bool, default False
+        Whether to return the images for every number of KL modes from 1 to ``k_klip``.
+    tag : str, default ""
+        Label of the request, for logs.
+    fm_sources : sequence of Source or None, default None
+        KLIP-FM test sources, put in the model cube and never added to the data.
+    extras : bool, default False
+        Whether to also make the reference images, ``nosub`` for the clean pass and ``cadi`` for
+        the injected pass.
+    threads : int, default 1
+        Threads of this partition job, for the per-target KLIP loop and the per-frame steps, set by
+        :class:`PartitionedReducer`.
+    stage : {"reduce", "prepare"}, default "reduce"
+        What to do.  "prepare" returns the prepared frames as :class:`SiblingFrames`, for the other
+        wavelength groups' SDI pools, and reduces nothing.
+    siblings : object, default None
+        The other groups' prepared frames for the SDI pool, ``{pid: SiblingFrames}`` or the
+        shared-memory descriptor :class:`klip_tpe.parallel.SharedArrays` of them.
+    card : bool, default False
+        Whether the job may go to the card workers (:class:`klip_tpe.parallel.CardSpec`).  The
+        runner marks the search's injected draws, and the pool sends the share of them its slot
+        picks.
+    """
     params: Dict[str, Any]
     injections: Optional[Sequence[Source]] = None
     k_scan: bool = False
@@ -59,10 +92,24 @@ class ReductionRequest:
 
 @dataclass
 class SiblingFrames:
-    """One wavelength group's frames as another group's reduction needs them for its SDI
-    pool: prepared exactly as the group would prepare its own (the same selection,
-    injections, high-pass and binning), not yet rescaled.  ``mcube`` is the KLIP-FM model
-    cube through the same chain, when the request asked for KLIP-FM."""
+    """One wavelength group's frames as another group's reduction needs them for its SDI pool.
+
+    They are prepared exactly as the group prepares its own, with the same selection, injections,
+    high-pass and binning, and are not yet rescaled.
+
+    Attributes
+    ----------
+    pid : object
+        Identifier of the group's partition.
+    lam_m : float
+        Wavelength of the group, in meters.
+    bcube : ndarray, shape (nb, ny, nx)
+        The nb binned frames.
+    bang : ndarray, shape (nb,)
+        Parallactic angle of each binned frame, in degrees.
+    mcube : ndarray or None, default None
+        The KLIP-FM model cube through the same chain, when the request asked for KLIP-FM.
+    """
     pid: Any
     lam_m: float
     bcube: np.ndarray                 # (n_binned, ny, nx)
@@ -72,8 +119,52 @@ class SiblingFrames:
 
 @dataclass
 class PreparedFrames:
-    """The first half of :meth:`KLIPReducer.reduce`: everything up to the binned frames,
-    before any PSF subtraction."""
+    """The first half of :meth:`KLIPReducer.reduce`, everything up to the binned frames.
+
+    Attributes
+    ----------
+    p : dict
+        The request's parameters over the reducer's defaults.
+    k : int
+        Number of KL modes, at least 1.
+    bin_ : int
+        Temporal binning factor.
+    filt : int
+        Width of the high-pass box, in pixels, 1 or less for none.
+    inrad : float
+        Inner radius of the KLIP zone, in pixels.
+    outrad : float
+        Outer radius of the KLIP zone, in pixels.
+    dth : float
+        Maximum span of parallactic angle in a bin, in degrees (:meth:`KLIPReducer.dth_max_deg`).
+    keep : ndarray of bool, shape (n,)
+        The frame selection over the n raw frames.
+    bcube : ndarray, shape (nb, ny, nx)
+        The nb binned frames kept.
+    bang : ndarray, shape (nb,)
+        Parallactic angle of each binned frame, in degrees.
+    grp : ndarray of int
+        Bin number of each selected frame.
+    bkeep : ndarray of bool
+        True for each bin kept, one value per bin before the bins without data are dropped.
+    mcube : ndarray or None
+        The KLIP-FM model cube through the same chain, or None without KLIP-FM.
+    hp_nan : bool
+        Whether the high-pass leaves NaN pixels out (``hp_nan_aware``).
+    hp_binned : bool
+        Whether the frames were binned before the high-pass (``hp_order="binned"``).
+    nth : int
+        Threads of the job.
+    meta : dict
+        Notes on the reduction, for its result's ``meta``.
+    ann : tuple of 2 floats or None, default None
+        The ``(inner, outer)`` annulus in pixels the zone was made from, with the runner's edge
+        padding.  ``angsep``'s arc and the bin's PA span are measured on it, and None makes the
+        zone the annulus.
+    bnorth : ndarray or None, default None
+        True north of each kept bin, in degrees, the mean of its frames'.  None takes the reducer's
+        ``truenorth`` for every bin.
+    """
     p: Dict[str, Any]
     k: int
     bin_: int
@@ -101,6 +192,20 @@ class PreparedFrames:
     bnorth: Optional[np.ndarray] = None
 
     def siblings_payload(self, pid: Any, lam_m: float) -> SiblingFrames:
+        """Package the binned frames for another group's SDI pool.
+
+        Parameters
+        ----------
+        pid : object
+            Identifier of this group's partition.
+        lam_m : float
+            Wavelength of this group, in meters.
+
+        Returns
+        -------
+        frames : SiblingFrames
+            Contiguous float32 copies of ``bcube`` and ``mcube``, with the angles.
+        """
         return SiblingFrames(pid, float(lam_m), np.ascontiguousarray(self.bcube, np.float32),
                              np.asarray(self.bang, float),
                              None if self.mcube is None else np.ascontiguousarray(self.mcube, np.float32))
@@ -108,23 +213,53 @@ class PreparedFrames:
 
 @dataclass
 class ReductionResult:
+    """The image a reduction returns, with its weight and notes.
+
+    Attributes
+    ----------
+    image : ndarray, shape (ny, nx) or (nk, ny, nx)
+        The derotated, combined image, or one per number of KL modes with ``k_scan``.
+    weight : float, default 1.0
+        Weight of the image in a combination of partitions.
+    meta : dict
+        Notes on how the reduction ran.
+    fm_image : ndarray or None, default None
+        KLIP-FM forward-modeled planet image, shape (ny, nx).
+    nosub : ndarray or None, default None
+        Derotated median stack without PSF subtraction, of the clean pass with ``extras``.
+    cadi : ndarray or None, default None
+        Classical ADI reference image of the injected pass with ``extras``.
+    """
     image: np.ndarray                # (ny, nx) or (nk, ny, nx) when k_scan
     weight: float = 1.0
     meta: Dict[str, Any] = field(default_factory=dict)
-    fm_image: Optional[np.ndarray] = None    # KLIP-FM forward-modelled planet response (ny, nx)
+    fm_image: Optional[np.ndarray] = None    # KLIP-FM forward-modeled planet response (ny, nx)
     nosub: Optional[np.ndarray] = None       # derotate + median stack, no PSF subtraction (clean pass, extras=True)
     cadi: Optional[np.ndarray] = None        # classical ADI reference (injected pass, extras=True)
 
 
 class Reducer:
-    """Interface every backend implements.
+    """Interface every reduction backend implements.
 
-    Class attributes a backend should set:
+    A reducer turns a request's parameters and optional injections into a derotated, combined image
+    (:meth:`reduce`).
 
-    ``pxscale`` (arcsec/px), ``fwhm`` (px) -- needed by the metric;
-    ``angle_convention`` ``'pa'`` (PA East of North, +90 in the image) or ``'math'``;
-    ``supports_kscan`` -- can return a cube over k = 1..k_klip in one call;
-    ``lam_over_d_px`` -- used for the ``angsep`` unit and the FWHM.
+    Attributes
+    ----------
+    pxscale : float
+        Plate scale, in arcsec per pixel, for the metric.
+    fwhm : float
+        FWHM of the PSF, in pixels, for the metric.
+    lam_over_d_px : float
+        lambda/D in pixels, the unit of ``angsep``.
+    angle_convention : {"pa", "math"}
+        How source angles are read, "pa" East of North or "math" counter-clockwise from +x.
+    supports_kscan : bool
+        Whether :meth:`reduce` can return a cube over k = 1 to ``k_klip`` in one call.
+    supports_fm : bool
+        Whether :meth:`reduce` can run KLIP-FM.
+    name : str
+        Name of the backend, for a run's record.
     """
 
     pxscale: float = 1.0
@@ -136,32 +271,124 @@ class Reducer:
     name: str = "reducer"
 
     def reduce(self, req: ReductionRequest) -> ReductionResult:  # pragma: no cover
+        """Reduce the data under one request.
+
+        Parameters
+        ----------
+        req : ReductionRequest
+            The request.
+
+        Returns
+        -------
+        result : ReductionResult
+            The image and its notes.
+        """
         raise NotImplementedError
 
     def partitions(self) -> List[Any]:
+        """Return the identifiers of the dataset's partitions, empty for one sequence.
+
+        Returns
+        -------
+        pids : list
+            The identifiers.
+        """
         return []
 
     def partition_weight(self, pid) -> float:
+        """Return a partition's weight in the combination.
+
+        Parameters
+        ----------
+        pid : object
+            Identifier of the partition.
+
+        Returns
+        -------
+        weight : float
+            The weight, 1 for this base class.
+        """
         return 1.0
 
     def frame_angles(self, pid=None) -> Optional[np.ndarray]:
-        """Per-frame parallactic angles (used by the reference-count guardrail)."""
+        """Return the frames' parallactic angles, for the reference-count check.
+
+        Parameters
+        ----------
+        pid : object or None, default None
+            Identifier of a partition, or None for the dataset.
+
+        Returns
+        -------
+        angles : ndarray or None
+            Angle of each frame in degrees, or None when unknown.
+        """
         return None
 
     def frame_tags(self, pid=None) -> Optional[Dict[str, np.ndarray]]:
+        """Return the frames' quality tags.
+
+        Parameters
+        ----------
+        pid : object or None, default None
+            Identifier of a partition, or None for the dataset.
+
+        Returns
+        -------
+        tags : dict of str to ndarray or None
+            The tags, or None when there are none.
+        """
         return None
 
     def matched_filter_kernel(self, rho_as: float):
+        """Return a measured matched filter for the metric, or None for its Gaussian.
+
+        Parameters
+        ----------
+        rho_as : float
+            Separation, in arcsec.
+
+        Returns
+        -------
+        kernel : ndarray or None
+            The kernel, None for this base class.
+        """
         return None
 
     def cost_estimate(self, params: Dict[str, Any], k_scan: bool = False, n_inject: int = 0,
                       fm: bool = False) -> Optional[float]:
-        """Rough single-thread seconds one :meth:`reduce` with ``params`` takes, used only to
-        schedule partition jobs (the longest first, and threads by cost).  None: unknown,
-        and the jobs keep a flat thread count in submission order."""
+        """Estimate the single-thread seconds of one :meth:`reduce`, to schedule partition jobs.
+
+        The jobs run the longest first, with threads by cost.
+
+        Parameters
+        ----------
+        params : dict
+            The request's parameters.
+        k_scan : bool, default False
+            Whether the reduction scans the number of KL modes.
+        n_inject : int, default 0
+            Number of injected sources.
+        fm : bool, default False
+            Whether the reduction runs KLIP-FM.
+
+        Returns
+        -------
+        seconds : float or None
+            The estimate, or None when unknown, and the jobs then keep a flat thread count in
+            submission order.
+        """
         return None
 
     def describe(self) -> Dict[str, Any]:
+        """Return the reducer's settings, for a run's record.
+
+        Returns
+        -------
+        info : dict
+            ``name``, ``pxscale``, ``fwhm``, ``angle_convention``, ``supports_kscan`` and
+            ``supports_fm``.
+        """
         return {"name": self.name, "pxscale": self.pxscale, "fwhm": self.fwhm,
                 "angle_convention": self.angle_convention, "supports_kscan": self.supports_kscan,
                 "supports_fm": self.supports_fm}
@@ -172,7 +399,28 @@ class Reducer:
 # ----------------------------------------------------------------------------
 @dataclass
 class Dataset:
-    """One pupil-tracking sequence, already centred on the star."""
+    """One pupil-tracking sequence, centered on the star.
+
+    Attributes
+    ----------
+    cube : ndarray, shape (n, ny, nx)
+        The n frames, ny by nx pixels each, in float32.
+    angles : ndarray, shape (n,)
+        Parallactic angle of each frame, in degrees.
+    tags : dict of str to ndarray or None, default None
+        Per-frame quality tags, ``corrs``, ``noises`` and ``coronoise``.
+    texp : float, default 0.0
+        Total on-source exposure time, in seconds, for the partition weights.
+    name : str, default "data"
+        Name of the sequence.
+    meta : dict
+        The loader's record of the data.
+    ref_cube : ndarray or None, default None
+        Registered frames of a PSF reference star, shape (nref, ny, nx), for RDI and ARDI.
+    north : ndarray or None, default None
+        Each frame's own true north, in degrees, used at derotation and in the injection azimuth.
+        None takes the reducer's one angle.
+    """
 
     cube: np.ndarray                       # (n, ny, nx) float32
     angles: np.ndarray                     # parallactic angle per frame (deg)
@@ -187,15 +435,29 @@ class Dataset:
 
     @property
     def nframes(self) -> int:
+        """Number of frames.
+        """
         return int(self.cube.shape[0])
 
 
 class _FrameCache:
     """One set of sources injected into a cube frame by frame, as reductions ask for frames.
 
-    ``done`` marks the frames injected so far.  The lock covers filling frames and copying
-    out a selection, so two reductions of the same sources on threads never read a frame
-    another is still writing."""
+    The lock covers filling frames and copying out a selection, so two reductions of the same
+    sources on threads never read a frame another is still writing.
+
+    Parameters
+    ----------
+    cube : ndarray, shape (n, ny, nx)
+        The cube the injected frames are written into.
+
+    Attributes
+    ----------
+    done : ndarray of bool, shape (n,)
+        True for each frame injected so far.
+    lock : threading.Lock
+        Lock over filling frames and copying them out.
+    """
 
     __slots__ = ("cube", "done", "lock")
 
@@ -206,15 +468,25 @@ class _FrameCache:
 
 
 class _CropCache:
-    """What one set of sources adds to each frame (:func:`klip_tpe.injection.stamp_crop`,
-    per source), kept once the set comes back.
+    """What one set of sources adds to each frame, kept once the set comes back.
 
-    A set seen for the first time is placed without keeping anything: the search draws new
-    sources for every reduction, and keeping their stamps would only write them out to
-    memory.  A set that comes back -- param-verify reduces one fixed set under many
-    configurations, a fixed-source search one set per annulus -- keeps each frame's stamps
-    from its second reduction on, so a later selection places only the frames it adds.  One
-    set is kept at a time, the latest that came back."""
+    A set seen for the first time is placed without keeping anything, since the search draws new
+    sources for every reduction.  A set that comes back, such as param-verify's fixed set or a
+    fixed-source search's set per annulus, keeps each frame's stamps from its second reduction on,
+    so a later selection places only the frames it adds.  One set is kept at a time, the latest that
+    came back.
+
+    Attributes
+    ----------
+    seen : tuple or None
+        The set seen last.
+    key : tuple or None
+        The set whose stamps are kept.
+    frames : dict of int to list
+        Each frame's stamps for the kept set.
+    lock : threading.Lock
+        Lock over the lookups.
+    """
 
     __slots__ = ("seen", "key", "frames", "lock")
 
@@ -225,8 +497,20 @@ class _CropCache:
         self.lock = threading.Lock()
 
     def lookup(self, key) -> Tuple[bool, Optional[Dict[int, list]]]:
-        """``(first_sighting, frames)``: whether ``key`` is new, and the dict its frames'
-        stamps go in, or None when they are not kept."""
+        """Look up a set of sources.
+
+        Parameters
+        ----------
+        key : tuple
+            The set's sources, as tuples.
+
+        Returns
+        -------
+        first : bool
+            True when the set is seen for the first time.
+        frames : dict of int to list or None
+            The dict the set's per-frame stamps go in, or None when they are not kept.
+        """
         with self.lock:
             if key == self.key:
                 return False, self.frames
@@ -240,12 +524,43 @@ class _CropCache:
 def _flux_taken(orig: np.ndarray, edited: np.ndarray, angles: np.ndarray, sources: Sequence[Source], model,
                 pxscale: float, *, truenorth, fallback, angle_convention: str,
                 n_frames: int = 32) -> Tuple[float, int]:
-    """The fraction of the ``sources``' flux that left the frames when they were subtracted
-    (1 = all of it), measured on up to ``n_frames`` frames spread over the cube:
-    ``sum(sign(m) (orig - edited)) / sum(|m|)``, with ``m`` the sources injected into zeros.
-    For sources added, pass the frames the other way round.  float32 rounding loses the part
-    of a source that sits below half a unit in the last place of the pixel it lands on.
-    Returns ``(fraction, frames measured)``."""
+    """Measure the fraction of sources' flux that left the frames when they were subtracted.
+
+    It is ``sum(sign(m) (orig - edited)) / sum(|m|)``, with ``m`` the sources injected into zeros, on
+    up to ``n_frames`` frames spread over the cube.  float32 rounding loses the part of a source that
+    sits below half a unit in the last place of the pixel it lands on.  For sources added, pass the
+    frames the other way round.
+
+    Parameters
+    ----------
+    orig : ndarray, shape (n, ny, nx)
+        The frames before the edit.
+    edited : ndarray, shape (n, ny, nx)
+        The frames after it.
+    angles : ndarray, shape (n,)
+        Parallactic angle of each frame, in degrees.
+    sources : sequence of Source
+        The sources, with the contrasts they were subtracted at.
+    model : InjectionModel
+        The injection model.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    truenorth : float or ndarray
+        True-north offset, in degrees, one value or one per frame.
+    fallback : InjectionModel or None
+        Model that supplies the stamp where ``model`` has none.
+    angle_convention : {"pa", "math"}
+        How the sources' angles are read.
+    n_frames : int, default 32
+        Maximum number of frames measured.
+
+    Returns
+    -------
+    fraction : float
+        Fraction of the flux that moved, 1 for all of it, NaN when the model puts no flux there.
+    n : int
+        Number of frames measured.
+    """
     n = int(orig.shape[0])
     idx = np.unique(np.linspace(0, n - 1, min(n, max(int(n_frames), 1))).round().astype(np.intp))
     m = np.zeros((idx.size,) + tuple(orig.shape[-2:]), np.float32)
@@ -263,9 +578,21 @@ def _flux_taken(orig: np.ndarray, edited: np.ndarray, angles: np.ndarray, source
 
 
 def _taken_text(red, attr: str = "subtracted_kept") -> str:
-    """``n4 0.9999998, n6 0.9999997`` (or one number): what :func:`_flux_taken` measured for
-    the sources a reducer subtracted (``attr="injected_kept"``: added), '' when it measured
-    nothing."""
+    """Format what :func:`_flux_taken` measured for a reducer's subtracted or added sources.
+
+    Parameters
+    ----------
+    red : Reducer
+        The reducer.
+    attr : {"subtracted_kept", "injected_kept"}, default "subtracted_kept"
+        Attribute to read, for the sources subtracted or the sources added.
+
+    Returns
+    -------
+    text : str
+        Such as "n4 0.9999998, n6 0.9999997" for partitions, or one number, empty when nothing was
+        measured.
+    """
     kept = getattr(red, attr, None)
     items = list(kept.items()) if isinstance(kept, dict) else [(None, kept)]
     out = [(k, v) for k, v in items if v is not None and np.isfinite(v)]
@@ -273,21 +600,60 @@ def _taken_text(red, attr: str = "subtracted_kept") -> str:
 
 
 def _flag(v) -> bool:
-    """A yes/no request parameter: True for True, 1, "1", "yes", "true"."""
+    """Read a yes-or-no request parameter.
+
+    Parameters
+    ----------
+    v : object
+        The value.
+
+    Returns
+    -------
+    flag : bool
+        True for a true value, or for the strings "1", "yes", "true", "y" and "on" in any case.
+    """
     if isinstance(v, str):
         return v.strip().lower() in ("1", "yes", "true", "y", "on")
     return bool(v)
 
 
 def _zone_ext(p: Dict[str, Any]) -> Tuple[float, float]:
-    """``(zone_in, zone_out)`` of a request's parameters, px >= 0: how far the KLIP zone
-    reaches inside and outside the annulus (0, 0 when the request does not say)."""
+    """Return how far a request's KLIP zone reaches inside and outside the annulus.
+
+    Parameters
+    ----------
+    p : dict
+        The request's parameters.
+
+    Returns
+    -------
+    zone_in : float
+        Reach inside the annulus, in pixels, at least 0.
+    zone_out : float
+        Reach outside the annulus, in pixels, at least 0.
+    """
     return (max(float(p.get("zone_in", 0.0) or 0.0), 0.0), max(float(p.get("zone_out", 0.0) or 0.0), 0.0))
 
 
 def _zone_center(p: Dict[str, Any]) -> Optional[Tuple[float, float]]:
-    """``zone_center`` of a request's parameters as ``(x, y)`` px, or None: the zones are then
-    drawn about ``(nx / 2, ny / 2)`` (:func:`klip_tpe.klip.zone_indices`)."""
+    """Return a request's ``zone_center`` as an ``(x, y)`` pixel, or None.
+
+    Parameters
+    ----------
+    p : dict
+        The request's parameters.
+
+    Returns
+    -------
+    center : tuple of 2 floats or None
+        The center, or None, which draws the zones about ``(nx/2, ny/2)``
+        (:func:`klip_tpe.klip.zone_indices`).
+
+    Raises
+    ------
+    ValueError
+        If ``zone_center`` does not have two values.
+    """
     c = p.get("zone_center")
     if c is None:
         return None
@@ -298,61 +664,102 @@ def _zone_center(p: Dict[str, Any]) -> Optional[Tuple[float, float]]:
 
 
 class KLIPReducer(Reducer):
-    """Reference annular KLIP/ADI reducer.
+    """Reference annular KLIP/ADI reducer, built on :mod:`klip_tpe.klip`.
 
-    Parameters (all optional, defaults = ``reduce_near_2`` behaviour)::
+    The chain is frame selection, injection into the kept frames, high-pass, optional destriping at
+    90 and 0 degrees, angle-aware binning, annular KLIP (with an RDI or ARDI basis and KLIP-FM when
+    asked), a second high-pass, derotation, combination and the optional ``mask_fn``.  The selection
+    reads only the frame tags, so injecting the kept frames alone changes no number.  Everything
+    before KLIP runs one bin group at a time (:meth:`_prep_fused`), which reads the cube once per
+    reduction and gives the whole-cube steps' numbers to the bit.
 
-        k_klip, bin, filter, n_ang, inrad, outrad, angsep, anglemax,
-        corr_thresh, noise_max, coronoise_max, fast, spat_mean, temp_mean, n_min_ref,
-        comb_type ('nwadi' | 'mean' | 'median'),
-        use_rdi (bool), rdi_mode ('rdi' | 'ardi'), do_destripe (bool), destripe_clip (float),
-        fm_selfsub (bool, KLIP-FM self-subtraction terms; default True),
-        hp_nan_aware (bool, default False: the high-pass of the science frames is IDL's
-            ``smooth`` without ``/nan``, and a frame with a NaN pixel anywhere comes out
-            NaN all over, since the boxcar's running sum carries the NaN along its line.
-            True is ``smooth(/nan)``: each NaN pixel stays NaN and the rest of the frame is
-            filtered.  For frames with NaN at their registration edges, say ALES's, where
-            False drops every bin with such a frame.)
-        prep_fused (bool, default True: the frames before KLIP are made one bin group at a
-            time, see below.  False makes them a whole cube per step, the reference the
-            fused path is tested against, to the bit.)
-        klip_gram ('target' | 'zone', default 'target': how the per-target KLIP forms each
-            target's reference covariance, :attr:`klip_tpe.klip.KLIPParams.gram`.  'zone'
-            reads it off one Gram matrix per zone and projects without forming the modes,
-            the same KLIP to float64 rounding and about twice as fast per target at small
-            bins, not the same to the bit.  :func:`set_klip_gram` sets it on every reducer
-            of a partitioned one.)
-        zone_in, zone_out (px, default 0: the KLIP zone is the annulus.  The zone's inner
-            edge moves in by zone_in and its outer edge out by zone_out, so the basis is
-            fitted over a wider ring than the one the run scores, as the ALES paper reduction
-            of MWC 758 fits one 5-27 px annulus.  ``angsep``'s lambda/D of arc and the bin's
-            PA span stay those of the annulus, where the sources are.)
-        post_hp (bool, default True: the KLIP residuals are high-passed again, with the same
-            box, before they are derotated, as ``reduce_near_2`` does.  False derotates them
-            as they come out of KLIP, as the ALES reduction's ADI images of MWC 758 do.)
-        zone_center ((x, y) px, default None: the zones' radii and sector angles are measured
-            from ``(nx / 2, ny / 2)``, half a pixel past the star of an even-sized frame, the
-            NEAR ``getzone``.  The 2015 ``getzone`` the ALES paper reduction used measures from
-            ``(nx / 2 - 1, ny / 2 - 1)``.  :func:`set_zone_center` sets it on every reducer.)
-        zone_angles ('ccw' | 'getzone2015', default 'ccw': sector angles CCW from +x in
-            [0, 360).  'getzone2015' measures them as the 2015 ``getzone`` does, atan2 + 180 in
-            (0, 360], so with its centre the sectors are its pixels, in its order.)
+    Parameters
+    ----------
+    data : Dataset
+        The sequence to reduce.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    lam_m : float
+        Wavelength, in meters.
+    diam_m : float
+        Telescope diameter, in meters.
+    injection_model : InjectionModel or None, default None
+        Model of the injected companions.  None allows no injection or KLIP-FM.
+    fallback_model : InjectionModel or None, default None
+        Model that supplies the stamp where the injection model has none.
+    truenorth : float, default 0.0
+        True-north offset, in degrees.  Frames that carry their own (``data.north``) override it.
+    fwhm_px : float or None, default None
+        FWHM of the PSF, in pixels.  None takes ``1.028`` lambda/D.
+    zone_pad : float, default 2.0
+        Padding of the KLIP zone beyond each annulus edge the runner marks, in pixels.
+    outrad_cap : float, default 70.0
+        Maximum outer radius of a zone, in pixels.
+    defaults : dict or None, default None
+        Request parameters that replace the built-in defaults.
+    angle_convention : {"pa", "math"}, default "pa"
+        How the sources' angles are read.
+    mask_fn : callable or None, default None
+        Legacy post-mask hook ``image -> image`` (``block_burn``, ``block_airy``), applied to the
+        final science image only.
 
-    The chain: frame selection -> inject (the kept frames) -> high-pass -> [destripe 90, 0]
-    -> angle-aware binning -> annular KLIP [RDI/ARDI basis, KLIP-FM] -> [high-pass
-    (NaN-aware)] -> derotate -> combine [-> mask_fn].  The selection reads only the frame
-    tags, so injecting the kept frames alone changes no number.
+    Attributes
+    ----------
+    lam_over_d_px : float
+        lambda/D in pixels, ``(lam_m / diam_m) * 206265 / pxscale``.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    truenorth : float
+        True-north offset, in degrees.
+    north_frames : ndarray or None
+        Each frame's own true north, in degrees, when the frames carry values that differ.
+    defaults : dict
+        Default request parameters.
 
-    Everything before KLIP is done one bin group at a time (:meth:`_prep_fused`): a group's
-    kept frames are copied out of the cube, given their sources, high-passed, destriped and
-    averaged into the one binned frame, while they are still in the processor's cache.  The
-    frames are read from memory once per reduction, where a whole-cube step per stage read
-    and wrote them seven times, and no injected cube is ever held.  Each step is the
-    whole-cube step's own function on the same frames in the same order, so the numbers are
-    the same to the bit.
+    Raises
+    ------
+    ValueError
+        If ``data.north`` does not hold one finite value per frame.
 
-    ``mask_fn(image) -> image`` is the optional legacy post-mask hook
-    (``block_burn`` / ``block_airy``), applied to the final science image only.
+    Notes
+    -----
+    The request's parameters, all optional, default to the behavior of the IDL predecessor's
+    ``reduce_near_2``:
+
+    ``k_klip``, ``n_ang``, ``inrad``, ``outrad``, ``angsep``, ``anglemax``, ``fast``, ``spat_mean``, ``temp_mean``, ``n_min_ref``
+        The KLIP settings (:class:`~klip_tpe.klip.KLIPParams`).
+    ``bin``, ``filter``
+        Temporal binning factor and width of the high-pass box in pixels.
+    ``corr_thresh``, ``noise_max``, ``coronoise_max``
+        The frame selection (:func:`~klip_tpe.klip.frame_selection_mask`).
+    ``comb_type``
+        Combination of the derotated frames, "nwadi", "mean" or "median".
+    ``use_rdi``, ``rdi_mode``
+        Whether to build the basis from the reference cube, as "rdi" or "ardi".
+    ``do_destripe``, ``destripe_clip``
+        Destriping of the frames and its clipping level (:func:`~klip_tpe.klip.destripe`).
+    ``fm_selfsub``
+        Whether KLIP-FM includes its self-subtraction terms, True by default.
+    ``hp_nan_aware``
+        False by default, the predecessor's ``smooth`` without ``/nan``, under which a frame with a
+        NaN pixel comes out NaN all over.  True leaves each NaN pixel NaN and filters the rest, for
+        frames with NaN at their registration edges, such as ALES's.
+    ``prep_fused``
+        True by default, the fused path.  False runs a whole cube per step, the reference the fused
+        path is tested against.
+    ``klip_gram``
+        "target" by default, or "zone" (:attr:`klip_tpe.klip.KLIPParams.gram`), about twice as fast
+        per target at small bins and equal to float64 rounding (:func:`set_klip_gram`).
+    ``zone_in``, ``zone_out``
+        How far the KLIP zone reaches inside and outside the annulus, in pixels, 0 by default.  The
+        ALES reduction of MWC 758 fits one 5-27 px annulus this way, while ``angsep``'s arc and the
+        bin's PA span stay those of the annulus.
+    ``post_hp``
+        True by default, the residuals high-passed again before derotation, as ``reduce_near_2``
+        does.  False derotates them as KLIP leaves them, as the ALES reduction's ADI images do.
+    ``zone_center``, ``zone_angles``
+        Center and angle convention of the zones (:func:`set_zone_center`,
+        :func:`~klip_tpe.klip.zone_indices`).
     """
 
     name = "klip"
@@ -366,9 +773,8 @@ class KLIPReducer(Reducer):
 
     @property
     def supports_reference_library(self) -> bool:
-        """True only where ``nkeep_<group>`` actually changes the reduction: the built-in
-        annular KLIP (whose ``_subtract`` passes ``kp.ref_lib`` / ``kp.ref_keep`` to
-        :func:`klip_tpe.klip.klip_annular`), or a backend that says it applies them."""
+        """Whether ``nkeep_<group>`` changes the reduction, for the built-in KLIP or a backend that declares ``_honours_reference_library``.
+        """
         return (type(self)._subtract is KLIPReducer._subtract
                 or bool(getattr(type(self), "_honours_reference_library", False)))
 
@@ -424,43 +830,124 @@ class KLIPReducer(Reducer):
         self._cost_cache: Dict[Tuple, float] = {}
         #: optional searched reference library (:mod:`klip_tpe.reflib`).  Set through
         #: :meth:`set_reference_library`; when it is None every RDI/ARDI reduction uses
-        #: the whole reference cube as one shared basis, which is the previous behaviour.
+        #: the whole reference cube as one shared basis, which is the previous behavior.
         self._reflib_spec: Optional[Dict[str, Any]] = None
         self._reflib_cache: Dict[Tuple, Any] = {}
 
     # -- helpers -------------------------------------------------------------
     def partitions(self) -> List[Any]:
+        """Return no partitions, the dataset being one sequence.
+
+        Returns
+        -------
+        pids : list
+            Empty.
+        """
         return []
 
     def frame_angles(self, pid=None):
+        """Return the frames' parallactic angles.
+
+        Parameters
+        ----------
+        pid : object or None, default None
+            Identifier of a partition, ignored.
+
+        Returns
+        -------
+        angles : ndarray
+            Angle of each frame, in degrees.
+        """
         return self.data.angles
 
     def frame_tags(self, pid=None):
+        """Return the frames' quality tags.
+
+        Parameters
+        ----------
+        pid : object or None, default None
+            Identifier of a partition, ignored.
+
+        Returns
+        -------
+        tags : dict of str to ndarray or None
+            The tags of ``data``.
+        """
         return self.data.tags
 
     def partition_weight(self, pid=None) -> float:
+        """Return the dataset's weight, the square root of its exposure time.
+
+        Parameters
+        ----------
+        pid : object or None, default None
+            Identifier of a partition, ignored.
+
+        Returns
+        -------
+        weight : float
+            ``sqrt(texp)``, or 1 without an exposure time.
+        """
         return float(np.sqrt(self.data.texp)) if self.data.texp > 0 else 1.0
 
     def matched_filter_kernel(self, rho_as: float):
+        """Return the injection model's measured matched filter at a separation.
+
+        Parameters
+        ----------
+        rho_as : float
+            Separation, in arcsec.
+
+        Returns
+        -------
+        kernel : ndarray or None
+            The kernel, or None without an injection model or a measured filter.
+        """
         if self.model is None:
             return None
         return self.model.matched_filter_kernel(rho_as, self.fwhm)
 
     def dth_max_deg(self, outrad: float) -> float:
-        """Max PA span inside one temporal bin: half a FWHM (``1.028 lambda/D``) of
-        motion at ``outrad``."""
+        """Return the maximum span of parallactic angle in one temporal bin.
+
+        Parameters
+        ----------
+        outrad : float
+            Outer radius of the annulus, in pixels.
+
+        Returns
+        -------
+        dth : float
+            Span in degrees that moves a source by half a FWHM, ``0.5 * 1.028`` lambda/D, at
+            ``outrad``.
+        """
         return float(np.rad2deg(0.5 * 1.028 * self.lam_over_d_px / max(outrad, 1.0)))
 
     def cost_estimate(self, params: Dict[str, Any], k_scan: bool = False, n_inject: int = 0,
                       fm: bool = False) -> Optional[float]:
-        """Rough single-thread seconds of one :meth:`reduce`, for scheduling only.
+        """Estimate the single-thread seconds of one :meth:`reduce`, for scheduling only.
 
-        From the frames kept, the frames after binning and the KLIP zone: the injection and
-        the high-pass of every kept frame, the derotation and combination of every binned
-        frame, and the per-target KL bases (binned frames x references squared x zone
-        pixels).  The
-        coefficients come from 2024-frame, 150 x 150 timings on one 2.8 GHz core, and only
-        the ratios between jobs are used."""
+        The estimate counts the injection and high-pass of every kept frame, the derotation and
+        combination of every binned frame, and the per-target KL bases (binned frames times references
+        squared times zone pixels).  The coefficients come from 2024-frame, 150 x 150 timings on one
+        2.8 GHz core, and only the ratios between jobs are used.
+
+        Parameters
+        ----------
+        params : dict
+            The request's parameters.
+        k_scan : bool, default False
+            Whether the reduction scans the number of KL modes.
+        n_inject : int, default 0
+            Number of injected sources.
+        fm : bool, default False
+            Whether the reduction runs KLIP-FM.
+
+        Returns
+        -------
+        seconds : float or None
+            The estimate, or None when it fails.
+        """
         try:
             p = dict(self.defaults)
             p.update({k: v for k, v in params.items() if v is not None})
@@ -527,14 +1014,37 @@ class KLIPReducer(Reducer):
 
     def _inject(self, sources: Sequence[Source], keep: Optional[np.ndarray] = None,
                 threads: int = 1) -> np.ndarray:
-        """The cube with ``sources`` injected, every frame; with ``keep``, the kept frames
-        only (``cube[keep]``, in order).
+        """Return the cube with sources injected, every frame or the kept frames only.
 
-        Only the frames asked for are injected.  The frame selection depends on the tags,
-        not on the injection, so a frame it drops never needs its companions.  The latest
-        set of sources stays cached with the frames injected so far, so a reduction with
-        the same sources and another selection injects only the frames it adds.  Each frame
-        gets the numbers :func:`klip_tpe.injection.inject_sources` gives it."""
+        Only the frames asked for are injected, since the selection depends on the tags and a frame it
+        drops never needs its companions.  The latest set of sources stays cached with the frames
+        injected so far, so a reduction with the same sources and another selection injects only the
+        frames it adds.  Each frame gets the numbers :func:`klip_tpe.injection.inject_sources` gives it.
+
+        Parameters
+        ----------
+        sources : sequence of Source
+            The sources.
+        keep : ndarray of bool or None, default None
+            The frames to return, ``cube[keep]`` in order.  None returns every frame.
+        threads : int, default 1
+            Number of threads.
+
+        Returns
+        -------
+        cube : ndarray
+            The injected frames, in float32.
+
+        Raises
+        ------
+        ValueError
+            If the reducer has no injection model.
+
+        Warns
+        -----
+        RuntimeWarning
+            When a new set of sources is too faint to survive float32 rounding.
+        """
         key = tuple(s.as_tuple() for s in sources)
         with self._inj_lock:
             ent = self._inj_cache.get(key)
@@ -551,9 +1061,33 @@ class KLIPReducer(Reducer):
 
     def model_cube(self, sources: Sequence[Source], keep: Optional[np.ndarray] = None,
                    threads: int = 1) -> np.ndarray:
-        """KLIP-FM planet-model cube: the sources injected into a ZERO cube with the
-        same injection code / conventions as the data (reduce_near_2 L1441-1494).
-        ``keep``: the kept frames only, as :meth:`_inject`."""
+        """Return the KLIP-FM planet-model cube, the sources injected into zero frames.
+
+        The injection code and conventions are those of the data.
+
+        Parameters
+        ----------
+        sources : sequence of Source
+            The KLIP-FM test sources.
+        keep : ndarray of bool or None, default None
+            The frames to return, as for :meth:`_inject`.
+        threads : int, default 1
+            Number of threads.
+
+        Returns
+        -------
+        mcube : ndarray
+            The model frames, in float32.
+
+        Raises
+        ------
+        ValueError
+            If the reducer has no injection model.
+
+        Notes
+        -----
+        It does what ``reduce_near_2`` L1441-1494 does in the IDL predecessor.
+        """
         key = tuple(s.as_tuple() for s in sources)
         with self._inj_lock:
             ent = self._fm_cache.get(key)
@@ -566,8 +1100,26 @@ class KLIPReducer(Reducer):
 
     def _fill(self, ent: _FrameCache, base: np.ndarray, sources: Sequence[Source],
               keep: Optional[np.ndarray], threads: int) -> np.ndarray:
-        """Inject the frames of ``keep`` (all by default) that ``ent`` does not hold yet,
-        from ``base``, and return the frames asked for."""
+        """Inject the frames a cache entry does not hold yet, and return the frames asked for.
+
+        Parameters
+        ----------
+        ent : _FrameCache
+            The cache entry, filled in place.
+        base : ndarray
+            Frames the sources are added to.
+        sources : sequence of Source
+            The sources.
+        keep : ndarray of bool or None
+            The frames asked for, or None for all.
+        threads : int
+            Number of threads.
+
+        Returns
+        -------
+        cube : ndarray
+            The entry's cube, or its frames in ``keep``.
+        """
         want = np.ones(ent.done.size, bool) if keep is None else np.asarray(keep, bool)
         with ent.lock:
             todo = np.flatnonzero(want & ~ent.done)
@@ -580,6 +1132,13 @@ class KLIPReducer(Reducer):
 
     def __getstate__(self):
         # the injection caches are scratch, and a lock does not pickle
+        """Return the state to pickle, without the injection caches and the lock.
+
+        Returns
+        -------
+        state : dict
+            The reducer's attributes.
+        """
         d = self.__dict__.copy()
         d.update(_inj_cache={}, _fm_cache={})
         d.pop("_inj_lock", None)
@@ -587,6 +1146,13 @@ class KLIPReducer(Reducer):
         return d
 
     def __setstate__(self, d):
+        """Restore a pickled state, with new caches and a new lock.
+
+        Parameters
+        ----------
+        d : dict
+            The state.
+        """
         self.__dict__.update(d)
         self._inj_lock = threading.Lock()
         self._crops = {"inj": _CropCache(), "fm": _CropCache()}
@@ -595,17 +1161,35 @@ class KLIPReducer(Reducer):
 
     # -- the true north ------------------------------------------------------
     def injection_north(self):
-        """The true north the injection takes: each frame's own (:attr:`north_frames`,
-        indexed as ``data.angles``) when the frames carry their own, else the one angle
-        :attr:`truenorth`."""
+        """Return the true north the injection takes, each frame's own or the one angle.
+
+        Returns
+        -------
+        north : float or ndarray
+            ``north_frames``, indexed as ``data.angles``, or ``truenorth``.
+        """
         nf = getattr(self, "north_frames", None)
         return self.truenorth if nf is None else nf
 
     def binned_north(self, keep: np.ndarray, grp: np.ndarray, bkeep: np.ndarray, bin_: int) -> Optional[np.ndarray]:
-        """Each kept bin's true north, the mean of its frames' (:func:`~klip_tpe.klip.bin_values`,
-        the mean :func:`~klip_tpe.klip.bin_frames` takes of the angles), or None when the frames
-        share :attr:`truenorth`.  ``keep``: the frame selection; ``grp``, ``bkeep``: the binning's
-        groups over the kept frames and its kept bins."""
+        """Return each kept bin's true north, the mean of its frames'.
+
+        Parameters
+        ----------
+        keep : ndarray of bool
+            The frame selection.
+        grp : ndarray of int
+            Bin number of each selected frame.
+        bkeep : ndarray of bool
+            The bins kept.
+        bin_ : int
+            Binning factor.
+
+        Returns
+        -------
+        north : ndarray or None
+            True north of each kept bin, in degrees, or None when the frames share ``truenorth``.
+        """
         nf = getattr(self, "north_frames", None)
         if nf is None:
             return None
@@ -615,16 +1199,20 @@ class KLIPReducer(Reducer):
 
     @property
     def supports_frame_north(self) -> bool:
-        """True where the derotation takes each bin's own north: the built-in KLIP, or a
-        backend that says so (``_honours_frame_north``).  pyKLIP's and VIP's backends derotate
-        by one angle, and refuse frames that carry their own."""
+        """Whether the derotation takes each bin's own north, for the built-in KLIP or a backend that declares ``_honours_frame_north``.
+        """
         return (type(self)._subtract is KLIPReducer._subtract
                 or bool(getattr(type(self), "_honours_frame_north", False)))
 
     def north_record(self) -> Dict[str, Any]:
-        """What a run records of the true north this reducer used: the loader's record
-        (``data.meta["north"]``: where the values came from), with the values' range over the
-        frames, or the one angle."""
+        """Return what a run records of the true north this reducer used.
+
+        Returns
+        -------
+        rec : dict
+            The loader's record (``data.meta["north"]``) with the values' range over the frames, or the
+            one angle.
+        """
         rec = dict((getattr(self.data, "meta", None) or {}).get("north") or {})
         north = getattr(self.data, "north", None)
         if north is None:
@@ -637,16 +1225,29 @@ class KLIPReducer(Reducer):
         return rec
 
     def _check_frame_north(self) -> None:
+        """Refuse frames with their own true north on a backend that derotates by one angle.
+
+        Raises
+        ------
+        ValueError
+            If the frames carry their own north and the backend does not take it.
+        """
         if getattr(self, "north_frames", None) is not None and not self.supports_frame_north:
             raise ValueError(f"{type(self).__name__} derotates every frame by one angle, and "
                              f"{getattr(self.data, 'name', 'the data')} has a true north per frame: reduce it "
                              f"with the built-in KLIP, or with the frames' north set to one angle")
 
     def cube_peak(self) -> float:
-        """The level of the cube's brightest pixels as the float32 headroom check samples it
-        (:func:`~klip_tpe.injection.cube_peak`), computed
-        once.  The check runs for every new set of sources, and its strided sample touches
-        most of the cube's cache lines: once per draw it was most of a read of the cube."""
+        """Return the level of the cube's brightest pixels, computed once.
+
+        The float32 headroom check runs for every new set of sources, and its strided sample touches
+        most of the cube's cache lines (:func:`~klip_tpe.injection.cube_peak`).
+
+        Returns
+        -------
+        peak : float
+            The level, in data units.
+        """
         if getattr(self, "_peak", None) is None:
             self._peak = cube_peak(self.data.cube)
         return self._peak
@@ -654,28 +1255,44 @@ class KLIPReducer(Reducer):
     def subtract_sources(self, sources: Sequence[Any], threads: int = 1) -> int:
         """Take point sources out of the data once, before any reduction.
 
-        Each source goes into every frame of ``data.cube`` with the negative of its contrast,
-        through :func:`~klip_tpe.injection.inject_frames` with this reducer's model, fallback,
-        true north, centre and angle convention.  Those are the numbers a draw's injection of
-        the same source adds, with the sign flipped.  Every reduction then works on the edited
-        frames: the clean pass, each draw, the reference ranking (:meth:`_clean_bins`),
-        validation and param-verify.  The KLIP-FM model cube does not, since it is built from
-        zeros (:meth:`model_cube`).
+        Each source goes into every frame of ``data.cube`` with the negative of its contrast, through
+        :func:`~klip_tpe.injection.inject_frames` with this reducer's model, fallback, true north,
+        center and angle convention.  Every reduction then works on the edited frames, except the
+        KLIP-FM model cube, which is built from zeros (:meth:`model_cube`).  Call it before the worker
+        pool starts (:meth:`PartitionedReducer.subtract_sources` checks), since the workers keep the
+        reducers they were forked with.
 
-        ``sources``: :class:`~klip_tpe.metrics.Source` or ``(rho_arcsec, pa_deg, contrast)``,
-        e.g. :func:`~klip_tpe.injection.read_sources`.  A source of contrast 0 is skipped, so a
-        list of zeros leaves the frames as they were, to the bit.  The edited frames are a copy:
-        a dataset the caller still holds is not changed.  Call it before the worker pool starts
-        (:meth:`PartitionedReducer.subtract_sources` checks), since the workers keep the
-        reducers they were forked with.  The edit is kept in :attr:`data_edits` and in
-        :meth:`describe`.
+        Parameters
+        ----------
+        sources : sequence
+            The sources, each a :class:`~klip_tpe.metrics.Source` or ``(rho_arcsec, pa_deg,
+            contrast)``, such as :func:`~klip_tpe.injection.read_sources` gives.  A source of contrast 0
+            is skipped.
+        threads : int, default 1
+            Number of threads.
 
-        The flux that left the frames is measured on a sample of frames against the sources
-        injected into zeros, and kept as :attr:`subtracted_kept` (1 = all of it).  It warns when
-        float32 rounding kept more than 0.1 % of it, in place of the per-source headroom check a
-        draw's injection gets: in a chain whose contrasts pass through 0, the faintest sources
-        lose part of their own flux and carry almost none of the chain's.  Returns the number of
-        sources subtracted."""
+        Returns
+        -------
+        n : int
+            Number of sources subtracted.
+
+        Raises
+        ------
+        ValueError
+            If a source lies beyond the frame or the reducer has no injection model.
+
+        Warns
+        -----
+        RuntimeWarning
+            When float32 rounding kept more than 0.1 % of the sources' flux in the frames.
+
+        Notes
+        -----
+        The edited frames are a copy, so a dataset the caller still holds is not changed.  The edit is
+        kept in ``data_edits`` and in :meth:`describe`, and the fraction of the flux that left the
+        frames in ``subtracted_kept``.  In a chain whose contrasts pass through 0, the faintest sources
+        lose part of their own flux and carry almost none of the chain's.
+        """
         src = [s if isinstance(s, Source) else Source(*(float(v) for v in s)) for s in sources]
         n, kept = self._edit_frames(src, -1.0, threads, "subtract_sources")
         if n:
@@ -686,16 +1303,41 @@ class KLIPReducer(Reducer):
         return n
 
     def inject_sources(self, sources: Sequence[Any], threads: int = 1) -> int:
-        """Add point sources to the data once, before any reduction: planets put into the
-        frames on purpose, to see what a reduction does to them.
+        """Add point sources to the data once, before any reduction, to see what a reduction does to them.
 
-        :meth:`subtract_sources` with the opposite sign.  Each source goes into every frame of
-        ``data.cube`` with its own contrast, through the code a draw's injection uses, and from
-        then on it is part of the data: the clean pass, each draw, the reference ranking,
-        validation and param-verify see it, and the KLIP-FM model cube does not.  The flux that
-        reached the frames is measured as for a subtraction (:attr:`injected_kept`).  The edit
-        is kept in :attr:`data_edits` as ``injected_sources``.  After :meth:`subtract_sources`
-        when both are asked for.  Returns the number of sources added."""
+        It is :meth:`subtract_sources` with the opposite sign.  From then on the sources are part of the
+        data, for the clean pass, each draw, the reference ranking, validation and param-verify, but
+        not for the KLIP-FM model cube.  It runs after :meth:`subtract_sources` when both are asked
+        for.
+
+        Parameters
+        ----------
+        sources : sequence
+            The sources, each a :class:`~klip_tpe.metrics.Source` or ``(rho_arcsec, pa_deg,
+            contrast)``.  A source of contrast 0 is skipped.
+        threads : int, default 1
+            Number of threads.
+
+        Returns
+        -------
+        n : int
+            Number of sources added.
+
+        Raises
+        ------
+        ValueError
+            If a source lies beyond the frame or the reducer has no injection model.
+
+        Warns
+        -----
+        RuntimeWarning
+            When float32 rounding lost more than 0.1 % of the sources' flux.
+
+        Notes
+        -----
+        The edit is kept in ``data_edits`` as ``injected_sources``, and the fraction of the flux that
+        reached the frames in ``injected_kept``.
+        """
         src = [s if isinstance(s, Source) else Source(*(float(v) for v in s)) for s in sources]
         n, kept = self._edit_frames(src, 1.0, threads, "inject_sources")
         if n:
@@ -706,9 +1348,39 @@ class KLIPReducer(Reducer):
         return n
 
     def _edit_frames(self, src: Sequence[Source], sign: float, threads: int, what: str) -> Tuple[int, float]:
-        """``src`` into every frame of ``data.cube`` at ``sign`` times its contrast (-1 takes
-        the sources out, +1 puts them in), on a float32 copy, and the fraction of their flux
-        that moved (:func:`_flux_taken`).  Returns ``(sources applied, fraction)``."""
+        """Add sources to every frame at a sign times their contrast, on a float32 copy of the data.
+
+        The reducer's data is replaced by the edited copy, and every cache built from the old frames is
+        cleared.
+
+        Parameters
+        ----------
+        src : sequence of Source
+            The sources.
+        sign : float
+            -1 to take them out, +1 to put them in.
+        threads : int
+            Number of threads.
+        what : str
+            Name of the caller, for messages.
+
+        Returns
+        -------
+        n : int
+            Number of sources applied, those with a contrast other than 0.
+        fraction : float
+            Fraction of their flux that moved (:func:`_flux_taken`).
+
+        Raises
+        ------
+        ValueError
+            If a source lies beyond the frame or the reducer has no injection model.
+
+        Warns
+        -----
+        RuntimeWarning
+            When float32 rounding kept or lost more than 0.1 % of the flux.
+        """
         ny, nx = self.data.cube.shape[-2:]
         far = [s for s in src if s.rho / self.pxscale > max(ny, nx)]
         if far:
@@ -756,44 +1428,59 @@ class KLIPReducer(Reducer):
                              sdi: Optional[Dict[str, Any]] = None) -> None:
         """Make the reference library a searched object rather than a fixed basis.
 
-        ``partition`` is one label per *unbinned* science frame -- the roll, night or
-        channel a frame belongs to.  A target never draws references sharing its label, so
-        this is what stops a roll subtracting its own companion.  ``groups`` optionally
-        splits ``data.ref_cube`` into several named external pools (name -> row indices);
-        the default makes it one pool called ``psfref``.
+        The similarity matrix that ranks each target's references depends on the binned cube, the
+        high-pass width and the annulus, so it is built when first needed and cached per combination.
+        With ``bin`` fixed, as in the MWC 758 run, that is one matrix for the whole search.
 
-        ``rotation`` makes the science pool one the ADI rule selects from, per target and
-        per annulus (``angsep``, ``anglemax`` over the binned angles, the label on top when
-        there is more than one): the form for one continuously rotating sequence, which has
-        no label to exclude by.  With every eligible science frame kept and
-        ``nkeep_<ref_group> = 0`` the reduction is plain ADI to the bit, so "no reference
-        frames" is a point of the search space.
+        Parameters
+        ----------
+        partition : sequence
+            One label per unbinned science frame, such as its roll, night or channel.  A target never
+            draws references that share its label, which stops a roll subtracting its own companion.
+        groups : dict of str to sequence of int or None, default None
+            Named external pools, as rows of ``data.ref_cube``.  None makes the whole cube one pool,
+            named ``ref_group``.
+        metric : str, default "cc"
+            Similarity measure of the ranking (:func:`klip_tpe.reflib.similarity_matrix`).
+        shift_px : int, default 1
+            Range of the similarity's shift search, in pixels.
+        n_min_ref : int, default 2
+            Minimum number of references for a target.
+        min_keep : dict of str to int or None, default None
+            Minimum count of each pool.
+        ref_group : str, default "psfref"
+            Name of the single external pool when ``groups`` is None.
+        similarity : ndarray or None, default None
+            Matrix of shape (n_library, n_target) used instead of computing one, such as the IDL
+            predecessor's ``F430M_refmetrics_cc.fits``.  A difference in the result is then a difference
+            in the selection, not in how the two code bases measure correlation.
+        rotation : bool, default False
+            Whether the ADI rule selects from the science pool per target and per annulus, by
+            ``angsep`` and ``anglemax`` over the binned angles, for one continuously rotating sequence.
+            With every eligible science frame kept and ``nkeep_<ref_group> = 0`` the reduction is plain
+            ADI to the bit.
+        searched : sequence of str or None, default None
+            Pools whose counts become search dimensions.  A pool left out puts every eligible frame in
+            the basis, and None searches every pool.
+        sdi : dict or None, default None
+            The pool of the other wavelength groups' frames, rescaled to this group's wavelength and
+            counted by ``nkeep_sdi``, as ``{"n_frames": frames the groups hold, "cap": maximum count,
+            "lenders": the groups' identifiers}``.  The frames arrive with each request
+            (``ReductionRequest.siblings``), so this only declares the pool.
 
-        ``searched`` names the pools whose counts become search dimensions (default: every
-        pool).  A pool left out is not a dimension at all: every one of its eligible frames
-        is in the basis, as it is without a library.  ``searched=("psfref",)`` with
-        ``rotation`` is ADI plus a searched number of reference-star frames, the ALES form.
+        Raises
+        ------
+        NotImplementedError
+            If the backend does not apply a searched library.
+        ValueError
+            If ``sdi`` has no frames or no cap, or ``searched`` names an unknown pool.
 
-        ``sdi`` adds the pool of the other wavelength groups' frames, rescaled about the star
-        to this group's wavelength (:mod:`klip_tpe.rescale`), ranked by correlation with the
-        target and counted by ``nkeep_sdi``: ``{"n_frames": total frames the other groups
-        hold (for the count's range), "cap": most-correlated rows the count may reach,
-        "lenders": their ids}``.  The frames themselves arrive with each request
-        (``ReductionRequest.siblings``, prepared by the groups' own :meth:`prepare`, which
-        :class:`PartitionedReducer` arranges), so this only declares the pool.  A target's
-        eligible SDI rows are the ones whose planet has moved, by rotation and scaling
-        together, the arc ``angsep`` asks for (the displacement rule,
-        :func:`klip_tpe.rescale.displacement_px`), within ``anglemax`` of rotation.
-
-        The similarity matrix depends on the binned cube, the high-pass width and the
-        annulus, all of which the search can move, so it is built lazily and cached per
-        distinct combination.  With ``bin`` fixed -- which is how the MWC 758 run was
-        configured -- that is exactly one matrix for the whole search.
-
-        ``similarity`` supplies a ``(n_library, n_target)`` matrix instead of computing
-        one.  That is how a port is checked against the thing it was ported from: hand it
-        the IDL's own ``F430M_refmetrics_cc.fits`` and any difference in the result is a
-        difference in the SELECTION, not in how two languages measure correlation.
+        Notes
+        -----
+        ``searched=("psfref",)`` with ``rotation`` is ADI plus a searched number of reference-star
+        frames, the ALES form.  A target's eligible SDI rows are those whose planet has moved the arc
+        ``angsep`` asks for, by rotation and scaling together (:func:`klip_tpe.rescale.displacement_px`),
+        within ``anglemax`` of rotation.
         """
         if not self.supports_reference_library:
             # This used to succeed on every backend: the counts were added to the search
@@ -828,9 +1515,13 @@ class KLIPReducer(Reducer):
         self._reflib_cache.clear()
 
     def reference_params(self):
-        """The searched counts this reducer's library contributes to the space (the
-        ``searched`` pools of :meth:`set_reference_library`; a pool left out keeps every
-        eligible frame and is no dimension)."""
+        """Return the searched counts this reducer's library adds to the search space.
+
+        Returns
+        -------
+        params : list
+            One parameter per searched pool (:meth:`set_reference_library`), empty without a library.
+        """
         if self._reflib_spec is None or not self.supports_reference_library:
             return []
         searched = self._reflib_spec.get("searched")
@@ -838,9 +1529,15 @@ class KLIPReducer(Reducer):
                 if searched is None or p.name[len("nkeep_"):] in searched]
 
     def _reflib_stub(self):
-        """A library over the UNBINNED geometry, for building the search space before any
-        reduction has run.  Only the group sizes matter here, so the similarity is a
-        placeholder of the right shape."""
+        """Build a library over the unbinned geometry, for the search space before any reduction runs.
+
+        Only the group sizes matter here, so the similarity is a placeholder of the right shape.
+
+        Returns
+        -------
+        lib : ReferenceLibrary
+            The placeholder library.
+        """
         from .reflib import ReferenceGroup, ReferenceLibrary
         spec = self._reflib_spec
         n_sci = int(self.data.cube.shape[0])
@@ -869,37 +1566,61 @@ class KLIPReducer(Reducer):
 
     def _reflib(self, bcube, ref, bkeep_partition, filt, inrad, outrad, key_extra=(), sim_cube=None,
                 bang=None, sdi=None, mid_px=None):
-        """The library for this evaluation: ``(selection, basis)``.  ``bang``: the binned
-        angles, which a ``rotation`` science pool selects by (they follow from the key).
-        ``mid_px``: the radius the SDI pool's displacement rule measures at (default the
-        mid radius of ``inrad``-``outrad``; the annulus' when the zone reaches beyond it).
+        """Return this evaluation's reference library and its basis rows.
 
-        The SELECTION -- the groups and the similarity matrix that ranks each target's
-        references -- is built once per distinct (binning, frame selection, filter, annulus)
-        and reused; ``key_extra`` carries the binning, the frame-selection mask and the bins
-        kept, and ``sim_cube`` is the same bins of the cube WITHOUT injections, so that the
-        ranking does not depend on what was injected or on which evaluation came first.  The BASIS rows are
-        always this evaluation's own cube, ``[bcube | SDI rows | ref]``.
+        The selection, the groups and the similarity matrix that ranks each target's references, is
+        built once per binning, frame selection, filter and annulus, from the bins without injections.
+        The ranking then depends neither on what was injected nor on which evaluation came first.  The
+        basis rows are always this evaluation's own frames, ``[bcube | SDI rows | ref]``.
 
-        ``sdi`` (from :meth:`_sdi_rows`) is this evaluation's SDI pool: its rows go between
-        the science frames and the reference star's, and its block of the similarity is
-        computed here and now, against this evaluation's own target frames at zero lag,
-        never cached.  The rows are rescaled frames of the same registered sequence, so the
-        +/- 1 px search the other pools use has nothing to find there, and they carry this
-        evaluation's injections: a cached ranking would make the selection depend on which
-        evaluation came first, the very thing the cache rule below exists to prevent, and a
-        second, clean prep of every sibling would double the rescaling.  The injections'
-        footprint in the ranking is a few pixels of the thousands in the annulus.
+        Parameters
+        ----------
+        bcube : ndarray, shape (nb, ny, nx)
+            This evaluation's binned science frames.
+        ref : ndarray or None
+            The reference-star frames, or None.
+        bkeep_partition : ndarray
+            Partition label of each kept bin.
+        filt : int
+            Width of the high-pass box, in pixels.
+        inrad : float
+            Inner radius of the zone, in pixels.
+        outrad : float
+            Outer radius of the zone, in pixels.
+        key_extra : tuple, default ()
+            The binning, the frame selection and the bins kept, which join the cache key.
+        sim_cube : ndarray or None, default None
+            The same bins without injections, for the similarity.  None takes ``bcube``.
+        bang : ndarray or None, default None
+            Parallactic angle of each bin, in degrees, which a rotation pool selects by.
+        sdi : dict or None, default None
+            This evaluation's SDI pool (:meth:`_sdi_rows`), ranked here against its own target frames at
+            zero lag and never cached.
+        mid_px : float or None, default None
+            Radius the SDI pool's displacement rule measures at, in pixels.  None takes the zone's
+            middle radius.
 
-        Until 2026-09-27 the cache held the basis rows too, keyed without the injections:
-        every later reduction with the same key took its science (other-roll) references from
-        whichever reduction had filled the cache first -- another evaluation's injections, or
-        none -- so an injected source was not self-subtracted by the other roll, a clean
-        reduction carried another evaluation's sources, and a result depended on the order of
-        the reductions.  It inflated every configuration that used the other roll on the
-        built-in engine's searched library (NIRCam DK, D2K, H2K; MIRI on the built-in engine);
-        pyKLIP, which builds its own basis, and the libraries without an other-roll pool were
-        untouched."""
+        Returns
+        -------
+        lib : ReferenceLibrary
+            The selection.
+        library : ndarray
+            The basis rows.
+
+        Raises
+        ------
+        ValueError
+            If a rotation pool lacks one angle per bin, or a similarity has the wrong shape.
+
+        Notes
+        -----
+        Until 2026-09-27 the cache held the basis rows too, keyed without the injections.  Every later
+        reduction with the same key took its other-roll references from whichever reduction filled the
+        cache first, so an injected source was not self-subtracted by the other roll and a result
+        depended on the order of the reductions.  It inflated every configuration that used the other
+        roll on the built-in engine's searched library (NIRCam DK, D2K, H2K, and MIRI on the built-in
+        engine).
+        """
         from .reflib import ReferenceGroup, ReferenceLibrary, similarity_matrix
         spec = self._reflib_spec
         n_sci = int(bcube.shape[0])
@@ -964,14 +1685,29 @@ class KLIPReducer(Reducer):
         return full, library
 
     def _binned_partition(self, keep, grp, bkeep):
-        """Partition label per surviving BINNED frame.
+        """Return the partition label of each kept binned frame.
 
-        Three maskings compose here and getting any of them wrong silently mislabels a
-        roll -- which would let a target draw references from its own roll, exactly the
-        failure the exclusion exists to prevent.  ``keep`` is the frame-selection mask over
-        the raw frames; ``grp`` is the bin index of each SELECTED frame; ``bkeep`` drops
-        the bins without data.  A bin takes the label of its first frame, and binning never spans
-        partitions because the frames of a roll are contiguous.
+        A bin takes the label of its first frame.  Binning never spans partitions, since a roll's frames
+        are contiguous, and a mislabeled bin would let a target draw references from its own roll.
+
+        Parameters
+        ----------
+        keep : ndarray of bool
+            The frame selection over the raw frames.
+        grp : ndarray of int
+            Bin number of each selected frame.
+        bkeep : ndarray of bool
+            The bins kept.
+
+        Returns
+        -------
+        labels : ndarray
+            Label of each kept bin.
+
+        Raises
+        ------
+        ValueError
+            If the labels do not match the frames or a bin mixes partitions.
         """
         lab = np.asarray(self._reflib_spec["partition"])
         if lab.size != int(np.asarray(keep).size):
@@ -991,9 +1727,29 @@ class KLIPReducer(Reducer):
         return out[np.asarray(bkeep, bool)]
 
     def _reference_cube(self, filt: int, meta: Dict[str, Any], threads: int = 1) -> Optional[np.ndarray]:
-        """RDI reference frames: centre-cropped to the science FOV and given the
-        first high-pass (``smooth(/nan)``, reduce_near_2 L1864-1867).  Not frame
-        selected, not binned (the file is required to be pre-registered/binned)."""
+        """Return the RDI reference frames, cropped to the science frames and high-passed.
+
+        The frames are center-cropped to the science field and given the first high-pass, NaN-aware.
+        They are neither selected nor binned, so the file must be registered and binned already.
+
+        Parameters
+        ----------
+        filt : int
+            Width of the high-pass box, in pixels, 1 or less for none.
+        meta : dict
+            The reduction's notes, which get ``rdi_note`` when the cube is missing or does not fit.
+        threads : int, default 1
+            Number of threads.
+
+        Returns
+        -------
+        ref : ndarray or None
+            The frames in float32, or None, which falls back to ADI.
+
+        Notes
+        -----
+        It does what ``reduce_near_2`` L1864-1867 does in the IDL predecessor, ``smooth(/nan)``.
+        """
         ref = self.data.ref_cube
         ny, nx = self.data.cube.shape[1:]
         if ref is None:
@@ -1012,11 +1768,30 @@ class KLIPReducer(Reducer):
 
     # -- main entry ----------------------------------------------------------
     def prepare(self, req: ReductionRequest) -> PreparedFrames:
-        """The first half of :meth:`reduce`: the frame selection, the injections into the
-        kept frames, the KLIP-FM model cube, the high-pass, the destriping and the
-        angle-aware binning.  What another wavelength group's reduction needs from this one
-        for its SDI pool is exactly this, so the SDI mode runs it once per group and hands
-        the result round (``ReductionRequest.stage = "prepare"``)."""
+        """Run the first half of :meth:`reduce`, up to the binned frames.
+
+        It makes the frame selection, the injections into the kept frames, the KLIP-FM model cube, the
+        high-pass, the destriping and the angle-aware binning.  The KLIP zone is the annulus padded by
+        ``zone_pad`` on each edge the runner marks (``pad_in``, ``pad_out``), then widened by ``zone_in``
+        and ``zone_out``.  Another wavelength group's SDI pool needs exactly this, so the SDI mode runs
+        it once per group (``ReductionRequest.stage = "prepare"``).
+
+        Parameters
+        ----------
+        req : ReductionRequest
+            The request.  KLIP-FM is skipped with ``k_scan``.
+
+        Returns
+        -------
+        prep : PreparedFrames
+            The prepared frames.
+
+        Raises
+        ------
+        ValueError
+            If every frame is dropped as empty after the high-pass and the binning, as happens to a
+            padded or masked cube with NaN.
+        """
         p = dict(self.defaults)
         p.update({k: v for k, v in req.params.items() if v is not None})
         k = int(max(round(p["k_klip"]), 1))
@@ -1024,7 +1799,7 @@ class KLIPReducer(Reducer):
         filt = int(round(p["filter"]))
         # the KLIP zone is the annulus padded by zone_pad on each edge the runner marks: by
         # default only an edge shared with another annulus (RunConfig.edge_padding).  A
-        # request without the marks pads both, as the IDL does.
+        # request without the marks pads both, as the IDL predecessor does.
         pad_in = self.zone_pad if _flag(p.get("pad_in", True)) else 0.0
         pad_out = self.zone_pad if _flag(p.get("pad_out", True)) else 0.0
         ann_in = max(float(p["inrad"]) - pad_in, 0.0)
@@ -1050,8 +1825,8 @@ class KLIPReducer(Reducer):
         # ``hp_order="binned"`` (under test, off by default): bin first, then high-pass the
         # binned frames.  Both are linear, so the images agree to rounding, and the high-pass
         # costs 1/bin as much.  The means are taken in double precision: binned before the
-        # high-pass, the frames still carry their background.  The IDL high-passes every
-        # frame before binning, and a destriped cube keeps that order (not linear).
+        # high-pass, the frames still carry their background.  The IDL predecessor high-passes
+        # every frame before binning, and a destriped cube keeps that order (not linear).
         hp_binned = str(p.get("hp_order", "raw")).lower() == "binned" and filt > 1 and not p["do_destripe"]
         hp_nan = _flag(p.get("hp_nan_aware", False))
         if _flag(p.get("prep_fused", True)):
@@ -1081,7 +1856,7 @@ class KLIPReducer(Reducer):
             # (bins_with_data), so a cube that is mostly NaN -- a subarray padded into a
             # larger grid, say -- is wiped out entirely by the high-pass, which at
             # nan_aware=False spreads NaN over the whole frame.  Every downstream shape then goes to zero and the failure
-            # surfaces somewhere far away and unrecognisable.
+            # surfaces somewhere far away and unrecognizable.
             nan_frac = float(np.mean(~np.isfinite(np.asarray(ds.cube, float))))
             raise ValueError(
                 f"every frame was dropped as empty after filtering and binning "
@@ -1096,25 +1871,58 @@ class KLIPReducer(Reducer):
     # ------------------------------------------------------------------ the fused path
     def _prep_fused(self, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth, injections=None, fm_sources=None,
                     bkeep=None):
-        """The frames before KLIP, one bin group at a time: ``(bcube, bang, grp, bkeep,
-        mcube)`` as the whole-cube steps make them (:meth:`_prep_cube`, :meth:`_inject`,
-        :meth:`model_cube`, and the model's binning in :meth:`prepare`), to the bit.
-        ``bkeep``: the bins to keep in place of the test for data (:func:`bins_with_data`).
+        """Make the frames before KLIP one bin group at a time, as the whole-cube steps make them, to the bit.
 
-        A group's kept frames are copied out of the cube (``float32`` when they take
-        sources, as the injected cube held them), given each source's stamp in the order of
-        the sources (:func:`klip_tpe.injection.place_source`, the arithmetic of
-        :func:`~klip_tpe.injection.inject_frames`), high-passed a block of frames at a time
-        (``_highpass_frames``, which filters every frame on its own), destriped frame by
-        frame when asked, and averaged by :func:`~klip_tpe.klip.group_mean`, the function the
-        whole-cube binning uses.  With ``hp_order="binned"`` the group is averaged in double
-        precision first and the mean high-passed.  The KLIP-FM model cube is made the same
-        way from zero frames.
+        A group's kept frames are copied out of the cube (in float32 when they take sources, as the
+        injected cube held them), given each source's stamp in the order of the sources
+        (:func:`klip_tpe.injection.place_source`), high-passed a block at a time, destriped when asked
+        and averaged by :func:`~klip_tpe.klip.group_mean`.  With ``hp_order="binned"`` the group is
+        averaged in double precision first and the mean high-passed.  The cube is read once and nothing
+        the size of the cube is written, and the groups go to the job's threads.
 
-        So the cube is read once and nothing the size of the cube is written: the stages
-        that used to read and write a whole cube each -- the injected copy, the compact copy
-        of the kept frames, the high-pass, the binning -- run on a group while it is in the
-        processor's cache.  The groups go to the job's threads."""
+        Parameters
+        ----------
+        p : dict
+            The request's parameters over the defaults.
+        keep : ndarray of bool
+            The frame selection over the raw frames.
+        bin_ : int
+            Temporal binning factor.
+        filt : int
+            Width of the high-pass box, in pixels, 1 or less for none.
+        dth : float
+            Maximum span of parallactic angle in a bin, in degrees.
+        hp_nan : bool
+            Whether the high-pass leaves NaN pixels out.
+        hp_binned : bool
+            Whether to bin before the high-pass (``hp_order="binned"``).
+        nth : int
+            Number of threads.
+        injections : sequence of Source or None, default None
+            Sources to inject.
+        fm_sources : sequence of Source or None, default None
+            KLIP-FM test sources, for a model cube made the same way from zero frames.
+        bkeep : ndarray of bool or None, default None
+            Bins to keep in place of the test for data (:func:`~klip_tpe.klip.bins_with_data`).
+
+        Returns
+        -------
+        bcube : ndarray, shape (nb, ny, nx)
+            The nb binned frames kept.
+        bang : ndarray, shape (nb,)
+            Mean parallactic angle of each kept bin, in degrees.
+        grp : ndarray of int
+            Bin number of each selected frame.
+        bkeep : ndarray of bool
+            True for each bin kept.
+        mcube : ndarray or None
+            The binned KLIP-FM model cube, or None without ``fm_sources``.
+
+        Raises
+        ------
+        ValueError
+            If ``bkeep`` does not have one value per bin.
+        """
         ds = self.data
         kidx = np.flatnonzero(keep)
         a_ = np.asarray(ds.angles, float)[kidx]
@@ -1142,9 +1950,34 @@ class KLIPReducer(Reducer):
         return bc[bkeep], bang[bkeep], grp, bkeep, mcube
 
     def _placer(self, sources: Sequence[Source], kind: str):
-        """``place(frames, J)``: every source's stamp added to ``frames[i]``, frame ``J[i]``
-        of the cube, in the order of the sources, as :func:`inject_frames` adds them.  The
-        stamps of a set that comes back are kept (:class:`_CropCache`)."""
+        """Return a function that adds every source's stamp to a batch of frames.
+
+        The function is ``place(frames, J)``, which adds to ``frames[i]``, frame ``J[i]`` of the cube,
+        every source's stamp in the order of the sources, as :func:`inject_frames` adds them.  The
+        stamps of a set that comes back are kept (:class:`_CropCache`).
+
+        Parameters
+        ----------
+        sources : sequence of Source
+            The sources.
+        kind : {"inj", "fm"}
+            Whether the sources are injections or KLIP-FM test sources, which have caches of their own.
+
+        Returns
+        -------
+        place : callable
+            The function, which changes ``frames`` in place.
+
+        Raises
+        ------
+        ValueError
+            If the reducer has no injection model.
+
+        Warns
+        -----
+        RuntimeWarning
+            When a new set of injections is too faint to survive float32 rounding.
+        """
         if self.model is None:
             raise ValueError("KLIPReducer needs an injection_model to inject sources" if kind == "inj" else
                              "KLIPReducer needs an injection_model to build the FM model cube")
@@ -1183,9 +2016,41 @@ class KLIPReducer(Reducer):
         return place
 
     def _fused_bins(self, base, kidx, bounds, bin_, filt, hp_nan, hp_binned, nth, place, clip) -> np.ndarray:
-        """Every bin group's frame, before the all-zero test: ``base[kidx]`` (zero frames
-        when ``base`` is None) through ``place``, the high-pass, ``clip``'s destriping and
-        the mean, a batch of whole groups at a time (see :meth:`_prep_fused`)."""
+        """Make every bin group's frame before the test for data, a batch of whole groups at a time.
+
+        Each group goes through ``place``, the high-pass, the destriping and the mean (see
+        :meth:`_prep_fused`).  A batch holds whole groups and, past its first group, no more frames than
+        one block of :func:`~klip_tpe.klip.highpass_stack` takes.
+
+        Parameters
+        ----------
+        base : ndarray or None
+            The cube, or None for zero frames, as for the KLIP-FM model cube.
+        kidx : ndarray of int
+            Indices of the kept frames.
+        bounds : ndarray of int
+            First frame of each group among the kept frames, then their number
+            (:func:`~klip_tpe.klip.group_bounds`).
+        bin_ : int
+            Temporal binning factor.
+        filt : int
+            Width of the high-pass box, in pixels, 1 or less for none.
+        hp_nan : bool
+            Whether the high-pass leaves NaN pixels out.
+        hp_binned : bool
+            Whether to average before the high-pass.
+        nth : int
+            Number of threads.
+        place : callable or None
+            Function that adds the sources' stamps (:meth:`_placer`), or None for none.
+        clip : float or None
+            Clipping level of the destriping, or None not to destripe.
+
+        Returns
+        -------
+        bins : ndarray, shape (ng, ny, nx)
+            The frame of each of the ng groups, in float32.
+        """
         ny, nx = self.data.cube.shape[1:]
         npix = int(ny) * int(nx)
         ng = int(bounds.size) - 1
@@ -1238,17 +2103,87 @@ class KLIPReducer(Reducer):
         return out
 
     def _clean_bins(self, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth, bkeep=None) -> np.ndarray:
-        """The binned frames of the cube without injections (the reference library's
-        ranking cube), by the path :meth:`prepare` takes.  ``bkeep``: the bins to take, the
-        ones the reduction's own cube kept, so that the ranking cube matches it bin for bin."""
+        """Return the binned frames without injections, the reference library's ranking cube.
+
+        They are made by the path :meth:`prepare` takes.
+
+        Parameters
+        ----------
+        p : dict
+            The request's parameters over the defaults.
+        keep : ndarray of bool
+            The frame selection over the raw frames.
+        bin_ : int
+            Temporal binning factor.
+        filt : int
+            Width of the high-pass box, in pixels, 1 or less for none.
+        dth : float
+            Maximum span of parallactic angle in a bin, in degrees.
+        hp_nan : bool
+            Whether the high-pass leaves NaN pixels out.
+        hp_binned : bool
+            Whether to bin before the high-pass (``hp_order="binned"``).
+        nth : int
+            Number of threads.
+        bkeep : ndarray of bool or None, default None
+            The bins to take, those the reduction's own cube kept, so the ranking cube matches it bin
+            for bin.
+
+        Returns
+        -------
+        bcube : ndarray, shape (nb, ny, nx)
+            The binned frames.
+        """
         if _flag(p.get("prep_fused", True)):
             return self._prep_fused(p, keep, bin_, filt, dth, hp_nan, hp_binned, nth, bkeep=bkeep)[0]
         return self._prep_cube(self.data.cube, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth, bkeep=bkeep)[0]
 
     def _prep_cube(self, c, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth, selected=False, bkeep=None):
-        """frame selection, high-pass, destripe and binning of a science cube
-        (``selected``: ``c`` holds only the kept frames already; ``bkeep``: the bins to keep in
-        place of the test for data)"""
+        """Select, high-pass, destripe and bin a science cube a whole cube per step.
+
+        It is the reference the fused path (:meth:`_prep_fused`) is tested against.
+
+        Parameters
+        ----------
+        c : ndarray, shape (n, ny, nx)
+            The science cube.
+        p : dict
+            The request's parameters over the defaults.
+        keep : ndarray of bool
+            The frame selection over the raw frames.
+        bin_ : int
+            Temporal binning factor.
+        filt : int
+            Width of the high-pass box, in pixels, 1 or less for none.
+        dth : float
+            Maximum span of parallactic angle in a bin, in degrees.
+        hp_nan : bool
+            Whether the high-pass leaves NaN pixels out.
+        hp_binned : bool
+            Whether to bin before the high-pass (``hp_order="binned"``).
+        nth : int
+            Number of threads.
+        selected : bool, default False
+            Whether ``c`` holds only the kept frames already.
+        bkeep : ndarray of bool or None, default None
+            Bins to keep in place of the test for data.
+
+        Returns
+        -------
+        bcube : ndarray
+            The binned frames kept.
+        bang : ndarray
+            Mean parallactic angle of each kept bin, in degrees.
+        grp : ndarray of int
+            Bin number of each selected frame.
+        bkeep : ndarray of bool
+            True for each bin kept.
+
+        Notes
+        -----
+        The destriping runs at 90 degrees (columns), then 0 degrees (rows), on the science frames only,
+        as ``reduce_near_2`` L1672-1677 does in the IDL predecessor.
+        """
         a_ = self.data.angles
         if not keep.all():
             a_ = a_[keep]
@@ -1266,17 +2201,52 @@ class KLIPReducer(Reducer):
         return bin_frames(c, a_, bin_, dth, return_groups=True, threads=nth, bkeep=bkeep)
 
     def reduce(self, req: ReductionRequest) -> ReductionResult:
+        """Reduce the data under one request.
+
+        With ``req.stage = "prepare"`` it returns the prepared frames for another group's SDI pool
+        instead (:meth:`prepare`).
+
+        Parameters
+        ----------
+        req : ReductionRequest
+            The request.
+
+        Returns
+        -------
+        result : ReductionResult or SiblingFrames
+            The image and its notes, or the prepared frames.
+        """
         if str(getattr(req, "stage", "reduce")) == "prepare":
             pr = self.prepare(req)
             return pr.siblings_payload(getattr(self, "partition_id", None), self.lam_m)
         return self._reduce_prepared(self.prepare(req), req)
 
     def _sdi_rows(self, siblings, prep: PreparedFrames):
-        """The SDI pool's rows for this group: every sibling's prepared frames magnified
-        about the star by ``lambda_this / lambda_sibling`` (:mod:`klip_tpe.rescale`), with
-        their angles and scales, and the model cubes the same way when KLIP-FM is on, so a
-        planet sits at ``r * s`` in the FM rows as in the data rows.  Returns ``None``
-        without siblings."""
+        """Build this group's SDI pool from the other groups' prepared frames.
+
+        Each sibling's frames are magnified about the star by ``lambda_this / lambda_sibling``
+        (:mod:`klip_tpe.rescale`), and its model cube the same way under KLIP-FM, so a planet sits at
+        ``r * s`` in the FM rows as in the data rows.
+
+        Parameters
+        ----------
+        siblings : dict, SharedArrays or None
+            The other groups' prepared frames, ``{pid: SiblingFrames}`` or their shared-memory
+            descriptor.
+        prep : PreparedFrames
+            This group's prepared frames.
+
+        Returns
+        -------
+        sdi : dict or None
+            ``rows``, ``angles``, ``scales``, ``fm_rows``, ``lenders`` and ``counts``, or None without
+            sibling frames.
+
+        Raises
+        ------
+        ValueError
+            If KLIP-FM is on and a sibling has no model cube.
+        """
         from .parallel import SharedArrays
         from .rescale import rescale_frames
         if siblings is None:
@@ -1312,6 +2282,24 @@ class KLIPReducer(Reducer):
                 "lenders": lenders, "counts": counts}
 
     def _reduce_prepared(self, prep: PreparedFrames, req: ReductionRequest) -> ReductionResult:
+        """Run the second half of :meth:`reduce`, from the prepared frames to the image.
+
+        It chooses the basis (ADI, RDI, ARDI, a searched library or its ADI point, and the SDI pool),
+        builds the :class:`~klip_tpe.klip.KLIPParams`, subtracts, derotates and combines
+        (:meth:`_subtract`), and makes the ``extras`` reference images when asked.
+
+        Parameters
+        ----------
+        prep : PreparedFrames
+            The prepared frames.
+        req : ReductionRequest
+            The request.
+
+        Returns
+        -------
+        result : ReductionResult
+            The image, its weight and its notes.
+        """
         p, k, bin_, filt = prep.p, prep.k, prep.bin_, prep.filt
         inrad, outrad, dth, keep = prep.inrad, prep.outrad, prep.dth, prep.keep
         bcube, bang, grp, bkeep, mcube = prep.bcube, prep.bang, prep.grp, prep.bkeep, prep.mcube
@@ -1427,9 +2415,23 @@ class KLIPReducer(Reducer):
                                fm_image=fm_img, nosub=nosub, cadi=cadi)
 
     def _library_at_adi_point(self, p: Dict[str, Any], n_binned: int) -> Optional[Dict[str, int]]:
-        """The counts of a searched library when they leave nothing but the rotating sequence
-        itself (every pool the space searches at 0, the one-label science pool whole), else
-        None.  A pool the space does not search is at its maximum, so it counts as present."""
+        """Return a searched library's counts when they leave only the rotating sequence itself.
+
+        That is every pool the space searches at 0 and the one-label science pool whole, which is the
+        ADI reduction.  A pool the space does not search is at its maximum, so it counts as present.
+
+        Parameters
+        ----------
+        p : dict
+            The request's parameters.
+        n_binned : int
+            Number of binned frames.
+
+        Returns
+        -------
+        keep : dict of str to int or None
+            The count of each pool, or None when the counts are not the ADI point.
+        """
         spec = self._reflib_spec
         if spec is None or not spec.get("rotation") or not self.supports_reference_library:
             return None
@@ -1456,19 +2458,54 @@ class KLIPReducer(Reducer):
     def _subtract(self, bcube: np.ndarray, bang: np.ndarray, kp: KLIPParams, p: Dict[str, Any], filt: int,
                   req: ReductionRequest, mcube: Optional[np.ndarray], ref_basis: Optional[np.ndarray],
                   fm_ref: Optional[np.ndarray], meta: Dict[str, Any], north: Optional[np.ndarray] = None):
-        """PSF subtraction + derotation + combination of the *pre-processed* (injected,
-        frame-selected, high-passed, binned) cube.  Returns ``(image, fm_image, info)``
-        where ``image`` is ``(ny, nx)`` or, for ``kp.k_scan``, ``(k, ny, nx)`` for
-        ``k = 1..kp.k_klip``.  Backends (pyKLIP, VIP, a user pipeline) override this and
-        inherit the rest of the chain unchanged; the reference implementation is the
-        annular KLIP of :mod:`klip_tpe.klip`.
+        """Subtract the PSF, derotate and combine the prepared cube.
 
-        ``north``: each bin's true north (:meth:`binned_north`) when the frames carry their
-        own, else None and every bin is derotated by ``bang + truenorth``.  The noise-weighted
-        combination rotates the frames back by the angles it is given to measure each pixel's
-        variance, so it gets ``bang + (north - truenorth)``: the frames line up again to one
-        common angle, as they do with one north.  A backend that overrides this method without
-        ``_honours_frame_north`` is never handed frames with their own north."""
+        Backends (pyKLIP, VIP, a user pipeline) override this and inherit the rest of the chain.  The
+        reference implementation is the annular KLIP of :mod:`klip_tpe.klip`, with the residuals
+        high-passed again unless ``post_hp`` is False.
+
+        Parameters
+        ----------
+        bcube : ndarray, shape (nb, ny, nx)
+            The prepared frames, injected, selected, high-passed and binned.
+        bang : ndarray, shape (nb,)
+            Parallactic angle of each frame, in degrees.
+        kp : KLIPParams
+            The KLIP settings.
+        p : dict
+            The request's parameters.
+        filt : int
+            Width of the high-pass box, in pixels.
+        req : ReductionRequest
+            The request.
+        mcube : ndarray or None
+            The KLIP-FM model cube, or None.
+        ref_basis : ndarray or None
+            Reference frames for the basis, or None for ADI.
+        fm_ref : ndarray or None
+            The planet model in ``ref_basis``.
+        meta : dict
+            The reduction's notes.
+        north : ndarray or None, default None
+            Each bin's true north (:meth:`binned_north`), or None to derotate every bin by
+            ``bang + truenorth``.  A backend that overrides this method without ``_honours_frame_north``
+            is never handed frames with their own north.
+
+        Returns
+        -------
+        image : ndarray, shape (ny, nx) or (k_klip, ny, nx)
+            The combined image, or one per number of KL modes with ``kp.k_scan``.
+        fm_image : ndarray or None
+            The KLIP-FM image, combined with the science frames' weights, or None.
+        info : dict
+            How the subtraction ran (:func:`~klip_tpe.klip.klip_annular`).
+
+        Notes
+        -----
+        The noise-weighted combination turns the frames back by the angles it is given to measure each
+        pixel's variance, so with each bin's own north it gets ``bang + (north - truenorth)``, which
+        lines the frames up again to one angle.
+        """
         out = klip_annular(bcube, bang, kp, self.lam_over_d_px, fm_cube=mcube, ref_cube=ref_basis,
                            fm_ref_cube=fm_ref, fm_selfsub=bool(p["fm_selfsub"]))
         res, info = out[0], out[1]
@@ -1506,6 +2543,14 @@ class KLIPReducer(Reducer):
         return img, fm_img, info
 
     def describe(self) -> Dict[str, Any]:
+        """Return the reducer's settings, for a run's record.
+
+        Returns
+        -------
+        info : dict
+            The base keys, the optics, the defaults, the injection model, the frames' provenance, any
+            edits of the data, the true north and the reference library.
+        """
         d = super().describe()
         d.update(lam_m=self.lam_m, diam_m=self.diam_m, truenorth=self.truenorth, zone_pad=self.zone_pad,
                  outrad_cap=self.outrad_cap, defaults=dict(self.defaults), nframes=self.data.nframes,
@@ -1538,7 +2583,29 @@ class KLIPReducer(Reducer):
 # ----------------------------------------------------------------------------
 @dataclass
 class EvalImages:
-    """Everything one evaluation produced."""
+    """Everything one evaluation produced.
+
+    Attributes
+    ----------
+    image : ndarray, shape (ny, nx)
+        The combined image, injected or clean.
+    stack : ndarray or None, default None
+        The per-partition images, shape (npart, ny, nx).
+    weights : ndarray or None, default None
+        Weight of each partition in the combination.
+    partitions : list or None, default None
+        Identifiers of the partitions, in the order of ``stack``.
+    meta : dict
+        Notes on the evaluation.
+    fm_image : ndarray or None, default None
+        The KLIP-FM image, combined with the same partition weights.
+    fm_stack : ndarray or None, default None
+        The per-partition KLIP-FM images, shape (npart, ny, nx).
+    nosub : ndarray or None, default None
+        The combined reference image without subtraction, of the clean pass with ``extras``.
+    cadi : ndarray or None, default None
+        The combined classical-ADI reference image, of the injected pass with ``extras``.
+    """
 
     image: np.ndarray                              # combined injected (or clean) image
     stack: Optional[np.ndarray] = None             # (npart, ny, nx) per-partition images
@@ -1552,7 +2619,24 @@ class EvalImages:
 
 
 def combine_stack(stack: np.ndarray, weights: np.ndarray) -> np.ndarray:
-    """NaN-aware weighted mean over the first axis (``near2m_avg`` / ``near2m_pncombine``)."""
+    """Take the NaN-aware weighted mean over the first axis.
+
+    Parameters
+    ----------
+    stack : ndarray, shape (m, ...)
+        The m images.
+    weights : ndarray, shape (m,)
+        Weight of each image.
+
+    Returns
+    -------
+    mean : ndarray
+        The weighted mean of the finite values, NaN where none is finite.
+
+    Notes
+    -----
+    It does what ``near2m_avg`` and ``near2m_pncombine`` do in the IDL predecessor.
+    """
     stack = np.asarray(stack, float)
     w = np.asarray(weights, float).reshape((-1,) + (1,) * (stack.ndim - 1))
     fin = np.isfinite(stack)
@@ -1563,13 +2647,33 @@ def combine_stack(stack: np.ndarray, weights: np.ndarray) -> np.ndarray:
 
 
 def _run_one(args):
+    """Reduce one job, for a worker pool.
+
+    Parameters
+    ----------
+    args : tuple
+        The ``(reducer, request)`` pair.
+
+    Returns
+    -------
+    result : ReductionResult
+        What ``reducer.reduce(request)`` returns.
+    """
     reducer, req = args
     return reducer.reduce(req)
 
 
 def _gpu_card_factory() -> Optional[Callable[[Any], Any]]:
-    """``GPUKLIPReducer.from_cpu`` for the KLIP partitions, when :mod:`klip_tpe.gpu_reducer` is
-    there (it loads CuPy only in the card workers), else None."""
+    """Return the factory of GPU reducers for the KLIP partitions, when :mod:`klip_tpe.gpu_reducer` is available.
+
+    CuPy loads only in the card workers.
+
+    Returns
+    -------
+    factory : callable or None
+        ``GPUKLIPReducer.from_cpu`` for a :class:`KLIPReducer` and None for other reducers, or None
+        when the module is missing.
+    """
     try:
         from .gpu_reducer import GPUKLIPReducer         # type: ignore[import-not-found]
     except Exception:                                  # noqa: BLE001
@@ -1578,35 +2682,67 @@ def _gpu_card_factory() -> Optional[Callable[[Any], Any]]:
 
 
 class PartitionedReducer(Reducer):
-    """Reduce every selected partition with its own parameter block and combine.
+    """Reducer of a dataset made of partitions, each reduced with its own parameter block and combined.
 
     Parameters
     ----------
-    reducers
-        ``{partition_id: Reducer}``.
-    weighting
-        ``'equal'`` (uniform mean; the production per-night combine -- inverse
-        variance is pathological here because an over-subtracted night has low
-        scatter *and* low throughput) or ``'sqrt_texp'`` (``Reducer.partition_weight``).
-    max_workers
-        the thread budget.  >1 dispatches partition jobs to forked worker processes (or
-        a thread pool, when forking is unavailable).
-    threads_per_job
-        threads each partition job uses for its per-target work, on average (2 by default
-        since 2026-10-27, 4 before).  The process pool gets ``max_workers //
-        threads_per_job`` processes, and never fewer than the ``min(max_workers, 2 x
-        partitions)`` it had before, so the runner can keep as many reductions in flight as
-        the budget can serve (a trial's clean and all its draws, several validation trials).
-        A job expected to take long gets up to four times as many (:meth:`_plan`), so the
-        jobs running together can hold more than ``max_workers`` for a while
-        (:attr:`cap_threads`).  On patrick, 48 jobs of 2 threads at a budget of 96 reduced
-        NEAR2's nights 1.25x faster than 48 jobs of 4 at 192.
-    representative
-        the partition whose pixel scale, FWHM, lambda/D and matched-filter kernel stand for
-        the combined image (the metric and the sampler read them from here).  Default: the
-        first partition, which is right when the partitions share a wavelength.  Wavelength
-        groups of an IFS cube do not, and the first group is the bluest: an ALES adapter
-        names the group at the mean wavelength instead.
+    reducers : dict
+        The reducer of each partition, ``{partition_id: Reducer}``.
+    weighting : {"equal", "sqrt_texp"}, default "equal"
+        Weights of the combination.  "equal" takes the uniform mean, the production per-night
+        combination, and "sqrt_texp" each reducer's :meth:`Reducer.partition_weight`.
+    max_workers : int or str, default 1
+        The thread budget (:func:`klip_tpe.parallel.resolve_workers`).  More than 1 sends partition
+        jobs to forked worker processes, or to a thread pool when forking is unavailable.
+    pool : {"auto", "processes", "threads"}, default "auto"
+        Kind of worker pool.
+    log : callable or None, default None
+        Function called with each log line.  None stays silent.
+    threads_per_job : int, default 2
+        Average threads of a partition job.  The process pool gets ``max_workers // threads_per_job``
+        processes, never fewer than ``min(max_workers, 2 x partitions)``, and a job expected to take
+        long gets up to four times as many threads (:meth:`_plan`).
+    representative : object or None, default None
+        The partition whose plate scale, FWHM, lambda/D and matched filter stand for the combined
+        image.  None takes the first, which does not suit the wavelength groups of an IFS cube, where
+        an adapter names the group at the mean wavelength.
+
+    Attributes
+    ----------
+    injection_scale : dict or None
+        Factor on each partition's injected contrasts (:meth:`set_injection_spectrum`), or None for
+        the contrast given in every partition.
+    card_share : float or None
+        Percent of the search's injected draws the card workers take
+        (:class:`klip_tpe.parallel.CardSpec`), set before the pool starts.  None or 0 uses no card.
+    card_workers : int
+        Number of card worker processes, sharing the card's queue.
+    card_factory : callable or None
+        Function ``cpu_reducer -> card reducer or None``.  None takes ``GPUKLIPReducer.from_cpu`` for
+        the KLIP partitions when :mod:`klip_tpe.gpu_reducer` is present.
+    sdi_lenders : {"all", "selected"}
+        Which partitions lend their frames to the others' SDI pools.
+    partition_label : str
+        What the partitions are, such as "night", "channel" or "roll", for the display's panels.
+    provenance : dict or None
+        Record of what the partitions are, written to the run's setup file by :meth:`describe`.
+    cap_threads : bool
+        Whether to hold the threads of the jobs running together to ``max_workers``, off by default.
+
+    Raises
+    ------
+    ValueError
+        If ``reducers`` is empty.
+    KeyError
+        If ``representative`` is not a partition.
+
+    Notes
+    -----
+    Inverse-variance weights are pathological here, because an over-subtracted night has low scatter
+    and low throughput.  On patrick, 48 jobs of 2 threads at a budget of 96 reduced NEAR2's nights
+    1.25x faster than 48 jobs of 4 at 192.  Capping the threads (``cap_threads``) took a six-night
+    reduction from 0.205 s to 0.339 s there, since the few jobs sent first took 8 threads each and
+    nearly every later one ran on 1.
     """
 
     name = "partitioned"
@@ -1680,18 +2816,73 @@ class PartitionedReducer(Reducer):
         self._pool: Optional[cf.ThreadPoolExecutor] = None
 
     def partitions(self) -> List[Any]:
+        """Return the identifiers of the partitions.
+
+        Returns
+        -------
+        pids : list
+            The identifiers, in order.
+        """
         return list(self.reducers)
 
     def frame_angles(self, pid=None):
+        """Return one partition's frame angles.
+
+        Parameters
+        ----------
+        pid : object, default None
+            Identifier of the partition.
+
+        Returns
+        -------
+        angles : ndarray or None
+            Parallactic angle of each frame, in degrees.
+        """
         return self.reducers[pid].frame_angles()
 
     def frame_tags(self, pid=None):
+        """Return one partition's frame quality tags.
+
+        Parameters
+        ----------
+        pid : object, default None
+            Identifier of the partition.
+
+        Returns
+        -------
+        tags : dict of str to ndarray or None
+            The tags.
+        """
         return self.reducers[pid].frame_tags()
 
     def partition_weight(self, pid) -> float:
+        """Return a partition's weight in the combination.
+
+        Parameters
+        ----------
+        pid : object
+            Identifier of the partition.
+
+        Returns
+        -------
+        weight : float
+            1 for equal weights, or the partition's own weight.
+        """
         return 1.0 if self.weighting == "equal" else self.reducers[pid].partition_weight()
 
     def matched_filter_kernel(self, rho_as: float):
+        """Return the representative partition's matched filter at a separation.
+
+        Parameters
+        ----------
+        rho_as : float
+            Separation, in arcsec.
+
+        Returns
+        -------
+        kernel : ndarray or None
+            The kernel, or None for the metric's Gaussian.
+        """
         return self.reducers[getattr(self, "representative", next(iter(self.reducers)))].matched_filter_kernel(rho_as)
 
     # -- the injected sources' spectrum ----------------------------------------------
@@ -1699,23 +2890,39 @@ class PartitionedReducer(Reducer):
                                ) -> Optional[Dict[Any, float]]:
         """Give every injected source a spectrum across the partitions.
 
-        A source of contrast ``c`` goes into partition ``pid`` at ``c * factor[pid]``, in every
-        reduction this reducer makes for the run: the search's, calibration's and validation's
-        injections, the KLIP-FM sources and the frames an SDI pool borrows.  ``c`` is then the
-        contrast where the factor is 1, which is ``norm``: the representative partition by
-        default (the one whose template is the matched filter), another partition id, or a
-        wavelength in metres.  A source of negative contrast, a known companion taken out of
-        the frames (``RunConfig.subtract_known``), keeps the contrast given.
+        A source of contrast ``c`` goes into partition ``pid`` at ``c * factor[pid]`` in every reduction
+        this reducer makes for the run, the search's, calibration's and validation's injections, the
+        KLIP-FM sources and the frames an SDI pool borrows.  ``c`` is then the contrast where the factor
+        is 1, at ``norm``.  A source of negative contrast, a known companion taken out of the frames
+        (``RunConfig.subtract_known``), keeps the contrast given.  Set it before the run starts, since
+        the run's calibrated contrast is in its units.
 
-        ``spectrum``: None (flat: the contrast given in every partition, a source with the
-        star's colours, the default); ``{pid: factor}`` (normalised at ``norm`` too); a callable
-        ``f(lambda_um) -> relative contrast``, read at each partition's wavelength (``lam_m``);
-        or ``(lambda_um, values)``, interpolated linearly in wavelength and held at its end
-        values outside.  Factors are finite and >= 0 (0: no source in that partition).
-        ``label`` says what the spectrum is in :meth:`describe` and the run's setup file.
+        Parameters
+        ----------
+        spectrum : dict, callable, tuple or None
+            None for a flat spectrum with the star's colors, ``{pid: factor}``, a function
+            ``f(lambda_um) -> relative contrast`` read at each partition's ``lam_m``, or
+            ``(lambda_um, values)``, interpolated linearly and held at its end values outside.  The
+            factors must be finite and at least 0, and 0 puts no source in that partition.
+        norm : object, float or None, default None
+            Where the factor is 1, a partition identifier or a wavelength in meters.  None takes the
+            representative partition, whose template is the matched filter.
+        label : str or None, default None
+            What the spectrum is, for :meth:`describe` and the run's setup file.
 
-        Set it before the run starts: the run's calibrated contrast is in its units.  Returns
-        the factors (None for flat)."""
+        Returns
+        -------
+        factors : dict or None
+            The factor of each partition, or None for a flat spectrum.
+
+        Raises
+        ------
+        KeyError
+            If a per-partition spectrum misses a partition.
+        ValueError
+            If a table is malformed, a partition has no wavelength, ``norm`` cannot be read there, the
+            spectrum is not positive at ``norm``, or a factor is negative or not finite.
+        """
         if spectrum is None:
             self.injection_scale = None
             self.injection_spectrum_info = None
@@ -1773,8 +2980,20 @@ class PartitionedReducer(Reducer):
         return dict(fac)
 
     def scaled_sources(self, sources: Optional[Sequence[Source]], pid: Any) -> Optional[Sequence[Source]]:
-        """``sources`` as partition ``pid`` injects them: each positive contrast times the
-        partition's spectrum factor (:meth:`set_injection_spectrum`); unchanged without one."""
+        """Return sources as a partition injects them, each positive contrast times its spectrum factor.
+
+        Parameters
+        ----------
+        sources : sequence of Source or None
+            The sources.
+        pid : object
+            Identifier of the partition.
+
+        Returns
+        -------
+        scaled : sequence of Source or None
+            The sources, unchanged without a spectrum.
+        """
         scale = getattr(self, "injection_scale", None)
         if not sources or not scale:
             return sources
@@ -1784,19 +3003,87 @@ class PartitionedReducer(Reducer):
         return [Source(s.rho, s.theta, float(s.contrast) * f) if float(s.contrast) > 0 else s for s in sources]
 
     def subtract_sources(self, sources: Sequence[Any], threads: int = 1) -> int:
-        """:meth:`KLIPReducer.subtract_sources` on every partition: the same sources, on the
-        sky, out of every night's frames.  It has to run before the worker processes start,
-        since they keep the reducers they were started with, and it refuses afterwards.
-        Returns the number of sources subtracted (per partition)."""
+        """Take point sources out of every partition's frames (:meth:`KLIPReducer.subtract_sources`).
+
+        It must run before the worker processes start, since they keep the reducers they were started
+        with.
+
+        Parameters
+        ----------
+        sources : sequence
+            The sources, each a :class:`~klip_tpe.metrics.Source` or ``(rho_arcsec, pa_deg, contrast)``.
+        threads : int, default 1
+            Number of threads.
+
+        Returns
+        -------
+        n : int
+            Number of sources subtracted per partition.
+
+        Raises
+        ------
+        RuntimeError
+            If the worker pool has started.
+        TypeError
+            If a partition's reducer cannot subtract sources.
+        """
         return self._edit_partitions(sources, threads, "subtract_sources", "subtracted_kept", "subtracted_sources")
 
     def inject_sources(self, sources: Sequence[Any], threads: int = 1) -> int:
-        """:meth:`KLIPReducer.inject_sources` on every partition: the same sources, on the sky,
-        added to every night's frames, before the worker processes start.  Returns the number
-        of sources added (per partition)."""
+        """Add point sources to every partition's frames (:meth:`KLIPReducer.inject_sources`).
+
+        It must run before the worker processes start, since they keep the reducers they were started
+        with.
+
+        Parameters
+        ----------
+        sources : sequence
+            The sources, each a :class:`~klip_tpe.metrics.Source` or ``(rho_arcsec, pa_deg, contrast)``.
+        threads : int, default 1
+            Number of threads.
+
+        Returns
+        -------
+        n : int
+            Number of sources added per partition.
+
+        Raises
+        ------
+        RuntimeError
+            If the worker pool has started.
+        TypeError
+            If a partition's reducer cannot inject sources.
+        """
         return self._edit_partitions(sources, threads, "inject_sources", "injected_kept", "injected_sources")
 
     def _edit_partitions(self, sources: Sequence[Any], threads: int, method: str, attr: str, key: str) -> int:
+        """Apply a reducer's data edit to every partition and record it.
+
+        Parameters
+        ----------
+        sources : sequence
+            The sources.
+        threads : int
+            Number of threads.
+        method : {"subtract_sources", "inject_sources"}
+            The edit.
+        attr : {"subtracted_kept", "injected_kept"}
+            Attribute that collects each partition's measured flux fraction.
+        key : {"subtracted_sources", "injected_sources"}
+            Key of the edit in ``data_edits``.
+
+        Returns
+        -------
+        n : int
+            Number of sources applied per partition.
+
+        Raises
+        ------
+        RuntimeError
+            If the worker pool has started.
+        TypeError
+            If a partition's reducer lacks the method.
+        """
         if self._procs is not None:
             raise RuntimeError(f"{method} has to run before the worker pool starts: the worker "
                                "processes keep the frames they were started with")
@@ -1818,15 +3105,16 @@ class PartitionedReducer(Reducer):
     _pool_logged = False
 
     def start_workers(self) -> str:
-        """Start the worker processes (IDL bridges) once the data are loaded.  Returns the
-        pool kind in use: ``processes`` (forked workers, :meth:`n_procs` of them),
-        ``threads`` (fallback / requested) or ``serial``.
+        """Start the worker pool once the data are loaded, and log which kind the run got.
 
-        Which one a run got is written to its log, here rather than at the call site: the
-        command line used to report it and a script that built its own runner reported
-        nothing, so the only record of the mode a run was in was whether a *failure* message
-        happened to be there.  Working out after the fact that a search had spent 350
-        evaluations in thread mode should not require inferring it from an absence.
+        The pool kind goes to the run's log here, so a script that builds its own runner records it as
+        the command line does.
+
+        Returns
+        -------
+        kind : {"processes", "threads", "serial"}
+            The pool in use.  "processes" runs :meth:`n_procs` forked workers, and "threads" is the
+            fallback or the request.
         """
         kind = self._pool_kind_now()
         if not self._pool_logged:
@@ -1850,12 +3138,26 @@ class PartitionedReducer(Reducer):
         return kind
 
     def _pool_kind_now(self) -> str:
+        """Return the pool kind in use, starting the worker processes on the first call.
+
+        Returns
+        -------
+        kind : {"processes", "threads", "serial"}
+            The pool in use.
+        """
         if self.max_workers <= 1:
             return "serial"
         with self._start_lock:
             return self._pool_kind_locked()
 
     def _pool_kind_locked(self) -> str:
+        """Return the pool kind, starting the worker processes when asked for, with the start lock held.
+
+        Returns
+        -------
+        kind : {"processes", "threads"}
+            "processes", or "threads" when they cannot start or are not asked for.
+        """
         if self._procs is not None:
             return "processes"
         if self.pool_kind in ("auto", "processes") and not self._threads_fallback:
@@ -1871,10 +3173,17 @@ class PartitionedReducer(Reducer):
         return "threads"
 
     def _card_spec(self):
-        """The card workers for the pool (:class:`klip_tpe.parallel.CardSpec`), or None: no
-        share, no card reducer, or no partition the card can reduce.  The card reducers are
-        built here, in the parent, before the fork, and load nothing of CUDA until their
-        worker warms them up."""
+        """Build the card workers' specification for the pool.
+
+        The card reducers are built in the parent before the fork, and load nothing of CUDA until their
+        worker warms them up.
+
+        Returns
+        -------
+        spec : CardSpec or None
+            The specification, or None without a share, a card reducer or a partition the card can
+            reduce.
+        """
         share = float(self.card_share or 0)
         if share <= 0:
             return None
@@ -1898,27 +3207,55 @@ class PartitionedReducer(Reducer):
         return CardSpec(reds, share, self.card_workers)
 
     def take_card_notes(self) -> List[str]:
-        """The card's log lines since the last call (it came up, a job failed on it, it was
-        left out), for the caller to write from its own thread."""
+        """Return the card's log lines since the last call, for the caller to write from its own thread.
+
+        Returns
+        -------
+        notes : list of str
+            Lines such as the card coming up, a job failing on it or a partition left out.
+        """
         take = getattr(self._procs, "take_notes", None)
         return take() if callable(take) else []
 
     def card_summary(self) -> Optional[Dict[str, Any]]:
-        """:meth:`klip_tpe.parallel.ProcessPool.card_summary`, or None without card workers."""
+        """Return the card workers' summary (:meth:`klip_tpe.parallel.ProcessPool.card_summary`).
+
+        Returns
+        -------
+        summary : dict or None
+            The summary, or None without card workers.
+        """
         f = getattr(self._procs, "card_summary", None)
         return f() if callable(f) else None
 
     def n_procs(self) -> int:
-        """Worker processes for the budget: one per ``threads_per_job`` threads, and never
-        fewer than ``min(max_workers, 2 x partitions)`` (the count before 2026-10-11)."""
+        """Return the number of worker processes for the budget.
+
+        Returns
+        -------
+        n : int
+            One per ``threads_per_job`` threads, never fewer than ``min(max_workers, 2 x partitions)``.
+        """
         b = int(self.max_workers)
         return max(b // self.threads_per_job, min(b, 2 * len(self.reducers)), 1)
 
     def job_threads(self, n_sel: Optional[int] = None) -> int:
-        """Per-target threads for one partition job.  With worker processes the budget is
-        shared out by process, so every job gets ``max_workers // processes`` whatever else
-        is in flight.  The thread-pool fallback keeps the old rule: the injected and the
-        clean reduction of ``n_sel`` partitions share the budget."""
+        """Return the per-target threads of one partition job.
+
+        With worker processes the budget is shared out by process, so every job gets
+        ``max_workers // processes``.  The thread-pool fallback shares the budget between the injected
+        and the clean reduction of ``n_sel`` partitions.
+
+        Parameters
+        ----------
+        n_sel : int or None, default None
+            Number of partitions reduced, for the thread-pool fallback.  None takes all.
+
+        Returns
+        -------
+        threads : int
+            Threads per job, at least 1.
+        """
         if self._procs is not None or (self.max_workers > 1 and self.pool_kind != "threads"
                                        and not self._threads_fallback):
             return max(int(self.max_workers) // self.n_procs(), 1)
@@ -1927,8 +3264,13 @@ class PartitionedReducer(Reducer):
         return max(int(self.max_workers) // max(conc * n, 1), 1)
 
     def job_slots(self) -> int:
-        """Partition jobs that can run at the same time: the worker processes, the
-        thread-pool size, or 1 when serial."""
+        """Return how many partition jobs can run at once.
+
+        Returns
+        -------
+        n : int
+            The worker processes, the thread pool's size, or 1 when serial.
+        """
         if self.max_workers <= 1:
             return 1
         if self._procs is not None:
@@ -1938,9 +3280,14 @@ class PartitionedReducer(Reducer):
         return int(self.max_workers)
 
     def memory_note(self) -> Optional[str]:
-        """A log line on the worker processes' memory (Linux), for sizing the pool against
-        the machine: their peak resident sets, and what they hold together now.  None
-        without worker processes or off Linux."""
+        """Return a log line on the worker processes' memory, for sizing the pool against the machine.
+
+        Returns
+        -------
+        note : str or None
+            Their peak resident sets and what they hold together now, or None without worker processes
+            or off Linux.
+        """
         mem = getattr(self._procs, "memory", None)
         m = mem() if callable(mem) else None
         if not m:
@@ -1954,6 +3301,23 @@ class PartitionedReducer(Reducer):
                 f"(shared data counted once)" + (f", {avail / gb:.0f} GB available" if avail else ""))
 
     def _map(self, jobs, keys=None):
+        """Run partition jobs on the worker pool, or in turn when serial.
+
+        A lone job goes to the worker processes too, since the runner keeps several reductions in flight.
+        The thread pool's wait keeps the GUI event loop serviced.
+
+        Parameters
+        ----------
+        jobs : list of tuple
+            The ``(reducer, request)`` pairs.
+        keys : list of float or None, default None
+            Priority of each job in the process pool, the lowest first.
+
+        Returns
+        -------
+        results : list
+            Each job's result, in order.
+        """
         if self.max_workers > 1 and (len(jobs) > 1 or self._procs is not None):
             if self.pool_kind != "threads" and self._procs is None:
                 self.start_workers()
@@ -1972,6 +3336,8 @@ class PartitionedReducer(Reducer):
         return [_run_one(j) for j in jobs]
 
     def close(self):
+        """Shut down the worker processes and the thread pool.
+        """
         if self._procs is not None:
             self._procs.close()
             self._procs = None
@@ -1980,19 +3346,57 @@ class PartitionedReducer(Reducer):
             self._pool = None
 
     def sdi_lender_ids(self, selected: Sequence[Any]) -> Optional[List[Any]]:
-        """The partitions whose frames feed the others' SDI pools, or None when no partition
-        has an SDI pool (:meth:`KLIPReducer.set_reference_library` with ``sdi``)."""
+        """Return the partitions whose frames feed the others' SDI pools.
+
+        Parameters
+        ----------
+        selected : sequence
+            The partitions the configuration includes.
+
+        Returns
+        -------
+        ids : list or None
+            All partitions or the selected ones (``sdi_lenders``), or None when no partition has an SDI
+            pool.
+        """
         if not any((getattr(r, "_reflib_spec", None) or {}).get("sdi") for r in self.reducers.values()):
             return None
         return list(self.reducers) if str(self.sdi_lenders) == "all" else list(selected)
 
     def _prepare_siblings(self, config: Config, sel, injections, k_scan, tag, fm_sources, per, kind):
-        """The SDI mode's first round: every lending partition's frames prepared as it would
-        prepare its own for this configuration (``ReductionRequest.stage = "prepare"``), in
-        parallel, then handed to the partition jobs -- in one shared-memory block with worker
-        processes (:class:`klip_tpe.parallel.SharedArrays`), as they are otherwise.  Nothing
-        is done when the configuration's ``nkeep_sdi`` is 0: that point is the reduction
-        without an SDI pool, and costs exactly that.  Returns ``(siblings, shared)``."""
+        """Run the SDI mode's first round, the lending partitions' frames prepared for this configuration.
+
+        The frames are prepared in parallel as each partition would prepare its own
+        (``ReductionRequest.stage = "prepare"``), then handed to the partition jobs, in one shared-memory
+        block with worker processes.  Nothing is done when the configuration's ``nkeep_sdi`` is 0, the
+        point without an SDI pool.
+
+        Parameters
+        ----------
+        config : Config
+            The configuration.
+        sel : list
+            The partitions it includes.
+        injections : sequence of Source or None
+            Sources to inject.
+        k_scan : bool
+            Whether the reduction scans the number of KL modes.
+        tag : str
+            Label of the request.
+        fm_sources : sequence of Source or None
+            KLIP-FM test sources.
+        per : int
+            Threads per job.
+        kind : str
+            The pool kind in use.
+
+        Returns
+        -------
+        siblings : dict, SharedArrays or None
+            The prepared frames for the requests, or None.
+        shared : SharedArrays or None
+            The shared-memory block to release afterward, or None.
+        """
         lenders = self.sdi_lender_ids(sel)
         if lenders is None or int(round(float(config.params.get("nkeep_sdi", 0) or 0))) <= 0:
             return None, None
@@ -2026,10 +3430,36 @@ class PartitionedReducer(Reducer):
                       k_scan: bool = False, tag: str = "", selected: Optional[Sequence[Any]] = None,
                       fm_sources: Optional[Sequence[Source]] = None, extras: bool = False,
                       card: bool = False) -> EvalImages:
-        """``fm_sources`` requests the KLIP-FM pass (``EvalImages.fm_image``, combined
-        with the same partition weights as the science image); ``extras`` the
-        nosub / cadi reference images.  ``card``: the partition jobs may go to the card
-        workers (:attr:`card_share`)."""
+        """Reduce every selected partition with its own parameters and combine the images.
+
+        Each partition injects the sources at its own point of their spectrum (:meth:`scaled_sources`).
+        With worker processes the jobs get threads by expected cost (:meth:`_plan`), and the job expected
+        to run longest goes first among those submitted together.
+
+        Parameters
+        ----------
+        config : Config
+            The configuration, with each partition's parameters.
+        injections : sequence of Source or None, default None
+            Sources to inject.
+        k_scan : bool, default False
+            Whether to return images for every number of KL modes.
+        tag : str, default ""
+            Label of the requests.
+        selected : sequence or None, default None
+            Partitions to reduce.  None takes ``config.selected``.
+        fm_sources : sequence of Source or None, default None
+            KLIP-FM test sources, for ``fm_image`` combined with the same partition weights.
+        extras : bool, default False
+            Whether to make the ``nosub`` and ``cadi`` reference images.
+        card : bool, default False
+            Whether the partition jobs may go to the card workers (``card_share``).
+
+        Returns
+        -------
+        ev : EvalImages
+            The combined images, the per-partition stack, the weights and each partition's notes.
+        """
         sel = list(config.selected if selected is None else selected)
         kind = self.start_workers() if self.max_workers > 1 else "serial"
         per = self.job_threads(len(sel))          # threads inside each partition job
@@ -2074,7 +3504,18 @@ class PartitionedReducer(Reducer):
         return ev
 
     def reduce(self, req: ReductionRequest) -> ReductionResult:
-        """Single-block interface: the same params for every partition."""
+        """Reduce every partition with the same parameters, the single-block interface.
+
+        Parameters
+        ----------
+        req : ReductionRequest
+            The request.
+
+        Returns
+        -------
+        result : ReductionResult
+            The combined images, with the partitions in ``meta``.
+        """
         cfg = Config(params=dict(req.params), per_partition={p: dict(req.params) for p in self.reducers},
                      selected=list(self.reducers), x=np.zeros(0))
         ev = self.reduce_config(cfg, req.injections, req.k_scan, req.tag, fm_sources=req.fm_sources,
@@ -2083,15 +3524,25 @@ class PartitionedReducer(Reducer):
                                nosub=ev.nosub, cadi=ev.cadi)
 
     def _plan(self, jobs, base: int):
-        """Threads and expected wall time of each partition job, from the partitions'
-        :meth:`Reducer.cost_estimate`, or None when one has no estimate.
+        """Plan each partition job's threads and expected wall time from the partitions' cost estimates.
 
-        Threads scale with the job's expected cost against the mean of the latest jobs,
-        rounded to a power of two between 1 and ``4 x base``: a big night at a small bin gets
-        many, a light job one, and over many jobs the mean stays near ``base``
-        (``--threads-per-job``).  The jobs running at a moment can hold more than
-        ``max_workers``, since the long ones run longest.  :attr:`cap_threads` would cut them
-        at dispatch, and is off.  The images do not depend on the thread count."""
+        Threads scale with a job's expected cost against the mean of the latest jobs, rounded to a power
+        of two from 1 to ``4 x base``, so a big night at a small bin gets many, a light job one, and the
+        mean stays near ``base``.  The jobs running at a moment can hold more than ``max_workers``, since
+        the long ones run longest.  The images do not depend on the thread count.
+
+        Parameters
+        ----------
+        jobs : list of tuple
+            The ``(reducer, request)`` pairs.
+        base : int
+            Average threads per job (``--threads-per-job``).
+
+        Returns
+        -------
+        plan : tuple of 2 lists or None
+            Threads and expected wall time of each job, or None when a partition has no estimate.
+        """
         costs = []
         for r, req in jobs:
             f = getattr(r, "cost_estimate", None)
@@ -2115,6 +3566,14 @@ class PartitionedReducer(Reducer):
         return threads, walls
 
     def describe(self) -> Dict[str, Any]:
+        """Return the reducer's settings, for a run's record.
+
+        Returns
+        -------
+        info : dict
+            The base keys, the weighting, the threads, the representative, each partition's settings,
+            and the injected spectrum, data edits, SDI lenders and card share when set.
+        """
         d = super().describe()
         d.update(weighting=self.weighting, max_workers=self.max_workers, threads_per_job=self.threads_per_job,
                  representative=str(getattr(self, "representative", next(iter(self.reducers)))),
@@ -2136,14 +3595,32 @@ KLIP_GRAM_MODES = ("target", "zone")
 
 
 def set_zone_center(reducer: Reducer, center: Optional[Sequence[float]], angles: Optional[str] = None) -> List[Any]:
-    """Set ``zone_center`` (``(x, y)`` px, the point the KLIP zones' radii and sector angles are
-    measured from) and, when given, ``zone_angles`` (how those angles are counted:
-    ``'getzone2015'`` as the 2015 IDL ``getzone``) as the defaults of every KLIP reducer in
-    ``reducer``, a :class:`PartitionedReducer`'s partitions or a single one; None goes back to the
-    default ``(nx / 2, ny / 2)`` and ``'ccw'``.  The ALES paper reduction of MWC 758 is
-    ``set_zone_center(red, (30, 30), "getzone2015")``.  Returns the partitions (or ``[None]``) it
-    was set on.  Set it before the worker pool starts: the workers keep the reducers they were
-    forked with."""
+    """Set the zones' center and angle convention as defaults of every KLIP reducer in a reducer.
+
+    The ALES paper reduction of MWC 758 is ``set_zone_center(red, (30, 30), "getzone2015")``.  Set it
+    before the worker pool starts, since the workers keep the reducers they were forked with.
+
+    Parameters
+    ----------
+    reducer : Reducer
+        A :class:`PartitionedReducer`, whose partitions are set, or a single reducer.
+    center : sequence of 2 floats or None
+        The ``(x, y)`` pixel the zones' radii and sector angles are measured from.  None goes back to
+        ``(nx/2, ny/2)`` and "ccw".
+    angles : {"ccw", "getzone2015"} or None, default None
+        How the sector angles are counted (:func:`klip_tpe.klip.zone_indices`).  None and "ccw" take
+        the default.
+
+    Returns
+    -------
+    done : list
+        The partitions it was set on, or ``[None]`` for a single reducer.
+
+    Raises
+    ------
+    ValueError
+        If ``center`` does not have two values or ``angles`` is unknown.
+    """
     from .klip import ZONE_ANGLES
     c = None if center is None else _zone_center({"zone_center": center})
     if angles is not None and angles not in ZONE_ANGLES:
@@ -2168,10 +3645,28 @@ def set_zone_center(reducer: Reducer, center: Optional[Sequence[float]], angles:
 
 
 def set_klip_gram(reducer: Reducer, mode: str) -> List[Any]:
-    """Set ``klip_gram`` (:attr:`klip_tpe.klip.KLIPParams.gram`) as the default of every
-    KLIP reducer in ``reducer``, a :class:`PartitionedReducer`'s partitions or a single one.
-    Returns the partitions (or ``[None]``) it was set on.  Set it before the worker pool
-    starts: the workers keep the reducers they were forked with."""
+    """Set ``klip_gram`` as the default of every KLIP reducer in a reducer.
+
+    Set it before the worker pool starts, since the workers keep the reducers they were forked with.
+
+    Parameters
+    ----------
+    reducer : Reducer
+        A :class:`PartitionedReducer`, whose partitions are set, or a single reducer.
+    mode : {"target", "zone"}
+        How the per-target KLIP forms its projection (:attr:`klip_tpe.klip.KLIPParams.gram`).  None
+        or empty takes "target".
+
+    Returns
+    -------
+    done : list
+        The partitions it was set on, or ``[None]`` for a single reducer.
+
+    Raises
+    ------
+    ValueError
+        If ``mode`` is unknown.
+    """
     mode = str(mode or "target").lower()
     if mode not in KLIP_GRAM_MODES:
         raise ValueError(f"klip_gram is one of {KLIP_GRAM_MODES}, not {mode!r}")
@@ -2187,8 +3682,24 @@ def set_klip_gram(reducer: Reducer, mode: str) -> List[Any]:
 
 
 def reducer_class(backend: str = "klip"):
-    """Reducer class for a backend name: ``'klip'`` (built-in annular KLIP), ``'pyklip'``,
-    ``'vip'`` (imported lazily; see :mod:`klip_tpe.backends`)."""
+    """Return the reducer class for a backend name.
+
+    Parameters
+    ----------
+    backend : {"klip", "pyklip", "vip"}, default "klip"
+        The backend, "klip" (or "builtin", "default") for the built-in annular KLIP.  pyKLIP's and
+        VIP's are imported when asked for (:mod:`klip_tpe.backends`).
+
+    Returns
+    -------
+    cls : type
+        The reducer class.
+
+    Raises
+    ------
+    ValueError
+        If ``backend`` is unknown.
+    """
     b = (backend or "klip").lower()
     if b in ("klip", "builtin", "default"):
         return KLIPReducer
