@@ -11,8 +11,13 @@ documented anywhere.  What must hold:
 * Only the angles' differences matter: an offset gives the same residuals.
 * The documented chain, ``nw_ang_comb(derotate(res, angles, truenorth), angles)``, is what the
   reducer's ``_subtract`` gives without its second high-pass.
+* Every field of ``KLIPParams`` has an entry in its docstring, of 1 to 3 sentences (Vivek
+  Vijayakumar and Kevin Wagner, 2026-11-12: written for a novice).
 """
 from __future__ import annotations
+
+import dataclasses
+import re
 
 import numpy as np
 
@@ -73,3 +78,31 @@ def test_the_documented_chain_is_the_reducers():
     doc = nw_ang_comb(derotate(res, ang, red.truenorth), ang)
     assert fm_img is None and img.shape == cube.shape[1:]
     assert np.array_equal(np.asarray(img, float), np.asarray(doc, float), equal_nan=True)
+
+
+def _doc_entries(doc: str):
+    """The ``name : type`` entries of a numpydoc section, each with its description's text."""
+    lines = doc.splitlines()
+    out = {}
+    for i, ln in enumerate(lines):
+        m = re.match(r"^(\s*)(\w+) : ", ln)
+        if not m:
+            continue
+        ind = len(m.group(1))
+        body = []
+        for nxt in lines[i + 1:]:
+            if nxt.strip() and len(nxt) - len(nxt.lstrip()) <= ind:
+                break
+            body.append(nxt.strip())
+        out[m.group(2)] = " ".join(b for b in body if b)
+    return out
+
+
+def test_every_klipparams_field_is_explained_in_one_to_three_sentences():
+    from klip_tpe.klip import KLIPParams
+    entries = _doc_entries(KLIPParams.__doc__)
+    for f in dataclasses.fields(KLIPParams):
+        assert f.name in entries, f"KLIPParams.{f.name} has no entry in the docstring"
+        n = len([x for x in re.split(r"(?<=[.!?])\s+", entries[f.name]) if x])
+        assert 1 <= n <= 3, f"KLIPParams.{f.name}: {n} sentences"
+    assert "residual" in KLIPParams.__doc__.split("Attributes")[0], "the residuals are explained before they are used"

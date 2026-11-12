@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — 2026-11-12 (KLIPParams explained for a novice)
+
+- **`KLIPParams` explains every field for a newcomer** (Vivek Vijayakumar and Kevin Wagner,
+  2026-11-12).  The docstring opens with what KLIP does and what target, reference and residual
+  frames are, then gives each of the 18 fields an entry of 1 to 3 sentences: what it is, its
+  units, its default and what that default does.  It is the trial of a rule for every function's
+  docstring.  `tests/test_klip_annular_doc.py` checks that every field has such an entry.
+
 ## Unreleased — 2026-11-11 (the best S/N title of the picture it circles)
 
 - **The best S/N cell's title gives the values circled in its picture** (RX J0534's
