@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — 2026-11-12 (metrics.py documented to the rule)
+
+- **`metrics.py` follows the documentation rule**: its module docstring, the S/N functions
+  (`mawet_peak_snr`, `aperture_mawet_snr`, `injection_difference_snr`, `sidelobe_snr`), the
+  masks, the ring recorder, the metrics and the `Objective`.  The history of each routine, the
+  IDL predecessor it succeeds and the NEAR2 notes behind its rules, moved to Notes sections.
+  Only docstrings and comments changed.
+
 ## Unreleased — 2026-11-12 (injection.py documented to the rule)
 
 - **`injection.py` follows the documentation rule**: its module docstring, 21 functions, the
