@@ -1,16 +1,17 @@
-"""Synthetic-companion injection.
+"""Synthetic-companion injection into pupil-tracking cubes.
 
-An :class:`InjectionModel` answers two questions for a separation ``rho``: what does
-an off-axis PSF look like there (a unit-normalised stamp) and what fraction of the
-flux survives the coronagraph (``throughput``).  :func:`inject_sources` places the
-scaled stamps into every frame of a pupil-tracking cube at the detector azimuth
-implied by the frame's parallactic angle, optionally rotating the stamp so an
-anisotropic (vortex-distorted) PSF keeps its distortion axis radial.
+An :class:`InjectionModel` gives, for a separation, the unit-normalized off-axis PSF and the
+fraction of its flux that survives the coronagraph.  :func:`inject_sources` adds the scaled
+stamps to every frame at the detector azimuth each frame's parallactic angle implies, rotating
+the stamp of an anisotropic PSF so its distortion axis stays radial.
 
-Conventions (match ``reduce_near_2.pro`` ``do_inject``):
-``az = theta - truenorth - 270 - parang`` degrees is the detector azimuth from +x;
-after derotation (CCW by ``parang + truenorth``) the source lands at
-``theta + 90`` deg from +x, i.e. at PA ``theta`` East of North.
+A source at position angle ``theta`` (degrees East of North) sits at detector azimuth
+``az = theta - truenorth - 270 - parang`` from +x.  After derotation, counter-clockwise by
+``parang + truenorth``, it lands at ``theta + 90`` degrees from +x, at PA ``theta``.
+
+Notes
+-----
+The azimuth convention is that of ``do_inject`` in ``reduce_near_2.pro``, the IDL predecessor.
 """
 from __future__ import annotations
 
@@ -28,12 +29,31 @@ __all__ = ["InjectionModel", "GaussianPSF", "TemplatePSF", "AiryPSF", "FramePSF"
 
 
 def read_sources(path: str, columns: int = 3):
-    """Point sources from a text file, one per line: ``rho pa contrast`` with ``rho`` in
-    arcsec, ``pa`` in degrees East of North and ``contrast`` in the injection model's flux
-    unit (for NEAR, alpha Cen A).  Whitespace or commas separate the values, ``#`` starts a
-    comment, and blank lines are skipped.  Columns after the third are ignored here
-    (:func:`klip_tpe.chainfit.read_chain` reads a node label from the fourth).  Returns a
-    list of :class:`~klip_tpe.metrics.Source`."""
+    """Read point sources from a text file, one ``rho pa contrast`` per line.
+
+    Whitespace or commas separate the values, ``#`` starts a comment and blank lines are skipped.
+    Values after the third are ignored here (:func:`klip_tpe.chainfit.read_chain` reads a node
+    label from the fourth).
+
+    Parameters
+    ----------
+    path : str
+        Path of the text file.  ``rho`` is in arcsec, ``pa`` in degrees East of North and
+        ``contrast`` in the injection model's flux unit, such as the flux of alpha Cen A for NEAR.
+    columns : int, default 3
+        Minimum number of values on a line.
+
+    Returns
+    -------
+    sources : list of Source
+        One :class:`~klip_tpe.metrics.Source` per line.
+
+    Raises
+    ------
+    ValueError
+        If a line has too few values, values that are not numbers, a negative or non-finite
+        ``rho``, or a non-finite ``pa`` or ``contrast``.
+    """
     out = []
     with open(path) as f:
         for i, line in enumerate(f, 1):
@@ -54,35 +74,76 @@ def read_sources(path: str, columns: int = 3):
 
 
 def takes_azimuth(model) -> bool:
-    """True when this model's throughput depends on azimuth as well as separation.
+    """Tell whether a model's throughput depends on azimuth as well as separation.
 
-    Read from the class attribute ``azimuth_dependent`` rather than inferred from the
-    signature of ``throughput``.  Every model in this package accepts the ``az_deg``
-    argument, because a uniform signature is worth having, but almost none of them look
-    at it -- so a signature test answers "does this model tolerate an azimuth", which is
-    true everywhere and therefore useless, rather than "does this model need one".
+    The answer is the class attribute ``azimuth_dependent``.  Every model here accepts ``az_deg``
+    for a uniform signature, so the signature cannot tell which models need it.  A model written
+    elsewhere that uses the azimuth sets ``azimuth_dependent = True`` to be called with one.
 
-    A model written outside this package that overrides ``throughput`` to use an azimuth
-    must set ``azimuth_dependent = True`` to be called with one.  That is the safe
-    default: a position-dependent model treated as radial is a visible factor-of-a-few
-    error in its own contrast curve, while a radial model driven down the per-frame path
-    would silently pay for it on every injection of every evaluation.
+    Parameters
+    ----------
+    model : InjectionModel
+        The injection model.
+
+    Returns
+    -------
+    dependent : bool
+        True when :func:`inject_sources` must evaluate the throughput per frame at that frame's
+        azimuth.
     """
     return bool(getattr(model, "azimuth_dependent", False))
 
 
 def shift_bilinear(img: np.ndarray, dx: float, dy: float) -> np.ndarray:
-    """Sub-pixel shift by bilinear interpolation (IDL ``fshift`` fractional part)."""
+    """Shift an image by a fraction of a pixel with bilinear interpolation.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image, ny by nx pixels.
+    dx : float
+        Shift along x, in pixels.
+    dy : float
+        Shift along y, in pixels.
+
+    Returns
+    -------
+    shifted : ndarray, shape (ny, nx)
+        Shifted image, in float64.  Pixels shifted in from outside the image are 0.
+
+    Notes
+    -----
+    It matches the fractional shift of ``fshift`` in the IDL predecessor.
+    """
     return ndimage.shift(np.asarray(img, float), (dy, dx), order=1, mode="constant", cval=0.0)
 
 
 def stamp_crop(shape: Tuple[int, int], stamp: np.ndarray, stamp_center: Tuple[float, float],
                x: float, y: float, buf: Optional[np.ndarray] = None):
-    """Where :func:`add_stamp` puts ``stamp`` in a frame of ``shape`` and what it adds there:
-    ``(y0, y1, x0, x1, values)``, the frame's rows ``y0:y1`` and columns ``x0:x1`` and the
-    shifted stamp's float64 values over them, or None when the stamp falls outside the
-    frame.  ``values`` is a view into ``buf`` when one is given (copy it to keep it past the
-    next call)."""
+    """Compute where :func:`add_stamp` puts a stamp in a frame and the values it adds there.
+
+    Parameters
+    ----------
+    shape : tuple of int
+        Shape of the frame, ``(ny, nx)``.
+    stamp : ndarray, shape (sy, sx)
+        The stamp, sy by sx pixels.
+    stamp_center : tuple of 2 floats
+        The ``(x, y)`` stamp pixel that lands at ``(x, y)`` in the frame.
+    x : float
+        Frame column of the stamp's center, in pixels.
+    y : float
+        Frame row of the stamp's center, in pixels.
+    buf : ndarray or None, default None
+        A float64 array of the stamp's shape that receives the shifted stamp.  None allocates one.
+
+    Returns
+    -------
+    crop : tuple or None
+        ``(y0, y1, x0, x1, values)``, the frame's rows ``y0:y1`` and columns ``x0:x1`` and the
+        shifted stamp's float64 values over them, or None when the stamp falls outside the frame.
+        ``values`` is a view into ``buf`` when one is given.
+    """
     sh, sw = stamp.shape
     fx = x - stamp_center[0]
     fy = y - stamp_center[1]
@@ -101,38 +162,73 @@ def stamp_crop(shape: Tuple[int, int], stamp: np.ndarray, stamp_center: Tuple[fl
 
 
 def add_crop(frame: np.ndarray, crop) -> None:
-    """Add a :func:`stamp_crop` to ``frame`` in place (a float32 frame takes the float64
-    values the way ``+=`` takes them: summed in double, rounded once)."""
+    """Add a :func:`stamp_crop` to a frame in place.
+
+    A float32 frame sums the float64 values in double and rounds once, as ``+=`` does.
+
+    Parameters
+    ----------
+    frame : ndarray, shape (ny, nx)
+        The frame, changed in place.
+    crop : tuple
+        The ``(y0, y1, x0, x1, values)`` that :func:`stamp_crop` gives.
+    """
     y0, y1, x0, x1, v = crop
     frame[y0:y1, x0:x1] += v
 
 
 def add_stamp(frame: np.ndarray, stamp: np.ndarray, stamp_center: Tuple[float, float],
               x: float, y: float, buf: Optional[np.ndarray] = None) -> None:
-    """Add ``stamp`` to ``frame`` in place so that ``stamp_center`` (x, y in stamp
-    pixels) lands at frame position ``(x, y)``; integer part by placement, fractional
-    part by bilinear shift (``near2_psfstamp``).  Clipped at the frame edges.
+    """Add a stamp to a frame in place, shifting it to a sub-pixel position.
 
-    ``buf``: a float64 array of the stamp's shape that receives the shifted stamp, so a
-    caller adding many stamps does not allocate one each time (the numbers are the same)."""
+    The integer part of the position is taken by placement and the fractional part by a
+    bilinear shift.  The stamp is clipped at the frame's edges.
+
+    Parameters
+    ----------
+    frame : ndarray, shape (ny, nx)
+        The frame, changed in place.
+    stamp : ndarray, shape (sy, sx)
+        The stamp, sy by sx pixels.
+    stamp_center : tuple of 2 floats
+        The ``(x, y)`` stamp pixel that lands at ``(x, y)`` in the frame.
+    x : float
+        Frame column of the stamp's center, in pixels.
+    y : float
+        Frame row of the stamp's center, in pixels.
+    buf : ndarray or None, default None
+        A float64 array of the stamp's shape that receives the shifted stamp, so a caller adding
+        many stamps does not allocate one each time.  None allocates one.
+
+    Notes
+    -----
+    It does what ``near2_psfstamp`` does in the IDL predecessor.
+    """
     c = stamp_crop(frame.shape, stamp, stamp_center, x, y, buf)
     if c is not None:
         add_crop(frame, c)
 
 
 class InjectionModel:
-    """Base class.
+    """Base class of the injection models, which give an injected companion's PSF and throughput.
 
-    ``stamp(rho_as) -> (stamp, (xc, yc), ok)``: PSF template normalised so that the
-    flux unit is 1 (encircled energy within ``ee_radius_px`` or total sum, model
-    dependent).  ``ok=False`` means the model has no template at that separation and
-    the caller should fall back (``fallback`` model) -- the throughput is still taken
-    from this model.
-    ``flux_unit``: flux (in data units) of the *star* in the same normalisation, so
-    an injected companion of ``contrast`` carries ``contrast * flux_unit *
-    throughput(rho)``.
-    ``refpa_deg``: if not None, stamps are rotated so their reference axis follows
-    the source's detector azimuth (anisotropic PSF libraries).
+    A model answers two questions for a separation ``rho_as``: what an off-axis PSF looks like
+    there (:meth:`stamp`) and what fraction of its flux survives the coronagraph
+    (:meth:`throughput`).  A companion of contrast ``c`` carries ``c * flux_unit * throughput``.
+
+    Attributes
+    ----------
+    flux_unit : float
+        Flux of the star, in data units, in the normalization of the stamps.
+    refpa_deg : float or None
+        Reference axis of the stamps, in degrees.  When set, each stamp is rotated so this axis
+        follows the source's detector azimuth, for an anisotropic PSF.
+    per_frame : bool
+        Whether :func:`inject_sources` takes each frame's own stamp from :meth:`frame_stamp`.
+    azimuth_dependent : bool
+        Whether :meth:`throughput` depends on the detector azimuth as well as the separation.
+    name : str
+        Name of the model, for a run's record.
     """
 
     flux_unit: float = 1.0
@@ -142,44 +238,128 @@ class InjectionModel:
     name = "injection_model"
 
     def stamp(self, rho_as: float):  # pragma: no cover
+        """Return the unit-normalized PSF stamp at a separation.
+
+        Parameters
+        ----------
+        rho_as : float
+            Separation, in arcsec.
+
+        Returns
+        -------
+        stamp : ndarray or None
+            PSF template normalized so the flux unit is 1, within an encircled-energy radius or in
+            total depending on the model.
+        center : tuple of 2 floats
+            The ``(x, y)`` stamp pixel of the PSF's center.
+        ok : bool
+            False when the model has no template there, and the caller falls back to another model.
+            The throughput still comes from this model.
+        """
         raise NotImplementedError
 
     def frame_stamp(self, j: int, rho_as: float):  # pragma: no cover
-        """Per-frame models: ``(stamp, (xc, yc), flux_unit_j)`` for frame ``j`` -- the
-        frame's own PSF, unit-normalised, and the star flux of THAT frame in the same
-        normalisation (so contrast tracks transparency / Strehl frame by frame)."""
+        """Return one frame's own PSF stamp and star flux, for per-frame models.
+
+        Parameters
+        ----------
+        j : int
+            Index of the frame.
+        rho_as : float
+            Separation, in arcsec.
+
+        Returns
+        -------
+        stamp : ndarray
+            The frame's PSF, unit-normalized.
+        center : tuple of 2 floats
+            The ``(x, y)`` stamp pixel of the PSF's center.
+        flux_unit_j : float
+            Star flux of that frame in the same normalization, so the contrast follows the
+            transparency and Strehl ratio frame by frame.
+        """
         raise NotImplementedError
 
     def throughput(self, rho_as: float, az_deg: Optional[float] = None) -> float:
-        """Fraction of a point source's flux that survives the coronagraph at ``rho_as``.
+        """Return the fraction of a point source's flux that survives the coronagraph.
 
-        ``az_deg`` is the source's azimuth in the DETECTOR frame.  Most coronagraphs are
-        round and ignore it; a four-quadrant phase mask does not, and on MIRI the
-        throughput varies by a factor of two to four around a circle of constant
-        separation (see :mod:`klip_tpe.instruments.miri`).  A model that uses it declares
-        so by accepting the argument, which :func:`takes_azimuth` detects, so a model
-        written before this argument existed is still called the old way.
+        Most coronagraphs are round and ignore the azimuth.  A four-quadrant phase mask does not, and
+        on MIRI the throughput varies by a factor of two to four around a circle of constant
+        separation (see :mod:`klip_tpe.instruments.miri`).
+
+        Parameters
+        ----------
+        rho_as : float
+            Separation, in arcsec.
+        az_deg : float or None, default None
+            Azimuth of the source in the detector frame, in degrees.  A model that uses it sets
+            ``azimuth_dependent`` True (:func:`takes_azimuth`).
+
+        Returns
+        -------
+        throughput : float
+            Fraction of the flux transmitted, 1 for this base class.
         """
         return 1.0
 
     def typical_throughput(self, rho_as: float) -> float:
-        """A representative throughput at ``rho_as``, for diagnostics that need a scale
-        rather than a value -- and that must not warn about the azimuth they cannot
-        supply.  Position-dependent models override this with an azimuthal average."""
+        """Return a representative throughput at a separation.
+
+        It serves diagnostics that need a scale rather than a value and cannot supply an azimuth.
+        Position-dependent models override it with an azimuthal average.
+
+        Parameters
+        ----------
+        rho_as : float
+            Separation, in arcsec.
+
+        Returns
+        -------
+        throughput : float
+            Fraction of the flux transmitted.
+        """
         return float(self.throughput(rho_as))
 
     def matched_filter_kernel(self, rho_as: float, fwhm: float):
-        """Optional measured matched filter for :class:`~klip_tpe.metrics.MawetPeakSNR`;
-        None -> Gaussian."""
+        """Return a measured matched filter for :class:`~klip_tpe.metrics.MawetPeakSNR`.
+
+        Parameters
+        ----------
+        rho_as : float
+            Separation, in arcsec.
+        fwhm : float
+            FWHM of the PSF, in pixels.
+
+        Returns
+        -------
+        kernel : ndarray or None
+            Unit-sum kernel, or None for the metric's Gaussian, which this base class gives.
+        """
         return None
 
     def describe(self) -> dict:
+        """Return the model's settings, for a run's record.
+
+        Returns
+        -------
+        info : dict
+            ``name``, ``flux_unit`` and ``refpa_deg``, with more keys in subclasses.
+        """
         return {"name": self.name, "flux_unit": float(self.flux_unit), "refpa_deg": self.refpa_deg}
 
 
 class GaussianPSF(InjectionModel):
-    """Analytic Gaussian PSF of the given FWHM, unit total flux.  ``star_flux`` is the
-    flux unit (peak-normalised stars: pass the star's total flux)."""
+    """Analytic Gaussian PSF of unit total flux.
+
+    Parameters
+    ----------
+    fwhm_px : float
+        FWHM of the Gaussian, in pixels.
+    star_flux : float, default 1.0
+        Total flux of the star in data units, which becomes ``flux_unit``.
+    size : int, default 41
+        Width of the stamp in pixels, made odd.
+    """
 
     name = "gaussian"
 
@@ -195,14 +375,51 @@ class GaussianPSF(InjectionModel):
         self._center = (c, c)
 
     def stamp(self, rho_as: float):
+        """Return the Gaussian stamp, the same at every separation.
+
+        Parameters
+        ----------
+        rho_as : float
+            Separation, in arcsec.
+
+        Returns
+        -------
+        stamp : ndarray, shape (size, size)
+            Gaussian of unit sum.
+        center : tuple of 2 floats
+            The ``(x, y)`` stamp pixel of its center.
+        ok : bool
+            Always True.
+        """
         return self._stamp, self._center, True
 
 
 class TemplatePSF(InjectionModel):
-    """Empirical PSF template (e.g. an unsaturated median PSF).  ``center`` in stamp
-    pixels; the stamp is normalised to unit flux inside ``ee_radius_px`` (or unit
-    total if None) and ``flux_unit`` defaults to the template's own flux in that
-    normalisation, i.e. contrast is relative to the template star."""
+    """Empirical PSF template, such as an unsaturated median PSF.
+
+    The stamp is normalized to unit flux inside ``ee_radius_px``, or to unit total.  By default
+    ``flux_unit`` is the template's own flux in that normalization, so the contrast is relative to
+    the template star.
+
+    Parameters
+    ----------
+    template : ndarray, shape (sy, sx)
+        The PSF image.  NaN pixels become 0.
+    center : tuple of 2 floats or None, default None
+        The ``(x, y)`` pixel of the PSF's center.  None takes the template's middle,
+        ``((sx-1)/2, (sy-1)/2)``.
+    ee_radius_px : float or None, default None
+        Radius of the unit-flux normalization, in pixels.  None normalizes the total.
+    star_flux : float or None, default None
+        Flux of the science star in the same normalization.  None takes the template's flux.
+    throughput_fn : callable or None, default None
+        Throughput as a function of separation in arcsec.  None gives 1.
+
+    Attributes
+    ----------
+    template_flux : float
+        Flux of the template in the normalization, before it is divided out.
+    """
 
     name = "template"
 
@@ -226,21 +443,78 @@ class TemplatePSF(InjectionModel):
         self._thru = throughput_fn
 
     def stamp(self, rho_as: float):
+        """Return the normalized template, the same at every separation.
+
+        Parameters
+        ----------
+        rho_as : float
+            Separation, in arcsec.
+
+        Returns
+        -------
+        stamp : ndarray, shape (sy, sx)
+            Normalized template.
+        center : tuple of 2 floats
+            The ``(x, y)`` stamp pixel of the PSF's center.
+        ok : bool
+            Always True.
+        """
         return self._stamp, self._center, True
 
     def throughput(self, rho_as: float, az_deg: Optional[float] = None) -> float:
+        """Return the throughput at a separation from ``throughput_fn``.
+
+        Parameters
+        ----------
+        rho_as : float
+            Separation, in arcsec.
+        az_deg : float or None, default None
+            Detector azimuth, in degrees, ignored.
+
+        Returns
+        -------
+        throughput : float
+            ``throughput_fn(rho_as)``, or 1 without one.
+        """
         return 1.0 if self._thru is None else float(self._thru(rho_as))
 
 
 class AiryPSF(InjectionModel):
-    """Obstructed, possibly elliptical Airy PSF -- the ``airy_disk`` model pyNOMIC fits to
-    every LBTI/NOMIC frame (``amp, sigmax, sigmay, offset, p, x0, y0``; secondary
-    obscuration ratio ``e``).  ``sigmax/sigmay`` are pyNOMIC's scale parameters (the
-    first dark ring sits at ``1.22 * sigma`` px), ``p`` the rotation in radians.
+    """Obstructed, possibly elliptical Airy PSF, the ``airy_disk`` model pyNOMIC fits to NOMIC frames.
 
-    The stamp is normalised to unit flux within ``ee_radius_px`` (default 2.5 sigma) and
-    ``flux_unit`` is the star's flux in that normalisation for amplitude ``amp``, so an
-    injected companion of contrast ``c`` is exactly pyNOMIC's ``airy_disk(c * amp, ...)``.
+    The stamp is normalized to unit flux within ``ee_radius_px``, and ``flux_unit`` is the star's
+    flux in that normalization for amplitude ``amp``.  An injected companion of contrast ``c`` is
+    then exactly pyNOMIC's ``airy_disk(c * amp, ...)``.
+
+    Parameters
+    ----------
+    sigmax : float
+        pyNOMIC's scale parameter along the first axis, in pixels.  The first dark ring of an
+        unobstructed PSF sits at ``1.22 * sigmax``.
+    sigmay : float or None, default None
+        Scale parameter along the second axis, in pixels.  None takes ``sigmax``.
+    p : float, default 0.0
+        Rotation of the axes, in radians.
+    amp : float, default 1.0
+        Amplitude of the star's fit, in data units.
+    e : float, default 0.11
+        Ratio of the secondary obscuration's diameter to the primary's.
+    size : int or None, default None
+        Width of the stamp in pixels, made odd.  None takes 6 times the larger scale.
+    ee_radius_px : float or None, default None
+        Radius of the unit-flux normalization, in pixels.  None takes 2.5 times the larger scale.
+    frame_params : ndarray or None, default None
+        pyNOMIC ``reffits`` rows ``(amp, sigmax, sigmay, offset, p, ...)``, shape (n, 5 or more),
+        one per frame.  With them, frame ``j`` is injected with its own fit, as pyNOMIC's
+        ``inject_source`` does, and the other parameters describe the median.
+
+    Attributes
+    ----------
+    fwhm_px : float
+        FWHM of the circularized core, ``1.028 * (sigmax + sigmay) / 2``, in pixels.
+    n_bad : int
+        Number of frames whose fit is unusable and that take the median stamp, set with
+        ``frame_params``.
     """
 
     name = "airy"
@@ -248,10 +522,6 @@ class AiryPSF(InjectionModel):
     def __init__(self, sigmax: float, sigmay: Optional[float] = None, p: float = 0.0, amp: float = 1.0,
                  e: float = 0.11, size: Optional[int] = None, ee_radius_px: Optional[float] = None,
                  frame_params: Optional[np.ndarray] = None):
-        """``frame_params`` (n, >=5) = pyNOMIC ``reffits`` rows ``(amp, sigmax, sigmay, offset,
-        p, ...)`` per frame: the model then injects frame ``j`` with frame ``j``'s own fit --
-        exactly pyNOMIC's ``inject_source`` -- and ``sigmax/sigmay/p/amp`` describe the
-        median (used for ``stamp()``, the matched filter and ``flux_unit``)."""
         self.sigmax = float(sigmax)
         self.sigmay = float(self.sigmax if sigmay is None else sigmay)
         self.p, self.amp, self.e = float(p), float(amp), float(e)
@@ -276,6 +546,24 @@ class AiryPSF(InjectionModel):
             self._cache: dict = {}
 
     def _model(self, amp, sx, sy, p):
+        """Evaluate the obstructed Airy pattern on the stamp's pixels.
+
+        Parameters
+        ----------
+        amp : float
+            Amplitude, in data units.
+        sx : float
+            Scale parameter along the first axis, in pixels.
+        sy : float
+            Scale parameter along the second axis, in pixels.
+        p : float
+            Rotation of the axes, in radians.
+
+        Returns
+        -------
+        model : ndarray, shape (size, size)
+            The PSF, ``amp`` at its center.
+        """
         from scipy.special import j1
         c = self._center[0]
         yy, xx = np.mgrid[0:self.size, 0:self.size]
@@ -287,15 +575,62 @@ class AiryPSF(InjectionModel):
         return amp * m
 
     def _core_flux(self, star: np.ndarray) -> float:
+        """Sum a stamp within ``ee_radius_px`` of its center.
+
+        Parameters
+        ----------
+        star : ndarray, shape (size, size)
+            The stamp.
+
+        Returns
+        -------
+        flux : float
+            Flux within the radius.
+        """
         c = self._center[0]
         yy, xx = np.mgrid[0:self.size, 0:self.size]
         return float(star[np.hypot(xx - c, yy - c) <= self.ee_radius_px].sum())
 
     def stamp(self, rho_as: float):
+        """Return the median fit's stamp, the same at every separation.
+
+        Parameters
+        ----------
+        rho_as : float
+            Separation, in arcsec.
+
+        Returns
+        -------
+        stamp : ndarray, shape (size, size)
+            The PSF, of unit flux within ``ee_radius_px``.
+        center : tuple of 2 floats
+            The ``(x, y)`` stamp pixel of its center.
+        ok : bool
+            Always True.
+        """
         return self._stamp, self._center, True
 
     def frame_stamp(self, j: int, rho_as: float):
-        """Frame ``j``'s own Airy fit (unit core flux, and that frame's star flux)."""
+        """Return frame ``j``'s own Airy fit, of unit core flux, and that frame's star flux.
+
+        A frame without a usable fit takes the median stamp and ``flux_unit``.
+
+        Parameters
+        ----------
+        j : int
+            Index of the frame.
+        rho_as : float
+            Separation, in arcsec.
+
+        Returns
+        -------
+        stamp : ndarray, shape (size, size)
+            The frame's PSF, in float32.
+        center : tuple of 2 floats
+            The ``(x, y)`` stamp pixel of its center.
+        flux_unit_j : float
+            Core flux of the frame's star, in data units.
+        """
         if self._frame_params is None or not self._frame_ok[j]:
             return self._stamp, self._center, float(self.flux_unit)
         amp, sx, sy, _off, p = self._frame_params[j, :5]
@@ -310,6 +645,13 @@ class AiryPSF(InjectionModel):
         return hit[0], self._center, hit[1]
 
     def describe(self) -> dict:
+        """Return the model's settings, for a run's record.
+
+        Returns
+        -------
+        info : dict
+            The base keys plus the fit's parameters, ``ee_radius_px`` and ``per_frame``.
+        """
         d = super().describe()
         d.update(sigmax=self.sigmax, sigmay=self.sigmay, p=self.p, amp=self.amp, e=self.e,
                  ee_radius_px=self.ee_radius_px, per_frame=bool(self.per_frame))
@@ -317,21 +659,40 @@ class AiryPSF(InjectionModel):
 
 
 class FramePSF(InjectionModel):
-    """Frame-by-frame empirical PSF: the (unsaturated) star of **each frame itself** is
-    the template for the companion injected into that frame.
+    """Frame-by-frame empirical PSF, each frame's own unsaturated star as the template for that frame.
 
-    For frame ``j`` the stamp is the ``2*r_stamp+1`` cut-out around the star, with a
-    cosine taper between ``r_ee`` and ``r_stamp`` so the halo / speckles beyond the core
-    (which would otherwise be copied at ``contrast`` level) fade to zero, normalised to
-    unit flux within ``r_ee``; ``flux_unit_j`` is that frame's star flux in the same
-    normalisation.  Frames must be registered (star at ``center``; default the frame
-    centre ``((nx-1)/2, (ny-1)/2)``) and background-subtracted -- exactly what pyNOMIC's
-    ``frame_registration`` + ``subtract_background`` deliver.  A frame whose core flux
-    is not positive falls back to the median template (``self.stamp``).
+    For frame ``j`` the stamp is the cut-out of radius ``r_stamp`` around the star, tapered by a
+    cosine between ``r_ee`` and ``r_stamp`` so the halo and speckles beyond the core fade to zero,
+    and normalized to unit flux within ``r_ee``.  The frames must be registered and
+    background-subtracted, as pyNOMIC's ``frame_registration`` and ``subtract_background`` leave
+    them.  A frame whose core flux is not positive takes the median template.
 
-    ``flux_unit`` (the class-level value used by the FM code / setup files) is the median
-    of the per-frame values; ``stamp()`` returns the median-normalised template, which is
-    also what the matched filter of the metric is built from.
+    Parameters
+    ----------
+    cube : ndarray, shape (n, ny, nx)
+        The n frames, ny by nx pixels each, with the star at ``center``.
+    r_ee : float
+        Radius of the unit-flux normalization, in pixels.
+    r_stamp : float or None, default None
+        Radius of the cut-out and outer edge of the taper, in pixels.  None takes ``1.6 * r_ee``.
+    center : tuple of 2 floats or None, default None
+        The star's ``(x, y)`` pixel.  None takes ``((nx-1)/2, (ny-1)/2)``.
+    throughput_fn : callable or None, default None
+        Throughput as a function of separation in arcsec.  None gives 1.
+
+    Attributes
+    ----------
+    frame_flux : ndarray, shape (n,)
+        Core flux of each frame's star, in data units.
+    flux_unit : float
+        Median of ``frame_flux`` over the good frames.
+    n_bad : int
+        Number of frames that take the median template.
+
+    Raises
+    ------
+    ValueError
+        If the cut-out does not fit in the frame.
     """
 
     name = "frame"
@@ -373,30 +734,120 @@ class FramePSF(InjectionModel):
         self._thru = throughput_fn
 
     def stamp(self, rho_as: float):
+        """Return the median template, used where no frame is named and for the matched filter.
+
+        Parameters
+        ----------
+        rho_as : float
+            Separation, in arcsec.
+
+        Returns
+        -------
+        stamp : ndarray
+            Median template, of unit flux within ``r_ee``, in float32.
+        center : tuple of 2 floats
+            The ``(x, y)`` stamp pixel of the star.
+        ok : bool
+            Always True.
+        """
         return self._median_stamp, self._center, True
 
     def frame_stamp(self, j: int, rho_as: float):
+        """Return frame ``j``'s own stamp and star flux.
+
+        Parameters
+        ----------
+        j : int
+            Index of the frame.
+        rho_as : float
+            Separation, in arcsec.
+
+        Returns
+        -------
+        stamp : ndarray
+            The frame's stamp, of unit flux within ``r_ee``, or the median template for a bad frame.
+        center : tuple of 2 floats
+            The ``(x, y)`` stamp pixel of the star.
+        flux_unit_j : float
+            Core flux of the frame's star, or ``flux_unit`` for a bad frame.
+        """
         if self._good[j]:
             return self._stamps[j], self._center, float(self.frame_flux[j])
         return self._median_stamp, self._center, float(self.flux_unit)
 
     def throughput(self, rho_as: float, az_deg: Optional[float] = None) -> float:
+        """Return the throughput at a separation from ``throughput_fn``.
+
+        Parameters
+        ----------
+        rho_as : float
+            Separation, in arcsec.
+        az_deg : float or None, default None
+            Detector azimuth, in degrees, ignored.
+
+        Returns
+        -------
+        throughput : float
+            ``throughput_fn(rho_as)``, or 1 without one.
+        """
         return 1.0 if self._thru is None else float(self._thru(rho_as))
 
     def matched_filter_kernel(self, rho_as: float, fwhm: float):
+        """Return the matched filter built from the median template.
+
+        Parameters
+        ----------
+        rho_as : float
+            Separation, in arcsec, ignored.
+        fwhm : float
+            FWHM of the PSF, in pixels.
+
+        Returns
+        -------
+        kernel : ndarray
+            Azimuthally averaged unit-sum kernel (:func:`klip_tpe.metrics.kernel_from_profile`).
+        """
         from .metrics import kernel_from_profile
         return kernel_from_profile(self._median_stamp, fwhm)
 
     def describe(self) -> dict:
+        """Return the model's settings, for a run's record.
+
+        Returns
+        -------
+        info : dict
+            The base keys plus ``r_ee``, ``r_stamp``, ``n_frames`` and ``n_bad``.
+        """
         d = super().describe()
         d.update(r_ee=self.r_ee, r_stamp=self.r_stamp, n_frames=int(self._good.size), n_bad=self.n_bad)
         return d
 
 
 class LibraryPSF(InjectionModel):
-    """Separation-dependent PSF library: ``slices[i]`` valid at ``seps[i]`` arcsec,
-    linearly interpolated in separation and re-normalised to unit flux within
-    ``ee_radius_px`` of ``center``.  Outside ``[seps[0], seps[-1]]`` ``ok=False``."""
+    """Separation-dependent PSF library, interpolated linearly between its slices.
+
+    Each stamp is renormalized to unit flux within ``ee_radius_px`` of ``center``.  Outside the
+    library's separations :meth:`stamp` reports no template.
+
+    Parameters
+    ----------
+    slices : ndarray, shape (m, sy, sx)
+        The m PSF stamps, ``slices[i]`` valid at ``seps[i]``.  A float64 array is normalized in
+        place.
+    seps : sequence of float
+        Separation of each slice, in arcsec, increasing.
+    center : tuple of 2 floats
+        The ``(x, y)`` stamp pixel of the PSF's center.
+    ee_radius_px : float
+        Radius of the unit-flux normalization, in pixels.
+    throughput_fn : callable or None, default None
+        Throughput as a function of separation in arcsec.  None gives 1.
+    refpa_deg : float or None, default None
+        Reference axis of the slices, in degrees, for an anisotropic PSF.  None leaves the stamps
+        unrotated.
+    flux_unit : float, default 1.0
+        Flux of the star in the normalization of the slices, in data units.
+    """
 
     name = "library"
 
@@ -418,6 +869,22 @@ class LibraryPSF(InjectionModel):
                 self.slices[i] = self.slices[i] / s
 
     def stamp(self, rho_as: float):
+        """Return the library's stamp at a separation, interpolated between the two nearest slices.
+
+        Parameters
+        ----------
+        rho_as : float
+            Separation, in arcsec.
+
+        Returns
+        -------
+        stamp : ndarray or None
+            Interpolated stamp of unit flux within ``ee_radius_px``, or None outside ``seps``.
+        center : tuple of 2 floats
+            The ``(x, y)`` stamp pixel of the PSF's center.
+        ok : bool
+            False outside ``[seps[0], seps[-1]]`` or for a non-finite ``rho_as``.
+        """
         r = float(rho_as)
         if not np.isfinite(r) or r < self.seps[0] or r > self.seps[-1]:
             return None, self.center, False
@@ -430,9 +897,38 @@ class LibraryPSF(InjectionModel):
         return st, self.center, True
 
     def throughput(self, rho_as: float, az_deg: Optional[float] = None) -> float:
+        """Return the throughput at a separation from ``throughput_fn``.
+
+        Parameters
+        ----------
+        rho_as : float
+            Separation, in arcsec.
+        az_deg : float or None, default None
+            Detector azimuth, in degrees, ignored.
+
+        Returns
+        -------
+        throughput : float
+            ``throughput_fn(rho_as)``, or 1 without one.
+        """
         return 1.0 if self._thru is None else float(self._thru(rho_as))
 
     def matched_filter_kernel(self, rho_as: float, fwhm: float):
+        """Return the matched filter built from the stamp at a separation.
+
+        Parameters
+        ----------
+        rho_as : float
+            Separation, in arcsec.
+        fwhm : float
+            FWHM of the PSF, in pixels.
+
+        Returns
+        -------
+        kernel : ndarray or None
+            Azimuthally averaged unit-sum kernel (:func:`klip_tpe.metrics.kernel_from_profile`), or
+            None outside the library.
+        """
         from .metrics import kernel_from_profile
         st, _, ok = self.stamp(rho_as)
         if not ok:
@@ -441,13 +937,29 @@ class LibraryPSF(InjectionModel):
 
 
 def cube_peak(cube: np.ndarray) -> float:
-    """The level of the brightest pixels of ``cube`` as the float32 cube holds them: the
-    99.9th percentile of ``|pixel|`` in a strided subsample of about two million pixels (what
-    :func:`_check_float32_headroom` reads).  A percentile rather than the maximum, so that one
-    hot pixel does not set the level: on NEAR night 6 the sample's maximum, one pixel at 1.9e3
-    counts 29 px out, made the check warn that a 1e-6 source at 0.5" would be lost, where the
-    pixels it lands on are of order 10 counts and the subtraction of such a chain was exact to
-    3e-7 of its flux.  The percentile there is 67 counts."""
+    """Return the level of a cube's brightest pixels, as the float32 cube holds them.
+
+    It is the 99.9th percentile of ``|pixel|`` in a strided subsample of about two million pixels,
+    which :func:`_check_float32_headroom` reads.  A percentile rather than the maximum keeps one
+    hot pixel from setting the level.
+
+    Parameters
+    ----------
+    cube : ndarray
+        The cube, of any shape.
+
+    Returns
+    -------
+    peak : float
+        The level, in data units, or NaN for an empty cube or one without finite pixels.
+
+    Notes
+    -----
+    On NEAR night 6 the subsample's maximum, one pixel at 1.9e3 counts 29 px out, made the check
+    warn that a 1e-6 source at 0.5" would be lost, where the pixels it lands on are of order 10
+    counts and the subtraction of such a chain was exact to 3e-7 of its flux.  The percentile there
+    is 67 counts.
+    """
     if not cube.size:
         return float("nan")
     s = max(1, int(cube.size // 2_000_000))
@@ -460,14 +972,28 @@ def _check_float32_headroom(cube: np.ndarray, sources: Sequence[Source], model: 
                             fallback: Optional[InjectionModel] = None, peak: Optional[float] = None) -> None:
     """Warn when an injection is too faint to survive being added to a float32 cube.
 
-    The cube is held in float32, so adding a stamp whose pixels sit below the float32
-    quantum of the science pixels they land on does nothing at all -- the source is not
-    faint, it is GONE, and silently: on this data an injection whose stamp peaks at 1e-4
-    counts loses a quarter of its flux and the loss grows as the contrast falls, so the
-    recovered S/N stops being proportional to the contrast and every curve derived from it
-    bends.  It is a real failure mode rather than a theoretical one: it is what happens the
-    moment ``flux_unit`` is a normalised template's own sum (order 1) instead of the star's
-    flux (order 1e6), which is the state a missing ``star_flux`` leaves you in.
+    A stamp whose pixels sit below the float32 quantum of the science pixels it lands on is lost
+    when added, silently.  The recovered S/N then stops scaling with the contrast, and every curve
+    derived from it bends.  That happens when ``flux_unit`` is a normalized template's own sum
+    instead of the star's flux, the state a missing ``star_flux`` leaves.
+
+    Parameters
+    ----------
+    cube : ndarray
+        The float32 cube the sources go into.
+    sources : sequence of Source
+        The sources to inject.
+    model : InjectionModel
+        The injection model.
+    fallback : InjectionModel or None, default None
+        Model that supplies the stamp where ``model`` has none.
+    peak : float or None, default None
+        Level of the cube's brightest pixels, as :func:`cube_peak` gives it.  None computes it.
+
+    Warns
+    -----
+    RuntimeWarning
+        Once per call, when a source's peak is under 32 float32 quanta of ``peak``.
     """
     if not cube.size:
         return
@@ -511,24 +1037,61 @@ def inject_sources(cube: np.ndarray, angles: np.ndarray, sources: Sequence[Sourc
                    pxscale: float, truenorth: float = 0.0, center: Optional[Tuple[float, float]] = None,
                    fallback: Optional[InjectionModel] = None, angle_convention: str = "pa",
                    copy: bool = True, frames: Optional[Sequence[int]] = None, threads: int = 1) -> np.ndarray:
-    """Return ``cube`` with synthetic companions added to every frame.
+    """Return a cube with synthetic companions added to every frame.
 
-    For each source: amplitude ``contrast * model.flux_unit * model.throughput(rho)``;
-    per frame the stamp is placed at
-    ``center + (rho/pxscale) * (cos az, sin az)`` with ``az = theta - truenorth - 270 -
-    parang`` (``angle_convention='pa'``) or ``az = theta - parang`` (``'math'``).
-    ``truenorth`` is one angle (deg) or one per frame of ``angles``, each frame's own.
-    Anisotropic models (``refpa_deg`` set) have their stamp rotated CCW by
-    ``az - refpa`` first.
+    Each source's amplitude is ``contrast * flux_unit * throughput(rho)``, and in each frame its
+    stamp goes to ``center + (rho / pxscale) * (cos az, sin az)``.  A model with ``refpa_deg`` set
+    has its stamp rotated counter-clockwise by ``az - refpa_deg`` first.  A model whose throughput
+    depends on azimuth (:func:`takes_azimuth`) is evaluated per frame at that frame's ``az``, since
+    the mask is fixed to the detector while the field rotates past it.
 
-    When the model's throughput depends on azimuth as well as separation
-    (:func:`takes_azimuth`), it is evaluated per frame at that frame's ``az``, because the
-    mask is fixed to the detector while the field rotates past it: a companion at one sky
-    position angle is attenuated differently in every frame of a roll sequence.  For a
-    round occulter the throughput is constant and is computed once.
+    Parameters
+    ----------
+    cube : ndarray, shape (n, ny, nx)
+        The n frames, ny by nx pixels each, not derotated.
+    angles : ndarray, shape (n,)
+        Parallactic angle of each frame, in degrees.
+    sources : sequence of Source
+        Companions to inject, each with its separation in arcsec, position angle and contrast.
+    model : InjectionModel
+        PSF and throughput of the companions.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    truenorth : float or ndarray, default 0.0
+        True-north offset, in degrees.  One value, or one per frame.
+    center : tuple of 2 floats or None, default None
+        The star's ``(x, y)`` pixel.  None takes ``((nx-1)/2, (ny-1)/2)``.
+    fallback : InjectionModel or None, default None
+        Model that supplies the stamp and flux unit where ``model`` has no template.  The
+        throughput still comes from ``model``, and without a fallback a missing template raises
+        ValueError.
+    angle_convention : {"pa", "math"}, default "pa"
+        How a source's angle ``theta`` sets its detector azimuth.  "pa" gives
+        ``az = theta - truenorth - 270 - parang``, so the source lands at PA ``theta`` after
+        derotation, and "math" gives ``az = theta - parang``.
+    copy : bool, default True
+        Whether to copy ``cube``.  False injects in place when ``cube`` is already float32.
+    frames : sequence of int or None, default None
+        Indices of the frames to inject.  The others come back as they went in, and None injects
+        all.
+    threads : int, default 1
+        Number of threads the frames are spread over.
 
-    ``frames``: inject only these frames (indices into the cube); the others come back as
-    they went in.  ``threads``: the frames go to that many threads (:func:`inject_frames`).
+    Returns
+    -------
+    out : ndarray, shape (n, ny, nx)
+        The cube with the companions added, in float32.
+
+    Raises
+    ------
+    ValueError
+        If a source has no template and no fallback, or ``truenorth`` has a per-frame value count
+        other than n.
+
+    Warns
+    -----
+    RuntimeWarning
+        When a source is too faint to survive float32 rounding (:func:`_check_float32_headroom`).
     """
     out = np.array(cube, dtype=np.float32, copy=copy)
     _check_float32_headroom(out, sources, model, fallback)
@@ -539,9 +1102,30 @@ def inject_sources(cube: np.ndarray, angles: np.ndarray, sources: Sequence[Sourc
 
 @dataclass
 class _Prepared:
-    """What one source needs in every frame, worked out once: the stamp, the model it
-    came from (the fallback where the model has no template there), and the scaled stamp
-    shared by every frame when neither the throughput nor the PSF changes frame to frame."""
+    """What one source needs in every frame, worked out once.
+
+    Attributes
+    ----------
+    src : Source
+        The source.
+    model : InjectionModel
+        Model the stamp came from, the fallback where the main model has no template.
+    stamp : ndarray
+        Unit stamp, in float64.
+    center : tuple of 2 floats
+        The ``(x, y)`` stamp pixel of the PSF's center.
+    r_px : float
+        Separation, in pixels.
+    per_frame : bool
+        Whether each frame takes its own stamp from the model's ``frame_stamp``.
+    az_aware : bool
+        Whether the throughput is evaluated per frame at the frame's azimuth.
+    thru : float or None
+        Throughput at the source's separation, or None when it depends on azimuth.
+    base : ndarray or None
+        Stamp scaled by contrast, flux unit and throughput, shared by every frame.  None when the
+        stamp or the throughput changes frame to frame.
+    """
 
     src: Source
     model: InjectionModel           # the model the stamp came from
@@ -556,6 +1140,29 @@ class _Prepared:
 
 def _prepare(sources: Sequence[Source], model: InjectionModel, fallback: Optional[InjectionModel],
              pxscale: float) -> list:
+    """Work out what each source needs in every frame.
+
+    Parameters
+    ----------
+    sources : sequence of Source
+        The sources to inject.
+    model : InjectionModel
+        The injection model.
+    fallback : InjectionModel or None
+        Model that supplies the stamp where ``model`` has no template.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+
+    Returns
+    -------
+    prepared : list of _Prepared
+        One entry per source, in order.
+
+    Raises
+    ------
+    ValueError
+        If ``model`` has no template at a source's separation and there is no fallback.
+    """
     out = []
     for s in sources:
         st, sc, ok = model.stamp(s.rho)
@@ -589,16 +1196,40 @@ def inject_frames(out: np.ndarray, cube: np.ndarray, angles: np.ndarray, sources
                   truenorth: float = 0.0, center: Optional[Tuple[float, float]] = None,
                   fallback: Optional[InjectionModel] = None, angle_convention: str = "pa",
                   threads: int = 1) -> None:
-    """``out[j] = cube[j]`` with the sources added, for every frame ``j`` of ``frames`` (all
-    by default), the numbers :func:`inject_sources` gives.  ``out`` is a float32 cube of
-    the same shape and may be ``cube`` itself.  Frames not listed are not touched.
-    ``truenorth``: one angle (deg), or one per frame of ``angles``, indexed as they are.
+    """Set ``out[j]`` to ``cube[j]`` with the sources added, for every listed frame ``j``.
 
-    Each frame's stamps are added in the order of ``sources``, as before.  The frames go
-    to ``threads`` threads in blocks, and each block writes only its own frames.  Within a
-    block, a source whose stamp is the same in every frame is rotated to all the block's
-    frames by one :func:`klip_tpe.klip.rotate_ccw_many` call, which runs without the GIL.
-    The shift and the add stay frame by frame."""
+    The numbers are those :func:`inject_sources` gives, each frame's stamps added in the order of
+    ``sources``.  The frames go to the threads in blocks, and each block writes only its own
+    frames.  Within a block, a stamp that is the same in every frame is rotated to all of them by
+    one :func:`klip_tpe.klip.rotate_ccw_many` call.
+
+    Parameters
+    ----------
+    out : ndarray, shape (n, ny, nx)
+        The float32 cube written, which may be ``cube`` itself.  Frames not listed are not touched.
+    cube : ndarray, shape (n, ny, nx)
+        The n frames to inject into, ny by nx pixels each.
+    angles : ndarray, shape (n,)
+        Parallactic angle of each frame, in degrees.
+    sources : sequence of Source
+        The sources to inject.
+    model : InjectionModel
+        PSF and throughput of the sources.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    frames : sequence of int or None, default None
+        Indices of the frames to inject.  None injects all.
+    truenorth : float or ndarray, default 0.0
+        True-north offset, in degrees.  One value, or one per frame of ``angles``.
+    center : tuple of 2 floats or None, default None
+        The star's ``(x, y)`` pixel.  None takes ``((nx-1)/2, (ny-1)/2)``.
+    fallback : InjectionModel or None, default None
+        Model that supplies the stamp where ``model`` has no template.
+    angle_convention : {"pa", "math"}, default "pa"
+        How a source's angle sets its detector azimuth, as for :func:`inject_sources`.
+    threads : int, default 1
+        Number of threads.
+    """
     from .klip import frame_blocks, run_blocks
     prepared = _prepare(sources, model, fallback, pxscale)
     n, ny, nx = out.shape
@@ -627,14 +1258,49 @@ def inject_frames(out: np.ndarray, cube: np.ndarray, angles: np.ndarray, sources
 
 
 def _azimuth(s: Source, angle: float, truenorth: float, angle_convention: str):
+    """Return a source's detector azimuth in one frame.
+
+    Parameters
+    ----------
+    s : Source
+        The source.
+    angle : float
+        Parallactic angle of the frame, in degrees.
+    truenorth : float
+        True-north offset of the frame, in degrees.
+    angle_convention : {"pa", "math"}
+        "pa" gives ``theta - truenorth - 270 - angle``, any other value ``theta - angle``.
+
+    Returns
+    -------
+    az : float
+        Azimuth from +x, in degrees.
+    """
     if angle_convention == "pa":
         return s.theta - truenorth - 270.0 - angle
     return s.theta - angle
 
 
 def _north_values(truenorth, angles):
-    """``truenorth`` as the injection uses it: one angle as it was given, or one per frame of
-    ``angles`` as a float array of the same length."""
+    """Return ``truenorth`` as the injection uses it, one angle or one per frame.
+
+    Parameters
+    ----------
+    truenorth : float or array_like
+        True-north offset, in degrees.  One value, or one per frame of ``angles``.
+    angles : ndarray, shape (n,)
+        Parallactic angles of the n frames, in degrees.
+
+    Returns
+    -------
+    north : float or ndarray
+        The one value as given, or a float array of length n.
+
+    Raises
+    ------
+    ValueError
+        If there are per-frame values but not n of them.
+    """
     if np.ndim(truenorth) == 0:
         return truenorth
     tn = np.asarray(truenorth, float).ravel()
@@ -644,14 +1310,46 @@ def _north_values(truenorth, angles):
 
 
 def _north_at(truenorth, j):
-    """Frame ``j``'s true north: the one angle, or the frame's own."""
+    """Return frame ``j``'s true north, the one angle or the frame's own.
+
+    Parameters
+    ----------
+    truenorth : float or ndarray
+        True-north offset, as :func:`_north_values` gives it.
+    j : int
+        Index of the frame.
+
+    Returns
+    -------
+    north : float
+        The frame's true-north offset, in degrees.
+    """
     return truenorth if np.ndim(truenorth) == 0 else truenorth[j]
 
 
 def _place_shared(J, p: _Prepared, angles, truenorth, center, angle_convention, shape, sink) -> None:
-    """Place a source whose scaled stamp is the same in every frame on the frames ``J``:
-    ``sink(i, crop)`` receives the :func:`stamp_crop` of frame ``J[i]`` (a view into a
-    buffer the next frame reuses)."""
+    """Place a source whose scaled stamp is the same in every frame on the frames ``J``.
+
+    Parameters
+    ----------
+    J : list of int
+        Indices of the frames.
+    p : _Prepared
+        The source, with ``base`` set.
+    angles : ndarray
+        Parallactic angle of each frame of the cube, in degrees.
+    truenorth : float or ndarray
+        True-north offset, as :func:`_north_values` gives it.
+    center : tuple of 2 floats
+        The star's ``(x, y)`` pixel.
+    angle_convention : {"pa", "math"}
+        How the source's angle sets its detector azimuth (:func:`_azimuth`).
+    shape : tuple of int
+        Shape of a frame, ``(ny, nx)``.
+    sink : callable
+        Function called as ``sink(i, crop)`` with the :func:`stamp_crop` of frame ``J[i]``.  The
+        crop's values are a view into a buffer the next frame reuses.
+    """
     s, m = p.src, p.model
     k = len(J)
     xs, ys = np.empty(k), np.empty(k)
@@ -675,8 +1373,29 @@ def _place_shared(J, p: _Prepared, angles, truenorth, center, angle_convention, 
 
 
 def _place_each(J, p: _Prepared, model, angles, truenorth, center, angle_convention, shape, sink) -> None:
-    """Place a source whose stamp or throughput changes frame to frame on the frames ``J``
-    (``sink`` as for :func:`_place_shared`)."""
+    """Place a source whose stamp or throughput changes frame to frame on the frames ``J``.
+
+    Parameters
+    ----------
+    J : list of int
+        Indices of the frames.
+    p : _Prepared
+        The source.
+    model : InjectionModel
+        The injection model, which gives the throughput and any per-frame stamp.
+    angles : ndarray
+        Parallactic angle of each frame of the cube, in degrees.
+    truenorth : float or ndarray
+        True-north offset, as :func:`_north_values` gives it.
+    center : tuple of 2 floats
+        The star's ``(x, y)`` pixel.
+    angle_convention : {"pa", "math"}
+        How the source's angle sets its detector azimuth (:func:`_azimuth`).
+    shape : tuple of int
+        Shape of a frame, ``(ny, nx)``.
+    sink : callable
+        Function called as ``sink(i, crop)`` with the :func:`stamp_crop` of frame ``J[i]``.
+    """
     s, m = p.src, p.model
     sc = p.center
     buf = None
@@ -701,11 +1420,29 @@ def _place_each(J, p: _Prepared, model, angles, truenorth, center, angle_convent
 
 
 def place_source(J, p: _Prepared, model, angles, truenorth, center, angle_convention, shape, sink) -> None:
-    """One prepared source (:func:`prepare_sources`) on the frames ``J`` of a cube of frame
-    ``shape``: ``sink(i, crop)`` receives what frame ``J[i]`` gets (:func:`stamp_crop`), with
-    the numbers :func:`inject_frames` adds.  ``model`` is the injection model (the
-    throughput's), ``center`` the star's ``(x, y)``.  ``truenorth``: one angle, or one per
-    frame of ``angles``."""
+    """Place one prepared source on the frames ``J``, with the numbers :func:`inject_frames` adds.
+
+    Parameters
+    ----------
+    J : list of int
+        Indices of the frames.
+    p : _Prepared
+        The source, from :func:`prepare_sources`.
+    model : InjectionModel
+        The injection model, which gives the throughput.
+    angles : ndarray
+        Parallactic angle of each frame of the cube, in degrees.
+    truenorth : float or ndarray
+        True-north offset, in degrees.  One value, or one per frame of ``angles``.
+    center : tuple of 2 floats
+        The star's ``(x, y)`` pixel.
+    angle_convention : {"pa", "math"}
+        How the source's angle sets its detector azimuth (:func:`_azimuth`).
+    shape : tuple of int
+        Shape of a frame, ``(ny, nx)``.
+    sink : callable
+        Function called as ``sink(i, crop)`` with what frame ``J[i]`` gets (:func:`stamp_crop`).
+    """
     truenorth = _north_values(truenorth, angles)
     if p.base is not None:
         _place_shared(J, p, angles, truenorth, center, angle_convention, shape, sink)
@@ -715,40 +1452,110 @@ def place_source(J, p: _Prepared, model, angles, truenorth, center, angle_conven
 
 def prepare_sources(sources: Sequence[Source], model: InjectionModel, fallback: Optional[InjectionModel],
                     pxscale: float) -> list:
-    """What each source needs in every frame, worked out once (for :func:`place_source`)."""
+    """Work out what each source needs in every frame, for :func:`place_source`.
+
+    Parameters
+    ----------
+    sources : sequence of Source
+        The sources to inject.
+    model : InjectionModel
+        The injection model.
+    fallback : InjectionModel or None
+        Model that supplies the stamp where ``model`` has no template.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+
+    Returns
+    -------
+    prepared : list of _Prepared
+        One entry per source, in order.
+    """
     return _prepare(sources, model, fallback, pxscale)
 
 
 def _add_shared(out, J, p: _Prepared, angles, truenorth, center, angle_convention) -> None:
-    """Add a source whose scaled stamp is the same in every frame to the frames ``J``."""
+    """Add a source whose scaled stamp is the same in every frame to the frames ``J``.
+
+    Parameters
+    ----------
+    out : ndarray, shape (n, ny, nx)
+        The cube, changed in place.
+    J : list of int
+        Indices of the frames.
+    p : _Prepared
+        The source, with ``base`` set.
+    angles : ndarray
+        Parallactic angle of each frame, in degrees.
+    truenorth : float or ndarray
+        True-north offset, as :func:`_north_values` gives it.
+    center : tuple of 2 floats
+        The star's ``(x, y)`` pixel.
+    angle_convention : {"pa", "math"}
+        How the source's angle sets its detector azimuth (:func:`_azimuth`).
+    """
     _place_shared(J, p, angles, truenorth, center, angle_convention, out.shape[1:],
                   lambda i, c: add_crop(out[J[i]], c))
 
 
 def _add_each(out, J, p: _Prepared, model, angles, truenorth, center, angle_convention) -> None:
-    """Add a source whose stamp or throughput changes frame to frame to the frames ``J``."""
+    """Add a source whose stamp or throughput changes frame to frame to the frames ``J``.
+
+    Parameters
+    ----------
+    out : ndarray, shape (n, ny, nx)
+        The cube, changed in place.
+    J : list of int
+        Indices of the frames.
+    p : _Prepared
+        The source.
+    model : InjectionModel
+        The injection model.
+    angles : ndarray
+        Parallactic angle of each frame, in degrees.
+    truenorth : float or ndarray
+        True-north offset, as :func:`_north_values` gives it.
+    center : tuple of 2 floats
+        The star's ``(x, y)`` pixel.
+    angle_convention : {"pa", "math"}
+        How the source's angle sets its detector azimuth (:func:`_azimuth`).
+    """
     _place_each(J, p, model, angles, truenorth, center, angle_convention, out.shape[1:],
                 lambda i, c: add_crop(out[J[i]], c))
 
 
 def injected_model(reducer, sources, shape) -> Optional[np.ndarray]:
-    """IDL ``disp_injmdl``: the injected-PSF model of ``sources`` (rho, theta, contrast) as it
-    appears in the final (north-up) image, from ``reducer``'s injection model (a partitioned
-    reducer's first sub-reducer that has one), or None.
+    """Return the injected PSFs of some sources as they appear in the final north-up image.
 
-    Built at the data's OWN roll angles, then derotated and combined the way the science frames
-    are.  It used to inject into a single ``parang = 0`` frame and derotate by the true-north
-    offset alone, which silently assumed the telescope had been pointed at roll 0.  That was
-    invisible while the injector span the stamp by the source's azimuth, and glaring once the
-    template became spacecraft-fixed (``815fc55``): the lobe structure is carried into the sky
-    frame entirely by the derotation, so a model built at roll 0 shows its lobes rotated away
-    from the data by the roll itself -- measured at ~112 degrees on HIP 65426's rolls of 108.0
-    and 117.4.
+    The model is built at the data's own roll angles, then derotated and combined as the science
+    frames are.  Frames that share a roll give the same picture, so each distinct angle is rotated
+    once and weighted by how many frames carry it.  A multi-roll data set therefore shows the
+    superposition that is in the combined image.
 
-    Frames sharing a roll give the same picture, so only the distinct angles are rotated,
-    weighted by how many frames carry each.  A multi-roll data set therefore shows the
-    superposition that is really in the combined image, not one arbitrary roll's version.
-    (Until 2026-11-10 this was ``display.injected_model_image``, which now calls it.)"""
+    Parameters
+    ----------
+    reducer : object
+        Reducer whose injection model, plate scale, true north and frame angles are used.  A
+        partitioned reducer lends its first sub-reducer that has a model.
+    sources : sequence
+        The sources, each a :class:`~klip_tpe.metrics.Source` or a ``(rho, theta, contrast)``
+        sequence.
+    shape : tuple of int
+        Shape of the final image, ``(ny, nx)``.
+
+    Returns
+    -------
+    image : ndarray or None
+        The model image, shape ``shape``, or None when there is no model, no source or anything
+        fails.
+
+    Notes
+    -----
+    It plays the role of ``disp_injmdl`` in the IDL predecessor.  It used to inject into one
+    ``parang = 0`` frame and derotate by the true-north offset alone, which assumed a roll of 0.
+    Once the template became spacecraft-fixed (``815fc55``) the model's lobes showed rotated away
+    from the data by the roll itself, about 112 degrees on HIP 65426's rolls of 108.0 and 117.4.
+    Until 2026-11-10 it was ``display.injected_model_image``, which now calls it.
+    """
     try:
         from .klip import rotate_ccw
         red = reducer

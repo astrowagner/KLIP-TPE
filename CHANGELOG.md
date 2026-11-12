@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — 2026-11-12 (injection.py documented to the rule)
+
+- **`injection.py` follows the documentation rule**: its module docstring, 21 functions, the
+  six injection models and their methods, and `_Prepared`.  The docstring of
+  `InjectionModel.throughput` now says what decides the per-frame path, the
+  `azimuth_dependent` attribute (`takes_azimuth`), not the method's signature.  Only docstrings
+  changed.
+
 ## Unreleased — 2026-11-12 (the documentation rule, and klip.py documented to it)
 
 - **The documentation rule** is Kevin Wagner's of 2026-11-12, modeled on VIP's docstrings after
