@@ -1,37 +1,36 @@
-"""Generic adapter: any registered ADI cube (+ angles, + optional PSF template and
-reference cube) -> :class:`~klip_tpe.reducer.Dataset`, reducer, search space, guard and
-objective.  This is the entry point for data that come out of VIP, pyKLIP, spaceKLIP or
-your own pipeline as plain arrays / FITS files.
+"""Generic adapter for any registered ADI cube, with its angles and an optional PSF template and reference cube.
 
-Minimal use::
+It builds the :class:`~klip_tpe.reducer.Dataset`, the reducer, the search space, the guard and
+the objective for data that come out of VIP, pyKLIP, spaceKLIP or another pipeline as plain
+arrays or FITS files.
+
+Notes
+-----
+* Angles: klip-tpe derotates every frame counter-clockwise by ``angle + truenorth`` to put North
+  up, the sign of VIP's ``angle_list`` and pyKLIP's ``PAs``.  Pass ``angle_sign=-1`` for the
+  opposite convention.
+* Frames must be registered on the star, which sits at ``((nx-1)/2, (ny-1)/2)`` for frames of
+  ny by nx pixels unless ``center`` says otherwise.  ``crop_half`` recenters by cropping around
+  it.
+* ``psf`` is an unsaturated off-axis or non-coronagraphic PSF image at the same plate scale, such
+  as VIP's ``psf`` array or spaceKLIP's offset PSF (pyNOMIC's Airy fit has its own adapter,
+  :mod:`klip_tpe.instruments.nomic`).  Its flux, within ``ee_radius_px`` when given, is the flux
+  unit, so injected contrasts are relative to the template.  For a template taken with another
+  exposure or neutral density, pass ``star_flux``, the star's flux in the science frames' units.
+* Without quality tags in the data, :func:`quality_tags` computes them, so ``corr_thresh`` and
+  ``noise_max`` mean what they mean for NEAR and NOMIC data.
+
+Examples
+--------
+::
 
     from klip_tpe.instruments import generic
-    ds  = generic.load_cube("cube.fits", "angles.fits", psf="psf.fits", name="betapic")
+    ds = generic.load_cube("cube.fits", "angles.fits", psf="psf.fits", name="betapic")
     red = generic.make_reducer({ds.name: ds}, pxscale=0.02719, lam_m=3.8e-6, diam_m=8.2)
     space = generic.make_space(red)
     space.project = generic.make_guard(red)
     objective, sampler = generic.default_config(red)
-    # -> Runner(red, space, objective, sampler, RunConfig(...), run_dir).run()
-
-Conventions
------------
-* ``angles``: klip-tpe derotates every frame counter-clockwise by ``angle + truenorth`` to
-  put North up, i.e. the same sign as VIP's ``angle_list`` and pyKLIP's ``PAs``.  Pass
-  ``angle_sign=-1`` for the opposite convention.
-* Frames must be registered on the star; the star is assumed at the array centre
-  ``((nx-1)/2, (ny-1)/2)`` unless ``center=`` says otherwise (``crop_half`` recentres by
-  cropping around it).
-* ``psf``: an unsaturated off-axis / non-coronagraphic PSF image at the same pixel scale
-  (VIP's ``psf`` array, spaceKLIP's offset PSF, pyNOMIC's Airy fit is handled by the
-  NOMIC adapter).  Its total flux (inside ``ee_radius_px`` when given) is the star flux
-  unit, so injected contrasts are relative to the template; when the template was taken
-  with a different exposure / neutral density, pass ``star_flux`` = the star's flux in the
-  science frames' units explicitly.  Without a PSF a Gaussian of ``1.028 lambda/D`` and
-  flux unit 1 is used (fine for parameter *ranking*, not for calibrated contrasts).
-* Frame-quality tags for the searched frame-selection dims are computed from the data
-  when the cube does not bring any (``quality_tags``: correlation of each frame with the
-  median frame and its noise level, both inside an annulus) so ``corr_thresh`` /
-  ``noise_max`` mean the same thing as for NEAR / NOMIC data.
+    # then Runner(red, space, objective, sampler, RunConfig(...), run_dir).run()
 """
 from __future__ import annotations
 
@@ -57,7 +56,20 @@ ArrayLike = Union[str, np.ndarray, Sequence[float]]
 
 
 def _read(x: ArrayLike, ext: int = 0) -> np.ndarray:
-    """FITS path or array -> float array."""
+    """Read a FITS file, or take an array, as a float array.
+
+    Parameters
+    ----------
+    x : str or array_like
+        A FITS path or the values.
+    ext : int, default 0
+        FITS extension to read.  An extension without data gives way to the first that has some.
+
+    Returns
+    -------
+    data : ndarray
+        The values, in float64.
+    """
     if isinstance(x, str):
         from astropy.io import fits
         with fits.open(x, memmap=False) as h:
@@ -68,12 +80,27 @@ def _read(x: ArrayLike, ext: int = 0) -> np.ndarray:
 
 def quality_tags(cube: np.ndarray, r_in: float = 6.0, r_out: Optional[float] = None,
                  center: Optional[Tuple[float, float]] = None) -> Dict[str, np.ndarray]:
-    """Per-frame quality tags from the data themselves, in the units the optimizer's
-    frame-selection dims expect: ``corrs`` = Pearson correlation of each frame with the
-    median frame inside the annulus ``[r_in, r_out]`` px (``corr_thresh`` keeps frames with
-    ``corrs >= corr_thresh``), ``noises`` = the frame's robust scatter in the annulus
-    divided by the median over frames (``noise_max`` multiplier), ``coronoise`` = the same
-    for the inner annulus ``[r_in, 2 r_in]`` (``coronoise_max``)."""
+    """Compute per-frame quality tags from the data, in the units the frame-selection dimensions expect.
+
+    Parameters
+    ----------
+    cube : ndarray, shape (n, ny, nx)
+        The n frames, ny by nx pixels each.
+    r_in : float, default 6.0
+        Inner radius of the annulus the tags are measured in, in pixels.
+    r_out : float or None, default None
+        Outer radius of the annulus, in pixels.  None takes ``min(nx, ny)/2 - 2``.
+    center : tuple of 2 floats or None, default None
+        The star's ``(x, y)`` pixel.  None takes ``((nx-1)/2, (ny-1)/2)``.
+
+    Returns
+    -------
+    tags : dict of str to ndarray
+        ``corrs``, the Pearson correlation of each frame with the median frame in the annulus, which
+        ``corr_thresh`` keeps at or above.  ``noises``, the frame's robust scatter about the median
+        frame there over its median across frames (``noise_max``), and ``coronoise``, the frame's own
+        robust scatter from ``r_in`` to ``max(2 r_in, r_in + 4)`` over its median (``coronoise_max``).
+    """
     n, ny, nx = cube.shape
     cx, cy = center if center is not None else ((nx - 1) / 2.0, (ny - 1) / 2.0)
     yy, xx = np.mgrid[0:ny, 0:nx]
@@ -111,15 +138,57 @@ def load_cube(cube: ArrayLike, angles: ArrayLike, psf: Optional[ArrayLike] = Non
               texp: Optional[float] = None, tags: Union[None, str, Dict[str, np.ndarray]] = "auto",
               tag_r_in: float = 6.0, nan_policy: str = "keep", meta: Optional[Dict[str, Any]] = None,
               frames: Optional[Sequence[int]] = None, wv_index: Optional[int] = None) -> Dataset:
-    """Build a :class:`Dataset` from a cube (``(n, ny, nx)`` array or FITS) and its angles.
+    """Build a :class:`~klip_tpe.reducer.Dataset` from a cube and its angles.
 
-    ``psf`` (array / FITS) is kept in ``meta['psf']`` for :func:`injection_model_for`;
-    ``ref_cube`` attaches a PSF-reference library (RDI / ARDI); ``crop_half`` crops to
-    ``2*crop_half+1`` around ``center`` (default: the array centre); ``frames`` selects
-    frame indices; ``wv_index`` picks a channel of a 4-d ``(nwv, n, ny, nx)`` IFS cube;
-    ``tags='auto'`` computes :func:`quality_tags`, ``None`` leaves frame selection out,
-    a dict supplies your own; ``nan_policy='zero'`` replaces NaN by 0 (``'keep'`` leaves
-    them; the KLIP engine handles NaN pixels as missing)."""
+    Parameters
+    ----------
+    cube : str or ndarray
+        The frames, shape (n, ny, nx), or (nwv, n, ny, nx) for an IFS cube, or a FITS path.
+    angles : str or array_like
+        Parallactic angle of each frame in degrees, or a FITS path.  One value is repeated for every
+        frame.
+    psf : str, ndarray or None, default None
+        Off-axis PSF template, kept in ``meta["psf"]`` for :func:`injection_model_for`.
+    name : str, default "data"
+        Name of the dataset.
+    crop_half : int or None, default None
+        Half width of a crop to ``2 * crop_half + 1`` pixels around ``center``.  None does not crop.
+    center : tuple of 2 floats or None, default None
+        The star's ``(x, y)`` pixel.  None takes ``((nx-1)/2, (ny-1)/2)``.
+    ref_cube : str, ndarray or None, default None
+        PSF-reference frames for RDI and ARDI, cropped as the cube is.
+    angle_sign : float, default 1.0
+        Factor on the angles, -1 for the opposite sign convention.
+    angle_offset : float, default 0.0
+        Offset added to the angles after the sign, in degrees.
+    texp : float or None, default None
+        Total exposure time, in seconds.  None takes the number of frames.
+    tags : {"auto"}, dict or None, default "auto"
+        Frame-quality tags.  "auto" computes :func:`quality_tags`, a dict supplies them and None
+        leaves frame selection out.
+    tag_r_in : float, default 6.0
+        Inner radius of the annulus the "auto" tags are measured in, in pixels.
+    nan_policy : {"keep", "zero"}, default "keep"
+        What to do with NaN pixels.  "zero" replaces them by 0, and "keep" leaves them to the KLIP
+        engine, which takes them as missing.
+    meta : dict or None, default None
+        More entries for the dataset's ``meta``.
+    frames : sequence of int or None, default None
+        Indices of the frames to keep.  None keeps all.
+    wv_index : int or None, default None
+        Channel of a 4-d IFS cube.  None takes the first.
+
+    Returns
+    -------
+    ds : Dataset
+        The dataset, with ``center``, ``angle_sign`` and ``angle_offset`` in its ``meta``.
+
+    Raises
+    ------
+    ValueError
+        If the cube is not 3-d once a channel is picked, the angles do not match the frames, or the
+        crop leaves the frame.
+    """
     c = _read(cube)
     if c.ndim == 4:
         c = c[int(wv_index or 0)]
@@ -161,7 +230,24 @@ def load_cube(cube: ArrayLike, angles: ArrayLike, psf: Optional[ArrayLike] = Non
 
 
 def _quadrant_area(x: np.ndarray, y: np.ndarray, r: float) -> np.ndarray:
-    """Area of ``{0<=u<=x, 0<=v<=y, u^2+v^2<=r^2}`` for ``x, y >= 0`` (exact)."""
+    """Compute the exact area of a circle's quadrant inside a rectangle that starts at the origin.
+
+    It is the area of ``{0 <= u <= x, 0 <= v <= y, u^2 + v^2 <= r^2}``.
+
+    Parameters
+    ----------
+    x : ndarray
+        Width of the rectangle, at least 0.
+    y : ndarray
+        Height of the rectangle, at least 0.
+    r : float
+        Radius of the circle.
+
+    Returns
+    -------
+    area : ndarray
+        The area, shaped as ``x`` and ``y`` broadcast.
+    """
     x = np.clip(np.asarray(x, float), 0.0, r)                 # beyond r the circle bounds it
     y = np.clip(np.asarray(y, float), 0.0, r)
     g = lambda t: 0.5 * (t * np.sqrt(np.clip(r * r - t * t, 0.0, None))
@@ -171,13 +257,28 @@ def _quadrant_area(x: np.ndarray, y: np.ndarray, r: float) -> np.ndarray:
 
 
 def aperture_sum(img: np.ndarray, cx: float, cy: float, radius_px: float) -> float:
-    """Flux in a circular aperture with *exact* partial-pixel areas.
+    """Sum the flux in a circular aperture, with exact partial-pixel areas.
 
-    Matches photutils' ``method='exact'`` to floating point, without the dependency.  A
-    whole-pixel mask (``hypot(x - cx, y - cy) <= r``) is NOT good enough here: at the radii
-    published photometry is quoted in -- 2 px, one FWHM -- it differs from the exact
-    aperture by several percent, and sub-pixel sampling converges only as 1/nsub, which is
-    still 1e-3 at 40 samples per pixel.  Either error lands straight on the contrast axis.
+    It matches photutils' ``method="exact"`` to floating point, without the dependency.  A
+    whole-pixel mask differs from the exact aperture by several percent at the radii published
+    photometry is quoted in, such as 2 px or one FWHM, and sub-pixel sampling converges only as
+    1/nsub.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image.  NaN pixels count as 0.
+    cx : float
+        Column of the aperture's center, in pixels.
+    cy : float
+        Row of the aperture's center, in pixels.
+    radius_px : float
+        Radius of the aperture, in pixels.
+
+    Returns
+    -------
+    flux : float
+        The flux, 0 for a radius of 0 or less or an aperture off the image.
     """
     img = np.asarray(img, float)
     ny, nx = img.shape
@@ -201,19 +302,40 @@ def aperture_sum(img: np.ndarray, cx: float, cy: float, radius_px: float) -> flo
 def star_flux_from_aperture_photometry(template: np.ndarray, starphot: float,
                                        aperture_px: float, center: Optional[Tuple[float, float]] = None,
                                        ee_radius_px: Optional[float] = None) -> float:
-    """``star_flux`` for :class:`TemplatePSF` from a *published* stellar aperture flux.
+    """Compute :class:`~klip_tpe.injection.TemplatePSF`'s ``star_flux`` from a published stellar aperture flux.
 
-    ``starphot`` is the star's flux inside ``aperture_px`` **in the science frames' own
-    units** (an unsaturated/off-axis measurement rescaled to the science exposure time and
-    neutral density).  The template is usually distributed normalised -- its own counts mean
-    nothing -- so the star flux this returns is ``starphot`` rescaled from ``aperture_px``
-    into whatever normalisation ``TemplatePSF`` will use (``ee_radius_px``, or the whole
-    stamp when None), which is the only number that makes an injected ``contrast`` a real
-    contrast.
+    The template is usually distributed normalized, so its own counts mean nothing.  The star flux is
+    ``starphot`` rescaled from ``aperture_px`` into the normalization ``TemplatePSF`` uses, the only
+    number that makes an injected contrast a real contrast.
 
-    This is the *replacement* for the halo fit that used to live here: it uses photometry
-    the observer actually made instead of fitting an off-axis template to a coronagraphic
-    halo, which compares two different functions and was 4-8x wrong on exactly this data.
+    Parameters
+    ----------
+    template : ndarray, shape (sy, sx)
+        The PSF template.  NaN pixels count as 0.
+    starphot : float
+        The star's flux inside ``aperture_px`` in the science frames' own units, an unsaturated or
+        off-axis measurement rescaled to the science exposure time and neutral density.
+    aperture_px : float
+        Radius of the published aperture, in pixels.
+    center : tuple of 2 floats or None, default None
+        The template's ``(x, y)`` center.  None takes ``((sx-1)/2, (sy-1)/2)``.
+    ee_radius_px : float or None, default None
+        Radius of ``TemplatePSF``'s normalization, in pixels.  None takes the whole stamp.
+
+    Returns
+    -------
+    star_flux : float
+        The star's flux in the template's normalization.
+
+    Raises
+    ------
+    ValueError
+        If the template has no flux inside ``aperture_px``.
+
+    Notes
+    -----
+    It replaces a halo fit that fitted an off-axis template to a coronagraphic halo, which compares
+    two different functions and was 4-8x wrong on this data.
     """
     t = np.asarray(template, float)
     t = np.where(np.isfinite(t), t, 0.0)
@@ -230,14 +352,40 @@ def star_flux_from_aperture_photometry(template: np.ndarray, starphot: float,
 def injection_model_for(ds: Dataset, fwhm_px: float, psf: Optional[np.ndarray] = None,
                         ee_radius_px: Optional[float] = None, star_flux: Optional[float] = None,
                         psf_center: Optional[Tuple[float, float]] = None) -> InjectionModel:
-    """:class:`TemplatePSF` from ``psf`` (or ``ds.meta['psf']``).
+    """Build a :class:`~klip_tpe.injection.TemplatePSF` from a dataset's PSF template.
 
-    A template is **required**.  The previous fallback -- a Gaussian with flux unit 1 --
-    produced a reducer that injected happily and reported a "contrast" that was really raw
-    detector units, with nothing downstream able to tell the difference; paper run D shipped
-    a contrast axis 2.3e5 off that way.  If you have no off-axis PSF, say so explicitly by
-    constructing :class:`GaussianPSF` yourself, so the choice is in your code and not in a
-    silent default.
+    A template is required.  Without one, build :class:`~klip_tpe.injection.GaussianPSF` yourself, so
+    the choice is in your code and not in a silent default.
+
+    Parameters
+    ----------
+    ds : Dataset
+        The dataset, whose ``meta["psf"]`` serves when ``psf`` is None.
+    fwhm_px : float
+        FWHM of the PSF, in pixels, not used by the template.
+    psf : ndarray or None, default None
+        The template, 2-D, or a 3-d stack whose median is taken.
+    ee_radius_px : float or None, default None
+        Radius of the unit-flux normalization, in pixels.  None normalizes the total.
+    star_flux : float or None, default None
+        The star's flux in the template's normalization.  None takes the template's own.
+    psf_center : tuple of 2 floats or None, default None
+        The template's ``(x, y)`` center.  None takes a 5x5 flux-weighted centroid around the peak.
+
+    Returns
+    -------
+    model : TemplatePSF
+        The injection model.
+
+    Raises
+    ------
+    ValueError
+        If there is no template.
+
+    Notes
+    -----
+    The earlier fallback, a Gaussian with flux unit 1, reported a contrast in raw detector units that
+    nothing downstream could tell apart, and paper run D shipped a contrast axis 2.3e5 off that way.
     """
     t = ds.meta.get("psf") if psf is None else psf
     if t is None:
@@ -252,7 +400,7 @@ def injection_model_for(ds: Dataset, fwhm_px: float, psf: Optional[np.ndarray] =
         t = np.nanmedian(t, axis=0)
     if psf_center is None:
         iy, ix = np.unravel_index(np.nanargmax(np.where(np.isfinite(t), t, -np.inf)), t.shape)
-        # sub-pixel centre from a 5x5 flux-weighted centroid around the peak
+        # sub-pixel center from a 5x5 flux-weighted centroid around the peak
         y0, y1, x0, x1 = max(iy - 2, 0), min(iy + 3, t.shape[0]), max(ix - 2, 0), min(ix + 3, t.shape[1])
         sub = np.clip(np.nan_to_num(t[y0:y1, x0:x1]), 0, None)
         yy, xx = np.mgrid[y0:y1, x0:x1]
@@ -267,12 +415,60 @@ def make_reducer(datasets: Dict[str, Dataset], pxscale: float, lam_m: float, dia
                  n_min_ref: int = 10, outrad_cap: Optional[float] = None, use_rdi: Optional[bool] = None,
                  rdi_mode: str = "ardi", backend: str = "klip", defaults: Optional[Dict[str, Any]] = None,
                  partition_label: str = "dataset", log: Callable[[str], None] = print) -> PartitionedReducer:
-    """One reducer per :class:`Dataset` (partition) on the chosen ``backend`` (``'klip'``
-    built-in | ``'pyklip'`` | ``'vip'``), combined by a :class:`PartitionedReducer`.
-    ``pxscale`` arcsec/px, ``lam_m`` / ``diam_m`` set lambda/D (``lam_m`` and ``fwhm_px`` may
-    be ``{partition: value}`` dicts for multi-wavelength partitions such as IRDIS K1/K2);
-    ``fwhm_px`` defaults to ``1.028 lambda/D``.  ``use_rdi`` defaults to True when a dataset carries a
-    ``ref_cube``.  ``outrad_cap`` (px) defaults to the largest annulus that fits."""
+    """Build one reducer per dataset on the chosen backend, combined by a :class:`~klip_tpe.reducer.PartitionedReducer`.
+
+    Parameters
+    ----------
+    datasets : dict of str to Dataset
+        The datasets, one partition each.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    lam_m : float or dict
+        Wavelength in meters, or ``{partition: value}`` for multi-wavelength partitions such as IRDIS
+        K1 and K2.
+    diam_m : float
+        Telescope diameter, in meters.
+    fwhm_px : float, dict or None, default None
+        FWHM of the PSF in pixels, one value or one per partition.  None takes ``1.028`` lambda/D.
+    truenorth : float, default 0.0
+        True-north offset, in degrees.
+    psf : ndarray or None, default None
+        PSF template for every partition.  None takes each dataset's own.
+    ee_radius_px : float or None, default None
+        Radius of the template's unit-flux normalization, in pixels.
+    star_flux : float, dict or None, default None
+        The star's flux in the template's normalization, one value or one per partition.
+    weighting : {"equal", "sqrt_texp"}, default "equal"
+        Weights of the combination.
+    max_workers : int or str, default "auto"
+        The thread budget.
+    pool : {"auto", "processes", "threads"}, default "auto"
+        Kind of worker pool.
+    fast : bool, default False
+        Default of the reducers' ``fast``.
+    n_min_ref : int, default 10
+        Default minimum number of references per target.
+    outrad_cap : float or None, default None
+        Maximum outer radius of a zone, in pixels.  None takes the largest annulus that fits.
+    use_rdi : bool or None, default None
+        Whether to build the basis from the reference cube.  None does so when a dataset carries
+        one.
+    rdi_mode : {"ardi", "rdi"}, default "ardi"
+        How the reference cube enters the basis.
+    backend : {"klip", "pyklip", "vip"}, default "klip"
+        The reduction backend (:func:`~klip_tpe.reducer.reducer_class`).
+    defaults : dict or None, default None
+        More default request parameters for every reducer.
+    partition_label : str, default "dataset"
+        What the partitions are, for the display's wording.
+    log : callable, default print
+        Function called with each log line.
+
+    Returns
+    -------
+    reducer : PartitionedReducer
+        The combined reducer.
+    """
     reducers = {}
     for pid, ds in datasets.items():
         lam = lam_m.get(pid) if isinstance(lam_m, dict) else lam_m           # per-partition wavelength (IRDIS K1/K2, IFS)
@@ -304,18 +500,34 @@ def make_reducer(datasets: Dict[str, Dataset], pxscale: float, lam_m: float, dia
 
 
 def make_space(reducer: PartitionedReducer, min_bins: int = 8, **kw) -> SearchSpace:
-    """The NEAR/NOMIC parameterisation (bin, n_ang, filter, angsep, anglemax, frame
-    selection, k_klip per partition + drop dims), with the ranges scaled to *these* data:
+    """Build the NEAR and NOMIC parameterization, with ranges scaled to these data.
 
-    * frame-selection dims only when the data carry quality tags;
-    * ``k_klip`` up to ``nframes / 5`` (capped at 100), as in
-      :func:`klip_tpe.instruments.search_space.make_space`;
-    * the temporal-binning range is ``1 .. nframes / min_bins`` (default: at least 8 bins
-      survive, so KLIP always has references).  The NEAR production range (5-30 frames per
-      bin) assumes sequences of thousands of frames and collapses a 61-frame cube to two
-      bins; pass ``bin_range=(lo, hi)`` to set it yourself.
+    Frame-selection dimensions appear only when the data carry quality tags, and ``k_klip`` reaches
+    ``nframes / 5``, capped at 100.  The binning range is 1 to ``nframes / min_bins``, so KLIP always
+    has references.  A searched reference library adds one global count per pool, not one per
+    partition, since a pool is the same whichever partition is reduced.
 
-    Other keywords: see :func:`klip_tpe.instruments.search_space.make_space`."""
+    Parameters
+    ----------
+    reducer : PartitionedReducer
+        The reducer.
+    min_bins : int, default 8
+        Minimum number of bins that must survive the largest binning.
+    kw : dict
+        More keywords for :func:`klip_tpe.instruments.search_space.make_space`, such as
+        ``bin_range=(lo, hi)``.
+
+    Returns
+    -------
+    space : SearchSpace
+        The search space.
+
+    Notes
+    -----
+    The NEAR production range of 5 to 30 frames per bin assumes sequences of thousands of frames and
+    collapses a 61-frame cube to two bins.  pyKLIP's ``maxnumbasis`` defaults to the default
+    ``k_klip``, so a run with the library searched starts from what pyKLIP does unasked.
+    """
     has_tags = all(r.frame_tags() for r in reducer.reducers.values())
     kw.setdefault("opt_framesel", has_tags)
     if "bin_range" not in kw:
@@ -343,13 +555,33 @@ def make_space(reducer: PartitionedReducer, min_bins: int = 8, **kw) -> SearchSp
 
 def make_guard(reducer: PartitionedReducer, n_min_ref: int = 10, ref_frac: float = 0.95, k_max: int = 100,
                frame_selection: Optional[bool] = None, bin_min: int = 1):
-    """Frame-selection snapping + reference-count guardrail from the reducer's own
-    lambda/D and FWHM.
+    """Build the search space's guard, from the reducer's own lambda/D and FWHM.
 
-    ``bin_min`` floors the temporal bin (:class:`~klip_tpe.feasibility.MinBinGuard`).  Leave
-    it at 1 for short sequences; on a few thousand frames per partition set it to the NEAR
-    production minimum of 5, or a single ``bin=1`` draw costs hours where its neighbours
-    cost seconds.  It is applied first, so the reference-count census sees the floored bin.
+    It chains the minimum bin, the frame-selection snapping, the reference-count guardrail and the
+    reference library's guard, as each applies.
+
+    Parameters
+    ----------
+    reducer : PartitionedReducer
+        The reducer.
+    n_min_ref : int, default 10
+        Minimum number of references per target.
+    ref_frac : float, default 0.95
+        Fraction of the target frames that must keep ``n_min_ref`` references.
+    k_max : int, default 100
+        Maximum number of KL modes.
+    frame_selection : bool or None, default None
+        Whether to snap the frame-selection dimensions.  None does so when every partition has
+        quality tags.
+    bin_min : int, default 1
+        Minimum temporal bin (:class:`~klip_tpe.feasibility.MinBinGuard`), applied first.  On a few
+        thousand frames per partition set it to 5, the NEAR production minimum, or a single
+        ``bin=1`` draw costs hours.
+
+    Returns
+    -------
+    guard : callable
+        The guard, or the composition of several (:func:`~klip_tpe.feasibility.compose`).
     """
     r0 = next(iter(reducer.reducers.values()))
     ref = ReferenceCountGuard(angles_fn=reducer.frame_angles, tags_fn=reducer.frame_tags,
@@ -384,27 +616,47 @@ def make_guard(reducer: PartitionedReducer, n_min_ref: int = 10, ref_frac: float
 def default_config(reducer: PartitionedReducer, clean_subtract: bool = True, known=(),
                    metric: str = "mawet", forbidden_pa=(), disk_mask=None, disk_mask_clear_fwhm: float = 0.0,
                    **metric_kw):
-    """Detection objective + position sampler.
+    """Build the detection objective and the position sampler.
 
-    ``metric='mawet'`` (default) is the matched-filter Mawet S/N with the injection PSF as
-    the kernel; ``metric='fmmf'`` is :class:`klip_tpe.fmmf.FMMFSNR`, the same statistics
-    with the template forward-modelled through each configuration's own subtraction (it
-    needs ``clean_subtract=True`` on a backend without analytic KLIP-FM).  ``known`` =
-    ``[(rho_arcsec, pa_deg), ...]`` real companions to keep injections away from.
+    Parameters
+    ----------
+    reducer : PartitionedReducer
+        The reducer, whose plate scale, FWHM and matched filter the metric takes.
+    clean_subtract : bool, default True
+        Whether the objective subtracts the clean image's score (:class:`~klip_tpe.metrics.Objective`).
+    known : sequence of tuple of 2 floats, default ()
+        Real companions, as ``(rho_arcsec, pa_deg)``, kept out of the noise and away from the
+        injections.
+    metric : {"mawet", "fmmf"}, default "mawet"
+        "mawet" is the matched-filter S/N with the injection PSF as the kernel.  "fmmf" is
+        :class:`klip_tpe.fmmf.FMMFSNR`, the same statistics with the template forward-modeled through
+        each configuration's own subtraction, which needs ``clean_subtract`` on a backend without
+        analytic KLIP-FM.
+    forbidden_pa : sequence of tuple of 2 floats, default ()
+        Wedges the injections avoid, as ``(center_pa_deg, half_width_deg)``, for resolved emission at
+        a position angle known in advance, such as a near-edge-on debris disk.  Pass the matching
+        ``pixel_mask`` too (:func:`klip_tpe.metrics.pa_wedge_mask`), since injections that avoid a
+        disk still inflating the ring's sigma are scored against noise nothing measures them at.
+    disk_mask : ndarray of bool or None, default None
+        Disk pixels, True on the disk, in the reduced frame's shape
+        (:func:`klip_tpe.metrics.disk_mask_from_image`).  It joins the metric's ``pixel_mask`` and
+        becomes the sampler's ``forbidden_mask``, both halves for a disk of any shape.
+    disk_mask_clear_fwhm : float, default 0.0
+        Margin kept clear around the disk mask for the injections, in FWHM.
+    metric_kw : dict
+        More keywords for the metric, such as ``pixel_mask``.
 
-    ``forbidden_pa`` = ``[(centre_pa_deg, half_width_deg), ...]`` azimuthal wedges the
-    injections must avoid -- resolved emission at a position angle known in advance, a
-    near-edge-on debris disk being the case it exists for.  It keeps sources *off* the
-    structure; to also keep the structure out of the noise estimate, pass the matching
-    ``pixel_mask=`` (:func:`klip_tpe.metrics.pa_wedge_mask` builds one from the same bands),
-    which reaches the metric through ``metric_kw``.  Doing only one of the two is worse than
-    doing neither: injections avoiding a disk that still inflates the ring sigma are scored
-    against a noise level nothing is measuring them at.
+    Returns
+    -------
+    objective : Objective
+        The objective.
+    sampler : PositionSampler
+        The sampler of injection positions.
 
-    ``disk_mask`` (boolean image, True = disk, the reduced frame's shape) does both halves for
-    a disk of any shape (:func:`klip_tpe.metrics.disk_mask_from_image` builds one): it joins
-    the metric's ``pixel_mask`` (OR-ed with one given) and becomes the sampler's
-    ``forbidden_mask``, so no injection lands on it, or within ``disk_mask_clear_fwhm`` FWHM.
+    Raises
+    ------
+    ValueError
+        If ``metric`` is unknown, or ``pixel_mask`` and ``disk_mask`` differ in shape.
     """
     kind = str(metric).lower()
     dm = None
