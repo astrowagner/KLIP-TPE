@@ -38,6 +38,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DONE = [
     "klip_tpe/injection.py",
     "klip_tpe/klip.py",
+    "klip_tpe/metrics.py",
     "tests/test_docstrings.py",
     "tests/test_klip_annular_doc.py",
 ]

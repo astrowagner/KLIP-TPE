@@ -1,17 +1,19 @@
 """Detection metrics and the search objective.
 
-Image convention: 2-D ``numpy`` arrays indexed ``img[y, x]``; the star sits at
-``cx = (nx-1)/2, cy = (ny-1)/2`` (between pixels for even sizes).  Source
-positions are given as ``(rho_arcsec, theta_deg)`` with ``theta`` a position angle
-East of North; the pixel position is ``x = cx + r cos(theta+90), y = cy + r sin(theta+90)``
-(North up, East left).  A reducer with a different convention declares it (see
-:class:`~klip_tpe.reducer.Reducer.angle_convention`) and the runner converts.
+Images are 2-D arrays indexed ``img[y, x]``, with the star at ``cx = (nx-1)/2, cy = (ny-1)/2``
+for frames of ny by nx pixels, between pixels for even sizes.  A source sits at ``(rho, theta)``,
+``rho`` in arcsec and ``theta`` a position angle East of North, at pixel
+``x = cx + r cos(theta + 90), y = cy + r sin(theta + 90)`` for ``r = rho / pxscale``, North up
+and East left.  A reducer with another convention declares it
+(:attr:`klip_tpe.reducer.Reducer.angle_convention`) and the runner converts.
 
-Ported from ``optimize_near_2_tpe.pro``: ``radprof``, ``near2m_declip``,
-``near2m_mfkern``, ``near2_snrpk`` (:func:`mawet_peak_snr`), ``near2_snr_inj``
-(:func:`injection_difference_snr`), ``near2m_clip0`` and the clean-subtraction rule
-(:class:`Objective`).  The instrument variants (MWC/LMIRCam/HPBoo) differ from NEAR
-only by option flags of :class:`MawetPeakSNR`.
+Notes
+-----
+These routines succeed those of ``optimize_near_2_tpe.pro``, the IDL predecessor: ``radprof``,
+``near2m_declip``, ``near2m_mfkern``, ``near2_snrpk`` (:func:`mawet_peak_snr`), ``near2_snr_inj``
+(:func:`injection_difference_snr`), ``near2m_clip0`` and its clean-subtraction rule
+(:class:`Objective`).  Its instrument variants (MWC, LMIRCam, HPBoo) differ from NEAR only by
+option flags of :class:`MawetPeakSNR`.
 """
 from __future__ import annotations
 
@@ -45,16 +47,33 @@ _RING_LOCAL = threading.local()
 
 
 class RingRecorder:
-    """While active (``with RingRecorder() as rec:``), every noise ring an S/N is measured on
-    is kept in ``rec.records``, one dict per source: the ring's apertures with what became of
-    each (``"used"``, ``"source"`` within the keep-out of an injected source, ``"known"`` a
-    known companion's, ``"arc"`` in a sidelobe arc, ``"masked"`` on the pixel mask, ``"off"``
-    off the data), and whether the ring or the radial band gave the noise.
-    :func:`mawet_peak_snr`, :func:`aperture_mawet_snr`, :func:`sidelobe_snr` (the attempt it
-    kept), :func:`klip_tpe.verify.snr_fap`, :func:`klip_tpe.verify.stim_fap` and
-    :func:`klip_tpe.products.snr_map` record.  ``phase``: a callable naming the phase, asked
-    when a record is made (:func:`klip_tpe.ringplot.phase_from_stack`).  Recording changes no
-    S/N."""
+    """Recorder of the noise rings the S/N measurements use, for diagrams.
+
+    While active (``with RingRecorder() as rec:``), every noise ring an S/N is measured on is kept in
+    ``rec.records``, one dict per source.  A record holds the ring's apertures with what became of
+    each (``"used"``, ``"source"`` within an injected source's keep-out, ``"known"`` a known
+    companion's, ``"arc"`` in a sidelobe arc, ``"masked"`` on the pixel mask, ``"off"`` off the data)
+    and whether the ring or the radial band gave the noise.  Recording changes no S/N.
+
+    Parameters
+    ----------
+    phase : callable or None, default None
+        Function that names the current phase, asked when a record is made
+        (:func:`klip_tpe.ringplot.phase_from_stack`).  None records no phase.
+    limit : int, default 20000
+        Maximum number of records kept.
+
+    Attributes
+    ----------
+    records : list of dict
+        The records, in the order they were made.
+
+    Notes
+    -----
+    :func:`mawet_peak_snr`, :func:`aperture_mawet_snr`, :func:`sidelobe_snr` (the attempt it kept),
+    :func:`klip_tpe.verify.snr_fap`, :func:`klip_tpe.verify.stim_fap` and
+    :func:`klip_tpe.products.snr_map` record.
+    """
 
     def __init__(self, phase: Optional[Callable[[], Optional[str]]] = None, limit: int = 20000):
         self.records: List[Dict[str, Any]] = []
@@ -64,6 +83,14 @@ class RingRecorder:
         self._prev: Optional["RingRecorder"] = None
 
     def add(self, rec: Dict[str, Any]) -> None:
+        """Add a record, labeled with the phase and the image's role.
+
+        Parameters
+        ----------
+        rec : dict
+            The record, given ``phase`` from :attr:`phase` and ``role`` from :class:`ring_role` when it
+            has neither.  It is dropped once :attr:`limit` records are kept.
+        """
         if "phase" not in rec and self.phase is not None:
             try:
                 rec["phase"] = self.phase()
@@ -75,18 +102,43 @@ class RingRecorder:
                 self.records.append(rec)
 
     def __enter__(self) -> "RingRecorder":
+        """Make this recorder the active one.
+
+        Returns
+        -------
+        rec : RingRecorder
+            This recorder.
+        """
         global _RING_RECORDER
         self._prev, _RING_RECORDER = _RING_RECORDER, self
         return self
 
     def __exit__(self, *exc) -> bool:
+        """Restore the recorder that was active before.
+
+        Parameters
+        ----------
+        exc : tuple
+            Type, value and traceback of an exception raised inside, ignored.
+
+        Returns
+        -------
+        suppress : bool
+            False, so an exception propagates.
+        """
         global _RING_RECORDER
         _RING_RECORDER = self._prev
         return False
 
 
 def _ring_emit(rec: Dict[str, Any]) -> None:
-    """A ring to the active recorder, or to the innermost :func:`sidelobe_snr` holding rings."""
+    """Send a ring record to the innermost :func:`sidelobe_snr` holding rings, or else to the active recorder.
+
+    Parameters
+    ----------
+    rec : dict
+        The record, as :func:`_ring_rec` builds it.
+    """
     held = getattr(_RING_LOCAL, "held", None)
     if held:
         held[-1].append(rec)
@@ -97,37 +149,77 @@ def _ring_emit(rec: Dict[str, Any]) -> None:
 
 
 class ring_role:
-    """``with ring_role("clean"):`` marks the rings measured inside as on that image (the
-    objective's clean term).  Without it a ring's ``role`` is None, the injected image."""
+    """Context manager that marks the rings measured inside it as measured on one image.
+
+    ``with ring_role("clean"):`` marks them as on the objective's clean image.  Without it a ring's
+    ``role`` is None, the injected image.
+
+    Parameters
+    ----------
+    role : str or None
+        Name of the image, such as ``"clean"``.
+    """
 
     def __init__(self, role: Optional[str]):
         self.role = role
         self._prev = None
 
     def __enter__(self):
+        """Set the role for the rings measured inside.
+
+        Returns
+        -------
+        ctx : ring_role
+            This context manager.
+        """
         self._prev = getattr(_RING_LOCAL, "role", None)
         _RING_LOCAL.role = self.role
         return self
 
     def __exit__(self, *exc) -> bool:
+        """Restore the role that was set before.
+
+        Parameters
+        ----------
+        exc : tuple
+            Type, value and traceback of an exception raised inside, ignored.
+
+        Returns
+        -------
+        suppress : bool
+            False, so an exception propagates.
+        """
         _RING_LOCAL.role = self._prev
         return False
 
 
 def line_mask(shape: Tuple[int, int], lines: Sequence[Tuple[float, float]], angle_convention: str = "pa",
               r_range: Optional[Tuple[float, float]] = None) -> np.ndarray:
-    """Boolean mask (True = exclude) of straight strips through the star, for ``pixel_mask``.
+    """Mask straight strips through the star, for ``pixel_mask``.
 
-    ``lines`` = ``[(pa_deg, half_width_px), ...]``.  A strip holds the pixels within
-    ``half_width_px`` of the line through the star at position angle ``pa_deg``, on both sides
-    of the star (``pa_deg + 180`` is the same line).  Built for a feature fixed on the sky
-    along one direction, one beam wide -- the line through alpha Cen A along the A-B
-    direction in the NEAR data -- which a wedge (:func:`pa_wedge_mask`) masks too widely far
-    out and too narrowly close in.  The caution of :func:`pa_wedge_mask` applies: choose the
-    strip from what is known before the image is looked at, and keep injections off it too
-    (:class:`~klip_tpe.positions.PositionSampler`'s ``forbidden_pa``).
+    A strip holds the pixels within ``half_width_px`` of the line through the star at position angle
+    ``pa_deg``, on both sides of the star.  It suits a feature fixed on the sky along one direction
+    and about one beam wide, such as the line through alpha Cen A along the A-B direction in the
+    NEAR data, which a wedge (:func:`pa_wedge_mask`) masks too widely far out and too narrowly close
+    in.  Choose the strips before looking at the image, as for :func:`pa_wedge_mask`, and keep the
+    injections off them too (:class:`~klip_tpe.positions.PositionSampler`'s ``forbidden_pa``).
 
-    ``r_range`` (pixels) limits the strips radially.
+    Parameters
+    ----------
+    shape : tuple of int
+        Shape of the image, ``(ny, nx)``.
+    lines : sequence of tuple of 2 floats
+        The strips, as ``(pa_deg, half_width_px)``, the angle in degrees and the half width in
+        pixels.
+    angle_convention : {"pa", "math"}, default "pa"
+        "pa" reads ``pa_deg`` East of North, and "math" counter-clockwise from +x.
+    r_range : tuple of 2 floats or None, default None
+        The ``(inner, outer)`` radii in pixels the strips are limited to.  None leaves them unlimited.
+
+    Returns
+    -------
+    mask : ndarray of bool, shape (ny, nx)
+        True for each pixel to exclude.
     """
     ny, nx = int(shape[0]), int(shape[1])
     cx, cy = star_center((ny, nx))
@@ -146,22 +238,37 @@ def line_mask(shape: Tuple[int, int], lines: Sequence[Tuple[float, float]], angl
 def pa_wedge_mask(shape: Tuple[int, int], bands: Sequence[Tuple[float, float]],
                   angle_convention: str = "pa",
                   r_range: Optional[Tuple[float, float]] = None) -> np.ndarray:
-    """Boolean mask (True = exclude) of azimuthal wedges, for ``pixel_mask``.
+    """Mask azimuthal wedges, for ``pixel_mask``.
 
-    ``bands`` = ``[(centre_pa_deg, half_width_deg), ...]``.  Built for resolved emission
-    that is known *a priori* to sit at a given position angle -- a debris disk seen close to
-    edge-on -- so that its flux is kept out of the noise ring and the radial-band sigma.
-    Pair it with :class:`~klip_tpe.positions.PositionSampler`'s ``forbidden_pa`` on the same
-    bands, so the injections avoid what the noise estimate is no longer measuring.
+    It suits resolved emission known beforehand to sit at a given position angle, such as a debris
+    disk seen close to edge-on, so its flux stays out of the noise ring and the radial-band sigma.
+    Pair it with :class:`~klip_tpe.positions.PositionSampler`'s ``forbidden_pa`` on the same bands,
+    so the injections avoid what the noise estimate no longer measures.
 
-    A word on when this is honest.  Removing ring apertures *because they are bright* biases
-    the noise estimate downwards and inflates every S/N; the exclusion has to be justified
-    before you look at the image.  A disk at a catalogued position angle qualifies, the
-    brightest speckle group does not -- and on beta Pic the two are comparable in this
-    annulus, so the cut is worth less than it looks (measured: the disk bands carry ~+0.2
-    sigma of median excess over the rest of the ring, while removing ~22% of the apertures).
+    Parameters
+    ----------
+    shape : tuple of int
+        Shape of the image, ``(ny, nx)``.
+    bands : sequence of tuple of 2 floats
+        The wedges, as ``(center_pa_deg, half_width_deg)``, in degrees.
+    angle_convention : {"pa", "math"}, default "pa"
+        "pa" reads the angles East of North, and "math" counter-clockwise from +x.
+    r_range : tuple of 2 floats or None, default None
+        The ``(inner, outer)`` radii in pixels the wedges are limited to, for a disk of known
+        extent.  None leaves them unlimited.
 
-    ``r_range`` (pixels) limits the wedges radially, for a disk with a known extent.
+    Returns
+    -------
+    mask : ndarray of bool, shape (ny, nx)
+        True for each pixel to exclude.
+
+    Notes
+    -----
+    Removing ring apertures because they are bright biases the noise estimate down and inflates
+    every S/N, so the exclusion has to be justified before the image is looked at.  A disk at a
+    catalogued position angle qualifies, the brightest speckle group does not.  On beta Pic the two
+    are comparable in the annulus.  The disk bands carry about +0.2 sigma of median excess over the
+    rest of the ring, while removing about 22% of the apertures.
     """
     ny, nx = int(shape[0]), int(shape[1])
     cx, cy = star_center((ny, nx))
@@ -184,33 +291,67 @@ def disk_mask_from_image(img: np.ndarray, fwhm_px: float, *, nsig: float = 2.0,
                          protect: Sequence[Tuple[float, float]] = (), protect_fwhm: float = 1.5,
                          pxscale: Optional[float] = None, angle_convention: str = "pa",
                          nsig_neg: Optional[float] = None, neg_reach_fwhm: float = 2.0) -> np.ndarray:
-    """Boolean mask (True = exclude) of the bright extended structure of ``img`` -- a disk
-    whose shape no wedge or strip follows, spiral arms or a ring -- for the metric's
-    ``pixel_mask`` and the sampler's ``forbidden_mask`` together
-    (:func:`klip_tpe.instruments.generic.default_config`'s ``disk_mask``).
+    """Mask the bright extended structure of an image, such as a disk that no wedge or strip follows.
 
-    ``img`` is smoothed with a Gaussian of ``smooth_fwhm`` x ``fwhm_px`` FWHM (NaN-aware),
-    referred to its median and robust sigma (1.4826 MAD) over ``r_range`` (px from the star
-    at the frame centre; default all finite pixels) and cut at ``nsig``.  Pieces smaller than
-    ``min_beams`` beams (pi (fwhm/2)^2 px each) are dropped -- an isolated speckle is not a
-    disk -- and the rest grown by ``grow_fwhm`` FWHM, since the metric samples the
-    matched-filtered image, which carries the disk about a FWHM beyond its edge.  The mask is
-    then limited to ``r_range``, and the positions in ``protect`` (``[(rho_arcsec, pa_deg)]``,
-    which needs ``pxscale``) are cleared within ``protect_fwhm`` FWHM: a companion on the disk
-    stays measurable, and its own ``known`` exclusion keeps it out of the noise anyway.
+    The mask serves the metric's ``pixel_mask`` and the sampler's ``forbidden_mask`` together
+    (:func:`klip_tpe.instruments.generic.default_config`'s ``disk_mask``).  The image is smoothed,
+    referred to its median and robust sigma (1.4826 times the MAD) over ``r_range`` and cut at
+    ``nsig``.  Pieces under ``min_beams`` beams are dropped and the rest grown by ``grow_fwhm``, since
+    the metric samples the matched-filtered image, which carries the disk about a FWHM beyond its
+    edge.
 
-    ``nsig_neg`` adds the disk's ADI negatives, the troughs self-subtraction digs beside
-    extended emission: pixels ``nsig_neg`` robust sigma below the median, in pieces of at least
-    ``min_beams`` beams that come within ``neg_reach_fwhm`` FWHM of the bright structure kept
-    (a trough nowhere near the disk is a speckle's, and stays).  They are the disk's footprint
-    in an ADI image as much as its emission is, so they are grown, limited and protected with
-    it.  None, the default: the bright structure only.
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        Image of the disk, ny by nx pixels, with the star at ``((nx-1)/2, (ny-1)/2)``.
+    fwhm_px : float
+        FWHM of the PSF, in pixels.
+    nsig : float, default 2.0
+        Threshold in robust sigma above the median.
+    r_range : tuple of 2 floats or None, default None
+        The ``(inner, outer)`` radii in pixels the statistics and the mask are limited to.  None
+        takes all finite pixels.
+    min_beams : float, default 2.0
+        Minimum size of a piece, in beams of ``pi (fwhm_px/2)^2`` pixels.  An isolated speckle is
+        not a disk.
+    grow_fwhm : float, default 1.0
+        Growth of the mask, in FWHM.
+    smooth_fwhm : float, default 1.0
+        FWHM of the NaN-aware Gaussian smoothing, in units of ``fwhm_px``.  0 does not smooth.
+    protect : sequence of tuple of 2 floats, default ()
+        Positions cleared from the mask, as ``(rho_arcsec, pa_deg)``, so a companion on the disk
+        stays measurable.  Its own ``known`` exclusion keeps it out of the noise anyway.
+    protect_fwhm : float, default 1.5
+        Radius cleared around each protected position, in FWHM.
+    pxscale : float or None, default None
+        Plate scale in arcsec per pixel, needed with ``protect``.
+    angle_convention : {"pa", "math"}, default "pa"
+        How the protected positions' angles are read (:func:`source_xy`).
+    nsig_neg : float or None, default None
+        Threshold in robust sigma below the median for the disk's ADI negatives, the troughs
+        self-subtraction digs beside extended emission.  Troughs in pieces of at least ``min_beams``
+        beams within ``neg_reach_fwhm`` of the bright structure are kept, and None leaves them out.
+    neg_reach_fwhm : float, default 2.0
+        Maximum distance of a kept trough from the bright structure, in FWHM.
 
-    The caution of :func:`pa_wedge_mask` applies with more force: this masks whatever is
-    bright, and a bright speckle group masked along with the disk biases the noise estimate
-    down.  Build it from an image of the disk made before the search (a disk-preserving
-    reduction, another epoch or instrument), never from a search's own winner, and look at
-    it."""
+    Returns
+    -------
+    mask : ndarray of bool, shape (ny, nx)
+        True for each pixel to exclude.  All False when fewer than 10 pixels are usable or the
+        sigma is 0.
+
+    Raises
+    ------
+    ValueError
+        If ``protect`` is given without ``pxscale``.
+
+    Notes
+    -----
+    The caution of :func:`pa_wedge_mask` applies with more force.  This masks whatever is bright,
+    and a bright speckle group masked with the disk biases the noise estimate down.  Build it from
+    an image made before the search, such as a disk-preserving reduction or another epoch, never
+    from a search's own winner, and look at it.
+    """
     img = np.asarray(img, float)
     ny, nx = img.shape
     cx, cy = star_center(img.shape)
@@ -271,11 +412,29 @@ def disk_mask_from_image(img: np.ndarray, fwhm_px: float, *, nsig: float = 2.0,
 
 @dataclass(frozen=True)
 class Source:
+    """A point source, by separation, position angle and contrast.
+
+    Attributes
+    ----------
+    rho : float
+        Separation from the star, in arcsec.
+    theta : float
+        Position angle East of North, in degrees.
+    contrast : float, default 0.0
+        Contrast to the star, in the injection model's flux unit.
+    """
     rho: float        # arcsec
     theta: float      # deg, PA east of north (metric convention)
     contrast: float = 0.0
 
     def as_tuple(self) -> Tuple[float, float, float]:
+        """Return the source as ``(rho, theta, contrast)``.
+
+        Returns
+        -------
+        values : tuple of 3 floats
+            Separation in arcsec, position angle in degrees and contrast.
+        """
         return (float(self.rho), float(self.theta), float(self.contrast))
 
 
@@ -283,13 +442,50 @@ class Source:
 # geometry helpers
 # ----------------------------------------------------------------------------
 def star_center(shape) -> Tuple[float, float]:
+    """Return the star's pixel, ``((nx-1)/2, (ny-1)/2)``, for an image's shape.
+
+    Parameters
+    ----------
+    shape : tuple of int
+        Shape of the image or cube, whose last two entries are ``(ny, nx)``.
+
+    Returns
+    -------
+    cx : float
+        Column of the star, in pixels.
+    cy : float
+        Row of the star, in pixels.
+    """
     ny, nx = shape[-2], shape[-1]
     return (nx - 1) / 2.0, (ny - 1) / 2.0
 
 
 def source_xy(rho_as, theta_deg, pxscale: float, cx: float, cy: float, angle_convention: str = "pa"):
-    """Pixel coordinates of sources.  ``angle_convention='pa'``: PA East of North
-    (x = cx + r cos(theta+90)); ``'math'``: angle measured from +x counter-clockwise."""
+    """Convert source positions to pixel coordinates.
+
+    Parameters
+    ----------
+    rho_as : float or array_like
+        Separations, in arcsec.
+    theta_deg : float or array_like
+        Angles, in degrees.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    cx : float
+        Column of the star, in pixels.
+    cy : float
+        Row of the star, in pixels.
+    angle_convention : {"pa", "math"}, default "pa"
+        "pa" reads ``theta_deg`` East of North, ``x = cx + r cos(theta + 90)``, and "math"
+        counter-clockwise from +x.
+
+    Returns
+    -------
+    x : ndarray
+        Column of each source, in pixels.
+    y : ndarray
+        Row of each source, in pixels.
+    """
     rho = np.atleast_1d(np.asarray(rho_as, float))
     th = np.atleast_1d(np.asarray(theta_deg, float))
     phi = np.deg2rad(th + (90.0 if angle_convention == "pa" else 0.0))
@@ -297,18 +493,45 @@ def source_xy(rho_as, theta_deg, pxscale: float, cx: float, cy: float, angle_con
 
 
 def nanmedian_even(v) -> float:
-    """Median over finite values, mean of the two middle values for even counts
-    (IDL ``median(/even)``); ``nan`` if nothing is finite."""
+    """Return the median of the finite values, the mean of the two middle ones for an even count.
+
+    Parameters
+    ----------
+    v : array_like
+        The values.
+
+    Returns
+    -------
+    median : float
+        The median, or NaN when no value is finite.
+
+    Notes
+    -----
+    It matches IDL's ``median(/even)``, which the IDL predecessor uses.
+    """
     v = np.asarray(v, float)
     v = v[np.isfinite(v)]
     return float(np.median(v)) if v.size else float("nan")
 
 
 def radprof(image: np.ndarray) -> np.ndarray:
-    """Subtract the azimuthal (integer-radius-bin) NaN-mean profile.  Bins are
-    computed about ``(nx/2, ny/2)`` -- deliberately the IDL ``radprof`` convention,
-    which differs by half a pixel from the star centre.  Only the flattening is
-    affected, never source positions."""
+    """Subtract an image's azimuthal mean profile, in bins of integer radius.
+
+    Parameters
+    ----------
+    image : ndarray, shape (ny, nx)
+        The image.  NaN pixels are left out of the means and stay NaN.
+
+    Returns
+    -------
+    flat : ndarray, shape (ny, nx)
+        The image minus its profile, in float64.
+
+    Notes
+    -----
+    The bins are centered on ``(nx/2, ny/2)``, half a pixel from the star, as in the IDL
+    predecessor's ``radprof``.  Only the flattening is affected, never the source positions.
+    """
     img = np.asarray(image, float)
     ny, nx = img.shape
     yy, xx = np.mgrid[0:ny, 0:nx]
@@ -326,8 +549,28 @@ def radprof(image: np.ndarray) -> np.ndarray:
 
 
 def declip(img: np.ndarray, nsig: float = 6.0) -> np.ndarray:
-    """Replace isolated single-pixel spikes by their 3x3 median (``near2m_declip``).
-    NaN-safe: only fully interior finite pixels are touched."""
+    """Replace isolated single-pixel spikes by their 3x3 median.
+
+    A spike is a finite pixel with a finite 3x3 neighborhood that lies more than ``nsig`` robust
+    sigma (1.4826 times the median absolute residual) from its 3x3 median.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image.  An array of another number of dimensions comes back unchanged.
+    nsig : float, default 6.0
+        Threshold in robust sigma.
+
+    Returns
+    -------
+    out : ndarray
+        The despiked image, in float64.  The input comes back unchanged when fewer than 20 pixels
+        qualify or the sigma is 0.
+
+    Notes
+    -----
+    It does what ``near2m_declip`` does in the IDL predecessor.
+    """
     img = np.asarray(img, float)
     if img.ndim != 2:
         return img
@@ -349,8 +592,24 @@ def declip(img: np.ndarray, nsig: float = 6.0) -> np.ndarray:
 
 
 def gaussian_kernel(fwhm: float, size: Optional[int] = None) -> np.ndarray:
-    """Unit-sum Gaussian matched-filter kernel of the given FWHM (``near2m_mfkern``
-    default branch): ``kd = 2*ceil(1.5*fwhm)+1`` pixels wide."""
+    """Return a unit-sum Gaussian matched-filter kernel.
+
+    Parameters
+    ----------
+    fwhm : float
+        FWHM of the Gaussian, in pixels.
+    size : int or None, default None
+        Width of the kernel, in pixels.  None takes ``2 * ceil(1.5 * fwhm) + 1``.
+
+    Returns
+    -------
+    kernel : ndarray, shape (size, size)
+        The kernel, summing to 1.
+
+    Notes
+    -----
+    It is the default branch of ``near2m_mfkern`` in the IDL predecessor.
+    """
     kd = int(2 * np.ceil(1.5 * fwhm) + 1) if size is None else int(size)
     kc = (kd - 1) / 2.0
     sg = fwhm / 2.3548
@@ -360,8 +619,28 @@ def gaussian_kernel(fwhm: float, size: Optional[int] = None) -> np.ndarray:
 
 
 def kernel_from_profile(stamp: np.ndarray, fwhm: float) -> np.ndarray:
-    """Azimuthally averaged, unit-sum kernel built from a PSF stamp (the measured
-    matched filter of ``near2m_mfkern`` when the injection library is active)."""
+    """Build a unit-sum matched-filter kernel from a PSF stamp's azimuthal profile.
+
+    The profile is the mean in rings 1 px wide about the stamp's middle, interpolated linearly onto
+    a kernel ``2 * ceil(1.5 * fwhm) + 1`` pixels wide and clipped at 0.
+
+    Parameters
+    ----------
+    stamp : ndarray, shape (sy, sx)
+        PSF stamp, centered on its middle pixel ``((sx-1)/2, (sy-1)/2)``.
+    fwhm : float
+        FWHM of the PSF, in pixels, which sets the kernel's width.
+
+    Returns
+    -------
+    kernel : ndarray
+        The kernel, summing to 1, or :func:`gaussian_kernel` when the profile sums to 0 or less.
+
+    Notes
+    -----
+    It is the measured matched filter of ``near2m_mfkern`` in the IDL predecessor, used there when
+    the injection library is active.
+    """
     st = np.asarray(stamp, float)
     kd = int(2 * np.ceil(1.5 * fwhm) + 1)
     kc = (kd - 1) / 2.0
@@ -399,20 +678,51 @@ _prepared_lock = threading.Lock()
 
 
 def _digest(a: np.ndarray) -> Tuple[Any, ...]:
-    """A key for an array's contents: its shape, dtype and a 128-bit hash of its bytes."""
+    """Return a key for an array's contents, its shape, dtype and a 128-bit hash of its bytes.
+
+    Parameters
+    ----------
+    a : ndarray
+        The array.
+
+    Returns
+    -------
+    key : tuple
+        ``(shape, dtype string, digest)``.
+    """
     a = np.ascontiguousarray(a)
     return (a.shape, a.dtype.str, hashlib.blake2b(a.data, digest_size=16).digest())
 
 
 def _frozen(*arrays: np.ndarray) -> None:
+    """Make arrays read-only.
+
+    Parameters
+    ----------
+    arrays : ndarray
+        The arrays, changed in place.
+    """
     for a in arrays:
         a.flags.writeable = False
 
 
 def _prepare(img: np.ndarray, declip_nsig: Optional[float]) -> Dict[str, Any]:
-    """``img`` (float) declipped (``img``), zero-filled (``imz``), its finite pixels
-    (``finite``) and its convolutions so far, by kernel (``maps``): from the cache when these
-    bytes were prepared before.  The cached arrays are read-only copies, never the caller's."""
+    """Prepare an image for the matched filter, from the cache when these bytes were prepared before.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image, in float.
+    declip_nsig : float or None
+        Threshold of the despike in robust sigma (:func:`declip`).  None does not despike.
+
+    Returns
+    -------
+    entry : dict
+        ``img`` the despiked image, ``imz`` it zero-filled, ``finite`` its finite pixels and
+        ``maps`` its correlations so far, by kernel.  Cached arrays are read-only copies, never the
+        caller's.
+    """
     def build() -> Dict[str, Any]:
         d = declip(img, declip_nsig) if declip_nsig is not None else img
         if d is img:
@@ -443,8 +753,24 @@ def clear_prepared_cache() -> None:
 
 @functools.lru_cache(maxsize=16)
 def _grids(ny: int, nx: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """``yy, xx`` pixel indices and ``rr``, the distance from the star (:func:`star_center`),
-    of a ``(ny, nx)`` image, read-only."""
+    """Return the pixel indices and the distances from the star for an image shape, read-only.
+
+    Parameters
+    ----------
+    ny : int
+        Number of rows.
+    nx : int
+        Number of columns.
+
+    Returns
+    -------
+    yy : ndarray, shape (ny, nx)
+        Row of each pixel.
+    xx : ndarray, shape (ny, nx)
+        Column of each pixel.
+    rr : ndarray, shape (ny, nx)
+        Distance of each pixel from the star (:func:`star_center`), in pixels.
+    """
     yy, xx = np.mgrid[0:ny, 0:nx]
     cx, cy = star_center((ny, nx))
     rr = np.hypot(xx - cx, yy - cy)
@@ -453,9 +779,29 @@ def _grids(ny: int, nx: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 def _per_source_kernels(kernel, nsrc: int, fwhm: float) -> List[np.ndarray]:
-    """Normalise the ``kernel`` argument of :func:`mawet_peak_snr` to one kernel per
-    source, sharing the *same object* when they are all the same (so the convolution is
-    done once)."""
+    """Expand :func:`mawet_peak_snr`'s ``kernel`` argument to one kernel per source.
+
+    Sources with the same kernel share the same object, so its correlation is done once.
+
+    Parameters
+    ----------
+    kernel : ndarray, sequence or None
+        One 2-D kernel, a sequence of one per source or of one, or None.
+    nsrc : int
+        Number of sources.
+    fwhm : float
+        FWHM of the Gaussian that None, empty or all-NaN entries take, in pixels.
+
+    Returns
+    -------
+    kernels : list of ndarray
+        One kernel per source.
+
+    Raises
+    ------
+    ValueError
+        If the sequence has neither one nor ``nsrc`` entries.
+    """
     if kernel is None:
         return [gaussian_kernel(fwhm)] * nsrc
     if isinstance(kernel, np.ndarray) and kernel.ndim == 2:
@@ -478,7 +824,22 @@ def _per_source_kernels(kernel, nsrc: int, fwhm: float) -> List[np.ndarray]:
 
 
 def clip0(x):
-    """Clamp finite negatives to 0, leave NaN untouched (``near2m_clip0``)."""
+    """Clamp finite negative values to 0, leaving NaN as it is.
+
+    Parameters
+    ----------
+    x : array_like
+        The values.
+
+    Returns
+    -------
+    clipped : ndarray
+        A float64 copy with the negatives set to 0.
+
+    Notes
+    -----
+    It does what ``near2m_clip0`` does in the IDL predecessor.
+    """
     x = np.asarray(x, float).copy()
     b = np.isfinite(x) & (x < 0)
     x[b] = 0.0
@@ -486,8 +847,25 @@ def clip0(x):
 
 
 def _aperture_sum(img: np.ndarray, x: float, y: float, r: float) -> float:
-    """Tophat aperture sum (pixel centres inside radius r); NaN if the aperture holds
-    no finite pixel.  Pixels outside the image are ignored."""
+    """Sum the finite pixels whose centers lie within a radius of a position.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image.
+    x : float
+        Column of the aperture's center, in pixels.
+    y : float
+        Row of the aperture's center, in pixels.
+    r : float
+        Radius of the aperture, in pixels.
+
+    Returns
+    -------
+    total : float
+        The sum, or NaN when the aperture holds no finite pixel.  Pixels outside the image are
+        ignored.
+    """
     ny, nx = img.shape
     x0, x1 = int(max(np.floor(x - r), 0)), int(min(np.ceil(x + r), nx - 1))
     y0, y1 = int(max(np.floor(y - r), 0)), int(min(np.ceil(y + r), ny - 1))
@@ -501,8 +879,28 @@ def _aperture_sum(img: np.ndarray, x: float, y: float, r: float) -> float:
 
 
 def _arc_regions(arcs, pxscale: float, fwhm: float, cx: float, cy: float, angle_convention: str = "pa"):
-    """``excl_arcs`` entries ``(rho_arcsec, theta_deg, half_width_deg, radial_fwhm)`` as
-    ``(r_px, phi_rad, half_width_rad, radial_px)`` in the image's own polar coordinates."""
+    """Convert ``excl_arcs`` entries to the image's polar coordinates.
+
+    Parameters
+    ----------
+    arcs : sequence of tuple of 4 floats or None
+        Arcs as ``(rho_arcsec, theta_deg, half_width_deg, radial_fwhm)``.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    cx : float
+        Column of the star, in pixels.
+    cy : float
+        Row of the star, in pixels.
+    angle_convention : {"pa", "math"}, default "pa"
+        How the arcs' angles are read (:func:`source_xy`).
+
+    Returns
+    -------
+    regions : list of tuple of 4 floats
+        Each arc as ``(r_px, phi_rad, half_width_rad, radial_px)``.
+    """
     out = []
     for a in arcs or ():
         x, y = source_xy([float(a[0])], [float(a[1])], pxscale, cx, cy, angle_convention)
@@ -512,8 +910,29 @@ def _arc_regions(arcs, pxscale: float, fwhm: float, cx: float, cy: float, angle_
 
 
 def _in_arcs(x, y, regions, cx: float, cy: float):
-    """True where ``(x, y)`` lies in any arc region: within ``radial_px`` of the arc's radius
-    and within ``half_width`` of its azimuth.  Scalars or arrays."""
+    """Tell which positions lie in any arc region.
+
+    A position is in an arc when it lies within ``radial_px`` of the arc's radius and within
+    ``half_width`` of its azimuth.
+
+    Parameters
+    ----------
+    x : float or ndarray
+        Columns, in pixels.
+    y : float or ndarray
+        Rows, in pixels.
+    regions : sequence of tuple of 4 floats
+        The arcs, as :func:`_arc_regions` gives them.
+    cx : float
+        Column of the star, in pixels.
+    cy : float
+        Row of the star, in pixels.
+
+    Returns
+    -------
+    inside : ndarray of bool
+        True for each position in an arc, shaped as ``x``.
+    """
     r = np.hypot(np.asarray(x, float) - cx, np.asarray(y, float) - cy)
     ph = np.arctan2(np.asarray(y, float) - cy, np.asarray(x, float) - cx)
     m = np.zeros(np.shape(r), bool)
@@ -533,13 +952,32 @@ WHY_NOISE = "no noise samples on its ring or band"
 
 
 def turn_kernel(k: np.ndarray, dphi: float, *, order: int = 3) -> np.ndarray:
-    """A least-squares template ``k = m / sum(m^2)`` turned by ``dphi`` radians about its center,
-    counterclockwise in the image's ``(x, y) = (column, row)`` frame, the sense of
-    ``arctan2(y - cy, x - cx)``, and normalized again as it was: zero-mean when ``k`` was, and
-    ``m' / sum(m'^2)`` for the turned template ``m'``.  An ADI forward model's template, turned
-    by the azimuth from its source to another position on the ring, is the template a source
-    there would have (NEAR2 note, 2026-11-01).  ``scipy.ndimage.rotate`` turns the other way
-    for a positive angle, hence the sign."""
+    """Turn a least-squares template about its center and normalize it again as it was.
+
+    The template ``m = k / sum(k^2)`` is turned counter-clockwise in the image's ``(x, y)`` frame,
+    the sense of ``arctan2(y - cy, x - cx)``.  It comes back zero-mean when ``k`` was, as
+    ``m' / sum(m'^2)`` for the turned template ``m'``.  An ADI forward model's template, turned by
+    the azimuth from its source to another position on the ring, is the template a source there
+    would have (NEAR2 note, 2026-11-01).
+
+    Parameters
+    ----------
+    k : ndarray, shape (K, K)
+        The least-squares filter, K pixels wide.
+    dphi : float
+        Turn, in radians, counter-clockwise.
+    order : int, default 3
+        Spline order of the rotation.
+
+    Returns
+    -------
+    turned : ndarray, shape (K, K)
+        The turned filter, or ``k`` itself when ``dphi`` is 0 or not finite or ``k`` is all 0.
+
+    Notes
+    -----
+    ``scipy.ndimage.rotate`` turns the other way for a positive angle, hence the sign in the code.
+    """
     k = np.asarray(k, float)
     s2 = float((k * k).sum())
     if s2 <= 0 or not np.isfinite(dphi) or dphi == 0.0:
@@ -553,11 +991,27 @@ def turn_kernel(k: np.ndarray, dphi: float, *, order: int = 3) -> np.ndarray:
 
 
 class _TurnedFilter:
-    """The matched-filter value of one source's template turned to other positions on the image,
-    each value what ``ndimage.correlate(imz, turned, mode="nearest")`` gives at that pixel (with
-    ``correlate=False`` what ``ndimage.convolve`` gives, as runs saved before 2026-11-04
-    measured), one small dot product instead of a whole map.  Turned templates are kept by
-    angle (to ``1e-6`` rad), since the ring and the band ask the same angles of several pixels."""
+    """Matched-filter values of one source's template turned to other positions on the image.
+
+    Each value is what ``ndimage.correlate(imz, turned, mode="nearest")`` gives at that pixel, or
+    with ``correlate`` False what ``ndimage.convolve`` gives, from one small dot product instead of
+    a whole map.  Turned templates are kept by angle, to 1e-6 rad, since the ring and the band ask
+    the same angles of several pixels.
+
+    Parameters
+    ----------
+    imz : ndarray, shape (ny, nx)
+        The zero-filled image.
+    kernel : ndarray, shape (K, K)
+        The source's template, K pixels wide with K odd.
+    az : float
+        Azimuth of the source from +x, in radians.
+    pads : dict of int to ndarray
+        Copies of ``imz`` padded at their edges, by pad width, shared between filters and filled
+        as needed.
+    correlate : bool, default True
+        Whether to correlate, or else convolve, as :func:`mawet_peak_snr` does.
+    """
 
     def __init__(self, imz: np.ndarray, kernel: np.ndarray, az: float, pads: Dict[int, np.ndarray],
                  correlate: bool = True):
@@ -571,8 +1025,18 @@ class _TurnedFilter:
         self._flip: Dict[int, np.ndarray] = {}
 
     def _flipped(self, dphi: float) -> np.ndarray:
-        """The turned template as the dot product takes it: as it is to correlate, turned 180
-        deg to convolve."""
+        """Return the template turned by ``dphi`` as the dot product takes it, flipped 180 deg to convolve.
+
+        Parameters
+        ----------
+        dphi : float
+            Turn, in radians, counter-clockwise.
+
+        Returns
+        -------
+        template : ndarray, shape (K, K)
+            The turned template.
+        """
         key = int(round(float(dphi) * 1e6))
         if key not in self._flip:
             t = turn_kernel(self.k, key * 1e-6)
@@ -580,12 +1044,48 @@ class _TurnedFilter:
         return self._flip[key]
 
     def at(self, x: int, y: int, dphi: float) -> float:
+        """Return the filtered value at a pixel, with the template turned by ``dphi``.
+
+        Parameters
+        ----------
+        x : int
+            Column of the pixel.
+        y : int
+            Row of the pixel.
+        dphi : float
+            Turn of the template, in radians.
+
+        Returns
+        -------
+        value : float
+            The matched-filter value.
+        """
         K = self.k.shape[0]
         return float((self.pad[y:y + K, x:x + K] * self._flipped(dphi)).sum())
 
     def band(self, x: np.ndarray, y: np.ndarray, cx: float, cy: float, width: float) -> np.ndarray:
-        """Values at pixels ``(x, y)``, each with the template turned to its azimuth, in bins of
-        ``width`` radians of azimuth, as :func:`klip_tpe.fmmf.fmmf_map` filters by bin."""
+        """Return the values at pixels, each with the template turned to its bin of azimuth.
+
+        The bins are those :func:`klip_tpe.fmmf.fmmf_map` filters by.
+
+        Parameters
+        ----------
+        x : ndarray of int
+            Columns of the pixels.
+        y : ndarray of int
+            Rows of the pixels.
+        cx : float
+            Column of the star, in pixels.
+        cy : float
+            Row of the star, in pixels.
+        width : float
+            Width of a bin of azimuth, in radians.
+
+        Returns
+        -------
+        values : ndarray
+            The matched-filter value at each pixel.
+        """
         x, y = np.asarray(x, int), np.asarray(y, int)
         dphi = np.angle(np.exp(1j * (np.arctan2(y - cy, x - cx) - self.az)))
         b = np.round(dphi / width).astype(int)
@@ -600,12 +1100,25 @@ class _TurnedFilter:
 
 
 class _PlacedFilter:
-    """The matched-filter value at pixels of the image, each with the template ``kernel_at(x, y)``
-    gives for a source there: what ``ndimage.correlate(imz, k, mode="nearest")`` gives at that
-    pixel with that template (with ``correlate=False`` what ``ndimage.convolve`` gives), one
-    small dot product per sample.  The forward model of a source at each noise aperture
-    (:class:`klip_tpe.fmmf.FMTemplates`).  The templates are square, of an odd size, as a forward
-    model's stamps are."""
+    """Matched-filter values at pixels of the image, each with the template of a source there.
+
+    Each value is what ``ndimage.correlate(imz, k, mode="nearest")`` gives at that pixel with the
+    template ``k = kernel_at(x, y)``, or with ``correlate`` False what ``ndimage.convolve`` gives,
+    from one small dot product per sample.  It gives the forward model of a source at each noise
+    aperture (:class:`klip_tpe.fmmf.FMTemplates`).
+
+    Parameters
+    ----------
+    imz : ndarray, shape (ny, nx)
+        The zero-filled image.
+    kernel_at : callable
+        Function ``(x, y) -> template or None`` that gives the template of a source at a pixel,
+        square and of an odd size.
+    pads : dict of int to ndarray
+        Copies of ``imz`` padded at their edges, by pad width, shared and filled as needed.
+    correlate : bool, default True
+        Whether to correlate, or else convolve.
+    """
 
     def __init__(self, imz: np.ndarray, kernel_at: Callable[[float, float], Optional[np.ndarray]],
                  pads: Dict[int, np.ndarray], correlate: bool = True):
@@ -614,8 +1127,18 @@ class _PlacedFilter:
         self._flip: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
 
     def _flipped(self, k: np.ndarray) -> np.ndarray:
-        """The template as the dot product takes it: as it is to correlate, turned 180 deg to
-        convolve."""
+        """Return a template as the dot product takes it, flipped 180 deg to convolve.
+
+        Parameters
+        ----------
+        k : ndarray
+            The template.
+
+        Returns
+        -------
+        template : ndarray
+            The template as used, kept by the template's identity.
+        """
         e = self._flip.get(id(k))
         if e is None or e[0] is not k:            # the kernel is kept, so its id stays its own
             kk = np.asarray(k, float)
@@ -623,12 +1146,37 @@ class _PlacedFilter:
         return e[1]
 
     def _pad(self, c: int) -> np.ndarray:
+        """Return the image padded by ``c`` pixels at its edges, as ``mode="nearest"`` extends it.
+
+        Parameters
+        ----------
+        c : int
+            Pad width, in pixels.
+
+        Returns
+        -------
+        padded : ndarray
+            The padded image.
+        """
         if c not in self.pads:                    # the frame padded as mode="nearest" extends it
             self.pads[c] = np.pad(self.imz, c, mode="edge")
         return self.pads[c]
 
     def at(self, x: int, y: int) -> Optional[float]:
-        """The value at pixel ``(x, y)``, None when ``kernel_at`` gives no template there."""
+        """Return the filtered value at a pixel, with the template of a source there.
+
+        Parameters
+        ----------
+        x : int
+            Column of the pixel.
+        y : int
+            Row of the pixel.
+
+        Returns
+        -------
+        value : float or None
+            The matched-filter value, or None when ``kernel_at`` gives no template there.
+        """
         k = self.kernel_at(x, y)
         if k is None:
             return None
@@ -637,9 +1185,30 @@ class _PlacedFilter:
 
     def band(self, x: np.ndarray, y: np.ndarray, cx: float, cy: float, r: float, az: float,
              width: float) -> np.ndarray:
-        """Values at pixels ``(x, y)``, in bins of ``width`` radians of azimuth from ``az``, each
-        bin with the template at its center on the circle of radius ``r``, and NaN in a bin
-        ``kernel_at`` gives none for."""
+        """Return the values at pixels, in bins of azimuth each filtered with the template at its center.
+
+        Parameters
+        ----------
+        x : ndarray of int
+            Columns of the pixels.
+        y : ndarray of int
+            Rows of the pixels.
+        cx : float
+            Column of the star, in pixels.
+        cy : float
+            Row of the star, in pixels.
+        r : float
+            Radius of the circle the bins' centers lie on, in pixels.
+        az : float
+            Azimuth the bins are counted from, in radians.
+        width : float
+            Width of a bin, in radians.
+
+        Returns
+        -------
+        values : ndarray
+            The matched-filter value at each pixel, NaN in a bin ``kernel_at`` gives no template for.
+        """
         x, y = np.asarray(x, int), np.asarray(y, int)
         dphi = np.angle(np.exp(1j * (np.arctan2(y - cy, x - cx) - az)))
         b = np.round(dphi / width).astype(int)
@@ -669,80 +1238,113 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                    turn: Any = None,
                    templates_at: Optional[Sequence[Optional[Callable[[float, float], Optional[np.ndarray]]]]] = None,
                    correlate: bool = True):
-    """Matched-filter Mawet et al. (2014) detection S/N of each source.
+    """Measure the matched-filter detection S/N of each source (Mawet et al. 2014).
 
-    * optional single-pixel de-spiking, then the matched filter: the image correlated with
-      ``kernel`` (default FWHM Gaussian), the template as a source looks (``correlate``);
-    * no S/N for a source placed inside ``inner_fwhm`` FWHM of the star, or so close that
-      its ring holds fewer than 5 apertures.  Both are asked of the position the source
-      was given, ``rho``, so a clean and an injected image are judged by the same
-      geometry;
-    * the source is *located* as the matched-filter peak within ``search_px`` of
-      the nominal position (absorbs sub-pixel recovery offsets);
-    * noise from ``nap = floor(2 pi r / fwhm)`` apertures on the ring through that peak,
-      skipping apertures within ``excl_fwhm*fwhm`` of any injected or ``known`` source;
-    * a radial band ``|r' - r| <= band_fwhm*fwhm`` gives a sigma FLOOR (and replaces
-      the ring when it holds fewer than ``min_ring`` clean samples);
-    * small-sample penalty ``sqrt(1 + 1/n)`` with ``n = max(nap, 3)`` (``penalty=
-      'geometric'``, NEAR) or the retained clean-aperture count (``'retained'``,
-      NIRCam variant).
+    The image is despiked and correlated with ``kernel``, the template as a source looks.  Each
+    source is located as the matched-filter peak within ``search_px`` of its position, and its noise
+    comes from the ``nap = floor(2 pi r / fwhm)`` apertures on the ring through that peak, less those
+    within ``excl_fwhm`` FWHM of an injected, known or excluded source.  A radial band
+    ``|r' - r| <= band_fwhm * fwhm`` sets a floor on the sigma and replaces the ring when the ring
+    keeps fewer than ``min_ring`` samples.  The small-sample penalty is ``sqrt(1 + 1/n)``.
 
-    ``kernel`` is one 2-D matched filter for every source, or a **sequence of one
-    kernel per source** (``None`` entries fall back to the FWHM Gaussian) when the
-    filter is position-dependent -- the forward-modelled templates of
-    :mod:`klip_tpe.fmmf`.  Each distinct kernel costs one convolution of the frame.
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image, ny by nx pixels, with the star at ``((nx-1)/2, (ny-1)/2)``.
+    rho : float or array_like
+        Separation of each source, in arcsec.
+    theta : float or array_like
+        Angle of each source, in degrees, read as ``angle_convention`` says.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    kernel : ndarray, sequence or None, default None
+        The matched filter, one 2-D kernel for every source or one per source, such as the
+        forward-modeled templates of :mod:`klip_tpe.fmmf`.  None, or a None entry, takes the FWHM
+        Gaussian, and each distinct kernel costs one correlation of the image.
+    search_px : float, default 1.5
+        Radius of the peak search around each source, in pixels.
+    excl_fwhm : float, default 1.5
+        Radius of the keep-out around each injected, known or excluded source, in FWHM.
+    known : sequence of tuple of 2 floats, default ()
+        Known companions, as ``(rho_arcsec, theta_deg)``, kept out of the noise.
+    declip_nsig : float or None, default 6.0
+        Threshold of the single-pixel despike in robust sigma (:func:`declip`).  None does not
+        despike.
+    band_fwhm : float, default 0.6
+        Half width of the radial band, in FWHM.
+    min_ring : int, default 6
+        Minimum number of clean ring samples for the ring to give the noise.
+    penalty : {"geometric", "retained"}, default "geometric"
+        Count ``n`` in the small-sample penalty.  "geometric" takes ``max(nap, 3)``, as for NEAR,
+        and "retained" the clean apertures kept, as for the NIRCam variant.
+    pixel_mask : ndarray of bool or None, default None
+        Pixels left out of the noise samples, True to exclude, such as a disk's.
+    inner_fwhm : float, default 1.0
+        Inner guard, in FWHM.  A source placed inside it gets no S/N.
+    angle_convention : {"pa", "math"}, default "pa"
+        How ``theta`` is read (:func:`source_xy`).
+    return_details : bool, default False
+        Whether to also return each source's geometry and noise statistics.
+    excl_arcs : sequence of tuple of 4 floats, default ()
+        Arcs left out of the ring and the band, as ``(rho_arcsec, theta_deg, half_width_deg,
+        radial_fwhm)``.  These are a source's sidelobes, the arc an ADI reduction over-subtracts
+        along at its radius (:mod:`klip_tpe.contrast_grid`).
+    peak_xy : sequence of tuple of 2 floats or None, default None
+        One ``(x, y)`` pixel per source where the peak is read instead of searched for, such as the
+        injected image's peak for the clean term (:func:`sidelobe_snr`).  None searches.
+    exclude_xy : sequence of tuple of 2 floats, default ()
+        More ``(x, y)`` pixels whose keep-out the ring and the band skip, such as the verify's
+        other sources (:func:`klip_tpe.verify.snr_fap`).
+    mfmap : ndarray or None, default None
+        Matched-filter map already made, used for every source instead of correlating ``img``
+        (:func:`matched_filter`).  It does not go with ``turn`` or ``templates_at``.
+    turn : bool, sequence of bool or None, default None
+        Whether each source's kernel is a template in the source's own orientation, an ADI forward
+        model's (:class:`klip_tpe.fmmf.FMMFSNR`).  Each noise sample then takes the template turned
+        by its azimuth from the source (:func:`turn_kernel`), and None reads every sample off one
+        map, which suits a round kernel.
+    templates_at : sequence of callable or None, default None
+        One entry per source, None or a function ``(x, y) -> template`` that gives the forward model
+        of a source at that pixel (:class:`klip_tpe.fmmf.FMTemplates`).  Each noise sample then takes
+        the template there, an entry takes the place of ``turn`` for its source, and a sample the
+        function gives None for is read off the source's map.
+    correlate : bool, default True
+        Whether the matched filter correlates the image with the kernel, so a source shaped like it
+        gives its own amplitude.  False convolves, which turns the template 180 deg first, as FMMF
+        runs saved before 2026-11-04 measured.
 
-    Returns per-source S/N, **which may be negative** (peak below the ring mean) or
-    NaN (inside the inner guard, no noise samples), and with ``return_details`` each
-    source's geometry and, for a NaN, ``'why'`` (:data:`WHY_GUARD`, :data:`WHY_RING`,
-    :data:`WHY_NOISE`).  ``pixel_mask`` (True = exclude) removes e.g. disk pixels from
-    the noise samples.
+    Returns
+    -------
+    snr : ndarray
+        S/N of each source.  It may be negative, a peak below the ring mean, or NaN, for a source
+        inside the inner guard, on a ring of fewer than 5 apertures or without noise samples.
+    details : list of dict
+        [return_details=True] Each source's ``x``, ``y``, ``r``, ``nap``, ``peak``, ``sigma``,
+        ``bg``, ``nclean``, ``n_left``, ``min_ring``, ``ring_used`` and ``sd_band``, and for a NaN
+        ``why`` (:data:`WHY_GUARD`, :data:`WHY_RING`, :data:`WHY_NOISE`).
 
-    ``excl_arcs`` = ``[(rho_arcsec, theta_deg, half_width_deg, radial_fwhm), ...]`` leaves
-    whole arcs out of the ring and the band: every aperture or pixel within ``radial_fwhm``
-    FWHM of the arc's radius and ``half_width_deg`` of its azimuth.  An ADI reduction
-    over-subtracts a source along the arc the field rotation sweeps at its radius, so these
-    are a source's sidelobes (:mod:`klip_tpe.contrast_grid`).  Default none.
+    Raises
+    ------
+    ValueError
+        If ``mfmap`` is not the image's shape, or ``kernel``, ``turn`` or ``templates_at`` has an
+        entry count other than the number of sources.
 
-    ``peak_xy`` = ``[(x, y), ...]``, one pixel per source, takes the peak there instead of
-    searching for it: the clean reduction's ring through an injected source as the injected
-    image located it (:func:`sidelobe_snr`).  ``exclude_xy`` (px): more positions whose
-    ``excl_fwhm`` keep-out the ring and the band skip, as the verify's other sources and known
-    companions (:func:`klip_tpe.verify.snr_fap`).  ``mfmap``: the matched-filter map, made
-    already, for every source instead of the convolutions of ``img`` (the verify's solved
-    contrasts, :func:`matched_filter`).  The details' ``n_left`` counts the ring's
-    apertures left after the exclusions; ``nclean`` is 0 when fewer than 3 are left.
+    Notes
+    -----
+    The guard and the ring count are asked of the position the source was given, ``rho``, so a
+    clean and an injected image are judged by the same geometry.  The IDL predecessor's
+    ``near2_snrpk`` asked the guard of the located peak instead.  On a clean image that peak is
+    whichever noise pixel is highest within ``search_px``, and for a source at 1.1 FWHM it lay inside
+    1 FWHM about half the time, so the clean term, and with it the draw, failed while the injected
+    image scored (NEAR2 note, 2026-10-13).  Where both guards pass, the S/N is the same.
 
-    ``turn`` (True, or one flag per source): the source's kernel is a template in the source's
-    own orientation, an ADI forward model's (:class:`klip_tpe.fmmf.FMMFSNR`).  Each noise
-    aperture then takes the template turned by its azimuth from the source
-    (:func:`turn_kernel`), and each band pixel the template turned to its bin of azimuth, half
-    a FWHM of arc wide, so every sample is filtered as a source there would be (NEAR2 note,
-    2026-11-01).  The source's own peak keeps the map of the unturned template.  Without
-    ``turn`` every sample is read from the one map, which suits a round kernel.  Not with
-    ``mfmap``.
-
-    ``templates_at`` (one entry per source, None or a callable ``(x, y) -> template``): each
-    noise aperture and each bin of the radial band takes the template the callable gives for a
-    source at that pixel, the forward model of a source there, its own PSF, throughput and
-    self-subtraction included (:class:`klip_tpe.fmmf.FMTemplates`, NEAR2 note, 2026-11-01,
-    asked 2).  The band's bins are half a FWHM of arc wide, as under ``turn``, and each takes
-    the template at its center on the ring.  An entry takes the place of ``turn`` for its
-    source, whose own peak keeps the map of its kernel.  A sample the callable gives None for
-    is read off that map.  Not with ``mfmap``.
-
-    ``correlate`` (default True): the matched filter correlates the image with the kernel, the
-    template as a source looks, so a source shaped like it gives its own amplitude.  ``False``
-    convolves, which turns the template 180 deg first.  The two give the same map, to the bit,
-    for a kernel that is the same turned 180 deg (the Gaussian, an azimuthally averaged PSF),
-    and convolving loses part of a lopsided template's source, as an FMMF run saved before
-    2026-11-04 measured (``RunConfig.fmmf_correlate``, GitHub agent's finding 13).
-
-    The IDL ``near2_snrpk`` asked the guard of the located peak instead.  On a clean
-    image that peak is whichever noise pixel is highest within ``search_px``, and for a
-    source at 1.1 FWHM it lay inside 1 FWHM about half the time, so the clean term, and
-    with it the draw, failed while the injected image scored (NEAR2 note, 2026-10-13).
-    Where both guards pass, the S/N is the same.
+    Under ``turn`` and ``templates_at`` the band's pixels are filtered in bins half a FWHM of arc
+    wide, each with the template at its bin's center (NEAR2 note, 2026-11-01).  The source's own
+    peak keeps the map of its unturned kernel.  Correlating and convolving give the same map, to
+    the bit, for a kernel that is the same turned 180 deg, such as the Gaussian
+    (``RunConfig.fmmf_correlate``, GitHub agent's finding 13).
     """
     img = np.asarray(img, float)
     ny, nx = img.shape
@@ -936,7 +1538,7 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
             sd, bg = sd_band, mn_band
         elif sd_ring > 0:
             sd, bg = sd_ring, mn_ring
-        # nclean is the number of noise realisations this separation actually got, after
+        # nclean is the number of noise realizations this separation actually got, after
         # injected sources, known companions, the frame edge and the pixel mask have eaten
         # into the ring.  It decides whether the ring or the radial band is used, so it is
         # the quantity a source-count rule has to respect -- recorded so it can be checked.
@@ -971,7 +1573,44 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
 
 def _ring_rec(fn: str, shape, cx: float, cy: float, det: Dict[str, Any], fwhm: float, exr: float, ring, xs, ys,
               kx=(), ky=(), excl_arcs=(), **extra) -> Dict[str, Any]:
-    """One source's noise ring as :class:`RingRecorder` keeps it."""
+    """Build one source's noise ring as :class:`RingRecorder` keeps it.
+
+    Parameters
+    ----------
+    fn : str
+        Name of the S/N function that measured it.
+    shape : tuple of int
+        Shape of the image, ``(ny, nx)``.
+    cx : float
+        Column of the star, in pixels.
+    cy : float
+        Row of the star, in pixels.
+    det : dict
+        The source's details, as :func:`mawet_peak_snr` gives them.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    exr : float
+        Radius of the keep-outs, in pixels.
+    ring : sequence of list
+        Each aperture as ``[x, y, what]``.
+    xs : sequence of float
+        Columns of the sources, in pixels.
+    ys : sequence of float
+        Rows of the sources, in pixels.
+    kx : sequence of float, default ()
+        Columns of the known companions, in pixels.
+    ky : sequence of float, default ()
+        Rows of the known companions, in pixels.
+    excl_arcs : sequence of tuple, default ()
+        The arcs left out, as :func:`mawet_peak_snr` takes them.
+    extra : dict
+        More keys for the record.
+
+    Returns
+    -------
+    rec : dict
+        The record.
+    """
     rec = {"fn": fn, "shape": tuple(int(v) for v in shape), "center": (float(cx), float(cy)),
            "x": float(det.get("x", np.nan)), "y": float(det.get("y", np.nan)), "r": float(det.get("r", np.nan)),
            "nap": int(det.get("nap", 0) or 0), "fwhm": float(fwhm), "exr": float(exr),
@@ -989,26 +1628,46 @@ RING_RULE_KEYS = ("search_px", "excl_fwhm", "declip_nsig", "band_fwhm", "min_rin
                   "inner_fwhm")
 
 #: the rules of a run that measures as before 2026-11-01 (``RunConfig.verify_snr = "idl"``): the
-#: verify and the candidate search take the IDL verify's S/N (``near2v_snrfap``, a Gaussian
-#: kernel, no despike or band), param_verify the metric's defaults, and no ring or map outside
-#: the search the pixel mask
+#: verify and the candidate search take the S/N of the IDL predecessor's verify
+#: (``near2v_snrfap``, a Gaussian kernel, no despike or band), param_verify the metric's
+#: defaults, and no ring or map outside the search the pixel mask
 VERIFY_IDL: Dict[str, Any] = {"verify": "idl"}
 
 
 def verify_idl(rules: Optional[Dict[str, Any]]) -> bool:
-    """Do ``rules`` keep the measures of before 2026-11-01 (:data:`VERIFY_IDL`)?"""
+    """Tell whether ring rules keep the measures of before 2026-11-01 (:data:`VERIFY_IDL`).
+
+    Parameters
+    ----------
+    rules : dict or None
+        Ring rules, as :func:`ring_rules` gives them.
+
+    Returns
+    -------
+    old : bool
+        True when ``rules["verify"]`` is "idl".
+    """
     return bool(rules) and str(rules.get("verify", "")).lower() == "idl"
 
 
 def ring_rules(metric) -> Dict[str, Any]:
-    """The noise-ring rules of a run's metric (:class:`MawetPeakSNR`), for the S/N the verify
-    and the candidate search measure (:func:`klip_tpe.verify.snr_fap`): its matched filter
-    (``kernel_at``, its kernel at a separation), the peak search, the keep-outs, the despike,
-    the radial band, the shortest ring, the small-sample correction, the pixel mask, the inner
-    guard and ``flatten``.  Empty without such a metric, which leaves
-    :func:`mawet_peak_snr`'s own defaults.  A forward-model metric
-    (:class:`~klip_tpe.fmmf.FMMFSNR`) gives the kernel it falls back to, its measured one or the
-    Gaussian, since the verify has no forward model."""
+    """Return the noise-ring rules of a run's metric, for the verify's and the candidate search's S/N.
+
+    The rules are the keywords of :data:`RING_RULE_KEYS` the metric sets, ``kernel_at`` (its kernel
+    at a separation) and ``flatten``.  A forward-model metric (:class:`~klip_tpe.fmmf.FMMFSNR`) gives
+    the kernel it falls back to, its measured one or the Gaussian, since the verify has no forward
+    model.
+
+    Parameters
+    ----------
+    metric : MawetPeakSNR or None
+        The run's metric.
+
+    Returns
+    -------
+    rules : dict
+        The rules, empty without such a metric, which leaves :func:`mawet_peak_snr`'s own defaults.
+    """
     if metric is None or not hasattr(metric, "excl_fwhm"):
         return {}
     out: Dict[str, Any] = {k: getattr(metric, k) for k in RING_RULE_KEYS if hasattr(metric, k)}
@@ -1028,9 +1687,22 @@ def ring_rules(metric) -> Dict[str, Any]:
 
 
 def rule_kwargs(rules: Optional[Dict[str, Any]], rho: float, shape) -> Dict[str, Any]:
-    """:func:`mawet_peak_snr`'s keywords from :func:`ring_rules` for a source at ``rho``
-    (arcsec) in an image of ``shape``: the kernel there, and the pixel mask where it is the
-    image's size."""
+    """Turn ring rules into :func:`mawet_peak_snr`'s keywords for a source at one separation.
+
+    Parameters
+    ----------
+    rules : dict or None
+        Ring rules, as :func:`ring_rules` gives them.
+    rho : float
+        Separation of the source, in arcsec, where the kernel is taken.
+    shape : tuple of int
+        Shape of the image, ``(ny, nx)``.  A pixel mask of another shape is dropped.
+
+    Returns
+    -------
+    kwargs : dict
+        The keywords, with ``kernel`` the kernel at ``rho``.
+    """
     kw = {k: v for k, v in (rules or {}).items() if k in RING_RULE_KEYS}
     m = kw.get("pixel_mask")
     if m is not None and np.shape(m) != tuple(shape):
@@ -1043,8 +1715,27 @@ def rule_kwargs(rules: Optional[Dict[str, Any]], rho: float, shape) -> Dict[str,
 
 def matched_filter(img: np.ndarray, fwhm: float, rules: Optional[Dict[str, Any]] = None,
                    rho: Optional[float] = None) -> np.ndarray:
-    """The matched-filter map :func:`mawet_peak_snr` measures ``img`` on, under ``rules``
-    (:func:`ring_rules`): despiked, zero-filled and correlated with the kernel at ``rho``."""
+    """Return the matched-filter map :func:`mawet_peak_snr` measures an image on.
+
+    The image is despiked, zero-filled and correlated with the kernel the rules give at ``rho``.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image.
+    fwhm : float
+        FWHM of the PSF, in pixels, for the Gaussian kernel used when the rules give none.
+    rules : dict or None, default None
+        Ring rules, as :func:`ring_rules` gives them.  None despikes at 6 sigma and takes the
+        Gaussian.
+    rho : float or None, default None
+        Separation where the kernel is taken, in arcsec.  None takes 0.
+
+    Returns
+    -------
+    mfmap : ndarray, shape (ny, nx)
+        The matched-filter map.
+    """
     kw = rule_kwargs(rules, rho if rho is not None else 0.0, np.shape(img)) if rules else {}
     prep = _prepare(np.asarray(img, float), kw.get("declip_nsig", 6.0))
     k = kw.get("kernel")
@@ -1054,12 +1745,51 @@ def matched_filter(img: np.ndarray, fwhm: float, rules: Optional[Dict[str, Any]]
 
 def _ring_fluxes(img, cx, cy, sep, phi0, nap, aprad, excl_xy, exr, known_xy, skip=None, trace=None,
                  n_src=None, skip_k=(), pixel_mask=None):
-    """The ring's aperture sums.  ``trace``: a list that gets ``[x, y, what]`` for every
-    aperture (:class:`RingRecorder`), ``n_src`` the leading entries of ``excl_xy`` that are
-    sources (the rest are known companions).  ``skip_k``: ring positions left out by their
-    index, the source's neighbours in the IDL contrast generators.  ``pixel_mask``: an
-    aperture whose centre pixel it holds is left out, as :func:`mawet_peak_snr` leaves out a
-    sample there."""
+    """Return the aperture sums on a source's ring, the source's own position left out.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image.
+    cx : float
+        Column of the star, in pixels.
+    cy : float
+        Row of the star, in pixels.
+    sep : float
+        Radius of the ring, in pixels.
+    phi0 : float
+        Azimuth of the source from +x, in radians.
+    nap : int
+        Number of positions on the ring, the source's included.
+    aprad : float
+        Radius of the apertures, in pixels.
+    excl_xy : sequence of tuple of 2 floats
+        The ``(x, y)`` pixels whose keep-out the ring skips, the sources first.
+    exr : float
+        Radius of the keep-outs, in pixels.
+    known_xy : sequence of tuple of 2 floats
+        The ``(x, y)`` pixels of known companions, whose apertures are kept but flagged False in
+        ``ok``.
+    skip : callable or None, default None
+        Function ``(x, y) -> bool`` that leaves an aperture out, such as one in a sidelobe arc.
+    trace : list or None, default None
+        List that gets ``[x, y, what]`` for every aperture (:class:`RingRecorder`).
+    n_src : int or None, default None
+        Number of leading entries of ``excl_xy`` that are sources, the rest known companions.
+    skip_k : sequence of int, default ()
+        Ring positions left out by their index, the source's neighbors in the IDL predecessor's
+        contrast generators.
+    pixel_mask : ndarray of bool or None, default None
+        Pixels that leave out an aperture centered on them, as :func:`mawet_peak_snr` leaves out a
+        sample there.
+
+    Returns
+    -------
+    ref : ndarray
+        Sum of each aperture kept.
+    ok : ndarray of bool
+        True for each aperture kept clear of the known companions.
+    """
     ref, ok = [], []
     ny, nx = np.shape(img)
     mask = None if pixel_mask is None or np.shape(pixel_mask) != (ny, nx) else np.asarray(pixel_mask, bool)
@@ -1100,10 +1830,44 @@ def injection_difference_snr(img_inj: np.ndarray, img_clean: np.ndarray, rho, th
                              fwhm: float, *, excl_fwhm: float = 1.5,
                              known: Sequence[Tuple[float, float]] = (),
                              angle_convention: str = "pa") -> np.ndarray:
-    """Injection-recovery S/N (``near2_snr_inj``): signal = aperture flux of
-    ``inj - clean`` at the source, noise = scatter of same-radius apertures on the
-    clean image times ``sqrt(1+1/nap)`` (starved rings are resampled at half-FWHM
-    spacing but the penalty keeps the independent count)."""
+    """Measure the injection-recovery S/N of each source on the difference of two images.
+
+    The signal is the aperture flux of ``inj - clean`` at the source, and the noise the scatter of
+    the apertures on the clean image's ring at its radius, times ``sqrt(1 + 1/nap)``.  A ring with
+    fewer than 6 usable apertures is resampled at half-FWHM spacing, while the penalty keeps the
+    independent count.
+
+    Parameters
+    ----------
+    img_inj : ndarray, shape (ny, nx)
+        The image with the sources injected.
+    img_clean : ndarray, shape (ny, nx)
+        The same reduction without them.
+    rho : float or array_like
+        Separation of each source, in arcsec.
+    theta : float or array_like
+        Angle of each source, in degrees, read as ``angle_convention`` says.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels, twice the aperture radius.
+    excl_fwhm : float, default 1.5
+        Radius of the keep-out around each source and known companion, in FWHM.
+    known : sequence of tuple of 2 floats, default ()
+        Known companions, as ``(rho_arcsec, theta_deg)``.
+    angle_convention : {"pa", "math"}, default "pa"
+        How ``theta`` is read (:func:`source_xy`).
+
+    Returns
+    -------
+    snr : ndarray
+        S/N of each source, NaN when its ring keeps fewer than 2 apertures or its own aperture holds
+        no finite pixel.
+
+    Notes
+    -----
+    It does what ``near2_snr_inj`` does in the IDL predecessor.
+    """
     img_inj, img_clean = np.asarray(img_inj, float), np.asarray(img_clean, float)
     cx, cy = star_center(img_inj.shape)
     rho = np.atleast_1d(np.asarray(rho, float))
@@ -1142,19 +1906,55 @@ def aperture_mawet_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float,
                        known: Sequence[Tuple[float, float]] = (),
                        excl_arcs: Sequence[Tuple[float, float, float, float]] = (),
                        return_details: bool = False, pixel_mask: Optional[np.ndarray] = None):
-    """Plain aperture Mawet S/N of the IDL contrast generators (``contrastcurve_*.pro``):
-    ``(f_src - mean(ring)) / (std(ring) sqrt(1+1/n))`` with FWHM/2 apertures, the source's at
-    the given position (no peak search), ``n`` the apertures kept.  As there, the ring holds
-    ``ntheta = round(2 pi r / FWHM) - 1`` positions from the source's, and skips the source and
-    the position each side of it, or the source alone when ``ntheta < 6``.  The optimizer's
-    ``near2_snr`` placed ``floor(2 pi r / FWHM)`` and skipped 1.5 FWHM around the source, which
-    left the same ring but for a position now and then (to 2026-11-01).
+    """Measure each source's plain aperture S/N, as the IDL predecessor's contrast generators do.
 
-    The other sources, the ``known`` companions (1.5 FWHM, ``excl_fwhm``), ``excl_arcs`` (see
-    :func:`mawet_peak_snr`) and the ``pixel_mask`` (an aperture centred on it, as the run's
-    disk mask leaves out the search's samples) leave apertures out of the ring.
-    ``return_details`` adds each source's ``nclean``, the apertures used, and ``peak``, ``bg``
-    and ``sigma``, the source's flux and the ring's mean and scatter."""
+    The S/N is ``(f_src - mean(ring)) / (std(ring) sqrt(1 + 1/n))`` with apertures of radius FWHM/2,
+    the source's at its given position without a peak search, and ``n`` the apertures kept.  The
+    ring holds ``ntheta = round(2 pi r / FWHM) - 1`` positions counted from the source's and skips
+    the source and the position each side of it, or the source alone when ``ntheta < 6``.  The other
+    sources, the known companions, ``excl_arcs`` and ``pixel_mask`` leave apertures out.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image, with the star at ``((nx-1)/2, (ny-1)/2)``.
+    rho : float or array_like
+        Separation of each source, in arcsec.
+    theta : float or array_like
+        Angle of each source, in degrees, read as ``angle_convention`` says.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    excl_fwhm : float, default 1.5
+        Radius of the keep-out around the other sources and the known companions, in FWHM.
+    angle_convention : {"pa", "math"}, default "pa"
+        How ``theta`` is read (:func:`source_xy`).
+    known : sequence of tuple of 2 floats, default ()
+        Known companions, as ``(rho_arcsec, theta_deg)``.
+    excl_arcs : sequence of tuple of 4 floats, default ()
+        Arcs left out of the ring, as for :func:`mawet_peak_snr`.
+    return_details : bool, default False
+        Whether to also return each source's ring statistics.
+    pixel_mask : ndarray of bool or None, default None
+        Pixels that leave out an aperture centered on them, as the run's disk mask leaves out the
+        search's samples.
+
+    Returns
+    -------
+    snr : ndarray
+        S/N of each source, NaN when its ring keeps fewer than 2 apertures.
+    details : list of dict
+        [return_details=True] Each source's ``nclean`` and ``n_left``, the apertures used, ``nap``,
+        ``peak`` the source's flux, ``bg`` and ``sigma`` the ring's mean and scatter, and ``why``
+        for a NaN.
+
+    Notes
+    -----
+    The ring is that of the IDL predecessor's ``contrastcurve_*.pro``.  Its optimizer's
+    ``near2_snr`` placed ``floor(2 pi r / FWHM)`` positions and skipped 1.5 FWHM around the source,
+    which left the same ring but for a position now and then, as this function did to 2026-11-01.
+    """
     img = np.asarray(img, float)
     cx, cy = star_center(img.shape)
     rho = np.atleast_1d(np.asarray(rho, float))
@@ -1206,16 +2006,28 @@ def aperture_mawet_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float,
 # ----------------------------------------------------------------------------
 @dataclass
 class Sidelobes:
-    """The noise rings' sidelobe rule (:func:`sidelobe_snr`).
+    """The noise rings' sidelobe rule, for :func:`sidelobe_snr`.
 
-    ADI over-subtracts a source along the arc the field rotation sweeps at its radius,
-    ``+/- rotation_deg`` (never less than ``floor_fwhm`` FWHM of arc), within ``radial_fwhm``
-    FWHM of its separation.  Every injected source's arc and every known companion's are
-    left out of every source's noise ring.  Where fewer than ``min_apertures`` apertures
-    remain, ``mode="farthest"`` takes the ones farthest from the source, its own arc shrinking
-    to let them in, and ``mode="clean"`` measures the noise on the clean reduction's ring
-    through the source, which holds no injected source and so no sidelobes.  ``rotation_deg`` None: the floor
-    alone."""
+    ADI over-subtracts a source along the arc the field rotation sweeps at its radius, within
+    ``radial_fwhm`` FWHM of its separation.  Every injected source's arc and every known companion's
+    are left out of every source's noise ring.  Where fewer than ``min_apertures`` apertures remain,
+    ``mode`` decides where the noise comes from.
+
+    Attributes
+    ----------
+    rotation_deg : float or None, default None
+        Half width of the arcs, in degrees, the field rotation.  None takes the floor alone.
+    mode : {"farthest", "clean"}, default "farthest"
+        Fallback when too few apertures remain.  "farthest" takes the apertures farthest from the
+        source, its own arc shrinking to let them in, and "clean" measures the noise on the clean
+        reduction's ring through the source, which holds no injected source.
+    min_apertures : int, default 4
+        Minimum number of apertures a ring must keep.
+    floor_fwhm : float, default 2.0
+        Minimum half width of an arc, in FWHM of arc at its radius.
+    radial_fwhm : float, default 1.5
+        Radial half width of an arc, in FWHM.
+    """
 
     rotation_deg: Optional[float] = None
     mode: str = "farthest"
@@ -1224,7 +2036,20 @@ class Sidelobes:
     radial_fwhm: float = 1.5
 
     def half_width(self, r_px: float, fwhm: float) -> float:
-        """The arc's half-width (deg) at separation ``r_px``."""
+        """Return the half width of an arc at a separation.
+
+        Parameters
+        ----------
+        r_px : float
+            Separation, in pixels.
+        fwhm : float
+            FWHM of the PSF, in pixels.
+
+        Returns
+        -------
+        hw : float
+            Half width in degrees, the larger of ``rotation_deg`` and the floor, at most 180.
+        """
         floor = float(np.rad2deg(self.floor_fwhm * fwhm / max(float(r_px), 1e-6)))
         rot = self.rotation_deg
         if rot is None or not np.isfinite(rot):
@@ -1232,15 +2057,36 @@ class Sidelobes:
         return min(max(float(rot), floor), 180.0)
 
     def describe(self) -> Dict[str, Any]:
+        """Return the rule's settings, for a run's record.
+
+        Returns
+        -------
+        info : dict
+            The five fields.
+        """
         return {"rotation_deg": None if self.rotation_deg is None else float(self.rotation_deg),
                 "mode": str(self.mode), "min_apertures": int(self.min_apertures),
                 "floor_fwhm": float(self.floor_fwhm), "radial_fwhm": float(self.radial_fwhm)}
 
 
 def _farther_widths(nap: int, start_deg: float) -> List[float]:
-    """Half-widths below ``start_deg``, widest first, each admitting the next group of ring
-    apertures in order of their distance from the source (``nap`` on the ring, the source's
-    own at 0)."""
+    """Return the half widths below ``start_deg`` that let in the ring's apertures group by group.
+
+    Each half width admits the next group of apertures in order of their distance from the source,
+    widest first.
+
+    Parameters
+    ----------
+    nap : int
+        Number of positions on the ring, the source's own at 0.
+    start_deg : float
+        Half width of the source's own arc, in degrees.
+
+    Returns
+    -------
+    widths : list of float
+        The half widths, in degrees, widest first.
+    """
     step = 360.0 / max(int(nap), 1)
     dist = sorted({min(q, nap - q) * step for q in range(1, int(nap))}, reverse=True)
     return [d - 0.25 * step for d in dist if d - 0.25 * step < start_deg]
@@ -1250,31 +2096,68 @@ def sidelobe_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, sidel
                  img_clean: Optional[np.ndarray] = None, known: Sequence[Tuple[float, float]] = (),
                  measure: Optional[Callable] = None, angle_convention: str = "pa",
                  only: Optional[int] = None, drop: Sequence[str] = ("known",), **kw):
-    """Each source's S/N by ``measure`` (default :func:`mawet_peak_snr`) with
-    :class:`Sidelobes` noise rings, one source at a time: every source's arc and the known
-    companions' arcs left out of its ring, then the at-least-``min_apertures`` rule.
+    """Measure each source's S/N with :class:`Sidelobes` noise rings, one source at a time.
 
-    ``kw`` goes to ``measure``; :func:`mawet_peak_snr`'s ``min_ring`` defaults to
-    ``min_apertures``, so a ring that keeps them is used rather than the radial band.
-    Returns ``(snr, details)``.  Each source's details add ``arc_deg`` (its own arc's
-    half-width as measured), ``n_arcs`` (the apertures outside all the arcs) and ``fallback``:
-    None, ``"farthest"``, ``"farthest, known arcs too"`` or ``"clean"``.  With
-    ``mode="clean"`` and no ``img_clean`` the farthest apertures are taken.  The clean ring
-    runs through the injected source where the injected image located it (``peak_xy``), so
-    the two rings have one radius.  Where the fallback too leaves fewer than
-    ``min_apertures``, ``fallback_tried`` names it and ``n_fallback`` is the most apertures it
-    found: the whole ring's, with the source's own arc let in and then the known companions'
-    arcs, or the clean ring's.
+    Every source's arc and the known companions' arcs are left out of the source's ring, then the
+    rule of at least ``min_apertures`` apertures applies.  :func:`mawet_peak_snr`'s ``min_ring``
+    defaults to ``min_apertures``, so a ring that keeps them is used rather than the radial band.
 
-    ``drop``: what the farthest fallback lets in, one after the other, once the source's own arc
-    is gone: ``"known"`` the known companions' arcs (the default, the run's metric), ``"others"``
-    the other sources' arcs.  ``("others", "known")`` (the verify's) lets in the other sources'
-    arcs first, ``fallback`` then ``"farthest, the other sources' arcs too"``, and both last,
-    ``"farthest, every arc let in"``, the ring without the rule.  ``only``: measure that source
-    alone, the others giving their arcs (the rest of the returned S/N NaN).  Each source's
-    details hold the ``arcs`` its measurement left out, ``(rho, theta, half_width_deg,
-    radial_fwhm)``.  ``measure`` may take ``peak_xy`` (``measure.takes_peak_xy``), for the clean
-    ring through the injected source."""
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image, with the star at ``((nx-1)/2, (ny-1)/2)``.
+    rho : float or array_like
+        Separation of each source, in arcsec.
+    theta : float or array_like
+        Angle of each source, in degrees, read as ``angle_convention`` says.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    sidelobes : Sidelobes
+        The rule.
+    img_clean : ndarray or None, default None
+        The clean reduction, for ``mode="clean"``.  Without it that mode takes the farthest
+        apertures.
+    known : sequence of tuple of 2 floats, default ()
+        Known companions, as ``(rho_arcsec, theta_deg)``.
+    measure : callable or None, default None
+        S/N function with :func:`mawet_peak_snr`'s signature, which it defaults to.  It may take
+        ``peak_xy`` (``measure.takes_peak_xy``), for the clean ring through the injected source.
+    angle_convention : {"pa", "math"}, default "pa"
+        How ``theta`` is read (:func:`source_xy`).
+    only : int or None, default None
+        Index of the one source to measure, the others giving their arcs and a NaN S/N.  None
+        measures all.
+    drop : sequence of {"known", "others"}, default ("known",)
+        What the farthest fallback lets in, in order, once the source's own arc is gone.  "known"
+        lets in the known companions' arcs, as the run's metric does, and "others" the other
+        sources' arcs, which ``("others", "known")`` lets in first, as the verify does.
+    kw : dict
+        More keywords for ``measure``.
+
+    Returns
+    -------
+    snr : ndarray
+        S/N of each source.
+    details : list of dict
+        Each source's details from ``measure``, plus ``arcs`` (the arcs left out), ``arc_deg`` (its
+        own arc's half width), ``n_arcs`` (the apertures outside all the arcs) and ``fallback``.
+        Where the fallback too leaves fewer than ``min_apertures``, ``fallback_tried`` names it and
+        ``n_fallback`` is the most apertures it found.
+
+    Raises
+    ------
+    ValueError
+        If ``drop`` holds something other than "known" and "others".
+
+    Notes
+    -----
+    ``fallback`` is None, ``"farthest"``, ``"farthest, known arcs too"``,
+    ``"farthest, the other sources' arcs too"``, ``"farthest, every arc let in"`` (the ring without
+    the rule) or ``"clean"``.  The clean ring runs through the injected source where the injected
+    image located it (``peak_xy``), so the two rings have one radius.
+    """
     measure = measure or mawet_peak_snr
     rho = np.atleast_1d(np.asarray(rho, float))
     theta = np.atleast_1d(np.asarray(theta, float))
@@ -1321,9 +2204,64 @@ def sidelobe_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, sidel
 def _sidelobe_sources(n, only, src_arcs, rho, theta, hw, rad, known, known_arcs, img, img_clean, pxscale, fwhm,
                       sidelobes, measure, angle_convention, kw, min_ap, retained, drop, snr, dets, held, emits,
                       all_xy, n_left) -> None:
-    """:func:`sidelobe_snr`'s loop over the sources, filling ``snr`` and ``dets``.  ``held``:
-    the rings the measure recorded (a :class:`RingRecorder` is active), of which the attempt
-    each source kept goes into ``emits``."""
+    """Run :func:`sidelobe_snr`'s loop over the sources, filling ``snr`` and ``dets``.
+
+    Parameters
+    ----------
+    n : int
+        Number of sources.
+    only : int or None
+        Index of the one source to measure, or None for all.
+    src_arcs : list of tuple of 4 floats
+        Each source's arc, ``(rho, theta, half_width_deg, radial_fwhm)``.
+    rho : ndarray
+        Separation of each source, in arcsec.
+    theta : ndarray
+        Angle of each source, in degrees.
+    hw : list of float
+        Half width of each source's arc, in degrees.
+    rad : float
+        Radial half width of the arcs, in FWHM.
+    known : list of tuple of 2 floats
+        Known companions, as ``(rho_arcsec, theta_deg)``.
+    known_arcs : list of tuple of 4 floats
+        The known companions' arcs.
+    img : ndarray
+        The image.
+    img_clean : ndarray or None
+        The clean reduction, for ``mode="clean"``.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    sidelobes : Sidelobes
+        The rule.
+    measure : callable
+        The S/N function.
+    angle_convention : {"pa", "math"}
+        How ``theta`` is read.
+    kw : dict
+        More keywords for ``measure``.
+    min_ap : int
+        Minimum number of apertures a ring must keep.
+    retained : bool
+        Whether the clean fallback's penalty counts the apertures kept rather than the ring's
+        positions.
+    drop : sequence of str
+        What the farthest fallback lets in, as for :func:`sidelobe_snr`.
+    snr : ndarray
+        S/N of each source, filled in place.
+    dets : list
+        Details of each source, appended to.
+    held : list
+        Rings the measure recorded while a :class:`RingRecorder` is active, emptied as they are used.
+    emits : list
+        Ring records of the attempt each source kept, appended to.
+    all_xy : list of tuple of 2 floats
+        The ``(x, y)`` pixel of every source, for the records.
+    n_left : callable
+        Function that gives the apertures a ring kept after the exclusions, from its details.
+    """
     for i in range(n):
         others = src_arcs[:i] + src_arcs[i + 1:]
 
@@ -1410,13 +2348,22 @@ def _sidelobe_sources(n, only, src_arcs, rho, theta, hw, rad, known, known_arcs,
 # metric objects
 # ----------------------------------------------------------------------------
 class Metric:
-    """Callable ``(img_inj, img_clean, sources) -> per-source S/N``.
+    """Base class of the metrics, callables ``(img_inj, img_clean, sources) -> per-source S/N``.
 
-    A metric that sets ``needs_fm = True`` (:class:`~klip_tpe.fmmf.FMMFSNR`) asks the
-    runner for the KLIP-FM pass of the same configuration and is called with the extra
-    keyword ``fm=`` -- the forward-modelled response of the injected sources, from which
-    it builds its position-dependent matched filter.  ``fm=None`` must stay valid: the
-    k-scan path has no forward model, and the metric falls back there.
+    A metric that sets ``needs_fm`` True (:class:`~klip_tpe.fmmf.FMMFSNR`) asks the runner for the
+    KLIP-FM pass of the same configuration and is called with the keyword ``fm``, the forward-modeled
+    response of the injected sources, from which it builds its position-dependent matched filter.
+    ``fm=None`` must stay valid, since the k-scan path has no forward model and the metric falls back
+    there.
+
+    Attributes
+    ----------
+    name : str
+        Name of the metric, for a run's record.
+    needs_clean : bool
+        Whether the metric uses the clean image on every call.
+    needs_fm : bool
+        Whether the metric asks for the KLIP-FM pass.
     """
 
     name = "metric"
@@ -1424,32 +2371,89 @@ class Metric:
     needs_fm = False
 
     def per_source(self, img_inj, img_clean, rho, theta) -> np.ndarray:  # pragma: no cover
+        """Return each source's S/N.
+
+        Parameters
+        ----------
+        img_inj : ndarray, shape (ny, nx)
+            The image scored.
+        img_clean : ndarray or None
+            The clean reduction, for a metric that uses it.
+        rho : sequence of float
+            Separation of each source, in arcsec.
+        theta : sequence of float
+            Angle of each source, in degrees.
+
+        Returns
+        -------
+        snr : ndarray
+            S/N of each source.
+        """
         raise NotImplementedError
 
     def describe(self) -> Dict:
+        """Return the metric's settings, for a run's record.
+
+        Returns
+        -------
+        info : dict
+            ``name``, with more keys in subclasses.
+        """
         return {"name": self.name}
 
 
 @dataclass
 class MawetPeakSNR(Metric):
-    """Default search & validation metric (see :func:`mawet_peak_snr`).
+    """Default search and validation metric, the matched-filter S/N of :func:`mawet_peak_snr`.
 
-    ``kernel_fn(rho_arcsec) -> kernel`` lets an injection model supply the measured
-    matched filter at the sources' median separation; ``flatten`` applies
-    :func:`radprof` before scoring.
+    Attributes
+    ----------
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    kernel_fn : callable or None, default None
+        Function ``rho_arcsec -> kernel`` with which an injection model supplies its measured
+        matched filter at the sources' median separation.  None, or a None kernel, takes the
+        Gaussian.
+    mf_fwhm : float or None, default None
+        FWHM of the Gaussian matched filter, in pixels.  None takes ``fwhm``.
+    search_px : float, default 1.5
+        Radius of the peak search, in pixels.
+    excl_fwhm : float, default 1.5
+        Radius of the keep-outs, in FWHM.
+    known : sequence of tuple of 2 floats, default ()
+        Known companions, as ``(rho_arcsec, theta_deg)``.
+    declip_nsig : float or None, default 6.0
+        Threshold of the despike in robust sigma.  None does not despike.
+    band_fwhm : float, default 0.6
+        Half width of the radial band, in FWHM.
+    min_ring : int, default 6
+        Minimum number of clean ring samples for the ring to give the noise.
+    penalty : {"geometric", "retained"}, default "geometric"
+        Count in the small-sample penalty (:func:`mawet_peak_snr`).
+    pixel_mask : ndarray of bool or None, default None
+        Pixels left out of the noise samples, True to exclude.
+    flatten : bool, default False
+        Whether to subtract the azimuthal mean profile (:func:`radprof`) before scoring.
+    angle_convention : {"pa", "math"}, default "pa"
+        How the sources' angles are read (:func:`source_xy`).
+    name : str, default "mawet_peak"
+        Name of the metric, for a run's record.
+    inner_fwhm : float, default 1.0
+        Inner guard, in FWHM.  The :class:`~klip_tpe.runner.Runner` lowers it to the injection floor
+        when the floor is closer in (``RunConfig.min_r_fwhm``), so a run that injects there is
+        scored there.
 
-    ``flatten=False`` is the default, which is a deliberate divergence from the IDL --
-    every IDL variant flattens.  :func:`radprof` subtracts the azimuthal mean of each
-    integer-radius bin, so anything that is not azimuthally uniform at a given radius
-    leaks into that mean and is subtracted off the whole ring: a bright companion, the
-    MIRI 4QPM dead zones, a glow-stick residual.  On a ring the mask already eats, the
-    mean is taken over the surviving pixels and then removed from all of them, which
-    biases the very sources the metric is trying to measure.  Pass ``flatten=True`` to
-    restore the IDL behaviour.
-
-    ``inner_fwhm``: no S/N for a source placed inside this many FWHM of the star.  The
-    :class:`~klip_tpe.runner.Runner` lowers it to the injection floor when the floor is
-    closer in (``RunConfig.min_r_fwhm``), so a run that injects there is scored there."""
+    Notes
+    -----
+    ``flatten`` False departs from the IDL predecessor, every variant of which flattens.
+    :func:`radprof` subtracts the mean of each integer-radius bin, so anything not azimuthally uniform
+    at a radius leaks into that mean and is subtracted off the whole ring, such as a bright
+    companion, the MIRI 4QPM dead zones or a glow-stick residual.  On a ring the mask already eats,
+    the mean comes from the surviving pixels and is removed from all of them, which biases the
+    sources the metric measures.
+    """
 
     pxscale: float
     fwhm: float
@@ -1469,6 +2473,18 @@ class MawetPeakSNR(Metric):
     inner_fwhm: float = 1.0
 
     def kernel(self, rho) -> np.ndarray:
+        """Return the matched filter for sources at the given separations.
+
+        Parameters
+        ----------
+        rho : float or array_like
+            Separations of the sources, in arcsec, whose median is used.
+
+        Returns
+        -------
+        kernel : ndarray
+            The measured filter from ``kernel_fn``, or the Gaussian of ``mf_fwhm`` or ``fwhm``.
+        """
         if self.kernel_fn is not None:
             k = self.kernel_fn(float(np.nanmedian(np.atleast_1d(rho))))
             if k is not None:
@@ -1477,10 +2493,29 @@ class MawetPeakSNR(Metric):
 
     def per_source(self, img_inj, img_clean, rho, theta, why: Optional[list] = None,
                    sidelobes: Optional["Sidelobes"] = None) -> np.ndarray:
-        """Per-source S/N.  ``why``: a list, filled with each source's reason for a NaN
-        (None for a finite S/N).  ``sidelobes``: the noise rings leave out the sources' and
-        the known companions' ADI sidelobes (:func:`sidelobe_snr`); ``img_clean`` serves its
-        ``mode="clean"``."""
+        """Return each source's S/N on an image.
+
+        Parameters
+        ----------
+        img_inj : ndarray, shape (ny, nx)
+            The image scored.
+        img_clean : ndarray or None
+            The clean reduction, used only by ``sidelobes`` with ``mode="clean"``.
+        rho : sequence of float
+            Separation of each source, in arcsec.
+        theta : sequence of float
+            Angle of each source, in degrees.
+        why : list or None, default None
+            List filled with each source's reason for a NaN, None for a finite S/N.
+        sidelobes : Sidelobes or None, default None
+            Rule that leaves the sources' and the known companions' ADI sidelobes out of the noise
+            rings (:func:`sidelobe_snr`).  None uses plain rings.
+
+        Returns
+        -------
+        snr : ndarray
+            S/N of each source.
+        """
         img = radprof(img_inj) if self.flatten else np.asarray(img_inj, float)
         kw = dict(kernel=self.kernel(rho), search_px=self.search_px, excl_fwhm=self.excl_fwhm,
                   declip_nsig=self.declip_nsig, band_fwhm=self.band_fwhm, penalty=self.penalty,
@@ -1498,6 +2533,14 @@ class MawetPeakSNR(Metric):
         return snr
 
     def describe(self) -> Dict:
+        """Return the metric's settings, for a run's record.
+
+        Returns
+        -------
+        info : dict
+            The settings, with ``pixel_mask_px`` the number of masked pixels, since a masked noise
+            estimate is not comparable with an unmasked one.
+        """
         return {"name": self.name, "fwhm": self.fwhm, "pxscale": self.pxscale,
                 "mf_fwhm": self.mf_fwhm, "measured_kernel": self.kernel_fn is not None,
                 "search_px": self.search_px, "excl_fwhm": self.excl_fwhm,
@@ -1512,8 +2555,33 @@ class MawetPeakSNR(Metric):
 
 @dataclass
 class InjectionDifferenceSNR(Metric):
-    """Alternative metric on ``inj - clean`` (``use_noinj_noise`` in IDL).  Needs the
-    clean image on every call."""
+    """Metric on the difference of the injected and the clean images (:func:`injection_difference_snr`).
+
+    It needs the clean image on every call.
+
+    Attributes
+    ----------
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    excl_fwhm : float, default 1.5
+        Radius of the keep-outs, in FWHM.
+    known : sequence of tuple of 2 floats, default ()
+        Known companions, as ``(rho_arcsec, theta_deg)``.
+    flatten : bool, default False
+        Whether to subtract the azimuthal mean profile (:func:`radprof`) from both images first.
+    angle_convention : {"pa", "math"}, default "pa"
+        How the sources' angles are read (:func:`source_xy`).
+    name : str, default "injection_difference"
+        Name of the metric, for a run's record.
+    needs_clean : bool, default True
+        Whether the metric uses the clean image, always True here.
+
+    Notes
+    -----
+    It is the ``use_noinj_noise`` option of the IDL predecessor.
+    """
 
     pxscale: float
     fwhm: float
@@ -1525,6 +2593,29 @@ class InjectionDifferenceSNR(Metric):
     needs_clean: bool = True
 
     def per_source(self, img_inj, img_clean, rho, theta) -> np.ndarray:
+        """Return each source's S/N on the difference image.
+
+        Parameters
+        ----------
+        img_inj : ndarray, shape (ny, nx)
+            The reduction with the sources injected.
+        img_clean : ndarray
+            The clean reduction.
+        rho : sequence of float
+            Separation of each source, in arcsec.
+        theta : sequence of float
+            Angle of each source, in degrees.
+
+        Returns
+        -------
+        snr : ndarray
+            S/N of each source.
+
+        Raises
+        ------
+        ValueError
+            If ``img_clean`` is None.
+        """
         if img_clean is None:
             raise ValueError("InjectionDifferenceSNR needs the clean image")
         a = radprof(img_inj) if self.flatten else np.asarray(img_inj, float)
@@ -1534,12 +2625,35 @@ class InjectionDifferenceSNR(Metric):
                                         angle_convention=self.angle_convention)
 
     def describe(self) -> Dict:
+        """Return the metric's settings, for a run's record.
+
+        Returns
+        -------
+        info : dict
+            ``name``, ``fwhm``, ``pxscale``, ``excl_fwhm`` and ``known``.
+        """
         return {"name": self.name, "fwhm": self.fwhm, "pxscale": self.pxscale,
                 "excl_fwhm": self.excl_fwhm, "known": [list(k) for k in self.known]}
 
 
 @dataclass
 class ScoreResult:
+    """The objective's score of one draw.
+
+    Attributes
+    ----------
+    score : float
+        Aggregate of ``per_source``, NaN for a failed draw.
+    per_source : ndarray
+        Per-source values after the clean correction.
+    raw_per_source : ndarray
+        Per-source values on the injected image, uncorrected.
+    clean_per_source : ndarray or None, default None
+        Per-source values on the clean image, or None without a clean term.
+    why : str or None, default None
+        Why ``score`` is NaN, such as ``"clean S/N NaN (inside the inner guard)"``, or None when it
+        is not.
+    """
     score: float                         # aggregate (nan = failed)
     per_source: np.ndarray               # corrected per-source values
     raw_per_source: np.ndarray           # uncorrected injected-image values
@@ -1550,6 +2664,8 @@ class ScoreResult:
 
     @property
     def raw_score(self) -> float:
+        """Median of the uncorrected per-source values.
+        """
         return nanmedian_even(self.raw_per_source)
 
 
@@ -1557,7 +2673,20 @@ _TAKES_WHY: Dict[Any, bool] = {}
 
 
 def _takes(metric, name: str) -> bool:
-    """Does ``metric.per_source`` take the keyword ``name``?"""
+    """Tell whether a metric's ``per_source`` takes a keyword.
+
+    Parameters
+    ----------
+    metric : Metric
+        The metric.
+    name : str
+        Name of the keyword.
+
+    Returns
+    -------
+    takes : bool
+        True when the signature names it.  The answer is cached per function.
+    """
     ps = getattr(metric, "per_source", None)
     key = (getattr(ps, "__func__", ps), name)
     try:
@@ -1576,14 +2705,44 @@ def _takes(metric, name: str) -> bool:
 
 
 def _takes_why(metric) -> bool:
-    """Does ``metric.per_source`` take ``why=`` (see :meth:`MawetPeakSNR.per_source`)?"""
+    """Tell whether a metric's ``per_source`` takes ``why`` (see :meth:`MawetPeakSNR.per_source`).
+
+    Parameters
+    ----------
+    metric : Metric
+        The metric.
+
+    Returns
+    -------
+    takes : bool
+        True when the signature names ``why``.
+    """
     return _takes(metric, "why")
 
 
 def why_failed(raw, why_raw=None, clean=None, why_clean=None) -> str:
-    """Why an aggregate of per-source values is NaN: at each source, the image whose S/N
-    was NaN (the injected one first) and the metric's reason when it gave one, counted
-    over the sources."""
+    """Explain why an aggregate of per-source values is NaN.
+
+    At each source it names the image whose S/N was NaN, the injected one first, and the metric's
+    reason when it gave one, counted over the sources.
+
+    Parameters
+    ----------
+    raw : array_like
+        Per-source values on the injected image.
+    why_raw : list of str or None, default None
+        The metric's reason for each NaN in ``raw``.
+    clean : array_like or None, default None
+        Per-source values on the clean image.
+    why_clean : list of str or None, default None
+        The metric's reason for each NaN in ``clean``.
+
+    Returns
+    -------
+    why : str
+        The explanation, such as "clean S/N NaN (inside the inner guard) at 2 of 3 sources", or
+        "no sources".
+    """
     raw = np.atleast_1d(np.asarray(raw, float))
     if raw.size == 0:
         return "no sources"
@@ -1606,18 +2765,35 @@ def why_failed(raw, why_raw=None, clean=None, why_clean=None) -> str:
 
 
 class Objective:
-    """Turns per-source metric values into the scalar the optimizer maximises.
+    """Objective that turns per-source metric values into the scalar the optimizer maximizes.
 
-    ``clean_subtract=True`` (production): ``s = s_inj - max(s_clean, 0)`` per source,
-    a strictly one-sided penalty that removes speckle contamination at the injection
-    site but can never manufacture signal from a dark hole; NaN clean terms drop the
-    source from the aggregate.  Validation always uses :meth:`score_raw`.
+    With ``clean_subtract`` each source scores ``s_inj - max(s_clean, 0)``, a one-sided penalty that
+    removes speckle contamination at the injection site but never makes signal from a dark hole.  A
+    NaN clean term drops the source from the aggregate, and validation always uses
+    :meth:`score_raw`.
 
-    A metric that already consumes the clean image (``metric.needs_clean``, e.g.
-    :class:`InjectionDifferenceSNR` on ``inj - clean``) has the speckle term removed by
-    construction, so for it ``clean_subtract`` is a documented no-op: :meth:`score_search`
-    returns the raw ``metric(inj, clean)`` values with ``clean_per_source=None`` instead of
-    subtracting a second, ill-defined clean term (``metric(clean, None)`` would raise).
+    Parameters
+    ----------
+    metric : Metric
+        The per-source metric.
+    clean_subtract : bool, default True
+        Whether to subtract the clean image's score, as production runs do.  A metric that already
+        uses the clean image (``metric.needs_clean``) ignores it.
+    aggregate : {"median", "mean"}, default "median"
+        How the per-source values combine.
+
+    Attributes
+    ----------
+    sidelobes : Sidelobes or None
+        Noise rings' sidelobe rule, handed to a metric that takes it.  The
+        :class:`~klip_tpe.runner.Runner` sets it from ``RunConfig.sidelobes``.
+
+    Notes
+    -----
+    A metric that already uses the clean image, such as :class:`InjectionDifferenceSNR` on
+    ``inj - clean``, removes the speckle term by construction.  For it :meth:`score_search` returns
+    the raw values with ``clean_per_source`` None, instead of subtracting a second, ill-defined
+    clean term.
     """
 
     def __init__(self, metric: Metric, clean_subtract: bool = True, aggregate: str = "median"):
@@ -1630,15 +2806,29 @@ class Objective:
 
     @property
     def needs_clean(self) -> bool:
+        """Whether a search score needs the clean image.
+        """
         return self.clean_subtract or self.metric.needs_clean
 
     @property
     def effective_clean_subtract(self) -> bool:
-        """``clean_subtract`` as actually applied: False for a metric that already uses
-        the clean image (the difference metric), where the clean term is a no-op."""
+        """Whether the clean term is applied, False for a metric that already uses the clean image.
+        """
         return self.clean_subtract and not self.metric.needs_clean
 
     def _agg(self, v) -> float:
+        """Combine per-source values into one, over the finite ones.
+
+        Parameters
+        ----------
+        v : array_like
+            The per-source values.
+
+        Returns
+        -------
+        agg : float
+            Their median, or their mean with ``aggregate="mean"``, NaN when no value is finite.
+        """
         v = np.asarray(v, float)
         v = v[np.isfinite(v)]
         if v.size == 0:
@@ -1648,10 +2838,23 @@ class Objective:
         return float(np.median(v))
 
     def _fmkw(self, fm, fm_at=None) -> Dict:
-        """``fm`` reaches the metric only when it asked for it, so every existing
-        :class:`Metric` keeps its 4-argument signature.  ``fm_at``, the forward-model passes at
-        the noise apertures (:class:`klip_tpe.fmmf.FMTemplates`), only when there are some and
-        the metric takes them."""
+        """Return the forward-model keywords for the metric, only those it asked for.
+
+        Every :class:`Metric` without ``needs_fm`` keeps its 4-argument signature.
+
+        Parameters
+        ----------
+        fm : object or None
+            The KLIP-FM pass of the injected sources.
+        fm_at : object or None, default None
+            Forward-model passes at the noise apertures (:class:`klip_tpe.fmmf.FMTemplates`), passed
+            only to a metric that takes them.
+
+        Returns
+        -------
+        kwargs : dict
+            Empty, ``{"fm": fm}`` or ``{"fm": fm, "fm_at": fm_at}``.
+        """
         if not self.metric.needs_fm:
             return {}
         if fm_at is not None and _takes(self.metric, "fm_at"):
@@ -1659,8 +2862,28 @@ class Objective:
         return {"fm": fm}
 
     def _values(self, img, img_clean, rho, th, kw) -> Tuple[np.ndarray, Optional[List[Optional[str]]]]:
-        """The metric's per-source values, and each NaN one's reason when the metric can
-        give one (``why=``, asked only of a metric that takes it)."""
+        """Return the metric's per-source values, and each NaN's reason when the metric can give one.
+
+        Parameters
+        ----------
+        img : ndarray
+            The image scored.
+        img_clean : ndarray or None
+            The clean image passed to the metric.
+        rho : sequence of float
+            Separation of each source, in arcsec.
+        th : sequence of float
+            Angle of each source, in degrees.
+        kw : dict
+            More keywords for the metric, joined by ``sidelobes`` when the metric takes it.
+
+        Returns
+        -------
+        values : ndarray
+            The per-source values.
+        why : list of str or None
+            Each source's reason for a NaN, or None when the metric gives none.
+        """
         if self.sidelobes is not None and _takes(self.metric, "sidelobes"):
             kw = dict(kw, sidelobes=self.sidelobes)
         if not _takes_why(self.metric):
@@ -1670,6 +2893,26 @@ class Objective:
         return v, (why if len(why) == len(rho) else None)
 
     def score_raw(self, img_inj, sources: Sequence[Source], img_clean=None, fm=None, fm_at=None) -> ScoreResult:
+        """Score a draw on the injected image alone, as validation does.
+
+        Parameters
+        ----------
+        img_inj : ndarray, shape (ny, nx)
+            The reduction with the sources injected.
+        sources : sequence of Source
+            The injected sources.
+        img_clean : ndarray or None, default None
+            The clean reduction, for a metric that uses it.
+        fm : object or None, default None
+            The KLIP-FM pass, for a metric with ``needs_fm``.
+        fm_at : object or None, default None
+            Forward-model passes at the noise apertures, for a metric that takes them.
+
+        Returns
+        -------
+        result : ScoreResult
+            The score, with ``per_source`` equal to ``raw_per_source``.
+        """
         rho = [s.rho for s in sources]
         th = [s.theta for s in sources]
         raw, wr = self._values(img_inj, img_clean, rho, th, self._fmkw(fm, fm_at))
@@ -1677,6 +2920,34 @@ class Objective:
         return ScoreResult(agg, raw, raw, None, why=None if np.isfinite(agg) else why_failed(raw, wr))
 
     def score_search(self, img_inj, sources: Sequence[Source], img_clean=None, fm=None, fm_at=None) -> ScoreResult:
+        """Score a draw as the search does, with the clean term subtracted.
+
+        The clean term is filtered with the same kernels as the injected image, since the forward-model
+        template belongs to the configuration, not to the injection.
+
+        Parameters
+        ----------
+        img_inj : ndarray, shape (ny, nx)
+            The reduction with the sources injected.
+        sources : sequence of Source
+            The injected sources.
+        img_clean : ndarray or None, default None
+            The clean reduction, needed when the clean term applies.
+        fm : object or None, default None
+            The KLIP-FM pass, for a metric with ``needs_fm``.
+        fm_at : object or None, default None
+            Forward-model passes at the noise apertures, for a metric that takes them.
+
+        Returns
+        -------
+        result : ScoreResult
+            The score.
+
+        Raises
+        ------
+        ValueError
+            If the clean term applies and ``img_clean`` is None.
+        """
         rho = [s.rho for s in sources]
         th = [s.theta for s in sources]
         kw = self._fmkw(fm, fm_at)
@@ -1697,6 +2968,14 @@ class Objective:
         return ScoreResult(agg, corr, raw, cl, why=None if np.isfinite(agg) else why_failed(raw, wr, cl, wc))
 
     def describe(self) -> Dict:
+        """Return the objective's settings, for a run's record.
+
+        Returns
+        -------
+        info : dict
+            The metric's settings, ``clean_subtract``, ``effective_clean_subtract``, ``aggregate`` and
+            the sidelobe rule when the metric takes it.
+        """
         out = {"metric": self.metric.describe(), "clean_subtract": self.clean_subtract,
                "effective_clean_subtract": self.effective_clean_subtract, "aggregate": self.aggregate}
         if self.sidelobes is not None and _takes(self.metric, "sidelobes"):
