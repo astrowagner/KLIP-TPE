@@ -757,19 +757,93 @@ def reference_mask(angles: np.ndarray, target: int, angsep_deg: float, anglemax:
 
 @dataclass
 class KLIPParams:
-    """The settings of one :func:`klip_annular` reduction.
+    """Settings for one KLIP reduction made by :func:`klip_annular`.
 
-    ``k_klip``: the KL modes subtracted (0: none).  ``inrad``, ``outrad``: the zone's radii
-    (px), cut into ``n_ang`` sectors, each with a basis of its own.  ``fast``: one basis per
-    zone from all frames, else one per target frame.  ``angsep``: the least rotation between
-    a target and its references, in lambda/D of arc at the zone's mid radius.  ``anglemax``:
-    the most (deg).  ``n_min_ref``: target frames with fewer references are dropped.
-    ``spat_mean``: each frame's mean over the zone is subtracted.  ``temp_mean``: the
-    references' mean frame is subtracted.  ``k_scan``: the residuals for every k up to
-    ``k_klip``.  ``zone_center``: the zones' centre ``(x, y)`` px, by default
-    ``(nx/2, ny/2)`` as the IDL's ``getzone`` takes it, half a pixel from the star at
-    ``((nx-1)/2, (ny-1)/2)``.  ``threads``: the per-target path's frames go to that many
-    threads.  The other fields are described where they are defined."""
+    KLIP (Karhunen-Loeve Image Projection) removes the star's light from each frame of an
+    observation.  For each frame being cleaned, the *target* frame, it builds a model of the
+    starlight from other frames, the *reference* frames, and subtracts that model.  What is
+    left of a frame after the subtraction is its *residual* frame, ideally noise plus the
+    light of any planet.  The subtraction is done in a ring around the star, the *zone*,
+    which may be cut into sectors.
+
+    Attributes
+    ----------
+    k_klip : int, default 10
+        The number of KL modes subtracted from each frame.  KL modes are the main patterns in
+        which the starlight varies from one reference frame to the next, ordered from the
+        strongest to the weakest.  More modes remove more starlight but also more of a
+        planet's light, and 0 subtracts nothing.
+    inrad : float, default 0.0
+        The inner radius of the zone, in pixels from the star.  Pixels closer to the star are
+        not reduced and are NaN ("not a number", an empty pixel) in the output.
+    outrad : float, default 70.0
+        The outer radius of the zone, in pixels from the star.  Pixels farther from the star
+        are not reduced and are NaN in the output.
+    n_ang : int, default 1
+        The number of equal sectors, like slices of a pie, that the zone is cut into.  Each
+        sector gets its own model of the starlight, which can follow patterns that differ
+        around the star.  1 reduces the whole ring at once.
+    fast : bool, default False
+        False builds a separate starlight model for every target frame, from only the
+        reference frames that ``angsep`` and ``anglemax`` allow.  True builds one model per
+        zone from all the frames, the target included, and subtracts it from every frame.
+        That is quicker but removes more of a planet's light.
+    angsep : float, default 0.0
+        The least rotation of the sky a reference frame needs relative to the target frame,
+        in lambda/D of arc at the middle of the zone (lambda/D, the wavelength over the
+        telescope's diameter, is about the width of the star's image).  The sky, and so a
+        planet, turns around the star during the night, so a reference frame taken long
+        enough before or after the target holds the planet elsewhere and does not subtract
+        it.  0 allows every other frame.
+    anglemax : float, default 360.0
+        The most rotation of the sky, in degrees, a reference frame may have relative to the
+        target frame.  Frames taken long before or after the target match its starlight less
+        well.  360 sets no limit.
+    n_min_ref : int, default 10
+        The fewest reference frames a target frame needs when ``fast`` is False.  A frame with
+        fewer is left out of the result (all NaN).  If that would leave out so many frames
+        that fewer than ``max(n_min_ref, n/4)`` remain, no frame is left out.
+    spat_mean : bool, default False
+        True subtracts each frame's average over the zone (or sector) before the modelling,
+        so that only the variations around the average are modelled.  False leaves the
+        frames as they are.
+    temp_mean : bool, default False
+        True subtracts the average of the reference frames, pixel by pixel, from the target
+        and from the references before the modelling.  False leaves them as they are.
+    k_scan : bool, default False
+        True returns the residual frames for every number of KL modes from 1 to ``k_klip``,
+        not only for ``k_klip``.  The output then has an extra first dimension of length
+        ``k_klip``, so one call compares all those numbers of modes.
+    zone_center : tuple of 2 floats, or None, default None
+        The ``(x, y)`` pixel position the zone's radii and sectors are measured from.  None
+        takes ``(nx/2, ny/2)`` as the IDL code does, half a pixel from the star at
+        ``((nx-1)/2, (ny-1)/2)``, where the rotations of the frames are centred.
+    threads : int, default 1
+        The number of CPU threads that share the target frames when ``fast`` is False.  More
+        threads finish sooner on a computer with several cores, and the result is the same.
+    ref_lib : ReferenceLibrary or None, default None
+        A library of candidate reference frames, for RDI (reference-star differential
+        imaging), ranked by how well each matches each target frame
+        (:class:`klip_tpe.reflib.ReferenceLibrary`).  With one, the ``ref_cube`` given to
+        :func:`klip_annular` is the pool of candidates, and every target frame takes its own
+        best-matching frames from it.  None uses no library.
+    ref_keep : dict or None, default None
+        With ``ref_lib``, how many frames each group of the library gives every target, as
+        ``{group name: count}``.  A group not listed gives its most.
+    gram : {"target", "zone"}, default "target"
+        How the starlight model is computed when ``fast`` is False.  "target" computes it from
+        the reference frames' pixels for every target frame.  "zone" computes the product of
+        every pair of frames once per zone and reads each target's model off those products,
+        which is quicker and gives the same result to rounding.
+    arc_radii : tuple of 2 floats, or None, default None
+        The ``(inner, outer)`` radii in pixels whose middle is the radius at which ``angsep``
+        is turned into degrees of rotation.  klip-tpe sets it when the zone reaches beyond
+        the ring being optimized.  None takes ``inrad`` and ``outrad``.
+    zone_angles : {"ccw", "getzone2015"}, default "ccw"
+        How the sectors' angles are measured around ``zone_center``.  "ccw" measures
+        counterclockwise from the +x axis.  "getzone2015" measures as the 2015 IDL
+        ``getzone`` does, so the sectors hold the same pixels in the same order.
+    """
     k_klip: int = 10
     inrad: float = 0.0
     outrad: float = 70.0
