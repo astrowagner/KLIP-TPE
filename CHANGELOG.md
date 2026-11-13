@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — 2026-11-13 (contrast_grid.py and chainfit.py documented to the rule)
+
+- **`contrast_grid.py` and `chainfit.py` follow the documentation rule**: the injection-recovery
+  curve's settings, positions, iteration and summary, and the chain fit with its chain and node
+  files, line integral, bases and per-night fit.  Their docstrings and comments now name the IDL
+  predecessor where they named the IDL.  Only docstrings and comments changed.
+
 ## Unreleased — 2026-11-13 (parallel.py documented to the rule)
 
 - **`parallel.py` follows the documentation rule**: the worker budget, the thread pools, the

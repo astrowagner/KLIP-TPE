@@ -1,26 +1,26 @@
-"""Fit a chain of point sources to a finished run's final image, through the run's own winners.
+"""Fit of a chain of point sources to a finished run's final image, through the run's own winners.
 
-A feature fixed on the sky, such as the line through alpha Cen A along the A-B direction in the
-NEAR data, can be modelled as a chain of point sources whose contrasts follow a few node
-values.  :func:`fit_chain` takes each node's part of the chain (its *basis*) through every
-annulus' winning reduction with KLIP-FM, stitches the responses as the run stitched its final
-image, and fits the node values to that image by noise-weighted least squares in a strip about
-the line.  The fitted chain is written in the format ``--subtract-sources`` reads.
+A feature fixed on the sky, such as the line through alpha Cen A along the A-B direction in the NEAR
+data, can be modeled as a chain of point sources whose contrasts follow a few node values.
+:func:`fit_chain` takes each node's part of the chain (its basis) through every annulus' winning
+reduction with KLIP-FM, stitches the responses as the run stitched its final image, and fits the
+node values to that image by noise-weighted least squares in a strip about the line.  The fitted
+chain is written in the format ``--subtract-sources`` reads.
 
-The chain file has one source per line, ``rho pa contrast [node]``: ``rho`` in arcsec, ``pa``
-in degrees East of North, ``contrast`` in the injection model's flux unit, and an optional node
-label.  A node's basis is its lines, each source at the contrast it has per unit node value, so
-a source shared by two nodes (a linear interpolation between them) appears on two lines.  A
-file without labels is one node, and the fit then scales the whole chain.  The fitted value of
-a node multiplies its basis, and the fitted chain is the sum over the nodes.
+The chain file has one source per line, ``rho pa contrast [node]``: ``rho`` in arcsec, ``pa`` in
+degrees East of North, ``contrast`` in the injection model's flux unit, and an optional node label.
+A node's basis is its lines, each source at the contrast it has per unit node value, so a source
+shared by two nodes (a linear interpolation between them) appears on two lines.  A file without
+labels is one node, and the fit then scales the whole chain.  The fitted value of a node multiplies
+its basis, and the fitted chain is the sum over the nodes.
 
-A line can also be given by its nodes (:func:`read_line_nodes`): the PA of one half-line, the
-step between chain sources, and the ridge's peak contrast ``a`` at a few separations on each
-side, piecewise linear between them and held at the last value out to the crop edge.
-:func:`line_chain` turns that into the chain, each source at ``a(s) step / L`` with ``L`` the
-injection PSF's own line integral (:func:`psf_line_integral`), and :func:`line_basis` into one
-basis per node and side for the fit.  ``klip-tpe fit-chain --line-nodes FILE`` fits the node
-values, ``--subtract-line FILE`` subtracts the line a node file describes.
+A line can also be given by its nodes (:func:`read_line_nodes`): the PA of one half-line, the step
+between chain sources, and the ridge's peak contrast ``a`` at a few separations on each side,
+piecewise linear between them and held at the last value out to the crop edge.  :func:`line_chain`
+turns that into the chain, each source at ``a(s) step / L`` with ``L`` the injection PSF's own line
+integral (:func:`psf_line_integral`), and :func:`line_basis` into one basis per node and side for
+the fit.  ``klip-tpe fit-chain --line-nodes FILE`` fits the node values, and
+``--subtract-line FILE`` subtracts the line a node file describes.
 
 ``klip-tpe fit-chain --run-dir RUN --chain FILE`` runs the fit on the command line.
 """
@@ -40,9 +40,28 @@ __all__ = ["read_chain", "chain_pa", "read_candidates", "fit_chain", "read_line_
 
 
 def read_chain(path: str) -> Tuple[List[str], Dict[str, List[Source]]]:
-    """``(labels, {label: [Source, ...]})`` from a chain file, the labels in the order they
-    first appear.  Lines without a node label make the single node ``"all"``.  A file that
-    labels some lines and not others is refused."""
+    """Read a chain file into its nodes.
+
+    Lines without a node label make the single node ``"all"``, and a file that labels some lines and not
+    others is refused.
+
+    Parameters
+    ----------
+    path : str
+        Path of the file.
+
+    Returns
+    -------
+    labels : list of str
+        The node labels, in the order they first appear.
+    nodes : dict of str to list of Source
+        Each node's sources.
+
+    Raises
+    ------
+    ValueError
+        If a line is malformed, labels are mixed, or the file holds no sources.
+    """
     labels: List[str] = []
     nodes: Dict[str, List[Source]] = {}
     with_label = None
@@ -73,7 +92,9 @@ def read_chain(path: str) -> Tuple[List[str], Dict[str, List[Source]]]:
 
 
 def read_line_nodes(path: str) -> Dict[str, Any]:
-    """A line through the star, by its nodes.  The file holds keyword lines and node lines::
+    """Read a line through the star given by its nodes.
+
+    The file holds keyword lines and node lines::
 
         pa 13            # PA of the first half-line (deg), the second is pa + 180
         step 0.5         # px between chain sources along each half-line (default 0.5)
@@ -83,9 +104,26 @@ def read_line_nodes(path: str) -> Dict[str, Any]:
         1.5  2.0e-6  1.0e-6
 
     ``a`` is the ridge's peak contrast: across the line, the ridge peaks where a point source of
-    contrast ``a`` would.  A node line with only the separation leaves both values 0, as a fit
-    needs no values.  Returns ``{"pa", "step",
-    "rho_max", "nodes", "a1", "a2"}`` (``rho_max`` None for the crop edge)."""
+    contrast ``a`` would.  A node line with only the separation leaves both values 0, since a fit needs
+    no values.
+
+    Parameters
+    ----------
+    path : str
+        Path of the file.
+
+    Returns
+    -------
+    spec : dict
+        ``pa``, ``step``, ``rho_max`` (None for the crop edge), ``nodes`` (the separations, in arcsec),
+        ``a1`` and ``a2``.
+
+    Raises
+    ------
+    ValueError
+        If a line is malformed, there is no ``pa`` line, the nodes' separations are not positive and
+        increasing, or the step is not positive.
+    """
     spec: Dict[str, Any] = {"pa": None, "step": 0.5, "rho_max": None, "nodes": [], "a1": [], "a2": []}
     with open(path) as f:
         for i, line in enumerate(f, 1):
@@ -121,8 +159,25 @@ def read_line_nodes(path: str) -> Dict[str, Any]:
 def write_line_nodes(path: str, spec: Dict[str, Any], a1: Sequence[float], a2: Sequence[float],
                      e1: Optional[Sequence[float]] = None, e2: Optional[Sequence[float]] = None,
                      comment: str = "") -> None:
-    """A node file (:func:`read_line_nodes`) with the values ``a1`` / ``a2``, and their errors
-    as comments."""
+    """Write a node file (:func:`read_line_nodes`) with given values, and their errors as comments.
+
+    Parameters
+    ----------
+    path : str
+        Path of the file.
+    spec : dict
+        The line, from :func:`read_line_nodes`.
+    a1 : sequence of float
+        The values of the first half-line.
+    a2 : sequence of float
+        The values of the second half-line.
+    e1 : sequence of float or None, default None
+        Errors of ``a1``.
+    e2 : sequence of float or None, default None
+        Errors of ``a2``.
+    comment : str, default ""
+        A first comment line.
+    """
     with open(path, "w") as f:
         if comment:
             f.write(f"# {comment}\n")
@@ -136,13 +191,35 @@ def write_line_nodes(path: str, spec: Dict[str, Any], a1: Sequence[float], a2: S
 
 
 def psf_line_integral(model, rho: float, fallback=None, step: float = 0.25) -> float:
-    """``L = integral PSF(x, 0) dx / PSF(0, 0)`` (px) of the stamp a source at ``rho`` gets:
-    the line integral through the source along the radial direction, over the value at the
-    source.  A line through the star is radial everywhere, and an anisotropic model's stamp is
-    turned so its reference axis is radial (``refpa_deg``), so the integral runs along that
-    axis.  For a model without one it is the mean over directions.  A continuous line of
-    ``lambda`` contrast per px has a ridge of peak ``lambda L``, so sources ``step`` px apart
-    at ``a step / L`` make a ridge of peak ``a``."""
+    """Return the line integral of a source's stamp through the source over its value there, ``L = integral PSF(x, 0) dx / PSF(0, 0)``.
+
+    A line through the star is radial everywhere, and an anisotropic model's stamp is turned so its
+    reference axis is radial (``refpa_deg``), so the integral runs along that axis, and for a model
+    without one it is the mean over directions.  A continuous line of ``lambda`` contrast per px has a
+    ridge of peak ``lambda L``, so sources ``step`` px apart at ``a step / L`` make a ridge of peak
+    ``a``.
+
+    Parameters
+    ----------
+    model : InjectionModel
+        The injection model.
+    rho : float
+        Separation of the source, in arcsec.
+    fallback : InjectionModel or None, default None
+        Model used where ``model`` has no stamp.
+    step : float, default 0.25
+        Step of the integral, in pixels.
+
+    Returns
+    -------
+    L : float
+        The integral, in pixels.
+
+    Raises
+    ------
+    ValueError
+        If neither model has a stamp, or the stamp's value at its center is not positive.
+    """
     from scipy import ndimage
     m = model
     st, c, ok = m.stamp(rho)
@@ -169,14 +246,44 @@ def psf_line_integral(model, rho: float, fallback=None, step: float = 0.25) -> f
 
 
 def _line_positions(spec: Dict[str, Any], pxscale: float, rho_max: float) -> np.ndarray:
-    """The chain's separations (arcsec) along each half-line: every ``step`` px from the first
-    node out to ``rho_max``."""
+    """Return the chain's separations along each half-line, every ``step`` px from the first node out to ``rho_max``.
+
+    Parameters
+    ----------
+    spec : dict
+        The line, from :func:`read_line_nodes`.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    rho_max : float
+        The last separation, in arcsec.
+
+    Returns
+    -------
+    rho : ndarray
+        The separations, in arcsec.
+    """
     d = float(spec["step"]) * float(pxscale)
     r0 = float(spec["nodes"][0])
     return np.round(r0 + d * np.arange(int(np.floor((rho_max - r0) / d + 1e-9)) + 1), 9)
 
 
 def _rho_max(spec: Dict[str, Any], frame_shape: Tuple[int, int], pxscale: float) -> float:
+    """Return a line's outer separation, its ``rho_max`` or the crop's inscribed edge.
+
+    Parameters
+    ----------
+    spec : dict
+        The line, from :func:`read_line_nodes`.
+    frame_shape : tuple of 2 ints
+        Shape of the frames, ``(ny, nx)``.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+
+    Returns
+    -------
+    rho_max : float
+        The separation, in arcsec.
+    """
     if spec.get("rho_max") is not None:
         return float(spec["rho_max"])
     return 0.5 * (min(frame_shape) - 1) * float(pxscale)       # the crop's inscribed edge
@@ -184,13 +291,36 @@ def _rho_max(spec: Dict[str, Any], frame_shape: Tuple[int, int], pxscale: float)
 
 def line_chain(spec: Dict[str, Any], model, pxscale: float, frame_shape: Tuple[int, int], fallback=None,
                a1: Optional[Sequence[float]] = None, a2: Optional[Sequence[float]] = None) -> List[Source]:
-    """The chain of point sources for the line ``spec`` (:func:`read_line_nodes`), or for the
-    node values ``a1`` / ``a2`` in its place: a source every ``step`` px along each half-line
-    from the first node out to ``rho_max`` (default: the crop's inscribed edge), each at
-    ``a(s) step / L(s)``, with ``a`` piecewise linear between the nodes and held at the last
-    value beyond them, and ``L`` the injection PSF's line integral there
-    (:func:`psf_line_integral`).  The contrasts are the line's own, ready for
-    :meth:`~klip_tpe.reducer.KLIPReducer.subtract_sources`."""
+    """Return the chain of point sources of a line, or of node values in place of its own.
+
+    There is a source every ``step`` px along each half-line from the first node out to ``rho_max``
+    (the crop's inscribed edge by default), each at ``a(s) step / L(s)``, with ``a`` piecewise linear
+    between the nodes and held at the last value beyond them, and ``L`` the injection PSF's line
+    integral there (:func:`psf_line_integral`).  The contrasts are the line's own, ready for
+    :meth:`~klip_tpe.reducer.KLIPReducer.subtract_sources`.
+
+    Parameters
+    ----------
+    spec : dict
+        The line, from :func:`read_line_nodes`.
+    model : InjectionModel
+        The injection model.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    frame_shape : tuple of 2 ints
+        Shape of the frames, ``(ny, nx)``.
+    fallback : InjectionModel or None, default None
+        Model used where ``model`` has no stamp.
+    a1 : sequence of float or None, default None
+        Values of the first half-line in place of the spec's.
+    a2 : sequence of float or None, default None
+        Values of the second half-line in place of the spec's.
+
+    Returns
+    -------
+    sources : list of Source
+        The chain, the first half-line's sources first.
+    """
     nodes = np.asarray(spec["nodes"], float)
     v1 = np.asarray(spec["a1"] if a1 is None else a1, float)
     v2 = np.asarray(spec["a2"] if a2 is None else a2, float)
@@ -206,9 +336,31 @@ def line_chain(spec: Dict[str, Any], model, pxscale: float, frame_shape: Tuple[i
 
 def line_basis(spec: Dict[str, Any], model, pxscale: float, frame_shape: Tuple[int, int],
                fallback=None) -> Tuple[List[str], Dict[str, List[Source]]]:
-    """One basis chain per node and half-line for :func:`fit_chain`: the node at 1 and the
-    others at 0, so a fitted value is the ridge's peak contrast ``a`` at that node.  Labels
-    ``a1_<s>`` (first half-line, PA ``pa``) and ``a2_<s>`` (second, ``pa + 180``)."""
+    """Return one basis chain per node and half-line, for :func:`fit_chain`.
+
+    Each basis holds its node at 1 and the others at 0, so a fitted value is the ridge's peak contrast
+    ``a`` at that node.
+
+    Parameters
+    ----------
+    spec : dict
+        The line, from :func:`read_line_nodes`.
+    model : InjectionModel
+        The injection model.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    frame_shape : tuple of 2 ints
+        Shape of the frames, ``(ny, nx)``.
+    fallback : InjectionModel or None, default None
+        Model used where ``model`` has no stamp.
+
+    Returns
+    -------
+    labels : list of str
+        ``a1_<s>`` for the first half-line (PA ``pa``) and ``a2_<s>`` for the second (``pa + 180``).
+    basis : dict of str to list of Source
+        Each label's chain.
+    """
     nodes = np.asarray(spec["nodes"], float)
     rho = _line_positions(spec, pxscale, _rho_max(spec, frame_shape, pxscale))
     step = float(spec["step"])
@@ -227,9 +379,28 @@ def line_basis(spec: Dict[str, Any], model, pxscale: float, frame_shape: Tuple[i
 
 
 def chain_pa(nodes: Dict[str, Sequence[Source]], tol_deg: float = 5.0) -> float:
-    """The position angle of the line the chain lies on, in [0, 180): the circular mean of
-    the sources' PAs folded onto one side.  Refused when they spread more than ``tol_deg``
-    about it, since the chain is then not one line (give ``line_pa`` instead)."""
+    """Return the position angle of the line a chain lies on, in [0, 180).
+
+    It is the circular mean of the sources' PAs folded onto one side.
+
+    Parameters
+    ----------
+    nodes : dict of str to sequence of Source
+        The chain's nodes.
+    tol_deg : float, default 5.0
+        Largest spread of the PAs about the mean, in degrees.
+
+    Returns
+    -------
+    pa : float
+        The position angle, in degrees.
+
+    Raises
+    ------
+    ValueError
+        If the PAs spread more than ``tol_deg``, the chain then not being one line (``line_pa`` gives
+        it instead).
+    """
     pas = np.array([s.theta for src in nodes.values() for s in src], float)
     z = np.exp(2j * np.deg2rad(pas))
     mean = 0.5 * np.rad2deg(np.angle(z.mean())) % 180.0
@@ -241,7 +412,18 @@ def chain_pa(nodes: Dict[str, Sequence[Source]], tol_deg: float = 5.0) -> float:
 
 
 def read_candidates(path: str) -> List[Dict[str, Any]]:
-    """The rows of a run's ``cand/candidates.txt``: ``rho`` (arcsec), ``pa``, ``snr``, ``tier``."""
+    """Read the rows of a run's ``cand/candidates.txt``.
+
+    Parameters
+    ----------
+    path : str
+        Path of the file.
+
+    Returns
+    -------
+    rows : list of dict
+        ``rho`` (arcsec), ``pa``, ``snr`` and ``tier`` per candidate, empty when the file is missing.
+    """
     out = []
     if not os.path.exists(path):
         return out
@@ -259,8 +441,29 @@ def read_candidates(path: str) -> List[Dict[str, Any]]:
 
 
 def _radial_sigma(img: np.ndarray, keep: np.ndarray, rr: np.ndarray, width: float) -> np.ndarray:
-    """Robust scatter (1.4826 x MAD) of ``img`` over ``keep`` in rings ``width`` px wide,
-    interpolated to every pixel's radius."""
+    """Return the robust scatter (1.4826 MAD) of an image in rings, interpolated to every pixel's radius.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image.
+    keep : ndarray of bool, shape (ny, nx)
+        Pixels the scatter is measured on.
+    rr : ndarray, shape (ny, nx)
+        Each pixel's radius, in pixels.
+    width : float
+        Width of the rings, in pixels.
+
+    Returns
+    -------
+    sigma : ndarray, shape (ny, nx)
+        The scatter at each pixel's radius, from the rings with at least 10 pixels.
+
+    Raises
+    ------
+    ValueError
+        If fewer than 10 pixels are kept, or no ring holds 10.
+    """
     r = rr[keep]
     if r.size < 10:
         raise ValueError("too few pixels outside the strip and the masks to measure the noise")
@@ -278,7 +481,29 @@ def _radial_sigma(img: np.ndarray, keep: np.ndarray, rr: np.ndarray, width: floa
 
 def _span(rr: np.ndarray, edges: Sequence[float], rho_range: Optional[Tuple[float, float]],
           pxscale: float) -> np.ndarray:
-    """The pixels inside the run's annuli (``edges`` in px) and inside ``rho_range`` (arcsec)."""
+    """Return the pixels inside the run's annuli and inside a radial range.
+
+    Parameters
+    ----------
+    rr : ndarray, shape (ny, nx)
+        Each pixel's radius, in pixels.
+    edges : sequence of float
+        The annuli's edges, in pixels.
+    rho_range : tuple of 2 floats or None
+        The range ``(rmin, rmax)``, in arcsec, or None for no range.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+
+    Returns
+    -------
+    span : ndarray of bool, shape (ny, nx)
+        True inside both.
+
+    Raises
+    ------
+    ValueError
+        If the range is not ``0 <= rmin < rmax`` or lies outside the annuli.
+    """
     span = (rr >= edges[0]) & (rr <= edges[-1])
     if rho_range is not None:
         lo, hi = float(rho_range[0]), float(rho_range[1])
@@ -299,31 +524,63 @@ def fit_chain(runner, nodes: Dict[str, Sequence[Source]], labels: Optional[Seque
               log: Callable[[str], None] = print) -> Dict[str, Any]:
     """Fit the node values of a chain to a finished run's final image.
 
-    ``runner`` is a :class:`~klip_tpe.runner.Runner` on the finished run, built with the
-    reducer the run used (:meth:`Runner.resume` checks the frames).  For every node, the
-    node's sources go through each annulus' winning configuration as the KLIP-FM model
-    (:meth:`Runner._reduce` with ``fm_sources``, so the zones, padding and known-source
-    subtraction are the run's), and the FM images are stitched with the final stitch's
-    weights and tiles.  The node values ``a`` then minimize
-    ``sum w (image - sum_n a_n M_n)^2`` over the pixels within ``halfwidth_px`` of the line
-    through the star at ``line_pa`` (default: the chain's own line, :func:`chain_pa`), inside
-    the run's annuli (and inside ``rho_range``, ``(rmin, rmax)`` in arcsec, when given), with
-    ``w = 1 / sigma(r)^2`` from the robust scatter of the image outside the strip.  A node
-    that puts no signal in that region (beyond the run's annuli, say) is refused rather than
-    reported as 0 +- 0.  Masked out: circles ``(rho_arcsec, pa_deg, radius_px)`` from ``masks``
-    (``radius_px`` None: 1.5 FWHM), the run's known sources (``mask_known``), and the run's
-    candidates of the tiers in ``candidate_tiers`` (``"A"``, ``"AB"``; the line's own peaks
-    can be listed as candidates, so name only tiers that are not the line).
+    For every node, the node's sources go through each annulus' winning configuration as the KLIP-FM
+    model (:meth:`Runner._reduce` with ``fm_sources``, so the zones, padding and known-source
+    subtraction are the run's), and the FM images are stitched with the final stitch's weights and
+    tiles.  The node values ``a`` then minimize ``sum w (image - sum_n a_n M_n)^2`` over the pixels
+    within ``halfwidth_px`` of the line through the star at ``line_pa``, inside the run's annuli and
+    ``rho_range``, with ``w = 1 / sigma(r)^2`` from the robust scatter of the image outside the strip.
+    A node that puts no signal in that region, beyond the run's annuli say, is refused rather than
+    reported as 0 +- 0.
 
     The errors are the least-squares ones scaled by the square root of the pixels per beam,
-    ``pi (FWHM / 2)^2``, since neighboring pixels are not independent.  Writes, under
-    ``out_dir`` (default ``<run>_chainfit`` beside the run, which is left as it is):
+    ``pi (FWHM / 2)^2``, since neighboring pixels are not independent.  Under ``out_dir`` it writes
     ``chainfit.json``, ``chain_fitted.txt`` (the fitted chain, ``rho pa contrast``),
-    ``chainfit_model.fits``, ``chainfit_residual.fits``, ``chainfit_basis.fits`` (one stitched
-    FM image per node, in the order of the labels) and ``chainfit_region.fits`` (1 where a
-    pixel entered the fit).  With ``line_spec`` (the nodes the basis came from,
-    :func:`line_basis`) also ``line_fitted.txt``, a node file with the fitted values.  Returns
-    the JSON's content."""
+    ``chainfit_model.fits``, ``chainfit_residual.fits``, ``chainfit_basis.fits`` (one stitched FM image
+    per node, in the order of the labels), ``chainfit_region.fits`` (1 where a pixel entered the fit)
+    and, with ``line_spec``, ``line_fitted.txt``, a node file with the fitted values.
+
+    Parameters
+    ----------
+    runner : Runner
+        The finished run, built with the reducer the run used (:meth:`Runner.resume` checks the
+        frames).
+    nodes : dict of str to sequence of Source
+        The chain's nodes, each source at its contrast per unit node value.
+    labels : sequence of str or None, default None
+        The nodes fitted, in order.  None takes every node.
+    line_pa : float or None, default None
+        Position angle of the line, in degrees.  None takes the chain's own line (:func:`chain_pa`).
+    halfwidth_px : float, default 12.0
+        Half-width of the strip about the line, in pixels.
+    masks : sequence of tuple, default ()
+        Circles left out, ``(rho_arcsec, pa_deg, radius_px)``, a None radius taking 1.5 FWHM.
+    mask_known : bool, default True
+        Whether to leave out the run's known sources.
+    candidate_tiers : str, default ""
+        Tiers of the run's candidates to leave out, such as "A" or "AB".  The line's own peaks can be
+        listed as candidates, so only tiers that are not the line belong here.
+    out_dir : str or None, default None
+        Directory of the products.  None takes ``<run>_chainfit`` beside the run, which is left as it is.
+    line_spec : dict or None, default None
+        The nodes the basis came from (:func:`line_basis`), for ``line_fitted.txt``.
+    rho_range : tuple of 2 floats or None, default None
+        Radial range of the fit, ``(rmin, rmax)`` in arcsec.
+    log : callable, default print
+        Function that takes each line of the log.
+
+    Returns
+    -------
+    record : dict
+        The content of ``chainfit.json``: each node's value and errors, the covariance, the line, the
+        annuli, the fit's statistics, the masks and the notes on the noise and the errors.
+
+    Raises
+    ------
+    ValueError
+        If a label has no sources, the run has not finished, the reducer has no KLIP-FM, an annulus'
+        images are missing, the region holds too few pixels, or a node puts no signal in it.
+    """
     from .stitch import read_fits, stitch_tiles, write_fits
     t0 = time.time()
     labels = list(labels) if labels is not None else list(nodes)
@@ -493,16 +750,48 @@ def fit_per_night(runner, chain: Sequence[Source], *, line_pa: Optional[float] =
                   masks: Sequence[Tuple[float, float, Optional[float]]] = (), mask_known: bool = True,
                   out_dir: Optional[str] = None, rho_range: Optional[Tuple[float, float]] = None,
                   log: Callable[[str], None] = print) -> Dict[str, Any]:
-    """One amplitude per partition (night) for a chain whose shape is held fixed: does the line
-    follow something that changes from night to night?
+    """Fit one amplitude per partition (night) to a chain whose shape is held fixed.
 
-    The chain goes through every annulus' winner as the KLIP-FM model, as in :func:`fit_chain`,
-    and each night's FM images and its own clean images (``best_clean_partitions.fits``) are
-    stitched night by night with the final stitch's weights and tiles.  Each night's amplitude
-    ``s`` minimizes ``sum w (clean - s FM)^2`` over the strip (inside ``rho_range`` when given,
-    as in :func:`fit_chain`), with ``w`` from that night's scatter outside it.  1 means the
-    night holds the chain as given.  Writes
-    ``per_night.json`` under ``out_dir`` (default ``<run>_chainfit``) and returns it."""
+    It asks whether the line follows something that changes from night to night.  The chain goes
+    through every annulus' winner as the KLIP-FM model, as in :func:`fit_chain`, and each night's FM
+    images and its own clean images (``best_clean_partitions.fits``) are stitched night by night with
+    the final stitch's weights and tiles.  Each night's amplitude ``s`` minimizes
+    ``sum w (clean - s FM)^2`` over the strip, inside ``rho_range`` where given, with ``w`` from that
+    night's scatter outside it, so 1 means the night holds the chain as given.  It writes
+    ``per_night.json`` under ``out_dir``.
+
+    Parameters
+    ----------
+    runner : Runner
+        The finished run.
+    chain : sequence of Source
+        The chain, its contrasts as fitted.
+    line_pa : float or None, default None
+        Position angle of the line, in degrees.  None takes the chain's own line.
+    halfwidth_px : float, default 12.0
+        Half-width of the strip, in pixels.
+    masks : sequence of tuple, default ()
+        Circles left out, ``(rho_arcsec, pa_deg, radius_px)``.
+    mask_known : bool, default True
+        Whether to leave out the run's known sources.
+    out_dir : str or None, default None
+        Directory of the product.  None takes ``<run>_chainfit``.
+    rho_range : tuple of 2 floats or None, default None
+        Radial range of the fit, ``(rmin, rmax)`` in arcsec.
+    log : callable, default print
+        Function that takes each line of the log.
+
+    Returns
+    -------
+    record : dict
+        The content of ``per_night.json``.
+
+    Raises
+    ------
+    ValueError
+        If the run has not finished, kept no per-partition images, or its reducer gives no per-partition
+        KLIP-FM images.
+    """
     from .stitch import stitch_stacks
     results = [r for r in (runner.results or []) if r is not None]
     if not results or len(results) < runner.cfg.nann:
