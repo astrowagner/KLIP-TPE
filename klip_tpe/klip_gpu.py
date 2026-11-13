@@ -1,21 +1,23 @@
 """klip-tpe's NEAR-style reduction of one night on the card (CuPy), step by step.
 
-The chain gpu_bench.py / gpu_validate.py have run since 2026-10-12, lifted out of the benchmark so a
-reducer can call it: the frames' selection, the injection of sources, the high-pass, the binning,
-annular KLIP in the Gram-matrix formulation, the residuals' high-pass, the derotation and the
-noise-weighted combination.  Everything runs on the device; the night's image comes back.
+It is the chain ``gpu_bench.py`` and ``gpu_validate.py`` have run since 2026-10-12, lifted out of
+the benchmark so a reducer can call it: the frames' selection, the injection of sources, the
+high-pass, the binning, annular KLIP in the Gram-matrix formulation, the residuals' high-pass, the
+derotation and the noise-weighted combination.  Everything runs on the device, and the night's
+image comes back.
 
-Numerics, as validated (gpu_benchmark_plan.md sections 6, 9, 12; gpu_validate.py --check on every
-run, <= 1e-5 of the image noise): frames in float32 on the device, the high-pass in the frames'
-precision, the Gram matrix in float64, the eigendecomposition in float64 with cuSOLVER's batched
-divide-and-conquer solver (``eigh="xbatched64"``), the projection, derotation and combination in
-float64, klip-tpe's absolute 1e-6 as the only eigenvalue threshold.
+The numerics are as validated (``gpu_benchmark_plan.md`` sections 6, 9 and 12, and
+``gpu_validate.py --check`` on every run, within 1e-5 of the image noise): frames in float32 on the
+device, the high-pass in the frames' precision, the Gram matrix in float64, the eigendecomposition
+in float64 with cuSOLVER's batched divide-and-conquer solver (``eigh="xbatched64"``), the
+projection, derotation and combination in float64, and klip-tpe's absolute 1e-6 as the only
+eigenvalue threshold.
 
-New here: the per-target eigenproblems are solved on each target's own ``n_ref x n_ref``
-sub-matrix, targets grouped into size classes (``compact`` = the class step; 0 = the benchmark's
-padded M x M stack).  The same eigenpairs to rounding, (n_ref/M)^3 of the work.
+New here, the per-target eigenproblems are solved on each target's own ``n_ref x n_ref``
+sub-matrix, the targets grouped into size classes (``compact`` the class step, 0 the benchmark's
+padded M x M stack).  They give the same eigenpairs to rounding for (n_ref/M)^3 of the work.
 
-With no CuPy the same code runs on NumPy / SciPy (``Backend("numpy")``), for tests.
+Without CuPy the same code runs on NumPy and SciPy (``Backend("numpy")``), for tests.
 """
 from __future__ import annotations
 
@@ -29,7 +31,22 @@ EIG_TOL = 1e-6          # klip_basis's absolute eigenvalue threshold: the only o
 
 # ----------------------------------------------------------------------------- backend
 class Backend:
-    """numpy/scipy or cupy/cupyx behind one name."""
+    """NumPy and SciPy, or CuPy and cupyx, behind one name.
+
+    Parameters
+    ----------
+    name : {"cupy", "numpy"}, default "cupy"
+        The backend.
+
+    Attributes
+    ----------
+    xp : module
+        The array module, ``cupy`` or ``numpy``.
+    ndi : module
+        The ndimage module.
+    is_gpu : bool
+        Whether the arrays live on the card.
+    """
 
     def __init__(self, name: str = "cupy"):
         self.name = name
@@ -46,27 +63,75 @@ class Backend:
         self._xsyev = None
 
     def sync(self) -> None:
+        """Wait for the card to finish its work, on the card only.
+        """
         if self.is_gpu:
             self.cp.cuda.Device().synchronize()
 
     def asnumpy(self, a):
+        """Return an array on the host.
+
+        Parameters
+        ----------
+        a : array_like
+            The array.
+
+        Returns
+        -------
+        array : ndarray
+            The array as NumPy.
+        """
         return self.cp.asnumpy(a) if self.is_gpu else np.asarray(a)
 
     def to_dev(self, a, dtype=None):
+        """Return an array on the device.
+
+        Parameters
+        ----------
+        a : array_like
+            The array.
+        dtype : dtype or None, default None
+            Its type on the device.  None keeps its own.
+
+        Returns
+        -------
+        array : ndarray or cupy.ndarray
+            The array on the device.
+        """
         a = np.asarray(a) if dtype is None else np.asarray(a, dtype)
         return self.xp.asarray(a)
 
     def scatter_add(self, target_flat, idx, vals) -> None:
+        """Add values into a flat array at indices, repeated indices adding up.
+
+        Parameters
+        ----------
+        target_flat : ndarray or cupy.ndarray
+            The flat array, changed in place.
+        idx : ndarray or cupy.ndarray
+            The indices.
+        vals : ndarray or cupy.ndarray
+            The values.
+        """
         if self.is_gpu:
             self._cupyx.scatter_add(target_flat, idx, vals)
         else:
             np.add.at(target_flat, idx, vals)
 
     def free_pool(self) -> None:
+        """Give the CuPy memory pool's free blocks back to the card, on the card only.
+        """
         if self.is_gpu:
             self.cp.get_default_memory_pool().free_all_blocks()
 
     def device_name(self) -> str:
+        """Return the card's name, or "numpy" on the host.
+
+        Returns
+        -------
+        name : str
+            The name.
+        """
         if not self.is_gpu:
             return "numpy"
         props = self.cp.cuda.runtime.getDeviceProperties(self.cp.cuda.Device().id)
@@ -74,11 +139,26 @@ class Backend:
         return name.decode() if isinstance(name, bytes) else str(name)
 
     def eigh(self, A, mode: str = "xbatched64"):
-        """Eigendecomposition of a C-contiguous stack (N, n, n): ``(w ascending (N, n), V (N, n, n))``
-        with ``V[i][:, j]`` the j-th eigenvector.  ``A`` may be overwritten.
-        xbatched64 / xbatched32: cuSOLVER's batched divide-and-conquer (cusolverDnXsyevBatched);
-        jacobi64 / jacobi32: cupy.linalg.eigh on the stack (cusolverDn<t>syevjBatched).
-        On NumPy every mode is numpy.linalg.eigh."""
+        """Eigendecompose a C-contiguous stack of symmetric matrices.
+
+        ``"xbatched64"`` and ``"xbatched32"`` use cuSOLVER's batched divide-and-conquer
+        (``cusolverDnXsyevBatched``), and ``"jacobi64"`` and ``"jacobi32"`` ``cupy.linalg.eigh`` on the
+        stack (``cusolverDn<t>syevjBatched``).  On NumPy every mode is ``numpy.linalg.eigh``.
+
+        Parameters
+        ----------
+        A : array, shape (N, n, n)
+            The stack, which may be overwritten.
+        mode : str, default "xbatched64"
+            The solver, its last two characters giving the precision.
+
+        Returns
+        -------
+        w : array, shape (N, n)
+            The eigenvalues, ascending.
+        V : array, shape (N, n, n)
+            The eigenvectors, ``V[i][:, j]`` the j-th of matrix ``i``.
+        """
         xp = self.xp
         dt = xp.float64 if mode.endswith("64") else xp.float32
         A = xp.ascontiguousarray(A, dtype=dt)
@@ -92,9 +172,21 @@ class Backend:
 
 
 class XsyevBatched:
-    """cusolverDnXsyevBatched through ctypes: one call eigendecomposes a contiguous stack of
-    symmetric matrices with a batched divide-and-conquer solver (cuSOLVER >= 11.7.1, CUDA >= 12.6.2).
-    The library is the one CuPy has loaded (found by its soname) and the handle is CuPy's."""
+    """``cusolverDnXsyevBatched`` through ctypes, which eigendecomposes a contiguous stack of symmetric matrices in one call.
+
+    The solver is a batched divide-and-conquer (cuSOLVER >= 11.7.1, CUDA >= 12.6.2).  The library is
+    the one CuPy has loaded, found by its soname, and the handle is CuPy's.
+
+    Parameters
+    ----------
+    cp : module
+        CuPy.
+
+    Raises
+    ------
+    RuntimeError
+        If the library is not found, has no ``cusolverDnXsyevBatched``, or a cuSOLVER call fails.
+    """
 
     CUDA_R_32F, CUDA_R_64F = 0, 1
     EIG_MODE_VECTOR = 1          # CUSOLVER_EIG_MODE_VECTOR
@@ -133,6 +225,18 @@ class XsyevBatched:
         self._check(L.cusolverDnCreateParams(ctypes.byref(self.params)), "cusolverDnCreateParams")
 
     def _load(self):
+        """Load ``libcusolver``, the sonames CuPy loads first, then the wheels' and the CUDA toolkit's copies.
+
+        Returns
+        -------
+        lib : ctypes.CDLL
+            The library.
+
+        Raises
+        ------
+        RuntimeError
+            If no candidate loads.
+        """
         import glob
         import sysconfig
         cands = ["libcusolver.so.11", "libcusolver.so.12", "libcusolver.so"]      # already loaded by CuPy
@@ -148,12 +252,47 @@ class XsyevBatched:
         raise RuntimeError("libcusolver not found: " + "; ".join(errs))
 
     def _check(self, status: int, what: str) -> None:
+        """Raise on a cuSOLVER status other than success.
+
+        Parameters
+        ----------
+        status : int
+            The status.
+        what : str
+            The call, for the message.
+
+        Raises
+        ------
+        RuntimeError
+            If the status is not 0.
+        """
         if status != 0:
             raise RuntimeError(f"{what}: cuSOLVER status {status} ({self.STATUS.get(status, '?')})")
 
     def eigh(self, A):
-        """(w ascending (N, n), V (N, n, n) with V[i][:, j] the j-th eigenvector), as linalg.eigh.
-        A must be a C-contiguous (N, n, n) float32/float64 stack; it is overwritten."""
+        """Eigendecompose a stack of symmetric matrices, as ``linalg.eigh`` does.
+
+        Parameters
+        ----------
+        A : cupy.ndarray, shape (N, n, n)
+            The stack, C-contiguous float32 or float64, which is overwritten.
+
+        Returns
+        -------
+        w : cupy.ndarray, shape (N, n)
+            The eigenvalues, ascending.
+        V : cupy.ndarray, shape (N, n, n)
+            The eigenvectors, ``V[i][:, j]`` the j-th of matrix ``i``.
+
+        Raises
+        ------
+        ValueError
+            If ``A`` is not a stack of square matrices.
+        TypeError
+            If ``A`` is neither float32 nor float64.
+        RuntimeError
+            If the solver fails on a matrix.
+        """
         cp, ct = self.cp, self.ct
         if A.ndim != 3 or A.shape[1] != A.shape[2]:
             raise ValueError(f"need a stack (N, n, n), got {A.shape}")
@@ -182,7 +321,7 @@ class XsyevBatched:
             ct.c_void_p(int(work_d.data.ptr)), int(dev_bytes.value),
             work_h.ctypes.data_as(ct.c_void_p), int(host_bytes.value),
             ct.c_void_p(int(info.data.ptr)), N), "cusolverDnXsyevBatched")
-        bad = int((info != 0).sum())                     # synchronises; work_h stays alive until here
+        bad = int((info != 0).sum())                     # synchronizes, so work_h stays alive until here
         if bad:
             first = int(info[info != 0][0])
             raise RuntimeError(f"cusolverDnXsyevBatched: info != 0 for {bad} of {N} matrices (first: {first})")
@@ -193,10 +332,44 @@ class XsyevBatched:
 # ----------------------------------------------------------------------------- the per-frame steps
 def inject(be: Backend, cube_dev, angles: np.ndarray, sources, model, pxscale: float, truenorth,
            angle_convention: str = "pa", fallback=None):
-    """klip-tpe's inject_sources on the device: per source, the stamp rotated per frame (refpa
-    models), shifted by the fractional offset and added at the integer one, every frame at once.
-    ``cube_dev`` (n, ny, nx) float32 is not changed; the injected cube is returned (float32).
-    ``truenorth``: one angle (deg), or one per frame of ``angles``."""
+    """Inject sources into a cube on the device, as klip-tpe's ``inject_sources`` does.
+
+    For each source the stamp is turned per frame (models with ``refpa``), shifted by the fractional
+    offset and added at the integer one, every frame at once.  Each stamp is added in float64 and the
+    cube stored in float32 after each source, as on the host.
+
+    Parameters
+    ----------
+    be : Backend
+        The backend.
+    cube_dev : array, shape (n, ny, nx)
+        The cube, float32, not changed.
+    angles : ndarray, shape (n,)
+        Parallactic angle of each frame, in degrees.
+    sources : sequence of Source
+        The sources.
+    model : InjectionModel
+        The injection model, whose throughput applies to every source.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    truenorth : float or ndarray
+        True north, in degrees, one value or one per frame.
+    angle_convention : {"pa", "math"}, default "pa"
+        How the sources' angles are read.
+    fallback : InjectionModel or None, default None
+        Model whose stamp and flux unit are used where ``model`` has no stamp.
+
+    Returns
+    -------
+    cube : array, shape (n, ny, nx)
+        The injected cube, float32.
+
+    Raises
+    ------
+    ValueError
+        If a source has no stamp and there is no fallback, or ``truenorth`` gives another number of
+        values than frames.
+    """
     xp, ndi = be.xp, be.ndi
     n, ny, nx = cube_dev.shape
     out = cube_dev.astype(xp.float64)            # klip-tpe adds each stamp in float64 and stores float32
@@ -254,8 +427,29 @@ def inject(be: Backend, cube_dev, angles: np.ndarray, sources, model, pxscale: f
 
 
 def highpass(be: Backend, cube_dev, width: int, nan_aware: bool, dtype=np.float64):
-    """highpass_stack on the device for a (..., ny, nx) stack: boxcar of odd width, IDL border
-    rule, NaN kept.  ``dtype``: the precision of the filter."""
+    """High-pass a stack on the device, as ``highpass_stack`` does.
+
+    The boxcar has an odd width, the border follows the IDL predecessor's rule (zeros within half a
+    width of the edge), and NaN pixels stay NaN.
+
+    Parameters
+    ----------
+    be : Backend
+        The backend.
+    cube_dev : array, shape (..., ny, nx)
+        The stack.
+    width : int
+        Width of the boxcar, in pixels, made odd.  1 or less does nothing.
+    nan_aware : bool
+        Whether the boxcar averages only the finite pixels.
+    dtype : dtype, default numpy.float64
+        Precision of the filter.
+
+    Returns
+    -------
+    stack : array, shape (..., ny, nx)
+        The high-passed stack, float32.
+    """
     xp, ndi = be.xp, be.ndi
     w = int(width)
     if w <= 1:
@@ -282,7 +476,18 @@ def highpass(be: Backend, cube_dev, width: int, nan_aware: bool, dtype=np.float6
 
 
 def bin_matrix(grp: np.ndarray) -> np.ndarray:
-    """(ng, n) averaging matrix of bin_by_groups (mean per group)."""
+    """Return the averaging matrix of ``bin_by_groups``, the mean of each group.
+
+    Parameters
+    ----------
+    grp : ndarray of int, shape (n,)
+        Each frame's group, from 0.
+
+    Returns
+    -------
+    B : ndarray, shape (ng, n)
+        The matrix, each row averaging one group's frames.
+    """
     ng = int(grp.max()) + 1
     B = np.zeros((ng, grp.size), np.float64)
     B[grp, np.arange(grp.size)] = 1.0
@@ -293,7 +498,28 @@ ROTATE_CHUNK = 192     # frames per gather: keeps the coordinate arrays at ~100 
 
 
 def rotate(be: Backend, imgs_dev, angles_deg: np.ndarray, cval: float, validity: bool = True):
-    """rotate_ccw of a stack (K, ny, nx) by angles (K,), a chunk of frames per gather; mode "zero"."""
+    """Rotate a stack counterclockwise by each frame's angle, as ``rotate_ccw`` does, a chunk of frames per gather.
+
+    Pixels from outside the frame take ``cval``, and a frame rotated by 0 comes back unchanged.
+
+    Parameters
+    ----------
+    be : Backend
+        The backend.
+    imgs_dev : array, shape (K, ny, nx)
+        The stack.
+    angles_deg : ndarray, shape (K,)
+        The angles, in degrees.
+    cval : float
+        Value of the pixels from outside the frame.
+    validity : bool, default True
+        Whether a pixel interpolated only from NaN pixels becomes NaN.
+
+    Returns
+    -------
+    rotated : array, shape (K, ny, nx)
+        The rotated stack, float64.
+    """
     xp, ndi = be.xp, be.ndi
     K, ny, nx = imgs_dev.shape
     cx, cy = (nx - 1) / 2.0, (ny - 1) / 2.0
@@ -327,7 +553,22 @@ def rotate(be: Backend, imgs_dev, angles_deg: np.ndarray, cval: float, validity:
 
 
 def nw_ang_comb(be: Backend, dr_dev, angles: np.ndarray):
-    """nw_ang_comb on the device for one derotated cube (M, ny, nx) -> (ny, nx) float64."""
+    """Combine one derotated cube with noise weights on the device, as ``nw_ang_comb`` does.
+
+    Parameters
+    ----------
+    be : Backend
+        The backend.
+    dr_dev : array, shape (M, ny, nx)
+        The derotated cube.
+    angles : ndarray, shape (M,)
+        The frames' angles, in degrees.
+
+    Returns
+    -------
+    image : array, shape (ny, nx)
+        The combined image, float64.
+    """
     xp = be.xp
     M = dr_dev.shape[0]
     if M == 1:
@@ -355,10 +596,38 @@ def nw_ang_comb(be: Backend, dr_dev, angles: np.ndarray):
 # ----------------------------------------------------------------------------- KLIP
 def reference_masks(angles: np.ndarray, k: int, angsep_deg: float, anglemax: float, n_min_ref: int,
                     fast: bool = False) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
-    """Per-target reference masks (M, M) and the dropped-target mask, by klip_annular's rules (the
-    auto-fast shortcut, the < 4 fallback, the n_min_ref drop with its 25 % floor).  ``angsep_deg``
-    is the exclusion in degrees of rotation (``angsep`` times the arc at the annulus).  The same
-    masks as klip_tpe.klip.reference_mask gives target by target, made at once."""
+    """Make every target's reference mask and the mask of dropped targets, by ``klip_annular``'s rules.
+
+    The rules are the automatic fast shortcut, the fallback for fewer than 4 references and the drop
+    below ``n_min_ref`` with its 25 % floor.  The masks are those :func:`klip_tpe.klip.reference_mask`
+    gives target by target, made at once.
+
+    Parameters
+    ----------
+    angles : ndarray, shape (M,)
+        The frames' angles, in degrees.
+    k : int
+        Number of KL modes asked for.
+    angsep_deg : float
+        The exclusion, in degrees of rotation (``angsep`` times the arc at the annulus).
+    anglemax : float
+        Largest rotation a reference may have, in degrees.
+    n_min_ref : int
+        Fewest references a target needs.
+    fast : bool, default False
+        Whether every frame references every target, the target included.
+
+    Returns
+    -------
+    masks : ndarray of bool, shape (M, M)
+        Row ``t`` the references of target ``t``.
+    dropped : ndarray of bool, shape (M,)
+        The dropped targets.
+    info : dict
+        ``klip_annular``'s info keys: ``fast``, ``auto_fast``, ``k_requested``, ``k_capped``, ``k``,
+        ``nref``, ``nref_used``, ``n_dropped`` and, off the fast path, ``n_starved`` and
+        ``drop_enabled``.
+    """
     angles = np.asarray(angles, float)
     n = int(angles.size)
     paspan = float(angles.max() - angles.min()) if n >= 2 else 0.0
@@ -389,9 +658,35 @@ def reference_masks(angles: np.ndarray, k: int, angsep_deg: float, anglemax: flo
 
 
 class Problems:
-    """The distinct eigenproblems of one night's KLIP: one per distinct reference set (the fast
-    path has one for every target), each a list of reference frames; and which problem each
-    target uses."""
+    """The distinct eigenproblems of one night's KLIP and which one each target uses.
+
+    There is one problem per distinct reference set (the fast path has one for every target), in the
+    order their first target appears.
+
+    Parameters
+    ----------
+    masks : ndarray of bool, shape (M, M)
+        Each target's references.
+    dropped : ndarray of bool, shape (M,)
+        The dropped targets.
+
+    Attributes
+    ----------
+    M : int
+        Number of frames.
+    targets : ndarray of int
+        The targets kept.
+    prob_of : ndarray of int, shape (M,)
+        Each frame's problem, -1 for a dropped target.
+    rows : ndarray of bool, shape (P, M)
+        Each problem's references.
+    ids : list of ndarray of int
+        Each problem's reference frames.
+    nref : ndarray of int, shape (P,)
+        Each problem's number of references.
+    P : int
+        Number of problems.
+    """
 
     def __init__(self, masks: np.ndarray, dropped: np.ndarray):
         M = masks.shape[0]
@@ -413,23 +708,57 @@ class Problems:
         self.P = int(self.rows.shape[0])
 
     def classes(self, step: int) -> List[Tuple[int, np.ndarray]]:
-        """Size classes: n_ref rounded up to a multiple of ``step`` -> [(size, problem indices)]."""
+        """Group the problems into size classes, ``n_ref`` rounded up to a multiple of ``step``.
+
+        Parameters
+        ----------
+        step : int
+            The step, at least 1.
+
+        Returns
+        -------
+        classes : list of tuple
+            ``(size, problem indices)`` per class.
+        """
         step = max(int(step), 1)
         sz = ((self.nref + step - 1) // step) * step
         return [(int(s), np.flatnonzero(sz == s)) for s in np.unique(sz)]
 
 
 def klip_weights(be: Backend, G, prob: Problems, k: int, eigh_mode: str, compact: int, rr: bool = False):
-    """The KLIP weights of every target: ``W`` (T, M) float64 with row i the coefficients of the
-    reference frames in target ``prob.targets[i]``'s subtraction, so that its residual is
-    ``D[t] - W[i] @ D``; ``G`` (M, M) the zone's Gram matrix (float64, on the device).
+    """Return the KLIP weights of every target.
 
-    For target t with references r and the top-k eigenpairs (lam, V) of ``G[r, r]``:
-    ``w_t[r] = V diag(1/lam) V^T G[t, r]`` (modes with lam <= 1e-6 dropped), which is
-    klip_annular's zone-Gram projection.  ``compact`` > 0: the problems are solved on their own
-    n_ref x n_ref sub-matrices in size classes of that step; 0: one padded M x M matrix per problem
-    (the benchmark's way).  ``rr``: a float64 Rayleigh-Ritz step inside the solver's top-k subspace
-    (for a float32 solver).  Returns ``(W, n_modes)``."""
+    For target t with references r and the top-k eigenpairs (lam, V) of ``G[r, r]``, the weights are
+    ``w_t[r] = V diag(1/lam) V^T G[t, r]``, the modes with lam <= 1e-6 dropped, which is
+    ``klip_annular``'s zone-Gram projection.  The target's residual is ``D[t] - W[i] @ D``.
+
+    Parameters
+    ----------
+    be : Backend
+        The backend.
+    G : array, shape (M, M)
+        The zone's Gram matrix, float64, on the device.
+    prob : Problems
+        The eigenproblems.
+    k : int
+        Number of KL modes.
+    eigh_mode : str
+        The solver (:meth:`Backend.eigh`).
+    compact : int
+        Step of the size classes, the problems solved on their own ``n_ref x n_ref`` sub-matrices.  0
+        solves one padded M x M matrix per problem, the benchmark's way.
+    rr : bool, default False
+        Whether to add a float64 Rayleigh-Ritz step inside the solver's top-k subspace, for a float32
+        solver.
+
+    Returns
+    -------
+    W : array, shape (T, M)
+        Row ``i`` the coefficients of the reference frames in target ``prob.targets[i]``'s subtraction,
+        float64.
+    n_modes : int
+        Number of modes kept, over the problems.
+    """
     xp = be.xp
     M, T, P = prob.M, len(prob.targets), prob.P
     tx = xp.asarray(prob.targets)
@@ -503,8 +832,30 @@ def klip_weights(be: Backend, G, prob: Problems, k: int, eigh_mode: str, compact
 
 
 def padded_weights(be: Backend, G, prob: "Problems", masks_x, lam, Vk):
-    """The KLIP weights (T, M) from the top-k eigenpairs of the padded problems: ``lam`` (P, k)
-    descending, ``Vk`` (P, M, k) in M-space, ``masks_x`` (P, M) float64 on the device."""
+    """Return the KLIP weights from the top-k eigenpairs of the padded problems.
+
+    Parameters
+    ----------
+    be : Backend
+        The backend.
+    G : array, shape (M, M)
+        The zone's Gram matrix.
+    prob : Problems
+        The eigenproblems.
+    masks_x : array, shape (P, M)
+        Each problem's references, float64 on the device.
+    lam : array, shape (P, k)
+        The eigenvalues, descending.
+    Vk : array, shape (P, M, k)
+        The eigenvectors, in M-space.
+
+    Returns
+    -------
+    W : array, shape (T, M)
+        The weights.
+    n_modes : int
+        Number of modes kept, those above 1e-6.
+    """
     xp = be.xp
     tx = xp.asarray(prob.targets)
     probx = xp.asarray(prob.prob_of[prob.targets])
@@ -526,16 +877,65 @@ def klip_annular(be: Backend, bc_dev, bang: np.ndarray, *, k: int, inrad: float,
                  arc_radii: Optional[Tuple[float, float]] = None, zone_center=None, zone_angles: str = "ccw",
                  fast: bool = False, eigh_mode: str = "xbatched64", compact: int = 0, rr: bool = False,
                  batch_sectors: bool = True, zone_cache: Optional[Dict[Any, Any]] = None) -> Tuple[Any, Dict[str, Any]]:
-    """Annular KLIP of one binned, high-passed cube (M, ny, nx) on the device, in the Gram-matrix
-    formulation, per-target reference sets as klip_annular's slow path makes them.  Pixels outside
-    the zones are NaN; dropped targets are NaN frames.  Returns ``(residuals (M, ny, nx) float32,
-    info)`` with klip_annular's info keys.
+    """Run annular KLIP on one binned, high-passed cube on the device, in the Gram-matrix formulation.
 
-    ``batch_sectors`` (the padded path): the eigenproblems of every sector go to the solver in one
-    call (the sectors share the frames and the reference sets, so their padded stacks have one
-    shape), in chunks of at most ``BATCH_BYTES``.  cuSOLVER's batched solver is far from busy with
-    one sector's hundred matrices of 100^2 at a time; eight sectors in one call cost little more
-    than one."""
+    The reference sets are per target, as ``klip_annular``'s slow path makes them.  Pixels outside the
+    zones are NaN, and dropped targets are NaN frames.  With ``batch_sectors`` on the padded path, the
+    eigenproblems of every sector go to the solver in one call, in chunks of at most
+    :data:`BATCH_BYTES`, since the sectors share the frames and the reference sets and so their padded
+    stacks have one shape.  cuSOLVER's batched solver is far from busy with one sector's hundred
+    matrices of 100^2 at a time, and eight sectors in one call cost little more than one.
+
+    Parameters
+    ----------
+    be : Backend
+        The backend.
+    bc_dev : array, shape (M, ny, nx)
+        The cube.
+    bang : ndarray, shape (M,)
+        The binned frames' angles, in degrees.
+    k : int
+        Number of KL modes.
+    inrad : float
+        Inner radius of the annulus, in pixels.
+    outrad : float
+        Outer radius of the annulus, in pixels.
+    n_ang : int
+        Number of azimuthal sectors, at least 1.
+    angsep : float
+        The exclusion, in units of the arc at the annulus.
+    anglemax : float
+        Largest rotation a reference may have, in degrees.
+    n_min_ref : int
+        Fewest references a target needs.
+    lam_over_d_px : float
+        lambda/D, in pixels.
+    arc_radii : tuple of 2 floats or None, default None
+        Radii the arc is measured between.  None takes the annulus'.
+    zone_center : tuple of 2 floats or None, default None
+        Center of the zones.  None takes the frame's.
+    zone_angles : str, default "ccw"
+        How the sectors' angles run.
+    fast : bool, default False
+        Whether every frame references every target.
+    eigh_mode : str, default "xbatched64"
+        The solver.
+    compact : int, default 0
+        Step of the size classes (:func:`klip_weights`).
+    rr : bool, default False
+        Whether to add the float64 Rayleigh-Ritz step.
+    batch_sectors : bool, default True
+        Whether the padded path batches the sectors.
+    zone_cache : dict or None, default None
+        Cache of the sectors' pixel indices, shared between calls.
+
+    Returns
+    -------
+    residuals : array, shape (M, ny, nx)
+        The residuals, float32.
+    info : dict
+        ``klip_annular``'s info keys, with ``n_modes`` per sector.
+    """
     from klip_tpe.klip import arcdist_deg, zone_indices
     xp = be.xp
     M, ny, nx = bc_dev.shape

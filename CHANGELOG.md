@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — 2026-11-13 (stpsf_psf.py and klip_gpu.py documented to the rule)
+
+- **`stpsf_psf.py` and `klip_gpu.py` follow the documentation rule**: the STPSF off-axis grid, its
+  cache, the injection library and the flux scale, and the card's backend, batched eigensolver,
+  per-frame steps and Gram-matrix KLIP.  `offaxis_grid`'s docstring no longer says `cache=False`
+  rewrites the cache: it recomputes without writing.  Only docstrings and comments changed.
+
 ## Unreleased — 2026-11-13 (contrast_grid.py and chainfit.py documented to the rule)
 
 - **`contrast_grid.py` and `chainfit.py` follow the documentation rule**: the injection-recovery

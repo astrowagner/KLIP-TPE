@@ -1,14 +1,14 @@
 """STPSF (formerly WebbPSF) point-spread functions for the JWST reductions.
 
-What this gives the optimizer, for a JWST coronagraphic mode:
+For a JWST coronagraphic mode it gives the optimizer:
 
-* a **separation-dependent injection model** -- the off-axis PSF of the actual mask,
-  which is neither a Gaussian nor separation-independent inside a few lambda/D of a
-  coronagraph -- as a :class:`~klip_tpe.injection.LibraryPSF`;
-* the **mask throughput** ``T(rho)`` measured from the same grid, so injected
-  contrasts and recovered contrasts are on the instrument's own scale;
-* the **matched filter** used by the detection metric, taken from the same PSFs and,
-  with :mod:`klip_tpe.fmmf`, forward-modelled through the KLIP subtraction.
+* a separation-dependent injection model, the off-axis PSF of the actual mask, which is neither a
+  Gaussian nor independent of separation inside a few lambda/D of a coronagraph, as a
+  :class:`~klip_tpe.injection.LibraryPSF`,
+* the mask's throughput ``T(rho)``, measured from the same grid, so injected and recovered
+  contrasts are on the instrument's own scale,
+* the matched filter of the detection metric, taken from the same PSFs and, with
+  :mod:`klip_tpe.fmmf`, forward-modeled through the KLIP subtraction.
 
 Usage::
 
@@ -18,19 +18,17 @@ Usage::
     model = stpsf_psf.library(grid, star_flux=F_star)      # -> LibraryPSF
     red   = spaceklip.make_reducer(dsets, injection_model=model, ...)
 
-or, straight off the data,
-``model = stpsf_psf.model_for_datasets(dsets, star_flux=F_star)``.
+or, straight off the data, ``model = stpsf_psf.model_for_datasets(dsets, star_flux=F_star)``.
 
-Each slice is an off-axis PSF **already centred on the source** and cropped to
-``stamp_px``, which is the convention :class:`~klip_tpe.injection.LibraryPSF` expects;
-``transmission[i]`` is the fraction of the unocculted aperture flux that survives the
-mask and Lyot stop at that separation.  Every PSF costs seconds to compute, so a grid is
-cached as one FITS per configuration under ``$KLIP_TPE_DATA/stpsf_cache`` (default
-``~/.klip_tpe/stpsf_cache``).
+Each slice is an off-axis PSF already centered on the source and cropped to ``stamp_px``, the
+convention :class:`~klip_tpe.injection.LibraryPSF` expects, and ``transmission[i]`` is the fraction
+of the unocculted aperture flux that survives the mask and Lyot stop at that separation.  Every PSF
+costs seconds to compute, so a grid is cached as one FITS per configuration under
+``$KLIP_TPE_DATA/stpsf_cache`` (default ``~/.klip_tpe/stpsf_cache``).
 
-STPSF itself (``pip install stpsf``, Python >= 3.10) and its ~90 MB data files
-(``STPSF_PATH``) are an optional dependency: everything here raises a clear error when
-they are missing, and no other klip-tpe module imports this one at import time.
+STPSF itself (``pip install stpsf``, Python >= 3.10) and its ~90 MB data files (``STPSF_PATH``) are
+an optional dependency.  Everything here raises a clear error when they are missing, and no other
+klip-tpe module imports this one at import time.
 """
 from __future__ import annotations
 
@@ -71,14 +69,17 @@ _THETA_PLUS_X = 270.0
 
 
 def have_stpsf() -> bool:
-    """True when ``stpsf`` imports *and* its data files are reachable.
+    """Tell whether ``stpsf`` imports and its data files are reachable.
 
-    Ask STPSF where its data is rather than reading ``STPSF_PATH`` out of the environment.
-    The environment variable is only one of the ways STPSF finds its data -- a conda
-    install or an ``~/.stpsf`` config file sets it up without ever exporting one -- so
-    testing the variable reports "no STPSF" on a machine where STPSF works perfectly well,
-    and the caller then falls back to a documented constant or refuses to start.  The
-    variables stay as the fallback for an older STPSF without the accessor.
+    It asks STPSF where its data is rather than reading ``STPSF_PATH`` from the environment.  The
+    variable is only one of the ways STPSF finds its data, since a conda install or an ``~/.stpsf``
+    config file sets it up without exporting one, so testing the variable reports no STPSF on a machine
+    where it works.  The variables stay as the fallback for an older STPSF without the accessor.
+
+    Returns
+    -------
+    available : bool
+        True when STPSF and its data are there.
     """
     try:
         import stpsf
@@ -95,9 +96,17 @@ def have_stpsf() -> bool:
 
 
 def cache_dir() -> str:
-    """Where NEW cache files are written: ``$KLIP_TPE_DATA/stpsf_cache`` when the variable
-    is set, else ``~/.klip_tpe/stpsf_cache``.  Reads go through :func:`_cache_path`, which
-    also looks in the other layout, so a grid computed in one shell is found from another."""
+    """Return the directory new cache files are written to, made where needed.
+
+    It is ``$KLIP_TPE_DATA/stpsf_cache`` when the variable is set, else ``~/.klip_tpe/stpsf_cache``.
+    Reads go through :func:`_cache_path`, which also looks in the other layout, so a grid computed in
+    one shell is found from another.
+
+    Returns
+    -------
+    path : str
+        The directory.
+    """
     d = os.environ.get("KLIP_TPE_DATA") or os.path.join(os.path.expanduser("~"), ".klip_tpe")
     d = os.path.join(d, "stpsf_cache")
     os.makedirs(d, exist_ok=True)
@@ -105,14 +114,22 @@ def cache_dir() -> str:
 
 
 def _cache_dirs() -> list:
-    """Every directory a cached PSF may be READ from, in order of preference.
+    """Return every directory a cached PSF may be read from, in order of preference.
 
-    ``cache_dir()`` depends on ``KLIP_TPE_DATA``: set to ``~/.klip_tpe/data`` (a common way
-    to point the package at its own default data directory explicitly) it puts the cache at
-    ``~/.klip_tpe/data/stpsf_cache``; unset, at ``~/.klip_tpe/stpsf_cache``.  A grid computed
-    under one setting was invisible under the other, and on a machine without STPSF that is
-    fatal: paper run D refused to start on 2026-09-16 with "the grid is not in the cache"
-    while the grid sat one directory over.  So a read tries both layouts.
+    ``cache_dir()`` depends on ``KLIP_TPE_DATA``: set to ``~/.klip_tpe/data`` it puts the cache at
+    ``~/.klip_tpe/data/stpsf_cache``, and unset at ``~/.klip_tpe/stpsf_cache``.  A grid computed under
+    one setting was invisible under the other, which on a machine without STPSF is fatal, so a read
+    tries both layouts.
+
+    Returns
+    -------
+    dirs : list of str
+        The absolute directories, each once.
+
+    Notes
+    -----
+    Paper run D refused to start on 2026-09-16 with "the grid is not in the cache" while the grid sat
+    one directory over.
     """
     home = os.path.join(os.path.expanduser("~"), ".klip_tpe")
     cands = [cache_dir()]
@@ -129,7 +146,18 @@ def _cache_dirs() -> list:
 
 
 def _cache_path(name: str) -> str:
-    """The existing cache file ``name`` wherever it is, else its path in :func:`cache_dir`."""
+    """Return the path of a cache file, where it exists, else its path in :func:`cache_dir`.
+
+    Parameters
+    ----------
+    name : str
+        Name of the file.
+
+    Returns
+    -------
+    path : str
+        The path.
+    """
     for d in _cache_dirs():
         p = os.path.join(d, name)
         if os.path.exists(p):
@@ -138,11 +166,35 @@ def _cache_path(name: str) -> str:
 
 
 def _key(meta: Dict[str, Any]) -> str:
+    """Return a short, stable key of a configuration, the first 16 hex digits of the SHA-1 of its JSON.
+
+    Parameters
+    ----------
+    meta : dict
+        The configuration.
+
+    Returns
+    -------
+    key : str
+        The key.
+    """
     s = json.dumps(meta, sort_keys=True, default=str)
     return hashlib.sha1(s.encode()).hexdigest()[:16]
 
 
 def _odd(n: float) -> int:
+    """Return a number rounded up to the next odd integer.
+
+    Parameters
+    ----------
+    n : float
+        The number.
+
+    Returns
+    -------
+    odd : int
+        The odd integer.
+    """
     n = int(np.ceil(n))
     return n + 1 if n % 2 == 0 else n
 
@@ -150,6 +202,35 @@ def _odd(n: float) -> int:
 def _instrument(name: str, filter_: str, image_mask: Optional[str], pupil_mask: Optional[str],
                 aperture: Optional[str], detector_position: Optional[Tuple[int, int]],
                 date: Optional[str]):
+    """Return an STPSF instrument set up for a coronagraphic mode.
+
+    Parameters
+    ----------
+    name : str
+        The instrument's class name in STPSF, such as "NIRCam".
+    filter_ : str
+        The filter.
+    image_mask : str or None
+        The coronagraph's mask.
+    pupil_mask : str or None
+        The pupil stop.
+    aperture : str or None
+        The aperture's name, which sets the field position.
+    detector_position : tuple of 2 ints or None
+        The position on the detector, in pixels.
+    date : str or None
+        Date of the measured wavefront to load, or None for the default.
+
+    Returns
+    -------
+    inst : stpsf instrument
+        The instrument.
+
+    Raises
+    ------
+    ImportError
+        If STPSF is not installed.
+    """
     try:
         import stpsf
     except ImportError as exc:                                  # pragma: no cover - optional dep
@@ -171,7 +252,22 @@ def _instrument(name: str, filter_: str, image_mask: Optional[str], pupil_mask: 
 
 
 def _ee_radius(ref: np.ndarray, frac: float = 0.5, scale: float = 1.5) -> float:
-    """``scale`` x the encircled-energy-``frac`` radius of a centred PSF, in pixels."""
+    """Return ``scale`` times the radius enclosing the fraction ``frac`` of a centered PSF's flux.
+
+    Parameters
+    ----------
+    ref : ndarray, shape (ny, nx)
+        The PSF.
+    frac : float, default 0.5
+        The encircled fraction.
+    scale : float, default 1.5
+        Factor on the radius.
+
+    Returns
+    -------
+    radius : float
+        The radius, in pixels, 3 for a PSF without flux.
+    """
     ref = np.asarray(ref, float)
     cy, cx = (ref.shape[0] - 1) / 2.0, (ref.shape[1] - 1) / 2.0
     yy, xx = np.mgrid[0:ref.shape[0], 0:ref.shape[1]]
@@ -187,6 +283,20 @@ def _ee_radius(ref: np.ndarray, frac: float = 0.5, scale: float = 1.5) -> float:
 
 
 def _ap_sum(img: np.ndarray, r: float) -> float:
+    """Return the flux of a centered aperture.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image.
+    r : float
+        Radius of the aperture, in pixels.
+
+    Returns
+    -------
+    flux : float
+        The sum of the finite pixels within ``r`` of the center.
+    """
     img = np.asarray(img, float)
     cy, cx = (img.shape[0] - 1) / 2.0, (img.shape[1] - 1) / 2.0
     yy, xx = np.mgrid[0:img.shape[0], 0:img.shape[1]]
@@ -194,11 +304,28 @@ def _ap_sum(img: np.ndarray, r: float) -> float:
 
 
 def _source_center(img: np.ndarray, guess: Tuple[float, float], win: float = 5.0) -> Tuple[float, float]:
-    """Flux-weighted centre of the (single) source in ``img``, refined from ``guess``.
+    """Return the flux-weighted center of the single source in an image, refined from a guess.
 
-    ``calc_psf`` with a ``source_offset`` computes one off-axis point source and nothing
-    else, so the brightest structure *is* the source; measuring it beats trusting a
-    convention for where STPSF puts the array centre after detector binning."""
+    ``calc_psf`` with a ``source_offset`` computes one off-axis point source and nothing else, so the
+    brightest structure is the source, and measuring it beats trusting a convention for where STPSF
+    puts the array's center after detector binning.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image.
+    guess : tuple of 2 floats
+        The guess, ``(x, y)`` in pixels.
+    win : float, default 5.0
+        Half-width of the box searched for the peak, in pixels.
+
+    Returns
+    -------
+    x : float
+        Column of the center, in pixels.
+    y : float
+        Row of the center, in pixels.
+    """
     img = np.asarray(img, float)
     ny, nx = img.shape
     gx, gy = float(guess[0]), float(guess[1])
@@ -223,8 +350,22 @@ def _source_center(img: np.ndarray, guess: Tuple[float, float], win: float = 5.0
 
 
 def _stamp_at(img: np.ndarray, src_xy: Tuple[float, float], stamp: int) -> np.ndarray:
-    """Cut a ``stamp`` x ``stamp`` box around ``src_xy`` and shift the sub-pixel
-    remainder, so the source lands exactly on the central pixel of the stamp."""
+    """Cut a square stamp around a source, shifting the sub-pixel remainder so the source lands on the central pixel.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image.
+    src_xy : tuple of 2 floats
+        The source, ``(x, y)`` in pixels.
+    stamp : int
+        Width of the stamp, in pixels.
+
+    Returns
+    -------
+    stamp : ndarray, shape (stamp, stamp)
+        The stamp, 0 outside the image.
+    """
     from scipy import ndimage
     ny, nx = img.shape
     sx, sy = float(src_xy[0]), float(src_xy[1])
@@ -250,25 +391,59 @@ def offaxis_grid(instrument: str = "NIRCam", filter: str = "F444W",
                  aperture: Optional[str] = None, detector_position: Optional[Tuple[int, int]] = None,
                  date: Optional[str] = None, source=None, cache: bool = True,
                  log: Callable[[str], None] = print) -> Dict[str, Any]:
-    """Off-axis PSF of a coronagraphic mode on a ladder of separations.
+    """Compute the off-axis PSF of a coronagraphic mode on a ladder of separations.
 
-    Returns a dict with
+    ``fov_px`` is sized per separation so the source is always inside the computed field, and should be
+    left None.  The results are cached by configuration under :func:`cache_dir`.
 
-    ``slices``      ``(nsep, stamp_px, stamp_px)`` source-centred off-axis PSFs;
-    ``seps``        the separations in arcsec;
-    ``transmission``the coronagraph throughput at each separation (aperture photometry
-                    of the occulted PSF over the same aperture on the unocculted one);
-    ``unocculted``  the same-size stamp of the unocculted PSF;
-    ``pxscale``     arcsec/pixel of the detector sampling;
-    ``fwhm_px``     FWHM of the unocculted PSF in pixels;
-    ``ee_radius_px``the aperture ``transmission`` was measured in;
-    ``center``      ``(cx, cy)`` of the source inside a stamp -- the stamp centre;
-    ``meta``        the configuration, for provenance.
+    Parameters
+    ----------
+    instrument : str, default "NIRCam"
+        The instrument.
+    filter : str, default "F444W"
+        The filter.
+    image_mask : str or None, default "MASK335R"
+        The coronagraph's mask.
+    pupil_mask : str or None, default None
+        The pupil stop.  None takes the Lyot stop that goes with ``image_mask`` (:data:`DEFAULTS`).
+    seps_as : sequence of float or None, default None
+        The separations, in arcsec, at least two.  None takes 0.2 to 2.6 in steps of 0.2.
+    stamp_px : int, default 31
+        Width of the stamps, in pixels, made odd.
+    oversample : int, default 2
+        STPSF's oversampling.
+    nlambda : int, default 3
+        Number of wavelengths over the band.
+    fov_px : int or None, default None
+        Field of each computation, in pixels.
+    aperture : str or None, default None
+        The aperture's name.
+    detector_position : tuple of 2 ints or None, default None
+        The position on the detector, in pixels.
+    date : str or None, default None
+        Date of the measured wavefront to load.
+    source : object, default None
+        STPSF's source spectrum.
+    cache : bool, default True
+        Whether to read and write the cache.  False recomputes, and does not write.
+    log : callable, default print
+        Function that takes each line of the log.
 
-    ``pupil_mask`` defaults to the Lyot stop that goes with ``image_mask``
-    (:data:`DEFAULTS`).  ``fov_px`` is sized per separation so that the source is always
-    inside the computed field; leave it None.  Results are cached by configuration under
-    :func:`cache_dir` (``cache=False`` recomputes and rewrites).
+    Returns
+    -------
+    grid : dict
+        ``slices`` (``(nsep, stamp_px, stamp_px)`` source-centered off-axis PSFs), ``seps`` (arcsec),
+        ``transmission`` (the coronagraph's throughput at each separation, aperture photometry of the
+        occulted PSF over the same aperture on the unocculted one), ``unocculted`` (the same-size stamp
+        of the unocculted PSF), ``pxscale``, ``fwhm_px``, ``ee_radius_px`` (the aperture of
+        ``transmission``), ``center`` (the stamp's center), ``meta`` (the configuration) and ``path``.
+
+    Raises
+    ------
+    ValueError
+        If fewer than two separations are given.
+    RuntimeError
+        If the grid is not in the cache and STPSF is not installed, the error naming the file to copy.
     """
     if pupil_mask is None and image_mask in DEFAULTS:
         pupil_mask = DEFAULTS[image_mask]["pupil_mask"]
@@ -351,8 +526,18 @@ def offaxis_grid(instrument: str = "NIRCam", filter: str = "F444W",
 
 
 def _fwhm_of(psf: np.ndarray) -> float:
-    """FWHM in pixels of a centred PSF, from the radius where the azimuthal profile
-    first falls below half the peak (linearly interpolated)."""
+    """Return the FWHM of a centered PSF, from where its azimuthal profile first falls below half the peak.
+
+    Parameters
+    ----------
+    psf : ndarray, shape (ny, nx)
+        The PSF.
+
+    Returns
+    -------
+    fwhm : float
+        The FWHM, in pixels, linearly interpolated, 3 for a PSF without a positive peak.
+    """
     psf = np.asarray(psf, float)
     cy, cx = (psf.shape[0] - 1) / 2.0, (psf.shape[1] - 1) / 2.0
     yy, xx = np.mgrid[0:psf.shape[0], 0:psf.shape[1]]
@@ -375,6 +560,15 @@ def _fwhm_of(psf: np.ndarray) -> float:
 
 
 def _write_cache(path: str, g: Dict[str, Any]) -> None:
+    """Write a grid to its cache file.
+
+    Parameters
+    ----------
+    path : str
+        Path of the file.
+    g : dict
+        The grid.
+    """
     from astropy.io import fits
     hdr = fits.Header()
     hdr["PIXELSCL"] = (float(g["pxscale"]), "arcsec / detector pixel")
@@ -393,10 +587,36 @@ def _write_cache(path: str, g: Dict[str, Any]) -> None:
 
 
 def _chunk(s: str, n: int):
+    """Cut a string into pieces of ``n`` characters, for FITS cards.
+
+    Parameters
+    ----------
+    s : str
+        The string.
+    n : int
+        Length of the pieces.
+
+    Returns
+    -------
+    pieces : list of str
+        The pieces, one empty piece for an empty string.
+    """
     return [s[i:i + n] for i in range(0, len(s), n)] or [""]
 
 
 def _read_cache(path: str) -> Dict[str, Any]:
+    """Read a grid from its cache file.
+
+    Parameters
+    ----------
+    path : str
+        Path of the file.
+
+    Returns
+    -------
+    grid : dict
+        The grid, as :func:`offaxis_grid` returns it.
+    """
     from astropy.io import fits
     with fits.open(path) as h:
         hdr = h[0].header
@@ -412,7 +632,18 @@ def _read_cache(path: str) -> Dict[str, Any]:
 
 
 def throughput_fn(g: Dict[str, Any]) -> Callable[[Any], Any]:
-    """``rho_arcsec -> coronagraph throughput`` (linear in separation, clamped outside)."""
+    """Return a grid's throughput as a function of separation, linear between the separations and held outside.
+
+    Parameters
+    ----------
+    g : dict
+        The grid, from :func:`offaxis_grid`.
+
+    Returns
+    -------
+    fn : callable
+        Function ``rho_arcsec -> throughput``.
+    """
     seps, t = np.asarray(g["seps"], float), np.asarray(g["transmission"], float)
 
     def f(rho):
@@ -422,28 +653,40 @@ def throughput_fn(g: Dict[str, Any]) -> Callable[[Any], Any]:
 
 def library(g: Dict[str, Any], star_flux: float = 1.0, ee_radius_px: Optional[float] = None,
             refpa_deg: Optional[float] = None) -> LibraryPSF:
-    """:class:`~klip_tpe.injection.LibraryPSF` from an :func:`offaxis_grid`.
+    """Build a :class:`~klip_tpe.injection.LibraryPSF` from an :func:`offaxis_grid`.
 
-    The stamps are source-centred already, the mask throughput becomes
-    ``LibraryPSF.throughput``, and ``flux_unit = star_flux`` is the star's flux in the
-    data's own units (e.g. from the target-acquisition image or the reference star's
-    photometry, measured in the *same* aperture ``ee_radius_px``; leave 1.0 to inject in
-    units of the template).
+    The stamps are source-centered already, and the mask's throughput becomes
+    ``LibraryPSF.throughput``.
 
-    ``refpa_deg=None``: the stamp is **translated to the source and not rotated**.  Until
-    2026-09-22 this was 0.0, which made the injector spin the stamp by the source's detector
-    azimuth -- and that is wrong, because the structure you can see in a JWST coronagraphic
-    PSF (the Lyot stop's pattern, the segmented pupil's lobes) is fixed to the *spacecraft*,
-    not to where the source happens to sit relative to the mask.  It does not turn as a
-    companion moves round the field, so neither should the template.  The injected sources
-    came out with their side lobes pointing the wrong way, which is how it was noticed.
+    Parameters
+    ----------
+    g : dict
+        The grid, from :func:`offaxis_grid`.
+    star_flux : float, default 1.0
+        The star's flux in the data's own units, measured in the same aperture ``ee_radius_px``, such as
+        from the target-acquisition image or the reference star's photometry.  1 injects in units of the
+        template.
+    ee_radius_px : float or None, default None
+        The normalization aperture, in pixels.  None takes the grid's.
+    refpa_deg : float or None, default None
+        Reference position angle of the stamps.  None translates each stamp to its source without
+        turning it, and a number turns it by the source's azimuth, as runs made before 2026-09-22 did.
 
-    The IDL reduction this package ports settles it: ``reduce_nircam_v13.pro`` reads one
-    WebbPSF template per filter, centres it with ``cntrd`` + ``fshift`` -- a translation --
-    and at injection does ``fshift(big_ref * contrast, xshift, yshift)`` per frame and
-    nothing else.  One template per data set, in the spacecraft's orientation, never rotated.
+    Returns
+    -------
+    model : LibraryPSF
+        The injection model.
 
-    Pass a number to restore the old behaviour (reproducing a pre-2026-09-22 run).
+    Notes
+    -----
+    Until 2026-09-22 ``refpa_deg`` was 0.0, which made the injector spin the stamp by the source's
+    detector azimuth.  That is wrong, because the structure visible in a JWST coronagraphic PSF (the
+    Lyot stop's pattern, the segmented pupil's lobes) is fixed to the spacecraft, not to where the
+    source sits relative to the mask.  It does not turn as a companion moves round the field, so
+    neither should the template, and the injected sources came out with their side lobes pointing the
+    wrong way.  The IDL predecessor's ``reduce_nircam_v13.pro`` settles it: it reads one WebbPSF
+    template per filter, centers it with ``cntrd`` and ``fshift`` (a translation), and at injection
+    does ``fshift(big_ref * contrast, xshift, yshift)`` per frame and nothing else.
     """
     sl = np.asarray(g["slices"], float)
     c = tuple(g.get("center") or ((sl.shape[-1] - 1) / 2.0, (sl.shape[-2] - 1) / 2.0))
@@ -460,20 +703,54 @@ def unocculted_ee(radius_px: float, instrument: str = "NIRCam", filter: str = "F
                   oversample: int = 2, nlambda: int = 3, aperture: Optional[str] = None,
                   detector_position: Optional[Tuple[int, int]] = None, date: Optional[str] = None,
                   cache: bool = True, log: Callable[[str], None] = print) -> float:
-    """Fraction of an **unocculted** point source's flux that lands inside ``radius_px``.
+    """Return the fraction of an unocculted point source's flux inside a radius.
 
-    Unocculted *through the Lyot stop* -- ``image_mask`` removed, ``pupil_mask`` kept --
-    because that is the configuration the data's own flux calibration refers to.  The
-    coronagraphic ``PHOTOM`` reference files are derived from standards observed in this
-    same mode, so the MJy/sr in the file already carries the Lyot stop and the mask
-    substrate; the only things left for a model to supply are the PSF's *shape* and the
-    occulter's spatial transmission ``T(rho)``, which :func:`offaxis_grid` measures
-    separately against this same reference.  Feeding an ordinary imaging PSF in here
-    instead would count the Lyot stop's effect on the PSF shape twice.
+    The source is unocculted through the Lyot stop, ``image_mask`` removed and ``pupil_mask`` kept,
+    because that is the configuration the data's flux calibration refers to.  The coronagraphic
+    ``PHOTOM`` reference files are derived from standards observed in this same mode, so the MJy/sr in
+    the file already carries the Lyot stop and the mask substrate, and a model supplies only the PSF's
+    shape and the occulter's transmission ``T(rho)``, which :func:`offaxis_grid` measures against this
+    same reference.  An ordinary imaging PSF here would count the Lyot stop's effect on the PSF's shape
+    twice.  ``fov_arcsec`` has to be large: the encircled energy of a NIRCam LW PSF is still climbing
+    at 5 arcsec (0.96 at 5", 0.99 at 12.5" for F444W), so a stamp-sized field overstates the fraction
+    by tens of percent, and the contrast axis inherits it.
 
-    ``fov_arcsec`` has to be big: the encircled energy of a NIRCam LW PSF is still climbing
-    at 5 arcsec (0.96 at 5", 0.99 at 12.5" for F444W), so a stamp-sized field overstates
-    the fraction by tens of percent and the contrast axis inherits it.
+    Parameters
+    ----------
+    radius_px : float
+        The radius, in pixels.
+    instrument : str, default "NIRCam"
+        The instrument.
+    filter : str, default "F444W"
+        The filter.
+    pupil_mask : str or None, default "MASKRND"
+        The pupil stop.
+    fov_arcsec : float, default 30.0
+        Field of the computation, in arcsec.
+    oversample : int, default 2
+        STPSF's oversampling.
+    nlambda : int, default 3
+        Number of wavelengths over the band.
+    aperture : str or None, default None
+        The aperture's name.
+    detector_position : tuple of 2 ints or None, default None
+        The position on the detector, in pixels.
+    date : str or None, default None
+        Date of the measured wavefront to load.
+    cache : bool, default True
+        Whether to read and write the cache.
+    log : callable, default print
+        Function that takes each line of the log.
+
+    Returns
+    -------
+    fraction : float
+        The encircled fraction.
+
+    Raises
+    ------
+    RuntimeError
+        If the PSF is not in the cache and STPSF is not installed, or the PSF has no flux.
     """
     from .instruments.generic import aperture_sum
     meta = {"kind": "unocculted_ee", "instrument": instrument, "filter": filter,
@@ -527,41 +804,60 @@ def star_flux_from_flux_density(g: Dict[str, Any], flux_density_jy: float, pixar
                                 ee_radius_px: Optional[float] = None, bunit: str = "MJy/sr",
                                 optics_transmission: float = 1.0,
                                 log: Callable[[str], None] = print, **kw) -> float:
-    """``star_flux`` for :func:`library` from the star's flux density in the band.
+    """Return ``star_flux`` for :func:`library` from the star's flux density in the band.
 
-    ``flux_density_jy`` is the star's flux density [Jy] in this filter -- synthetic
-    photometry of a stellar model, or published photometry -- and ``pixar_sr`` the
-    ``PIXAR_SR`` of the science frames.  The JWST pipeline calibrates NRC_CORON data to
-    surface brightness, so a point source of flux density ``S`` deposits
-    ``S / (1e6 * PIXAR_SR)`` summed over its pixels; only the fraction inside the injection
-    model's normalisation radius belongs in ``flux_unit``, and :func:`unocculted_ee`
-    supplies it.  The occulter is *not* applied here -- that is ``throughput(rho)``, and
-    applying it twice is the classic way to get a contrast axis wrong by 1/T.
+    The JWST pipeline calibrates NRC_CORON data to surface brightness, so a point source of flux
+    density ``S`` deposits ``S / (1e6 * PIXAR_SR)`` summed over its pixels, and only the fraction
+    inside the injection model's normalization radius, from :func:`unocculted_ee`, belongs in
+    ``flux_unit``.  The occulter is not applied here, since that is ``throughput(rho)``, and applying
+    it twice is the classic way to get a contrast axis wrong by 1/T.
 
-    ``optics_transmission`` scales the result for any transmissive loss that neither the
-    data's calibration nor the model carries.  **For JWST calints, leave it at 1.0.**
-    STPSF's ``normalize='first'`` propagates only diffractive losses, so the model PSF is
-    missing the COM substrate and the Lyot substrate -- but so is every calibration
-    standard that was observed through them: ``PHOTMJSR`` for ``PUPIL=MASKRND`` (2.486 in
-    F444W, against ~0.4 for CLEAR imaging) is derived from stars observed in this very
-    optical train, so the MJy/sr in the file already put an off-mask point source at its
-    true flux, and the ``EE`` here is a *fraction* of the Lyot-stop PSF, in which the
-    stop's own 0.18 cancels.  The occulter's ``T(rho)`` is the one thing the photom file
-    cannot hold (it varies across the field), and it comes in through the injection
-    model's ``throughput``.
+    Parameters
+    ----------
+    g : dict
+        The grid, from :func:`offaxis_grid`.
+    flux_density_jy : float
+        The star's flux density in this filter, in Jy, from synthetic photometry of a stellar model or
+        published photometry.
+    pixar_sr : float
+        The ``PIXAR_SR`` of the science frames.
+    ee_radius_px : float or None, default None
+        The normalization radius, in pixels.  None takes the grid's.
+    bunit : str, default "MJy/sr"
+        Unit of the data, which must be MJy/sr.
+    optics_transmission : float, default 1.0
+        Factor for a transmissive loss that neither the data's calibration nor the model carries.  For
+        JWST calints it stays 1.
+    log : callable, default print
+        Function that takes each line of the log.
+    kw : dict
+        Keywords of :func:`unocculted_ee`, such as ``fov_arcsec`` and ``date``.
 
-    A value of 0.561 was carried here for HIP 65426 until 2026-09-16, "anchored" on the
-    companion.  It was not an optics number: the calints loader's sigma-clip repair had
-    median-filtered the companion's core to 39% of its peak while the fakes, injected
-    after the repair, kept theirs; 0.561 = 1/1.9 was what hid that.  With the repair fixed
-    and 1.0 here, HIP 65426 b gives dF444W = 8.796 +/- 0.092 against Carter et al. (2023)'s
-    8.703 +/- 0.055 -- 1.0 sigma, with nothing tuned (``scripts/check_hip65426_contrast.py``).
-    It read 8.74 until 2026-09-22, when :func:`library` stopped rotating the template by the
-    source's azimuth.  Use a
-    value other than 1.0 only for data whose flux calibration demonstrably excludes part
-    of the optical train, and say where the number comes from.
+    Returns
+    -------
+    star_flux : float
+        The flux unit, ``S / (1e6 PIXAR_SR) EE optics_transmission``.
 
-    Extra keywords go to :func:`unocculted_ee` (``fov_arcsec``, ``date``, ...).
+    Raises
+    ------
+    ValueError
+        If the data are not in MJy/sr.
+
+    Notes
+    -----
+    STPSF's ``normalize='first'`` propagates only diffractive losses, so the model PSF misses the COM
+    and Lyot substrates, but so does every calibration standard observed through them.  ``PHOTMJSR``
+    for ``PUPIL=MASKRND`` (2.486 in F444W, against about 0.4 for CLEAR imaging) is derived from stars
+    observed in this optical train, so the MJy/sr in the file already puts an off-mask point source at
+    its true flux, and the EE is a fraction of the Lyot-stop PSF, in which the stop's own 0.18 cancels.
+
+    A value of 0.561 was carried here for HIP 65426 until 2026-09-16, "anchored" on the companion.  It
+    was not an optics number: the calints loader's sigma-clip repair had median-filtered the companion's
+    core to 39% of its peak while the fakes, injected after the repair, kept theirs, and 0.561 = 1/1.9
+    hid that.  With the repair fixed and 1.0 here, HIP 65426 b gives dF444W = 8.796 +/- 0.092 against
+    Carter et al. (2023)'s 8.703 +/- 0.055, 1.0 sigma with nothing tuned
+    (``scripts/check_hip65426_contrast.py``).  It read 8.74 until 2026-09-22, when :func:`library`
+    stopped turning the template by the source's azimuth.
     """
     if str(bunit).replace(" ", "").upper() not in ("MJY/SR",):
         raise ValueError(f"star_flux_from_flux_density expects MJy/sr data, got {bunit!r}; "
@@ -587,8 +883,19 @@ def star_flux_from_flux_density(g: Dict[str, Any], flux_density_jy: float, pixar
 
 # ------------------------------------------------------------------ from the data itself
 def mode_from_header(hdr) -> Dict[str, Any]:
-    """``{'instrument', 'filter', 'image_mask', 'pupil_mask', 'aperture'}`` from a JWST
-    science header (``INSTRUME``/``FILTER``/``CORONMSK``/``PUPIL``/``APERNAME``)."""
+    """Read a JWST coronagraphic mode from a science header.
+
+    Parameters
+    ----------
+    hdr : dict or astropy.io.fits.Header
+        The header, with ``INSTRUME``, ``FILTER``, ``CORONMSK``, ``PUPIL`` and ``APERNAME``.
+
+    Returns
+    -------
+    mode : dict
+        ``instrument``, ``filter``, ``image_mask``, ``pupil_mask`` (the mask's Lyot stop where
+        ``PUPIL`` holds a filter-wheel entry) and ``aperture``.
+    """
     def g(*keys):
         for k in keys:
             v = hdr.get(k) if hasattr(hdr, "get") else None
@@ -613,12 +920,41 @@ def mode_from_header(hdr) -> Dict[str, Any]:
 def model_for_datasets(dsets, star_flux: float = 1.0, seps_as: Optional[Sequence[float]] = None,
                        rho_max_as: Optional[float] = None, pxscale: Optional[float] = None,
                        log: Callable[[str], None] = print, **kw) -> LibraryPSF:
-    """The STPSF injection model for an already-loaded JWST sequence.
+    """Build the STPSF injection model of a JWST sequence already loaded.
 
-    Reads the coronagraphic mode out of the first dataset's ``meta['header']`` (or
-    ``meta['INSTRUME']``-style keys), builds the off-axis grid over the separations the
-    data actually cover, and returns the :class:`LibraryPSF`.  Extra keyword arguments go
-    to :func:`offaxis_grid` (``stamp_px``, ``nlambda``, ``date``, ...).
+    It reads the coronagraphic mode from the first dataset's ``meta['header']``, or its
+    ``meta['INSTRUME']``-style keys, builds the off-axis grid over the separations the data cover, and
+    returns the :class:`~klip_tpe.injection.LibraryPSF`.  A MIRI coronagraph, whose throughput depends
+    on where a source is rather than how far out, takes the MIRI module's library with a
+    two-dimensional throughput map (:func:`klip_tpe.instruments.miri.library`).
+
+    Parameters
+    ----------
+    dsets : Dataset or sequence of Dataset
+        The datasets.
+    star_flux : float, default 1.0
+        The star's flux in the data's units (:func:`library`).
+    seps_as : sequence of float or None, default None
+        The separations, in arcsec.  None takes 0.15 to ``rho_max_as`` in steps of 0.15.
+    rho_max_as : float or None, default None
+        Largest separation, in arcsec.  None takes 0.45 of the frame's width.
+    pxscale : float or None, default None
+        Plate scale, in arcsec per pixel.  None takes the dataset's.
+    log : callable, default print
+        Function that takes each line of the log.
+    kw : dict
+        Keywords of :func:`offaxis_grid`, such as ``stamp_px``, ``nlambda`` and ``date``, and overrides
+        of the mode.
+
+    Returns
+    -------
+    model : LibraryPSF
+        The injection model.
+
+    Raises
+    ------
+    ValueError
+        If the header gives no filter and none is passed.
     """
     d0 = dsets[0] if isinstance(dsets, (list, tuple)) else dsets
     meta = getattr(d0, "meta", {}) or {}
