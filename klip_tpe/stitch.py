@@ -1,23 +1,26 @@
-"""Stitch helpers and FITS/text product writers for the run protocol (A §9).
+"""Stitching of the annuli's images, and the FITS and text products of a run (A §9).
 
-Everything here is a pure function of arrays + numbers; :class:`~klip_tpe.runner.Runner`
-decides *what* to stitch (previous annuli's winners, the current running best, the
-per-partition stacks) and calls in here for the *how*:
+Everything here is a pure function of arrays and numbers.  :class:`~klip_tpe.runner.Runner` decides
+what to stitch (the previous annuli's winners, the current running best, the per-partition stacks)
+and calls in here for how:
 
-* :func:`tile_mask` / :func:`stitch_tiles` -- NaN-aware weighted mean over radial tiles
-  ``edge_ia - pad <= r <= edge_ia+1 + pad`` (running stitch: equal weights; final
-  stitch: the sensitivity weights of :func:`klip_tpe.products.stitch_annuli`).  A run
-  pads only the edges where two annuli meet (``RunConfig.edge_padding``).
-* :func:`stitch_stacks` -- the same for per-partition stacks onto the union of
-  partition ids (NaN where an annulus did not use a partition).
-* :func:`tile_of` / :func:`tile_index` / :func:`stitch_by_tiles` -- which tile holds a
-  radius or a pixel, and maps put together tile by tile with no blending (the annuli' own
-  S/N maps).
-* :func:`seam_pixels` -- pixels inside the searched span still NaN after stitching.
-* :func:`fits_header` / :func:`write_fits` -- provenance headers (``.fits`` or ``.fits.gz``).
-* :func:`write_params_table`, :func:`write_contrast_curve`, :func:`write_setup_file`
-  -- the IDL text products (``klip_stitched_params.txt``, ``contrast_curve.txt``,
-  ``evalNNNN_setup.txt`` ...).
+* :func:`tile_mask` and :func:`stitch_tiles`, the NaN-aware weighted mean over radial tiles
+  ``edge_ia - pad <= r <= edge_ia+1 + pad``, with equal weights for the running stitch and the
+  sensitivity weights of :func:`klip_tpe.products.stitch_annuli` for the final one.  A run pads
+  only the edges where two annuli meet (``RunConfig.edge_padding``).
+* :func:`stitch_stacks`, the same for per-partition stacks, onto the union of the partition ids.
+* :func:`annulus_tiles` and :func:`open_ends`, the tiles of overlapping annuli and the tiles an
+  image product is stitched over.
+* :func:`tile_of`, :func:`tile_index` and :func:`stitch_by_tiles`, which tile holds a radius or a
+  pixel, and maps put together tile by tile without blending, such as the annuli's own S/N maps.
+* :func:`put_tile_in` and :func:`put_tile_in_stack`, the stitch with one annulus' tile put in.
+* :func:`seam_pixels` and :func:`seam_trim`, the pixels of the searched span still NaN after
+  stitching, and the contrast curve's seam trim.
+* :func:`fits_header`, :func:`write_fits` and :func:`read_fits`, FITS files with provenance headers
+  (``.fits`` or ``.fits.gz``).
+* :func:`write_params_table`, :func:`write_contrast_curve` and :func:`write_setup_file`, the text
+  products of the IDL predecessor (``klip_stitched_params.txt``, ``contrast_curve.txt``,
+  ``evalNNNN_setup.txt``).
 """
 from __future__ import annotations
 
@@ -43,6 +46,18 @@ PARAM_COLUMNS = ("k_klip", "bin", "n_ang", "filter", "angsep", "anglemax", "corr
 # geometry
 # ----------------------------------------------------------------------------
 def _radius(shape) -> np.ndarray:
+    """Return each pixel's distance from the star.
+
+    Parameters
+    ----------
+    shape : tuple of 2 ints
+        Shape of the image, ``(ny, nx)``.
+
+    Returns
+    -------
+    r : ndarray, shape (ny, nx)
+        The distance, in pixels.
+    """
     ny, nx = shape
     cx, cy = star_center((ny, nx))
     yy, xx = np.mgrid[0:ny, 0:nx]
@@ -50,13 +65,27 @@ def _radius(shape) -> np.ndarray:
 
 
 def annulus_tiles(zones: Sequence[Tuple[float, float]]) -> List[Tuple[float, float]]:
-    """Each annulus' tile, the radii the stitch takes from it, for ``zones`` sorted by centre.
+    """Return each annulus' tile, the radii the stitch takes from it.
 
-    Where two annuli next to each other overlap, the boundary between their tiles is the
-    midpoint between their centres, kept within the overlap, so each radius comes from the
-    annulus whose centre is nearest.  Where they meet, or leave a gap, the tiles keep the
-    zones' edges.  So without overlaps the tiles are the zones (``--ann-extra``,
-    NEAR2 s6 note, section 5)."""
+    Where two annuli next to each other overlap, the boundary between their tiles is the midpoint
+    between their centers, kept within the overlap, so each radius comes from the annulus whose center
+    is nearest.  Where they meet, or leave a gap, the tiles keep the zones' edges, so without overlaps
+    the tiles are the zones.
+
+    Parameters
+    ----------
+    zones : sequence of tuple of 2 floats
+        Each annulus' zone, ``(rin, rout)`` in pixels, sorted by center.
+
+    Returns
+    -------
+    tiles : list of tuple of 2 floats
+        Each annulus' tile, in pixels.
+
+    Notes
+    -----
+    Overlapping annuli come from ``--ann-extra`` (NEAR2 s6 note, section 5).
+    """
     z = [(float(a), float(b)) for a, b in zones]
     tiles = [[a, b] for a, b in z]
     for k in range(len(z) - 1):
@@ -69,12 +98,27 @@ def annulus_tiles(zones: Sequence[Tuple[float, float]]) -> List[Tuple[float, flo
 
 
 def open_ends(tiles: Sequence[Tuple[float, float]]) -> List[Tuple[float, float]]:
-    """The tiles an image product is stitched over: ``tiles`` with the innermost reaching in to
-    the star and the outermost out past the frame's edge.  The stitch then takes the innermost
-    and outermost annuli' images wherever they are finite, which is their whole KLIP zone, with
-    its pads and ``zone_in`` / ``zone_out``, since a reducer's image is NaN outside its zone.  A
-    one-annulus run's stitch is then its winner's image (MWC 758 ALES session, 2026-11-07).  The
-    boundaries between annuli are kept."""
+    """Return the tiles an image product is stitched over, opened in to the star and out past the frame.
+
+    The stitch then takes the innermost and outermost annuli's images wherever they are finite, which
+    is their whole KLIP zone with its pads and ``zone_in`` and ``zone_out``, since a reducer's image is
+    NaN outside its zone.  A one-annulus run's stitch is then its winner's image.  The boundaries
+    between annuli are kept.
+
+    Parameters
+    ----------
+    tiles : sequence of tuple of 2 floats
+        The scored tiles, in pixels.
+
+    Returns
+    -------
+    tiles : list of tuple of 2 floats
+        The tiles, the innermost from 0 and the outermost to infinity.
+
+    Notes
+    -----
+    From the MWC 758 ALES session of 2026-11-07.
+    """
     t = [(float(a), float(b)) for a, b in tiles]
     if not t:
         return t
@@ -86,14 +130,44 @@ def open_ends(tiles: Sequence[Tuple[float, float]]) -> List[Tuple[float, float]]
 
 
 def tile_mask(shape, rin: float, rout: float, pad: Any = 2.0) -> np.ndarray:
-    """Boolean tile ``rin - pad_in <= r <= rout + pad_out``.  ``pad`` is one value for both
-    edges or a ``(pad_in, pad_out)`` pair."""
+    """Return the mask of a tile, ``rin - pad_in <= r <= rout + pad_out``.
+
+    Parameters
+    ----------
+    shape : tuple of 2 ints
+        Shape of the image, ``(ny, nx)``.
+    rin : float
+        Inner radius, in pixels.
+    rout : float
+        Outer radius, in pixels.
+    pad : float or tuple of 2 floats, default 2.0
+        Pad of both edges, or ``(pad_in, pad_out)``, in pixels.
+
+    Returns
+    -------
+    mask : ndarray of bool, shape (ny, nx)
+        True inside the tile.
+    """
     pin, pout = _pair(pad)
     rr = _radius(shape)
     return (rr >= rin - pin) & (rr <= rout + pout)
 
 
 def _pair(pad: Any) -> Tuple[float, float]:
+    """Return a pad as ``(pad_in, pad_out)``.
+
+    Parameters
+    ----------
+    pad : float or sequence of 2 floats
+        One pad for both edges, or the pair.
+
+    Returns
+    -------
+    pad_in : float
+        Pad of the inner edge.
+    pad_out : float
+        Pad of the outer edge.
+    """
     if isinstance(pad, (tuple, list, np.ndarray)):
         return float(pad[0]), float(pad[1])
     return float(pad), float(pad)
@@ -102,10 +176,34 @@ def _pair(pad: Any) -> Tuple[float, float]:
 def stitch_tiles(images: Sequence[Optional[np.ndarray]], zones: Sequence[Tuple[float, float]],
                  weights: Optional[Sequence[float]] = None, pad: float = 2.0,
                  pads: Optional[Sequence[Tuple[float, float]]] = None) -> np.ndarray:
-    """NaN-aware weighted mean of ``images`` over their tiles (``None`` entries skipped).
-    ``zones`` are ``(rin, rout)`` in px; overlaps (±pad) are weighted means.  ``pads``
-    gives each tile its own ``(pad_in, pad_out)``: the runner pads only the edges between
-    two annuli (``RunConfig.edge_padding``)."""
+    """Stitch images into their NaN-aware weighted mean over their tiles.
+
+    Where padded tiles overlap, each pixel is the weighted mean of the images finite there.
+
+    Parameters
+    ----------
+    images : sequence of ndarray or None
+        One image per tile.  None is skipped, as is an image of another shape than the first.
+    zones : sequence of tuple of 2 floats
+        Each image's tile, ``(rin, rout)`` in pixels.
+    weights : sequence of float or None, default None
+        Weight of each image.  None weighs them equally.
+    pad : float, default 2.0
+        Pad of every edge, in pixels, when ``pads`` is None.
+    pads : sequence of tuple of 2 floats or None, default None
+        Each tile's ``(pad_in, pad_out)``, in pixels.  The runner pads only the edges between two annuli
+        (``RunConfig.edge_padding``).
+
+    Returns
+    -------
+    stitch : ndarray, shape (ny, nx)
+        The stitched image, NaN where no image is finite.
+
+    Raises
+    ------
+    ValueError
+        If every image is None.
+    """
     ref = next((im for im in images if im is not None), None)
     if ref is None:
         raise ValueError("no images to stitch")
@@ -127,10 +225,33 @@ def stitch_stacks(stacks: Sequence[Optional[np.ndarray]], part_ids: Sequence[Opt
                   zones: Sequence[Tuple[float, float]], weights: Optional[Sequence[float]] = None,
                   pad: float = 2.0, pads: Optional[Sequence[Tuple[float, float]]] = None
                   ) -> Tuple[Optional[np.ndarray], List[str]]:
-    """Stitch per-partition stacks ``(npart_ia, ny, nx)`` onto the union of partition ids
-    (sorted by first appearance).  Returns ``(cube (nunion, ny, nx), ids)``; NaN where an
-    annulus did not use a partition.  ``(None, [])`` when nothing is available.  ``pads``
-    as for :func:`stitch_tiles`."""
+    """Stitch per-partition stacks onto the union of their partition ids.
+
+    Each partition's planes are stitched as :func:`stitch_tiles` stitches images.
+
+    Parameters
+    ----------
+    stacks : sequence of ndarray or None
+        Each annulus' per-partition images, ``(npart, ny, nx)``, None skipped.
+    part_ids : sequence of sequence or None
+        Each stack's partition ids, None skipped.
+    zones : sequence of tuple of 2 floats
+        Each annulus' tile, ``(rin, rout)`` in pixels.
+    weights : sequence of float or None, default None
+        Weight of each annulus.  None weighs them equally.
+    pad : float, default 2.0
+        Pad of every edge, in pixels, when ``pads`` is None.
+    pads : sequence of tuple of 2 floats or None, default None
+        Each tile's ``(pad_in, pad_out)``, in pixels.
+
+    Returns
+    -------
+    cube : ndarray or None
+        The stitched stack, ``(nunion, ny, nx)``, NaN where no annulus used a partition, None when
+        nothing is available.
+    ids : list of str
+        The union of the ids, in the order they first appear, empty when nothing is available.
+    """
     union: List[str] = []
     for ids, st in zip(part_ids, stacks):
         if st is None or ids is None:
@@ -161,8 +282,20 @@ def stitch_stacks(stacks: Sequence[Optional[np.ndarray]], part_ids: Sequence[Opt
 
 
 def tile_of(r_px: float, tiles: Sequence[Tuple[float, float]]) -> Optional[int]:
-    """The index of the tile holding radius ``r_px``: ``rin <= r < rout``, the last tile's
-    outer edge included.  None outside every tile."""
+    """Return the index of the tile holding a radius, ``rin <= r < rout``, the last tile's outer edge included.
+
+    Parameters
+    ----------
+    r_px : float
+        The radius, in pixels.
+    tiles : sequence of tuple of 2 floats
+        The tiles, in pixels.
+
+    Returns
+    -------
+    index : int or None
+        The tile's index, None outside every tile.
+    """
     r = float(r_px)
     for k, (a, b) in enumerate(tiles):
         if float(a) <= r < float(b):
@@ -173,8 +306,20 @@ def tile_of(r_px: float, tiles: Sequence[Tuple[float, float]]) -> Optional[int]:
 
 
 def tile_index(shape, tiles: Sequence[Tuple[float, float]]) -> np.ndarray:
-    """Each pixel's tile as :func:`tile_of` gives it for the pixel's radius, -1 outside every
-    tile."""
+    """Return each pixel's tile, as :func:`tile_of` gives it for the pixel's radius.
+
+    Parameters
+    ----------
+    shape : tuple of 2 ints
+        Shape of the image, ``(ny, nx)``.
+    tiles : sequence of tuple of 2 floats
+        The tiles, in pixels.
+
+    Returns
+    -------
+    index : ndarray of int, shape (ny, nx)
+        The tile's index, -1 outside every tile.
+    """
     rr = _radius(shape)
     out = np.full(tuple(shape), -1, int)
     n = len(tiles)
@@ -185,9 +330,27 @@ def tile_index(shape, tiles: Sequence[Tuple[float, float]]) -> np.ndarray:
 
 
 def stitch_by_tiles(images: Sequence[Optional[np.ndarray]], tiles: Sequence[Tuple[float, float]]) -> np.ndarray:
-    """Each pixel from the image of the tile holding it (:func:`tile_index`), with no blending
-    at the boundaries, for maps that must not be averaged, as the annuli' own S/N maps.  NaN
-    outside every tile, where that tile's image is missing and where it is NaN."""
+    """Put maps together tile by tile, each pixel from the map of the tile holding it, without blending.
+
+    It serves for maps that must not be averaged, such as the annuli's own S/N maps.
+
+    Parameters
+    ----------
+    images : sequence of ndarray or None
+        One map per tile.
+    tiles : sequence of tuple of 2 floats
+        The tiles, in pixels.
+
+    Returns
+    -------
+    stitch : ndarray, shape (ny, nx)
+        The map, NaN outside every tile, where a tile's map is missing and where it is NaN.
+
+    Raises
+    ------
+    ValueError
+        If every map is None.
+    """
     ref = next((im for im in images if im is not None), None)
     if ref is None:
         raise ValueError("no images to stitch")
@@ -204,11 +367,31 @@ def stitch_by_tiles(images: Sequence[Optional[np.ndarray]], tiles: Sequence[Tupl
 
 def put_tile_in(stitched: Optional[np.ndarray], image: Optional[np.ndarray], tile: np.ndarray
                 ) -> Optional[np.ndarray]:
-    """The stitch with one annulus' image put in on its tile: ``image`` where ``tile`` (a mask,
-    as ``tile_index(...) == k``) holds and ``image`` is finite, ``stitched`` everywhere else.  A
-    matched filter and a noise ring near the tile's edge then take the neighbors' residuals, as
-    on the stitch, where on ``image`` alone, NaN outside its zone, they take zeros (NEAR2 note,
-    2026-11-04).  ``image`` alone when there is no stitch of its shape, None without ``image``."""
+    """Return the stitch with one annulus' image put in on its tile.
+
+    The result is ``image`` where ``tile`` holds and ``image`` is finite, and ``stitched`` everywhere
+    else.  A matched filter and a noise ring near the tile's edge then take the neighbors' residuals,
+    as on the stitch, where on ``image`` alone, NaN outside its zone, they take zeros.
+
+    Parameters
+    ----------
+    stitched : ndarray or None
+        The stitched image.
+    image : ndarray or None
+        The annulus' image.
+    tile : ndarray of bool
+        The tile's mask, such as ``tile_index(...) == k``.
+
+    Returns
+    -------
+    image : ndarray or None
+        The stitch with the tile put in, ``image`` alone when there is no stitch of its shape, None
+        without ``image``.
+
+    Notes
+    -----
+    From the NEAR2 note of 2026-11-04.
+    """
     if image is None:
         return None
     img = np.asarray(image, float)
@@ -222,10 +405,30 @@ def put_tile_in(stitched: Optional[np.ndarray], image: Optional[np.ndarray], til
 
 def put_tile_in_stack(stitched: Optional[np.ndarray], stitched_ids: Optional[Sequence[Any]], stack: np.ndarray,
                       ids: Optional[Sequence[Any]], tile: np.ndarray) -> np.ndarray:
-    """:func:`put_tile_in` for each partition: each plane of ``stack`` (an annulus' per-partition
-    images, ids ``ids``) put into the plane of the stitched per-partition cube with the same id.
-    A plane whose id the stitched cube lacks, and every plane when either set of ids is unknown,
-    stays as the annulus has it."""
+    """Put each plane of an annulus' per-partition stack into the stitched cube's plane of the same id.
+
+    Each plane goes in as :func:`put_tile_in` puts an image in.  A plane whose id the stitched cube
+    lacks, and every plane when either set of ids is unknown or the shapes disagree, stays as the
+    annulus has it.
+
+    Parameters
+    ----------
+    stitched : ndarray or None
+        The stitched per-partition cube.
+    stitched_ids : sequence or None
+        The cube's partition ids.
+    stack : ndarray
+        The annulus' per-partition images, ``(n, ny, nx)`` or one ``(ny, nx)``.
+    ids : sequence or None
+        The stack's partition ids.
+    tile : ndarray of bool
+        The tile's mask.
+
+    Returns
+    -------
+    stack : ndarray, shape (n, ny, nx)
+        The planes with the tile put in.
+    """
     st = np.asarray(stack, float)
     if st.ndim == 2:
         st = st[None]
@@ -242,13 +445,41 @@ def put_tile_in_stack(stitched: Optional[np.ndarray], stitched_ids: Optional[Seq
 
 
 def seam_pixels(stitched: np.ndarray, r0: float, r1: float) -> np.ndarray:
-    """Mask of pixels with ``r0 <= r <= r1`` that are still NaN after stitching."""
+    """Return the mask of the pixels between two radii that are still NaN after stitching.
+
+    Parameters
+    ----------
+    stitched : ndarray, shape (ny, nx)
+        The stitched image.
+    r0 : float
+        Inner radius, in pixels.
+    r1 : float
+        Outer radius, in pixels.
+
+    Returns
+    -------
+    mask : ndarray of bool, shape (ny, nx)
+        True at the NaN pixels with ``r0 <= r <= r1``.
+    """
     rr = _radius(stitched.shape)
     return (rr >= r0) & (rr <= r1) & ~np.isfinite(stitched)
 
 
 def seam_trim(fwhm: float, pxscale: float) -> float:
-    """Contrast-curve seam trim ``max(round(fwhm/3), 1) * pxscale`` (arcsec)."""
+    """Return the contrast curve's seam trim, ``max(round(fwhm / 3), 1) * pxscale``.
+
+    Parameters
+    ----------
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+
+    Returns
+    -------
+    trim : float
+        The trim, in arcsec.
+    """
     return max(int(round(fwhm / 3.0)), 1) * pxscale
 
 
@@ -256,11 +487,25 @@ def seam_trim(fwhm: float, pxscale: float) -> float:
 # FITS
 # ----------------------------------------------------------------------------
 def fits_header(d: Dict[str, Any], history: Sequence[str] = ()):
-    """Build an ``astropy.io.fits.Header`` from a flat dict.  Keys are upper-cased and
-    truncated to 8 characters (HIERARCH is avoided so the files stay readable by
-    everything); values that FITS cannot hold are stringified; ``None`` / non-finite
-    floats are skipped; ``history`` lines go into HISTORY cards.  ``PROG``, ``DATE``
-    and ``KTPEVER`` (klip_tpe version) are always present."""
+    """Build an ``astropy.io.fits.Header`` from a flat dict.
+
+    Keys are upper-cased, with "-" as "_", and cut to 8 characters, which avoids HIERARCH so every
+    reader can read the files.  Values FITS cannot hold become strings, strings are cut to 68
+    characters, and None and non-finite floats are skipped.  ``PROG``, ``DATE`` and ``KTPEVER`` (the
+    klip_tpe version) are always present.
+
+    Parameters
+    ----------
+    d : dict
+        The keys and values.
+    history : sequence of str, default ()
+        Lines of the HISTORY cards.
+
+    Returns
+    -------
+    header : astropy.io.fits.Header
+        The header.
+    """
     from astropy.io import fits
     h = fits.Header()
     h["PROG"] = ("klip_tpe.runner", "generating package")
@@ -293,8 +538,27 @@ def fits_header(d: Dict[str, Any], history: Sequence[str] = ()):
 
 def write_fits(path: str, data: np.ndarray, header: Optional[Dict[str, Any]] = None,
                history: Sequence[str] = ()) -> str:
-    """Write ``data`` (float32) with :func:`fits_header`.  ``.fits.gz`` paths are
-    compressed by astropy.  Falls back to ``.npy`` without astropy.  Returns the path."""
+    """Write an array as float32 FITS with a :func:`fits_header`.
+
+    A ``.fits.gz`` path is compressed by astropy, and the directory is made where needed.  Without
+    astropy it saves a ``.npy`` file instead.
+
+    Parameters
+    ----------
+    path : str
+        Path of the file, ``.fits`` or ``.fits.gz``.
+    data : ndarray
+        The array.
+    header : dict or None, default None
+        Keys and values of the header.
+    history : sequence of str, default ()
+        Lines of the HISTORY cards.
+
+    Returns
+    -------
+    path : str
+        The path given, also without astropy.
+    """
     try:
         from astropy.io import fits
     except Exception:  # pragma: no cover
@@ -307,6 +571,18 @@ def write_fits(path: str, data: np.ndarray, header: Optional[Dict[str, Any]] = N
 
 
 def read_fits(path: str) -> Optional[np.ndarray]:
+    """Read a FITS file's primary data as floats.
+
+    Parameters
+    ----------
+    path : str
+        Path of the file.
+
+    Returns
+    -------
+    data : ndarray or None
+        The data, None when the file is missing or unreadable.
+    """
     if not os.path.exists(path):
         return None
     try:
@@ -320,6 +596,22 @@ def read_fits(path: str) -> Optional[np.ndarray]:
 # text products
 # ----------------------------------------------------------------------------
 def _fmt(v, fmt: str, default: str = "nan") -> str:
+    """Format a number, ``default`` where it is not finite or not a number.
+
+    Parameters
+    ----------
+    v : object
+        The value.
+    fmt : str
+        The format.
+    default : str, default "nan"
+        Text for a value that is not finite or not a number.
+
+    Returns
+    -------
+    text : str
+        The value formatted.
+    """
     try:
         f = float(v)
         return fmt.format(f) if np.isfinite(f) else default
@@ -328,9 +620,21 @@ def _fmt(v, fmt: str, default: str = "nan") -> str:
 
 
 def _kept_median(r: Dict[str, Any]) -> Dict[str, Any]:
-    """The parameters of a ``write_params_table`` row with each column of :data:`PARAM_COLUMNS`
-    replaced by its median over the per-partition blocks of the partitions the row keeps (all
-    of the blocks when the row names none), where those blocks give it."""
+    """Return a parameters-table row's parameters, the columns of :data:`PARAM_COLUMNS` as medians over its kept blocks.
+
+    The blocks are the per-partition blocks of the partitions the row keeps, all of them when it names
+    none, and a column no block gives keeps the row's value.
+
+    Parameters
+    ----------
+    r : dict
+        The row, with ``params``, ``per_partition`` and ``partitions``.
+
+    Returns
+    -------
+    params : dict
+        The parameters.
+    """
     p = dict(r.get("params") or {})
     per = r.get("per_partition") or {}
     keep = [str(v) for v in (r.get("partitions") or [])]
@@ -350,15 +654,28 @@ def _kept_median(r: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def write_params_table(path: str, rows: Sequence[Dict[str, Any]]) -> str:
-    """``klip_stitched_params.txt``: one row per annulus with the representative values,
-    the median over the partitions the winner keeps of their per-partition blocks (the row's
-    ``params`` where there are none), then the per-partition block.  Values carry 6
-    significant digits, so they can be rounded again without the error of a second rounding.
+    """Write ``klip_stitched_params.txt``, each annulus' representative parameters and its per-partition blocks.
 
-    Each row dict: ``ann, inner_px, outer_px, params (dict), best_SNR, partitions (list),
-    per_partition ({pid: params})`` plus optional ``validated``, ``contrast``.  Rows with
-    ``tile_in_px`` / ``tile_out_px`` (overlapping annuli, ``RunConfig.ann_extra``) add the
-    two tile columns after the zone's.  Returns the text."""
+    The representative value of each parameter is the median over the partitions the winner keeps of
+    their per-partition blocks (:func:`_kept_median`), or the row's ``params`` where there are none.
+    Values carry 6 significant digits, so they can be rounded again without the error of a second
+    rounding.
+
+    Parameters
+    ----------
+    path : str
+        Path of the file.
+    rows : sequence of dict
+        One row per annulus, holding ``ann``, ``inner_px``, ``outer_px``, ``params``, ``best_SNR``,
+        ``partitions`` and ``per_partition`` (partition id to parameters).  Optional keys are
+        ``validated``, ``contrast``, and ``tile_in_px`` and ``tile_out_px`` for overlapping annuli
+        (``RunConfig.ann_extra``), which add two tile columns after the zone's.
+
+    Returns
+    -------
+    text : str
+        The text written.
+    """
     def g(v, w):
         return f"{_fmt(v, '{:.6g}'):>{w}}"
     tiles = any(r.get("tile_in_px") is not None for r in rows)
@@ -401,7 +718,18 @@ def write_params_table(path: str, rows: Sequence[Dict[str, Any]]) -> str:
 
 
 def _spans(nums: Sequence[int]) -> str:
-    """``[1, 2, 3, 5]`` as ``"1-3, 5"``."""
+    """Return integers as spans, such as ``[1, 2, 3, 5]`` as ``"1-3, 5"``.
+
+    Parameters
+    ----------
+    nums : sequence of int
+        The integers.
+
+    Returns
+    -------
+    text : str
+        The spans, sorted.
+    """
     out, run = [], []
     for v in sorted(int(x) for x in nums):
         if run and v == run[-1] + 1:
@@ -420,19 +748,45 @@ def write_contrast_curve(path: str, curves: Sequence[Optional[Dict[str, Any]]], 
                          contrasts: Optional[Sequence[float]] = None,
                          fm_curves: Optional[Sequence[Optional[Dict[str, Any]]]] = None,
                          grid_curves: Optional[Sequence[Optional[Dict[str, Any]]]] = None) -> Dict[str, np.ndarray]:
-    """Run-level ``contrast_curve.txt``: per-annulus curves concatenated with the seam
-    trim ``trim = max(round(fwhm/3), 1) * pxscale`` (annulus ``ia`` keeps ``r >=
-    edge_ia + trim`` for ``ia > 0`` and ``r <= edge_ia+1 - trim`` for ``ia < nann-1``;
-    ``legacy`` disables the trim), sorted by separation, followed by the per-sample
-    ``5 * contrast / SNR`` points.  ``curves`` are the ``AnnulusResult.contrast_curve``
-    dicts (``r_as, curve, sample_r, sample_c``; ``None`` entries skipped).  ``fm_curves``
-    (the ``AnnulusResult.fm_curve`` dicts) append the ``# KLIP-FM`` cross-check section
-    (A §6.4): two comment lines then ``sep_arcsec  contrast_5sig`` rows over all
-    annuli, sorted by separation (no seam trim -- the test radii are inside the zone).
-    ``grid_curves`` (the ``AnnulusResult.grid_curve`` dicts, one injection per reduction) take
-    the main section's place annulus by annulus where present, and when only some annuli have
-    one the header names the annuli of each method.
-    Returns the concatenated arrays (``fm_r`` / ``fm_c`` when an FM section was written)."""
+    """Write the run's ``contrast_curve.txt``, the annuli's curves joined at the seams, then their per-sample points.
+
+    Each annulus' curve is trimmed at the seams by ``trim = max(round(fwhm / 3), 1) * pxscale``:
+    annulus ``ia`` keeps ``r >= edge_ia + trim`` for ``ia > 0`` and ``r <= edge_ia+1 - trim`` for
+    ``ia < nann - 1``.  The curves are joined and sorted by separation, followed by the per-sample
+    ``5 * contrast / SNR`` points.  With ``fm_curves`` a ``# KLIP-FM`` cross-check section follows
+    (A §6.4), two comment lines then ``sep_arcsec  contrast_5sig`` rows over all annuli, sorted by
+    separation and not trimmed, since the test radii lie inside the zones.
+
+    Parameters
+    ----------
+    path : str
+        Path of the file.
+    curves : sequence of dict or None
+        Each annulus' ``AnnulusResult.contrast_curve`` (``r_as``, ``curve``, ``sample_r``,
+        ``sample_c``), None skipped.
+    edges_px : sequence of float
+        The annuli's edges, in pixels.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    legacy : bool, default False
+        Whether to leave the curves untrimmed, as ``legacy_stitch`` does.
+    contrasts : sequence of float or None, default None
+        Injection contrast of each annulus, for the header.
+    fm_curves : sequence of dict or None, default None
+        Each annulus' ``AnnulusResult.fm_curve``, for the KLIP-FM section.
+    grid_curves : sequence of dict or None, default None
+        Each annulus' ``AnnulusResult.grid_curve`` (one injection per reduction), which takes the main
+        section's place annulus by annulus where present.  When only some annuli have one, the header
+        names the annuli of each method.
+
+    Returns
+    -------
+    curve : dict of str to ndarray
+        The joined ``r_as`` and ``curve``, ``sample_r`` and ``sample_c``, and ``fm_r`` and ``fm_c``
+        where a KLIP-FM section was written.
+    """
     nann = len(curves)
     trim = 0.0 if legacy else seam_trim(fwhm, pxscale)
     grid = list(grid_curves or [])
@@ -510,7 +864,9 @@ def write_setup_file(path: str, phase: str, annulus: int, step: int, params: Dic
                      snr: Optional[float] = None, per_partition: Optional[Dict[Any, Dict[str, Any]]] = None,
                      k_used: Any = None, weights: Optional[Sequence[float]] = None,
                      extra: Optional[Dict[str, Any]] = None) -> str:
-    """One step-setup text file in the ``near2m_write_setup`` layout (A §6.3)::
+    """Write one step's setup file, in the layout of the IDL predecessor's ``near2m_write_setup`` (A §6.3).
+
+    The file reads::
 
         # KLIP-TPE step setup -- <date>
         phase         : eval
@@ -525,9 +881,47 @@ def write_setup_file(path: str, phase: str, annulus: int, step: int, params: Dic
         # injected sources:  rho_arcsec   PA_deg     contrast
             0.700      123.40   3.000E-05
 
-    followed (partitioned runs) by a ``# PER-PARTITION block`` table and, for a dict
-    ``k_used``, a ``per-partition k*`` line.  Never raises (a text product must not
-    kill a run); returns the text ('' on failure)."""
+    A partitioned run's file ends with a ``# PER-PARTITION block`` table.  It never raises, since a
+    text product must not stop a run.
+
+    Parameters
+    ----------
+    path : str
+        Path of the file, whose directory is made where needed.
+    phase : str
+        Phase of the step, such as "eval".
+    annulus : int
+        The annulus, counted from 0 and written from 1.
+    step : int
+        The step.
+    params : dict
+        The step's parameters.
+    inrad : float
+        Inner radius of the zone, in pixels.
+    outrad : float
+        Outer radius of the zone, in pixels.
+    partitions : sequence, default ()
+        The partitions kept, all when empty.
+    sources : sequence of sequence of float, default ()
+        The injected sources, as ``(rho_arcsec, theta_deg)`` or ``(rho_arcsec, theta_deg, contrast)``.
+    contrast : float or None, default None
+        Contrast of the sources that give none.  None writes 0.
+    snr : float or None, default None
+        The step's median S/N.
+    per_partition : dict or None, default None
+        Each partition's parameters, for the per-partition block.
+    k_used : dict or None, default None
+        Each partition's KL modes, written as a ``per-partition k*`` line.  Other values are not written.
+    weights : sequence of float or None, default None
+        The per-partition combine weights, written under the block.
+    extra : dict or None, default None
+        More lines, as name and value.
+
+    Returns
+    -------
+    text : str
+        The text written, empty on a failure.
+    """
     try:
         L = [f"# KLIP-TPE step setup -- {_dt.datetime.now().isoformat(timespec='seconds')}  (klip_tpe {__version__})",
              f"{'phase':<14}: {phase}", f"{'annulus':<14}: {int(annulus) + 1}", f"{'step':<14}: {int(step)}"]
