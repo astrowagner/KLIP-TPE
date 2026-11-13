@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — 2026-11-13 (verify.py documented to the rule)
+
+- **`verify.py` follows the documentation rule**: its module docstring, with the departures from
+  the IDL predecessor's `near2_verify.pro` under Notes, the statistics, the S/N and FAP measures,
+  the solved contrasts, Path B, the drivers (`verify_candidates`, `verify_injections`,
+  `verify_tiles`) and the report writers.  The module and `bootstrap_nights` no longer say the
+  bootstrap reads its peak directly, since it reads it from `snr_fap` called with `exr = srad`, as
+  the predecessor does.  Only docstrings and comments changed.
+
 ## Unreleased — 2026-11-13 (fmmf.py documented to the rule)
 
 - **`fmmf.py` follows the documentation rule**: the forward-modeled matched filter's functions,
