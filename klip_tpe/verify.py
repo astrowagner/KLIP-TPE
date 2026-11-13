@@ -1,88 +1,55 @@
-"""Multi-night source verification -- port of ``near2_verify.pro``.
+"""Multi-night source verification, two independent paths for every candidate ``(rho, theta)``.
 
-Two independent "paths" are evaluated for every candidate ``(rho, theta)``:
+* Path A is the search's matched-filter S/N on the combined image (Mawet et al. 2014,
+  :func:`snr_fap`), with the small-sample false-alarm probability (Student t, ``df = n_ap - 2``).
+  The decision is ``fap < fap_op``.
+* Path B is the night-to-night consistency: the night-STIM map with an empirical FAP from the
+  same-radius annulus, a bootstrap over nights of the matched-filter peak, and the S/N in five
+  semi-independent subsets (combined, first half, second half, even and odd nights), whose
+  minimum over the four partitions is the persistence.
 
-* **Path A** -- matched-filter Mawet et al. (2014) S/N on the combined image, the
-  search's (:func:`snr_fap`), with the small-sample false-alarm probability
-  (Student-t, ``df = n_ap - 2``; ``near2v_snrfap`` / ``near2v_tfap``).  The decision
-  is ``fap < fap_op``.
-* **Path B** -- night-to-night consistency: the night-STIM map
-  (``near2v_stim``) with an empirical FAP from the same-radius annulus, a
-  bootstrap over nights of the matched-filter peak (``near2v_boot``), and the
-  S/N in five semi-independent subsets (combined / first half / second half /
-  even / odd nights) whose minimum over the four partitions is the
-  *persistence*.
+With an injected twin of the night stack, the same machinery runs at the injected positions, and
+the Path-A detection limits ``c_lim = c_inj (tau_alpha + tau_{1-beta}) / SNR_inj`` are binned by
+separation (TABLE 1 and TABLE 2).  With the clean image beside the injected one, each injection's
+S/N is also solved on ``clean + a (injected - clean)`` for the contrasts at which it reaches the
+thresholds (:func:`solved_contrasts`), which TABLE 3 reports.  The runner gives Path A the image
+the run made (``combined``, ``combined_inj``), an annulus' combined image or the final stitch.
+Without it Path A uses the weighted mean of the nights.
 
-When an injected twin of the night stack is given, the same machinery is run
-at the injected positions and the Path-A detection limits
-``c_lim = c_inj (tau_alpha + tau_{1-beta}) / SNR_inj`` (``near2v_climit``) are
-binned by separation (TABLE 1 / TABLE 2 of the IDL report).  With the clean
-image beside the injected one, each injection's S/N is also solved on ``clean +
-a (injected - clean)`` for the contrasts at which it reaches the thresholds
-(:func:`solved_contrasts`), and TABLE 3 gives the limits and detected counts from
-those, which the IDL report does not have.
+Images are ``(ny, nx)`` arrays indexed ``[y, x]``, with the star at ``((nx-1)/2, (ny-1)/2)``.
+``theta`` is a position angle East of North, ``x = cx + r cos(theta+90)``, ``y = cy + r sin(theta+90)``.
 
-The combined image of Path A can be given (``combined`` / ``combined_inj`` of
-:func:`verify_candidates`).  The runner gives the image the run made, an annulus'
-combined image or the final stitch, so the verify measures the product itself.
-Without it Path A uses the weighted mean of the nights, as the IDL does.
+Notes
+-----
+The module succeeds ``near2_verify.pro`` of the IDL predecessor, from which it departs on purpose
+where listed here, each also flagged at its call site:
 
-Conventions: images are ``(ny, nx)`` numpy arrays indexed ``[y, x]``; the star is
-at ``((nx-1)/2, (ny-1)/2)``; ``theta`` is a position angle East of North with
-``x = cx + r cos(theta+90)``, ``y = cy + r sin(theta+90)`` (verify 128-129).
-
-Deliberate deviations from the IDL (each also flagged at the call site):
-
-* ``near2v_tthresh`` bisects ``tau`` on ``[0, 50]``; we use ``scipy.stats.t.isf``
-  and clip to the same ``[-50, 50]`` range so extreme (``df=1``) thresholds
-  agree with the IDL value instead of exploding.
-* The bootstrap (verify 208) calls ``near2v_snrfap`` with ``exr = srad`` only to
-  read back the matched-filter peak value (``s[3]``), which the ring exclusion
-  never influences.  We evaluate the peak directly; results are identical.
-* The injected-STIM empirical FAP (verify 660) omits the 1.5-FWHM keep-out
-  around the source that the candidate FAP (verify 601) applies; we apply the
-  keep-out in both cases (brief C.6).
-* The driver calls ``near2v_snrfap`` without ``exclude`` (verify 588-591 and
-  655-656), so a noise ring holds the known sources and, in the injection
-  calibration block, the other injected sources.  We leave out of every ring the
-  known sources, and out of an injection's ring (combined and subsets) the other
-  injections of the block, within ``excl_fwhm`` FWHM, as the run's metric
-  (:func:`~klip_tpe.metrics.mawet_peak_snr`, IDL ``near2_snrpk``) does.  The
-  STIM FAP annulus drops the same positions within the same keep-out.  Two
-  injections at one radius, 180 deg apart (the two-source layout of
-  ``near2m_randpos``), otherwise put a ring sample on, or two beside, the other
-  source.
-* The driver measures Path A on ``near2v_combine`` of the per-night stitched
-  images (verify 545-552, 588), which is not the run's stitched image.  At an edge
-  between two annuli each tile reaches into the other annulus, a night kept by
-  only one of the two holds that annulus' value there at full weight, and the
-  stitch weighs the two annuli by their sensitivity, not by night.  A night
-  dropped by a quiet annulus and kept by a noisy neighbor brings the neighbor's
-  noise into the quiet annulus' edge (NEAR2 run_20261015_171115, annulus 2).  The
-  runner gives the image it made as ``combined`` (and ``combined_inj``), and Path A
-  runs there.  Path B (STIM, bootstrap, subsets) stays on the per-night images, and
-  the ``combined`` subset is Path A's image.
-* ``median`` of the per-bin S/N uses ``numpy.median`` (mean of the two middle
-  values) rather than IDL's upper-middle default.
+* ``near2v_tthresh`` bisects ``tau`` on [0, 50], and :func:`t_thresh` uses ``scipy.stats.t.isf``
+  clipped to the same range, so extreme thresholds (``df = 1``) agree with the predecessor's.
+* The predecessor's injected-STIM FAP (verify 660) omits the 1.5 FWHM keep-out around the source
+  that its candidate FAP (verify 601) applies.  The keep-out applies to both here (brief C.6).
+* The predecessor's driver calls ``near2v_snrfap`` without ``exclude`` (verify 588-591, 655-656), so
+  a noise ring holds the known sources and the other injections of a calibration block.  Here
+  every ring leaves out the known sources, and an injection's ring the block's other injections,
+  within ``excl_fwhm`` FWHM, as the run's metric does.  Two injections at one radius 180 degrees
+  apart otherwise put a ring sample on, or two beside, the other source.
+* The predecessor measures Path A on ``near2v_combine`` of the per-night stitched images (verify
+  545-552, 588), which is not the run's stitched image.  At an edge between two annuli a night
+  dropped by a quiet annulus and kept by a noisy neighbor brings the neighbor's noise into the
+  quiet annulus' edge (NEAR2 run_20261015_171115, annulus 2), so Path A runs on the run's own
+  image.  Path B stays on the per-night images, and its ``combined`` subset is Path A's image.
+* The median of the per-bin S/N is ``numpy.median``, the mean of the two middle values, rather than
+  the upper middle that the predecessor's IDL ``median`` takes.
 * Since 2026-11-01 (Kevin Wagner) every S/N of the verify is the search's
   (:func:`~klip_tpe.metrics.mawet_peak_snr`, through :func:`snr_fap`) under the run's rules
-  (``rules=``, :func:`~klip_tpe.metrics.ring_rules`): its matched filter (a measured kernel
-  too), its despike (6 sigma unless the run turns it off), the keep-outs around the sources
-  as given, its radial band (the noise of a ring shorter than ``min_ring``, and a floor under
-  the ring's scatter), its small-sample correction and its pixel mask.  ``near2v_snrfap``
-  convolved a Gaussian kernel, kept ``exr`` around the located peak and had no band.  The
-  bootstrap reads the peak of the same matched filter, the STIM annulus leaves the pixel mask
-  out, and the FAP counts the ring samples used.  Without ``rules`` the search metric's
-  defaults apply.  A run saved before 2026-11-01 keeps the verify it had
-  (``RunConfig.verify_snr = "idl"``, :data:`~klip_tpe.metrics.VERIFY_IDL`): the IDL's
-  ``near2v_snrfap`` with its Gaussian maps, and no pixel mask.
-* Under the run's sidelobe rule (``sidelobes=``, :class:`~klip_tpe.metrics.Sidelobes`)
-  every ring of Path A and of the subsets also leaves out the ADI arcs of the source, of
-  the known companions and of the injection block's other sources, the STIM annulus
-  leaves out the same, and the solved contrasts keep them out (:func:`ring_snr`).  Where
-  fewer than 4 samples remain, the source's own arc narrows to let in the farthest, then
-  the other sources' arcs and the known companions' are let in.  The IDL has no such rule,
-  and ``sidelobes=None`` keeps its rings.
+  (``rules``, :func:`~klip_tpe.metrics.ring_rules`), with its matched filter, despike, keep-outs,
+  radial band, small-sample correction and pixel mask.  ``near2v_snrfap`` convolved a Gaussian
+  kernel, kept ``exr`` around the located peak and had no band.  A run saved before keeps the verify
+  it had (``RunConfig.verify_snr = "idl"``, :data:`~klip_tpe.metrics.VERIFY_IDL`).
+* Under the run's sidelobe rule (``sidelobes``, :class:`~klip_tpe.metrics.Sidelobes`) every ring of
+  Path A and of the subsets also leaves out the ADI arcs of the source, of the known companions and
+  of the block's other sources, as do the STIM annulus and the solved contrasts (:func:`ring_snr`).
+  The predecessor has no such rule, and ``sidelobes=None`` keeps its rings.
 """
 from __future__ import annotations
 
@@ -112,10 +79,27 @@ DEFAULT_TAP_LIST = (0.50, 0.90, 0.95)                     # verify 515
 # C.1.1 - C.1.3  statistical primitives
 # ----------------------------------------------------------------------------
 def t_fap(snr: float, n: int) -> float:
-    """Mawet (2014) small-sample false-alarm probability per resolution element
-    (``near2v_tfap``, verify 66-72): Student-t survival ``P(T > snr)`` with
-    ``df = max(n-2, 1)``.  ``snr <= 0`` returns 0.5 exactly (IDL behaviour);
-    ``n`` is the number of noise apertures actually used."""
+    """Return Mawet et al. (2014)'s small-sample false-alarm probability per resolution element.
+
+    It is the Student-t survival ``P(T > snr)`` with ``df = max(n - 2, 1)``.
+
+    Parameters
+    ----------
+    snr : float
+        The S/N.
+    n : int
+        Number of noise apertures used.
+
+    Returns
+    -------
+    fap : float
+        The probability, exactly 0.5 for ``snr <= 0`` as in the IDL predecessor, NaN for a non-finite
+        S/N.
+
+    Notes
+    -----
+    It is ``near2v_tfap`` of the IDL predecessor (verify 66-72).
+    """
     if not np.isfinite(snr):
         return float("nan")
     df = max(int(n) - 2, 1)
@@ -125,36 +109,89 @@ def t_fap(snr: float, n: int) -> float:
 
 
 def t_thresh(alpha: float, n: int) -> float:
-    """S/N threshold ``tau`` with ``t_fap(tau, n) = alpha`` (``near2v_tthresh``,
-    verify 80-91).  ``alpha <= 0 -> 1e30``.  DEVIATION: closed-form
-    ``t.isf`` clipped to the IDL bisection range ``[-50, 50]``.
+    """Return the S/N threshold ``tau`` at which :func:`t_fap` is ``alpha``, capped at 50.
 
-    The decision, :func:`t_fap`, is exact.  So where the exact threshold passes 50 (``n <= 6``
-    at the operating FAP 2.87e-7, where it is 57, 157, 1320 and 1.1e6 for ``n`` = 6 to 3), a
-    source at a limit made with this ``tau`` does not reach the FAP.  The report's TABLE 1 says
-    where, and TABLE 3 takes the exact threshold (:func:`_t_exact`)."""
+    It is ``t.isf`` clipped to [-50, 50], the IDL predecessor's bisection range.  The decision,
+    :func:`t_fap`, is exact, so where the exact threshold passes 50 (``n <= 6`` at the operating FAP
+    2.87e-7, where it is 57, 157, 1320 and 1.1e6 for ``n`` 6 to 3) a source at a limit made with this
+    ``tau`` does not reach the FAP.  TABLE 1 says where, and TABLE 3 takes the exact threshold
+    (:func:`_t_exact`).
+
+    Parameters
+    ----------
+    alpha : float
+        The false-alarm probability.
+    n : int
+        Number of noise apertures.
+
+    Returns
+    -------
+    tau : float
+        The threshold, 1e30 for ``alpha <= 0``.
+
+    Notes
+    -----
+    It is ``near2v_tthresh`` of the IDL predecessor (verify 80-91), which bisects instead.
+    """
     if alpha <= 0:
         return 1.0e30
     df = max(int(n) - 2, 1)
     return float(np.clip(_student_t.isf(float(alpha), df), -50.0, 50.0))
 
 
-#: :func:`t_thresh`'s cap, the IDL's bisection range
+#: :func:`t_thresh`'s cap, the IDL predecessor's bisection range
 TAU_CAP = 50.0
 
 
 def _t_exact(alpha: float, n: int) -> float:
-    """:func:`t_thresh` without the cap: the S/N at which :func:`t_fap` is ``alpha``."""
+    """Return the S/N at which :func:`t_fap` is ``alpha``, without :func:`t_thresh`'s cap.
+
+    Parameters
+    ----------
+    alpha : float
+        The false-alarm probability.
+    n : int
+        Number of noise apertures.
+
+    Returns
+    -------
+    tau : float
+        The threshold, infinite for ``alpha <= 0``.
+    """
     if alpha <= 0:
         return float("inf")
     return float(_student_t.isf(float(alpha), max(int(n) - 2, 1)))
 
 
 def contrast_limit(alpha: float, beta: float, ci, si, napi) -> float:
-    """Detection-limit contrast at per-resel FAP ``alpha`` and completeness
-    ``beta`` scaled from injections (``near2v_climit``, verify 99-107):
-    ``lim_k = c_k (tau_alpha + tau_{1-beta}) / SNR_k`` with ``n_ap = max(round
-    (nap_k), 3)``, averaged over injections with ``SNR>0`` and ``c>0``."""
+    """Return the detection-limit contrast at a per-resolution-element FAP and completeness, scaled from injections.
+
+    Each injection gives ``lim_k = c_k (tau_alpha + tau_{1-beta}) / SNR_k`` with
+    ``n_ap = max(round(nap_k), 3)``, and the limit is their mean over the injections with a positive
+    S/N and contrast.
+
+    Parameters
+    ----------
+    alpha : float
+        False-alarm probability per resolution element.
+    beta : float
+        Completeness, the fraction of sources detected.
+    ci : array_like
+        Contrast of each injection.
+    si : array_like
+        S/N of each injection.
+    napi : array_like
+        Number of noise apertures of each injection.
+
+    Returns
+    -------
+    limit : float
+        The contrast limit, NaN without a usable injection.
+
+    Notes
+    -----
+    It is ``near2v_climit`` of the IDL predecessor (verify 99-107).
+    """
     ci, si, napi = (np.atleast_1d(np.asarray(a, float)) for a in (ci, si, napi))
     lim, nl = 0.0, 0
     for k in range(ci.size):
@@ -166,8 +203,32 @@ def contrast_limit(alpha: float, beta: float, ci, si, napi) -> float:
 
 
 def contrast_limit_image(alpha_img: float, beta: float, ci, si, napi) -> float:
-    """Same as :func:`contrast_limit` for a PER-IMAGE FAP converted to per-resel
-    with ``ar = min(alpha_img / n_ap, 0.49)`` (``near2v_climg``, verify 352-360)."""
+    """Return :func:`contrast_limit` for a per-image FAP, converted per resolution element.
+
+    The per-element FAP is ``min(alpha_img / n_ap, 0.49)``.
+
+    Parameters
+    ----------
+    alpha_img : float
+        False-alarm probability per image.
+    beta : float
+        Completeness.
+    ci : array_like
+        Contrast of each injection.
+    si : array_like
+        S/N of each injection.
+    napi : array_like
+        Number of noise apertures of each injection.
+
+    Returns
+    -------
+    limit : float
+        The contrast limit, NaN without a usable injection.
+
+    Notes
+    -----
+    It is ``near2v_climg`` of the IDL predecessor (verify 352-360).
+    """
     ci, si, napi = (np.atleast_1d(np.asarray(a, float)) for a in (ci, si, napi))
     lim, nl = 0.0, 0
     for k in range(ci.size):
@@ -183,10 +244,30 @@ def contrast_limit_image(alpha_img: float, beta: float, ci, si, napi) -> float:
 # C.1.4  matched-filter S/N + FAP at a source
 # ----------------------------------------------------------------------------
 def mf_convolve(img: np.ndarray, fwhm: float, kernel: Optional[np.ndarray] = None) -> np.ndarray:
-    """``near2v_mfconv`` (verify 117-120): NaN -> 0 then the matched filter, the image
-    correlated with the unit-sum FWHM Gaussian (``near2v_mfkern``, verify 53-59) with edge
-    truncation (``mode='nearest'``).  The Gaussian is round, so a convolution gives the same
-    map, and a ``kernel`` given is correlated, as a matched filter takes its template."""
+    """Apply the IDL predecessor's matched filter, the image correlated with a unit-sum FWHM Gaussian.
+
+    NaN pixels become 0 and the edges are truncated (``mode="nearest"``).  The Gaussian is round, so a
+    convolution gives the same map, and a ``kernel`` given is correlated, as a matched filter takes its
+    template.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image.
+    fwhm : float
+        FWHM of the Gaussian, in pixels.
+    kernel : ndarray or None, default None
+        Kernel to use instead of the Gaussian.
+
+    Returns
+    -------
+    mfmap : ndarray, shape (ny, nx)
+        The filtered image.
+
+    Notes
+    -----
+    It is ``near2v_mfconv`` (verify 117-120) with ``near2v_mfkern`` (verify 53-59).
+    """
     img = np.asarray(img, float)
     k = gaussian_kernel(fwhm) if kernel is None else kernel
     return ndimage.correlate(np.where(np.isfinite(img), img, 0.0), k, mode="nearest")
@@ -197,30 +278,49 @@ def _snr_fap_idl(img: np.ndarray, rho: float, theta: float, pxscale: float, fwhm
                  exclude_xy: Sequence[Tuple[float, float]] = (), mfmap: Optional[np.ndarray] = None,
                  angle_convention: str = "pa", excl_arcs: Sequence[Tuple[float, float, float, float]] = (),
                  peak_xy: Optional[Tuple[float, float]] = None) -> Dict[str, float]:
-    """:func:`snr_fap` as it measured before 2026-11-01, for runs that keep that verify
-    (``RunConfig.verify_snr = "idl"``, :data:`~klip_tpe.metrics.VERIFY_IDL`): the matched-filter
-    Mawet S/N and small-sample FAP of the IDL verify (``near2v_snrfap``, verify 122-154).
+    """Measure :func:`snr_fap` as it measured before 2026-11-01, for runs that keep that verify.
 
-    1. ``A`` = ``mfmap`` if given (same shape) else :func:`mf_convolve` (127).
-    2. Peak search on the disc ``dx^2+dy^2 <= srad^2`` around the rounded nominal
-       position; the pixel with max ``A`` where ``img`` is finite wins (131-136).
-    3. ``r = |peak - centre|``, ``nap = floor(2 pi r / fwhm)``; ``r < fwhm`` or
-       ``nap < 5`` -> NaN (137-138).
-    4. Ring samples at ``th0 + q 2pi/nap``, ``q = 1..nap-1``, skipping pixels
-       within ``exr`` of the peak (radial exclusion) or of any ``exclude_xy``
-       coordinate, out of bounds or non-finite (139-148).
-    5. ``nv < 3`` or ``sd <= 0`` -> NaN; ``snr = (A_pk - mean) / (sd sqrt(1+1/nv))``
-       with the sample (N-1) std (150-152); ``fap = t_fap(snr, nv)`` (153).
+    It is the matched-filter Mawet S/N and small-sample FAP of the IDL predecessor's ``near2v_snrfap``
+    (verify 122-154), kept for ``RunConfig.verify_snr = "idl"`` (:data:`~klip_tpe.metrics.VERIFY_IDL`).
+    The peak is the maximum of the Gaussian-filtered map within ``srad`` of the position, and the ring
+    of ``nap = floor(2 pi r / fwhm)`` positions skips ``exr`` around the peak and around each
+    ``exclude_xy``.  The S/N is ``(A_pk - mean) / (sd sqrt(1 + 1/nv))`` with the ``nv`` samples used.
 
-    Returns ``{'snr', 'fap', 'nap', 'peak', 'x', 'y', 'r'}`` where ``nap`` is the
-    number of ring samples actually used (``nv``) on success, the nominal count
-    on the early exits (as in the IDL return vector).  With samples, ``n_left`` is their
-    count and ``bg`` and ``sigma`` their mean and standard deviation.
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image, with the star at ``((nx-1)/2, (ny-1)/2)``.
+    rho : float
+        Separation of the source, in arcsec.
+    theta : float
+        Angle of the source, in degrees.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    exr : float or None, default None
+        Radius of the keep-outs, in pixels.  None takes 1.5 FWHM.
+    srad : float, default 1.5
+        Radius of the peak search, in pixels.
+    exclude_xy : sequence of tuple of 2 floats, default ()
+        More ``(x, y)`` pixels whose keep-out the ring skips, such as the other sources and the known
+        companions.
+    mfmap : ndarray or None, default None
+        Matched-filter map made already, of the image's shape.
+    angle_convention : {"pa", "math"}, default "pa"
+        How ``theta`` is read.
+    excl_arcs : sequence of tuple of 4 floats, default ()
+        Arcs left out of the ring, ADI sidelobes under the sidelobe rule, as
+        :func:`~klip_tpe.metrics.mawet_peak_snr` takes them.
+    peak_xy : tuple of 2 floats or None, default None
+        The ``(x, y)`` pixel where the peak is read instead of searched for.
 
-    ``excl_arcs`` (``(rho_arcsec, theta_deg, half_width_deg, radial_fwhm)``, as
-    :func:`~klip_tpe.metrics.mawet_peak_snr` takes them) leaves out the samples in those
-    arcs: ADI sidelobes, under the sidelobe rule (:func:`ring_snr`).  ``peak_xy`` places the
-    peak there instead of searching for it.
+    Returns
+    -------
+    result : dict
+        ``snr``, ``fap``, ``nap`` (the samples used, or the nominal count on an early exit), ``peak``,
+        ``x``, ``y``, ``r`` and ``nclean``, with ``n_left``, ``bg`` and ``sigma`` when there are samples.
+        The S/N is NaN for ``r < fwhm``, ``nap < 5``, fewer than 3 samples or no scatter.
     """
     img = np.asarray(img, float)
     ny, nx = img.shape
@@ -306,30 +406,59 @@ def snr_fap(img: np.ndarray, rho: float, theta: float, pxscale: float, fwhm: flo
             exclude_xy: Sequence[Tuple[float, float]] = (), mfmap: Optional[np.ndarray] = None,
             angle_convention: str = "pa", excl_arcs: Sequence[Tuple[float, float, float, float]] = (),
             peak_xy: Optional[Tuple[float, float]] = None, rules: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
-    """The verify's S/N and its small-sample FAP at one source: the search's matched-filter
-    Mawet S/N (:func:`~klip_tpe.metrics.mawet_peak_snr`) under the run's ring rules (``rules``,
-    :func:`~klip_tpe.metrics.ring_rules`: its matched filter, despike, radial band, shortest
-    ring, small-sample correction, pixel mask and inner guard), or that function's defaults.
+    """Measure the verify's S/N and small-sample FAP at one source, the search's measure under the run's rules.
 
-    The source is the matched-filter peak within ``srad`` px of the nominal position, the ring
-    runs through it and skips ``exr`` (default 1.5 FWHM) around the source as given and around
-    every ``exclude_xy`` position (the other sources and the known companions), the pixel mask
-    and ``excl_arcs``.  ``peak_xy`` places the peak there instead of searching for it, and
-    ``mfmap`` is the matched-filter map made already (:func:`~klip_tpe.metrics.matched_filter`).
-    ``fap = t_fap(snr, n)`` with ``n`` the ring samples used, or the ring's count when the
-    radial band gave the noise.
+    The S/N is the search's matched-filter Mawet S/N (:func:`~klip_tpe.metrics.mawet_peak_snr`) under
+    the run's ring rules (:func:`~klip_tpe.metrics.ring_rules`), or that function's defaults.  The
+    source is the matched-filter peak within ``srad`` of its position, and the ring through it skips
+    ``exr`` around the source as given and around each ``exclude_xy``, the pixel mask and ``excl_arcs``.
+    ``fap = t_fap(snr, n)`` with ``n`` the ring samples used, or the ring's count when the radial band
+    gave the noise.
 
-    Since 2026-11-01 (Kevin Wagner) the verify and the candidate search measure as the search
-    does.  Before, this function ported the IDL's ``near2v_snrfap`` (verify 122-154): a Gaussian
-    kernel, no despike, ``exr`` kept around the located peak, the samples used counted in the
-    small-sample correction and no radial band.  A run saved before then keeps that verify
-    (``RunConfig.verify_snr = "idl"``), whose ``rules``
-    (:data:`~klip_tpe.metrics.VERIFY_IDL`) hand the measure to :func:`_snr_fap_idl`.
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image, with the star at ``((nx-1)/2, (ny-1)/2)``.
+    rho : float
+        Separation of the source, in arcsec.
+    theta : float
+        Angle of the source, in degrees.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    exr : float or None, default None
+        Radius of the keep-outs, in pixels.  None takes 1.5 FWHM.
+    srad : float, default 1.5
+        Radius of the peak search, in pixels.
+    exclude_xy : sequence of tuple of 2 floats, default ()
+        More ``(x, y)`` pixels whose keep-out the ring skips, such as the other sources and the known
+        companions.
+    mfmap : ndarray or None, default None
+        Matched-filter map made already, of the image's shape.
+    angle_convention : {"pa", "math"}, default "pa"
+        How ``theta`` is read.
+    excl_arcs : sequence of tuple of 4 floats, default ()
+        Arcs left out of the ring, ADI sidelobes under the sidelobe rule, as
+        :func:`~klip_tpe.metrics.mawet_peak_snr` takes them.
+    peak_xy : tuple of 2 floats or None, default None
+        The ``(x, y)`` pixel where the peak is read instead of searched for.
+    rules : dict or None, default None
+        The run's ring rules.  Rules of :data:`~klip_tpe.metrics.VERIFY_IDL` hand the measure to
+        :func:`_snr_fap_idl`.
 
-    Returns ``{'snr', 'fap', 'nap', 'peak', 'x', 'y', 'r'}`` where ``nap`` is the ``n`` of the
-    FAP on success and the ring's count on the early exits, with ``nclean`` the ring samples
-    kept, ``n_left`` those left after the exclusions, ``noise`` (``"ring"`` or ``"band"``) and,
-    with samples, ``bg`` and ``sigma``.
+    Returns
+    -------
+    result : dict
+        ``snr``, ``fap``, ``nap`` (the FAP's ``n``, or the ring's count on an early exit), ``peak``,
+        ``x``, ``y``, ``r``, ``nclean``, ``n_left`` and ``noise`` ("ring" or "band").  ``bg`` and ``sigma``
+        come with samples, and ``why`` with a NaN.
+
+    Notes
+    -----
+    Since 2026-11-01 (Kevin Wagner) the verify and the candidate search measure as the search does.
+    Before, this function ported the IDL predecessor's ``near2v_snrfap``, with a Gaussian kernel, no
+    despike, ``exr`` kept around the located peak and no radial band.
     """
     if verify_idl(rules):
         return _snr_fap_idl(img, rho, theta, pxscale, fwhm, exr, srad, exclude_xy=exclude_xy, mfmap=mfmap,
@@ -364,9 +493,50 @@ def snr_fap(img: np.ndarray, rho: float, theta: float, pxscale: float, fwhm: flo
 def _fap_measure(img, rho, theta, pxscale, fwhm, *, known=(), excl_arcs=(), angle_convention="pa",
                  return_details=True, exr=None, srad=1.5, exclude_xy=(), mfmap=None, peak_xy=None, rules=None,
                  **_):
-    """:func:`snr_fap` in the form :func:`~klip_tpe.metrics.sidelobe_snr` asks of a measure:
-    one source, ``(snr array, [details])`` with ``nclean`` the ring samples used and ``nap`` the
-    ring's apertures.  The known companions' keep-outs come in ``exclude_xy``."""
+    """Measure one source with :func:`snr_fap` in the form :func:`~klip_tpe.metrics.sidelobe_snr` asks of a measure.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image.
+    rho : sequence of float
+        Separation of the one source, in arcsec.
+    theta : sequence of float
+        Angle of the one source, in degrees.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    known : sequence of tuple of 2 floats, default ()
+        Known companions, unused here, since their keep-outs come in ``exclude_xy``.
+    excl_arcs : sequence of tuple of 4 floats, default ()
+        Arcs left out of the ring.
+    angle_convention : {"pa", "math"}, default "pa"
+        How ``theta`` is read.
+    return_details : bool, default True
+        Unused, the details always come back.
+    exr : float or None, default None
+        Radius of the keep-outs, in pixels.
+    srad : float, default 1.5
+        Radius of the peak search, in pixels.
+    exclude_xy : sequence of tuple of 2 floats, default ()
+        More pixels whose keep-out the ring skips.
+    mfmap : ndarray or None, default None
+        Matched-filter map made already.
+    peak_xy : sequence of tuple of 2 floats or None, default None
+        One ``(x, y)`` pixel where the peak is read.
+    rules : dict or None, default None
+        The run's ring rules.
+    _ : dict
+        Other keywords of the measure, ignored.
+
+    Returns
+    -------
+    snr : ndarray, shape (1,)
+        The S/N.
+    details : list of dict
+        The source's details, with ``nap`` the ring's apertures and ``nclean`` the samples used.
+    """
     s = snr_fap(img, float(rho[0]), float(theta[0]), pxscale, fwhm, exr, srad, exclude_xy=exclude_xy, mfmap=mfmap,
                 angle_convention=angle_convention, excl_arcs=excl_arcs,
                 peak_xy=None if peak_xy is None else peak_xy[0], rules=rules)
@@ -387,14 +557,52 @@ def ring_snr(img: np.ndarray, i: int, rhos: Sequence[float], thetas: Sequence[fl
              exclude_xy: Sequence[Tuple[float, float]] = (), known: Sequence[Tuple[float, float]] = (),
              mfmap: Optional[np.ndarray] = None, angle_convention: str = "pa",
              rules: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """:func:`snr_fap` of source ``i`` of ``(rhos, thetas)`` under the run's sidelobe rule
-    (:class:`~klip_tpe.metrics.Sidelobes`, :func:`~klip_tpe.metrics.sidelobe_snr`): its ring
-    leaves out its own ADI arc, the other sources' and the ``known`` companions'.  Where fewer
-    than ``min_apertures`` samples remain, its own arc narrows to let in the farthest, then
-    the other sources' arcs are let in, then the known companions'.  The last is the ring
-    without the rule.  The fallback is always the farthest samples: the verify has no clean
-    ring through every source.  Returns :func:`snr_fap`'s dict with the rule's ``arc_deg``,
-    ``n_arcs``, ``fallback`` (or ``fallback_tried``) and the ``arcs`` it left out."""
+    """Measure :func:`snr_fap` of one source under the run's sidelobe rule.
+
+    The source's ring leaves out its own ADI arc, the other sources' and the known companions'
+    (:func:`~klip_tpe.metrics.sidelobe_snr`).  Where fewer than ``min_apertures`` samples remain, its
+    own arc narrows to let in the farthest, then the other sources' arcs are let in, then the known
+    companions', which leaves the ring without the rule.  The fallback is always the farthest samples,
+    since the verify has no clean ring through every source.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image.
+    i : int
+        Index of the source measured.
+    rhos : sequence of float
+        Separation of every source, in arcsec.
+    thetas : sequence of float
+        Angle of every source, in degrees.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    sidelobes : Sidelobes
+        The sidelobe rule, taken in its "farthest" mode.
+    exr : float or None, default None
+        Radius of the keep-outs, in pixels.  None takes 1.5 FWHM.
+    srad : float, default 1.5
+        Radius of the peak search, in pixels.
+    exclude_xy : sequence of tuple of 2 floats, default ()
+        More pixels whose keep-out the ring skips.
+    known : sequence of tuple of 2 floats, default ()
+        Known companions, as ``(rho_arcsec, theta_deg)``.
+    mfmap : ndarray or None, default None
+        Matched-filter map made already.
+    angle_convention : {"pa", "math"}, default "pa"
+        How the angles are read.
+    rules : dict or None, default None
+        The run's ring rules, taken with the rule's ``min_apertures`` as the shortest ring, so the
+        rule's fallback takes over from the radial band.
+
+    Returns
+    -------
+    result : dict
+        :func:`snr_fap`'s dict, with ``nap`` the samples used (the ring's count for a NaN), and the
+        rule's ``arc_deg``, ``n_arcs``, ``fallback`` (or ``fallback_tried``) and the ``arcs`` it left out.
+    """
     from dataclasses import replace as _replace
     if exr is None:
         exr = 1.5 * fwhm
@@ -414,7 +622,30 @@ def ring_snr(img: np.ndarray, i: int, rhos: Sequence[float], thetas: Sequence[fl
 
 def _without_self(known: Sequence[Tuple[float, float]], rho: float, theta: float, pxscale: float,
                   fwhm: float, exr: float, angle_convention: str) -> List[Tuple[float, float]]:
-    """The known companions other than the one at ``(rho, theta)``, within ``exr`` px of it."""
+    """Return the known companions at least ``exr`` from a source.
+
+    Parameters
+    ----------
+    known : sequence of tuple of 2 floats
+        Known companions, as ``(rho_arcsec, theta_deg)``.
+    rho : float
+        Separation of the source, in arcsec.
+    theta : float
+        Angle of the source, in degrees.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    exr : float
+        Radius within which a companion is the source itself, in pixels.
+    angle_convention : {"pa", "math"}
+        How the angles are read.
+
+    Returns
+    -------
+    others : list of tuple of 2 floats
+        The other known companions.
+    """
     if not len(known):
         return []
     c = 0.0
@@ -428,21 +659,58 @@ def _without_self(known: Sequence[Tuple[float, float]], rho: float, theta: float
 
 
 def _noise(d: Dict[str, Any]) -> Dict[str, Any]:
-    """How a ring came out under the sidelobe rule, for a verify row: the source's own arc as
-    measured, the samples outside every arc, the fallback (None when none was needed)."""
+    """Summarize how a ring came out under the sidelobe rule, for a verify row.
+
+    Parameters
+    ----------
+    d : dict
+        The source's details, from :func:`ring_snr`.
+
+    Returns
+    -------
+    noise : dict
+        ``arc_deg`` (the source's own arc as measured), ``n_arcs`` (the samples outside every arc),
+        ``n_used`` (the samples used) and ``fallback`` (the fallback taken, or tried and how many it
+        found, None when none was needed).
+    """
     return {"arc_deg": float(d.get("arc_deg", float("nan"))), "n_arcs": int(d.get("n_arcs", 0)),
             "n_used": int(d.get("nclean", 0)), "fallback": d.get("fallback") or
             (f"{d['fallback_tried']} tried, {int(d.get('n_fallback', 0))} found" if d.get("fallback_tried") else None)}
 
 
 class _ScaledImage:
-    """The S/N of injected sources on ``clean + a (inj - clean)``, with the clean image's noise as
-    it is and the sources' response scaled by ``a``.  Pixels not finite in both images are left
-    out of both.  The map is the line through the run's two maps, ``mf(clean) + a (mf(inj) -
-    mf(clean))``, each made as the run's rules make it (:func:`~klip_tpe.metrics.matched_filter`,
-    at each source's separation for a measured kernel).  At ``a = 0`` and ``a = 1`` it is the
-    search's own map of each image.  The convolution is linear, and only the despike, where it
-    replaces a pixel, bends the map off that line in between."""
+    """S/N of injected sources with their response scaled by ``a`` and the clean image's noise as it is.
+
+    The image is ``clean + a (inj - clean)``, and its map is the line through the run's two maps,
+    ``mf(clean) + a (mf(inj) - mf(clean))``, each made as the run's rules make it
+    (:func:`~klip_tpe.metrics.matched_filter`, at each source's separation for a measured kernel).  At
+    ``a = 0`` and ``a = 1`` it is the search's own map of each image.  The convolution is linear, so
+    only the despike, where it replaces a pixel, bends the map off that line in between.  Pixels not
+    finite in both images are left out of both.
+
+    Parameters
+    ----------
+    clean_img : ndarray, shape (ny, nx)
+        The clean reduction.
+    inj_img : ndarray, shape (ny, nx)
+        The same reduction with the sources injected.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    rules : dict or None, default None
+        The run's ring rules.
+
+    Attributes
+    ----------
+    img0 : ndarray, shape (ny, nx)
+        The clean image, NaN where either image is not finite.
+    img1 : ndarray, shape (ny, nx)
+        The injected image, NaN where either image is not finite.
+
+    Raises
+    ------
+    ValueError
+        If the two images differ in shape.
+    """
 
     def __init__(self, clean_img: np.ndarray, inj_img: np.ndarray, fwhm: float,
                  rules: Optional[Dict[str, Any]] = None):
@@ -459,9 +727,24 @@ class _ScaledImage:
         self._snr: Dict[Any, Tuple[float, int]] = {}
 
     def maps(self, rho: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray]:
-        """``(mf(clean), mf(inj) - mf(clean))`` with the kernel at ``rho``.  Under the measures of
-        before 2026-11-01 (:data:`~klip_tpe.metrics.VERIFY_IDL`) the Gaussian maps of the clean
-        image and of ``inj - clean``, as they were made then."""
+        """Return the clean image's matched-filter map and the injected image's difference from it.
+
+        Each kernel's maps are made once.  Under the measures of before 2026-11-01
+        (:data:`~klip_tpe.metrics.VERIFY_IDL`) they are the Gaussian maps of the clean image and of
+        ``inj - clean``, as made then.
+
+        Parameters
+        ----------
+        rho : float or None, default None
+            Separation where the kernel is taken, in arcsec.  None takes 0.
+
+        Returns
+        -------
+        mf0 : ndarray, shape (ny, nx)
+            ``mf(clean)``.
+        mf1 : ndarray, shape (ny, nx)
+            ``mf(inj) - mf(clean)``.
+        """
         if verify_idl(self.rules):
             if "idl" not in self._maps:
                 self._maps["idl"] = (mf_convolve(self.img0, self.fwhm),
@@ -477,15 +760,51 @@ class _ScaledImage:
 
     @property
     def mf0(self) -> np.ndarray:
+        """The clean image's matched-filter map, with the kernel at separation 0.
+        """
         return self.maps()[0]
 
     @property
     def mf1(self) -> np.ndarray:
+        """The injected image's matched-filter map minus the clean one's, with the kernel at separation 0.
+        """
         return self.maps()[1]
 
     def snr(self, a: float, rho: float, theta: float, pxscale: float, fwhm: float, exr: float, srad: float,
             exclude_xy: Sequence[Tuple[float, float]] = (), angle_convention: str = "pa",
             excl_arcs: Sequence[Tuple[float, float, float, float]] = ()) -> Tuple[float, int]:
+        """Return a source's S/N at the scale ``a``, measured once per scale and source.
+
+        Parameters
+        ----------
+        a : float
+            Scale of the sources' response.
+        rho : float
+            Separation of the source, in arcsec.
+        theta : float
+            Angle of the source, in degrees.
+        pxscale : float
+            Plate scale, in arcsec per pixel.
+        fwhm : float
+            FWHM of the PSF, in pixels.
+        exr : float
+            Radius of the keep-outs, in pixels.
+        srad : float
+            Radius of the peak search, in pixels.
+        exclude_xy : sequence of tuple of 2 floats, default ()
+            More pixels whose keep-out the ring skips.
+        angle_convention : {"pa", "math"}, default "pa"
+            How ``theta`` is read.
+        excl_arcs : sequence of tuple of 4 floats, default ()
+            Arcs left out of the ring.
+
+        Returns
+        -------
+        snr : float
+            The S/N.
+        nap : int
+            The FAP's ``n`` (:func:`snr_fap`).
+        """
         key = (float(a), float(rho), float(theta), float(pxscale), float(fwhm), float(exr), float(srad),
                tuple((float(x), float(y)) for x, y in exclude_xy), str(angle_convention),
                tuple(tuple(float(v) for v in arc) for arc in excl_arcs))
@@ -500,9 +819,27 @@ class _ScaledImage:
 
 
 def _first_crossing(cond, lo: float, hi: float, n_grid: int) -> float:
-    """The smallest ``x`` in ``[lo, hi]`` at which ``cond(x)`` holds, from ``n_grid`` values spaced
-    evenly in log and a bisection of the first step that crosses.  ``inf`` when none holds, ``lo``
-    when ``cond(lo)`` does."""
+    """Find the smallest value in a range at which a condition holds.
+
+    The range is stepped through ``n_grid`` values spaced evenly in log, and the first step that
+    crosses is bisected.
+
+    Parameters
+    ----------
+    cond : callable
+        Function ``x -> bool``.
+    lo : float
+        Lower end of the range, positive.
+    hi : float
+        Upper end of the range.
+    n_grid : int
+        Number of grid values.
+
+    Returns
+    -------
+    x : float
+        The smallest such value, ``lo`` when the condition holds there, infinite when it holds nowhere.
+    """
     grid = np.geomspace(float(lo), float(hi), int(n_grid))
     prev = None
     for x in grid:
@@ -524,11 +861,44 @@ def _first_crossing(cond, lo: float, hi: float, n_grid: int) -> float:
 
 
 def _detected(s: float, n: int, fap: float) -> bool:
+    """Tell whether an S/N on ``n`` samples is detected at a false-alarm probability.
+
+    Parameters
+    ----------
+    s : float
+        The S/N.
+    n : int
+        Number of noise samples, at least 3 for a detection.
+    fap : float
+        The false-alarm probability.
+
+    Returns
+    -------
+    detected : bool
+        True when :func:`t_fap` is below ``fap``.
+    """
     return bool(np.isfinite(s) and n >= 3 and t_fap(s, n) < fap)
 
 
 def _reaches(s: float, n: int, fap: float, beta: float) -> bool:
-    """``s`` reaches ``tau_fap + tau_(1-beta)``, both exact, as :func:`t_fap` decides."""
+    """Tell whether an S/N reaches ``tau_fap + tau_(1-beta)``, both thresholds exact.
+
+    Parameters
+    ----------
+    s : float
+        The S/N.
+    n : int
+        Number of noise samples, at least 3.
+    fap : float
+        The false-alarm probability.
+    beta : float
+        The completeness.
+
+    Returns
+    -------
+    reaches : bool
+        True when it reaches the sum (:func:`_t_exact`).
+    """
     return bool(np.isfinite(s) and n >= 3 and s >= _t_exact(fap, n) + _t_exact(1.0 - beta, n))
 
 
@@ -540,28 +910,70 @@ def solved_contrasts(clean_img: np.ndarray, inj_img: np.ndarray, rho: float, the
                      _scaled: Optional["_ScaledImage"] = None,
                      excl_arcs: Sequence[Tuple[float, float, float, float]] = (),
                      rules: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """The contrasts at which an injected source reaches the verify's thresholds, solved on
-    its own image.
+    """Solve the contrasts at which an injected source reaches the verify's thresholds, on its own image.
 
-    The source's S/N at contrast ``a * contrast`` is :func:`snr_fap` on ``clean + a (inj -
-    clean)`` with the exclusions given.  The image's noise stays as it is, the noise at the
-    source's position included, and only the source's response scales with ``a``, its
-    residual in its own noise ring included.  At ``a = 1`` it is the injected image's own S/N
-    (``snr1``).  Pixels not finite in both images are left out of both.
+    The source's S/N at contrast ``a * contrast`` is :func:`snr_fap` on ``clean + a (inj - clean)``
+    (:class:`_ScaledImage`), with pixels not finite in both images left out of both.  The image's noise
+    stays as it is, the noise at the source's position included, and only the source's response scales,
+    its residual in its own ring included.  Both thresholds are exact (:func:`_t_exact`), where
+    :func:`t_thresh` caps them at 50.  This is the single-source limit of :func:`contrast_limit` solved,
+    where that function scales the whole S/N at the injected contrast, noise included.
 
-    Returns ``c_det``, the faintest contrast at which the source is detected at ``fap`` (its
-    FAP below ``fap``), and ``c_tap``, for each ``taps`` entry beta the faintest contrast at
-    which its S/N reaches ``tau_fap + tau_(1-beta)``, both exact (:func:`t_thresh` caps them
-    at 50).  That is the single-source limit of :func:`contrast_limit` solved, where
-    :func:`contrast_limit` scales the whole S/N at the injected contrast, noise included.  A contrast is ``inf`` where no ``a`` up to
-    ``a_range[1]`` gets there, and ``a_range[0] * contrast`` where even that does.  The search
-    steps through ``n_grid`` values of ``a`` spaced evenly in log and bisects the first step
-    that crosses.  The S/N need not grow with ``a``.  The source's own residual in its ring
-    grows with it, and the peak search can move to a pixel at another radius, whose ring
-    differs.  So the faintest contrast that gets there is not always one above which the source
-    stays there.  KLIP's response to a bright source is not linear either, so the contrasts
-    hold best for an injection near them (NEAR2 note of 2026-10-23, revised).  ``excl_arcs``: the
-    sidelobe rule's arcs, as the source's own S/N left them out (:func:`ring_snr`)."""
+    Parameters
+    ----------
+    clean_img : ndarray, shape (ny, nx)
+        The clean reduction.
+    inj_img : ndarray, shape (ny, nx)
+        The same reduction with the source injected.
+    rho : float
+        Separation of the source, in arcsec.
+    theta : float
+        Angle of the source, in degrees.
+    contrast : float
+        Contrast the source was injected at.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    exr : float or None, default None
+        Radius of the keep-outs, in pixels.  None takes 1.5 FWHM.
+    srad : float, default 1.5
+        Radius of the peak search, in pixels.
+    exclude_xy : sequence of tuple of 2 floats, default ()
+        More pixels whose keep-out the ring skips.
+    fap : float, default DEFAULT_FAP_LIST[0]
+        The false-alarm probability of the detection.
+    taps : sequence of float, default DEFAULT_TAP_LIST
+        The completeness levels beta.
+    angle_convention : {"pa", "math"}, default "pa"
+        How ``theta`` is read.
+    a_range : tuple of 2 floats, default (1e-3, 1e3)
+        Range of the scale ``a`` searched.
+    n_grid : int, default 121
+        Number of values of ``a``, spaced evenly in log, before the bisection.
+    _scaled : _ScaledImage or None, default None
+        The scaled image made already, shared between the sources of one image.
+    excl_arcs : sequence of tuple of 4 floats, default ()
+        The sidelobe rule's arcs, as the source's own S/N left them out (:func:`ring_snr`).
+    rules : dict or None, default None
+        The run's ring rules.
+
+    Returns
+    -------
+    result : dict
+        ``c_det``, the faintest contrast detected at ``fap``, ``c_tap``, for each beta the faintest at
+        which the S/N reaches ``tau_fap + tau_(1-beta)``, ``snr1`` and ``nap1``, the injected image's own
+        S/N and ``n``.  A contrast is infinite where no ``a`` gets there and ``a_range[0] * contrast``
+        where even that does, and all are NaN, with ``nap1`` 0, for a contrast not finite and positive.
+
+    Notes
+    -----
+    The S/N need not grow with ``a``.  The source's residual in its ring grows with it, and the peak
+    search can move to a pixel at another radius, whose ring differs.  So the faintest contrast that
+    gets there is not always one above which the source stays there.  KLIP's response to a bright
+    source is not linear either, so the contrasts hold best for an injection near them (NEAR2 note of
+    2026-10-23, revised).
+    """
     out: Dict[str, Any] = {"c_det": float("nan"), "c_tap": [float("nan")] * len(taps), "snr1": float("nan"),
                            "nap1": 0}
     c0 = float(contrast)
@@ -582,18 +994,33 @@ def solved_contrasts(clean_img: np.ndarray, inj_img: np.ndarray, rho: float, the
 
 def _solved_bins(lim: Dict[str, Any], items: Sequence[Tuple[Dict[str, Any], Any]], n_grid_decade: int = 20,
                  a_range: Tuple[float, float] = (1e-3, 1e3)) -> Optional[List[Dict[str, Any]]]:
-    """TABLE 3 in the bins of TABLE 1 (``lim``, from :func:`limit_tables`), and in bins of the same
-    width beyond them.  ``items`` are ``(row, detected_at)`` per injection with solved contrasts,
-    ``detected_at(c)`` telling whether the source is detected at contrast ``c`` (its S/N on its own
-    image, scaled to ``c``).  With beta = ``tap_list[i90]``, each bin gives the following.
+    """Bin the solved contrasts into TABLE 3, in the bins of TABLE 1 and in bins of the same width beyond them.
 
-    * ``n``, its sources.
-    * ``c_tap``, the mean of the rows' finite ``c_tap_solved``.
-    * ``c_det_beta``, the faintest contrast at which at least ``ceil(beta n)`` of the bin's
-      sources are detected, all of them at that contrast.
-    * ``n_det_t1``, the sources detected at TABLE 1's ``c@TAP`` for beta in the same bin
-      (``None`` where TABLE 1 has no such bin).
-    * ``rows``, ``(rho, theta, contrast, c_det, c@TAP for beta)`` per source."""
+    With beta the completeness nearest 0.9 (``tap_list[i90]``), each bin gives the faintest contrast at
+    which at least ``ceil(beta n)`` of its ``n`` sources are detected, all of them at that contrast, and
+    counts the sources detected at TABLE 1's ``c@TAP`` for beta.
+
+    Parameters
+    ----------
+    lim : dict
+        TABLE 1 and TABLE 2, from :func:`limit_tables`.
+    items : sequence of tuple
+        ``(row, detected_at)`` per injection with solved contrasts, ``detected_at(c)`` telling whether
+        the source is detected at contrast ``c`` (its S/N on its own image, scaled to ``c``).
+    n_grid_decade : int, default 20
+        Number of contrasts per decade searched before the bisection.
+    a_range : tuple of 2 floats, default (1e-3, 1e3)
+        Range searched, as factors on the bin's faintest and brightest injected contrasts.
+
+    Returns
+    -------
+    bins : list of dict or None
+        One dict per bin that holds sources, None without ``items``.  Each holds ``sep`` (the mean
+        separation, in arcsec), ``n``, ``c_tap`` (for each beta the mean of the rows' finite
+        ``c_tap_solved``, infinite where none is), ``c_det_beta`` (the faintest contrast above),
+        ``n_det_t1`` (None where TABLE 1 has no such bin), ``ib`` (the bin's index) and ``rows``,
+        ``(rho, theta, contrast, c_det, c@TAP for beta)`` per source.
+    """
     if not items:
         return None
     rbw, i90 = lim["rbin_as"], lim["i90"]
@@ -641,9 +1068,30 @@ def _solved_bins(lim: Dict[str, Any], items: Sequence[Tuple[Dict[str, Any], Any]
 # C.1.5 - C.1.7  night combine, night-STIM, bootstrap
 # ----------------------------------------------------------------------------
 def combine_nights(stack: np.ndarray, weights: np.ndarray, idx: Sequence[int]) -> np.ndarray:
-    """Weighted NaN-aware mean of the selected slices (``near2v_combine``, verify
-    160-170): ``sum w_j img_j fin_j / sum w_j fin_j``; zero total weight -> NaN.
-    Duplicate indices (bootstrap draws) count with multiplicity."""
+    """Combine the selected nights into their weighted mean, NaN-aware.
+
+    Each pixel is ``sum w_j img_j fin_j / sum w_j fin_j``, with ``fin_j`` whether night ``j`` is finite
+    there, and NaN where the total weight is 0.  A night drawn more than once, as in a bootstrap, counts
+    each time.
+
+    Parameters
+    ----------
+    stack : ndarray, shape (n, ny, nx)
+        The images of the ``n`` nights.
+    weights : ndarray, shape (n,)
+        Weight of each night.
+    idx : sequence of int
+        Indices of the nights combined.
+
+    Returns
+    -------
+    image : ndarray, shape (ny, nx)
+        The weighted mean.
+
+    Notes
+    -----
+    It is ``near2v_combine`` of the IDL predecessor (verify 160-170).
+    """
     stack = np.asarray(stack, float)
     w = np.asarray(weights, float)
     num = np.zeros(stack.shape[1:])
@@ -657,10 +1105,27 @@ def combine_nights(stack: np.ndarray, weights: np.ndarray, idx: Sequence[int]) -
 
 
 def night_stim(stack: np.ndarray, weights: Optional[np.ndarray] = None) -> np.ndarray:
-    """Night-STIM map (``near2v_stim``, verify 177-196): weighted mean over the
-    weighted (BIASED, no N-1) std across nights, with the std floored at
-    ``0.3 * median(std > 0)`` and ``1e-12``.  All-NaN if fewer than 2 nights;
-    NaN where the total weight is 0."""
+    """Make the night-STIM map, the weighted mean over the nights divided by their weighted scatter.
+
+    The scatter is the biased weighted standard deviation (no ``N - 1``), floored at
+    ``0.3 median(std > 0)`` and at 1e-12.
+
+    Parameters
+    ----------
+    stack : ndarray, shape (n, ny, nx)
+        The images of the ``n`` nights.
+    weights : ndarray or None, default None
+        Weight of each night.  None weighs them equally.
+
+    Returns
+    -------
+    stim : ndarray, shape (ny, nx)
+        The STIM map, NaN where the total weight is 0 and everywhere for fewer than 2 nights.
+
+    Notes
+    -----
+    It is ``near2v_stim`` of the IDL predecessor (verify 177-196).
+    """
     stack = np.asarray(stack, float)
     nn = stack.shape[0]
     if nn < 2:
@@ -685,14 +1150,51 @@ def stim_fap(stim: np.ndarray, x: float, y: float, rho_px: float, fwhm: float,
              exclude_xy: Sequence[Tuple[float, float]] = (),
              excl_arcs: Sequence[Tuple[float, float, float, float]] = (), pxscale: Optional[float] = None,
              angle_convention: str = "pa", pixel_mask: Optional[np.ndarray] = None) -> Tuple[float, float]:
-    """Empirical STIM FAP (verify 594-602): the value at the rounded source pixel
-    ranked against the annulus ``|r - rho_px| <= fwhm`` (finite pixels farther
-    than ``keepout`` (default ``1.5 fwhm``) from the source and from every
-    ``exclude_xy`` position: other sources, which are not noise).  ``excl_arcs``
-    (with ``pxscale``) drops the pixels in those arcs too, the ADI sidelobes the
-    source's ring left out (:func:`ring_snr`).  ``pixel_mask`` (True = left out, the run's
-    disk mask) drops its pixels, as every noise ring does.  Returns ``(stim_value, fraction >=
-    value)``."""
+    """Return the night-STIM value at a source and its empirical FAP against the annulus at its separation.
+
+    The value is read at the rounded source pixel and ranked against the finite pixels of
+    ``|r - rho_px| <= fwhm`` farther than ``keepout`` from the source and from each ``exclude_xy``,
+    with ``excl_arcs`` and ``pixel_mask`` left out as every noise ring leaves them out.  A
+    :class:`~klip_tpe.metrics.RingRecorder` that is on records the annulus.
+
+    Parameters
+    ----------
+    stim : ndarray, shape (ny, nx)
+        The night-STIM map.
+    x : float
+        Column of the source, in pixels.
+    y : float
+        Row of the source, in pixels.
+    rho_px : float
+        Separation of the source, in pixels.
+    fwhm : float
+        FWHM of the PSF, in pixels, also the annulus' half width.
+    keepout : float or None, default None
+        Radius of the keep-outs, in pixels.  None takes 1.5 FWHM.
+    exclude_xy : sequence of tuple of 2 floats, default ()
+        The ``(x, y)`` pixels of the other sources, which are not noise.
+    excl_arcs : sequence of tuple of 4 floats, default ()
+        Arcs left out of the annulus, the ADI sidelobes the source's ring left out (:func:`ring_snr`).
+    pxscale : float or None, default None
+        Plate scale, in arcsec per pixel, without which ``excl_arcs`` is ignored.
+    angle_convention : {"pa", "math"}, default "pa"
+        How the arcs' angles are read.
+    pixel_mask : ndarray of bool or None, default None
+        Pixels left out of the annulus, True to exclude, such as the run's disk mask.  A mask not of the
+        map's shape is ignored.
+
+    Returns
+    -------
+    value : float
+        The STIM value at the source, NaN off the map.
+    fap : float
+        The fraction of the annulus at or above the value, NaN for an empty annulus or a NaN value.
+
+    Notes
+    -----
+    It is the IDL predecessor's STIM FAP (verify 594-602), with the keep-out around the source for the
+    injections too (the module's Notes).
+    """
     ny, nx = stim.shape
     cx, cy = star_center(stim.shape)
     sx, sy = int(round(x)), int(round(y))
@@ -726,13 +1228,49 @@ def bootstrap_nights(stack: np.ndarray, weights: np.ndarray, rho: float, theta: 
                      pxscale: float, fwhm: float, srad: float = 1.5, n_boot: int = 500,
                      rng: Optional[np.random.Generator] = None, angle_convention: str = "pa",
                      rules: Optional[Dict[str, Any]] = None) -> float:
-    """Bootstrap-over-nights significance (``near2v_boot``, verify 203-214):
-    resample the ``nn`` nights with replacement ``n_boot`` times, recombine
-    (weighted, no radprof), re-locate the matched-filter peak within ``srad`` and
-    record its VALUE; result ``mean / std`` over finite draws (NaN if < 3 finite
-    or std = 0).  DEVIATION: the peak value is read directly (the IDL ring
-    exclusion ``exr = srad`` cannot affect it).  The matched filter is the run's
-    (``rules``, :func:`~klip_tpe.metrics.matched_filter`)."""
+    """Return the bootstrap-over-nights significance of a source, the mean over the scatter of its peak.
+
+    The ``n`` nights are drawn with replacement ``n_boot`` times.  Each draw is combined
+    (:func:`combine_nights`, weighted, not flattened), and its matched-filter peak within ``srad`` is
+    read from :func:`snr_fap`, called with ``exr = srad``, whose ring never moves the peak.  The
+    matched filter is the run's (:func:`~klip_tpe.metrics.matched_filter`), or the Gaussian of
+    :func:`mf_convolve` under :data:`~klip_tpe.metrics.VERIFY_IDL`.
+
+    Parameters
+    ----------
+    stack : ndarray, shape (n, ny, nx)
+        The images of the ``n`` nights.
+    weights : ndarray, shape (n,)
+        Weight of each night.
+    rho : float
+        Separation of the source, in arcsec.
+    theta : float
+        Angle of the source, in degrees.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    srad : float, default 1.5
+        Radius of the peak search, in pixels.
+    n_boot : int, default 500
+        Number of draws.
+    rng : numpy.random.Generator or None, default None
+        Generator of the draws.  None seeds one with 42, the IDL predecessor's seed.
+    angle_convention : {"pa", "math"}, default "pa"
+        How ``theta`` is read.
+    rules : dict or None, default None
+        The run's ring rules.
+
+    Returns
+    -------
+    significance : float
+        Mean over standard deviation (``ddof=1``) of the finite peaks, NaN for fewer than 3 or no scatter.
+
+    Notes
+    -----
+    It is ``near2v_boot`` of the IDL predecessor (verify 203-214), which also calls its S/N function
+    with ``exr = srad`` only to read back the peak.
+    """
     stack = np.asarray(stack, float)
     nn = stack.shape[0]
     if rng is None:
@@ -755,8 +1293,23 @@ def bootstrap_nights(stack: np.ndarray, weights: np.ndarray, rho: float, theta: 
 # C.2  driver
 # ----------------------------------------------------------------------------
 def night_subsets(nn: int) -> Dict[str, np.ndarray]:
-    """Night index subsets (verify 542-544): all, first half ``0..nn//2-1``,
-    second half ``nn//2..``, even ``j%2==0``, odd ``j%2==1``."""
+    """Return the subsets of the nights, by the order of the slices.
+
+    Parameters
+    ----------
+    nn : int
+        Number of nights.
+
+    Returns
+    -------
+    subsets : dict of str to ndarray
+        The night indices of ``combined`` (all), ``first-half`` (``0`` to ``nn//2 - 1``),
+        ``second-half`` (``nn//2`` on), ``even`` and ``odd``.
+
+    Notes
+    -----
+    They are the IDL predecessor's subsets (verify 542-544).
+    """
     a = np.arange(nn)
     return {"combined": a, "first-half": a[: nn // 2], "second-half": a[nn // 2:],
             "even": a[a % 2 == 0], "odd": a[a % 2 == 1]}
@@ -764,15 +1317,42 @@ def night_subsets(nn: int) -> Dict[str, np.ndarray]:
 
 def verify_maps(stack: np.ndarray, weights: Optional[np.ndarray] = None, fwhm: Optional[float] = None,
                 flatten: bool = False, *, combined: Optional[np.ndarray] = None) -> Dict[str, Any]:
-    """Subset images (weighted combines, verify 545-552), the night-STIM map (555)
-    and, when ``fwhm`` is given, the Gaussian matched-filter map of every subset
-    (``mf``, a look at the subsets: since 2026-11-01 each S/N makes the run's own map,
-    :func:`snr_fap`).  Empty subsets (nn = 1) give all-NaN images.
+    """Make the subset images, the night-STIM map and, with ``fwhm``, a Gaussian matched-filter map of each subset.
 
-    ``flatten`` applies :func:`radprof` to each combine, as the IDL does; off by
-    default so the subsets match what the run scored.  ``combined``, an image of the
-    stack's frame size, replaces the combine of all nights (the run's own combined
-    image, which Path A measures)."""
+    Each subset of :func:`night_subsets` is the weighted mean of its nights (:func:`combine_nights`),
+    and a subset without nights (one night) is all NaN.  The ``mf`` maps are a look at the subsets
+    only, since every S/N makes the run's own map (:func:`snr_fap`).
+
+    Parameters
+    ----------
+    stack : ndarray, shape (n, ny, nx)
+        The images of the ``n`` nights.
+    weights : ndarray or None, default None
+        Weight of each night.  None weighs them equally.
+    fwhm : float or None, default None
+        FWHM of the PSF, in pixels.  None makes no ``mf`` maps.
+    flatten : bool, default False
+        Whether to subtract each subset's azimuthal mean profile (:func:`~klip_tpe.metrics.radprof`), as
+        the IDL predecessor does.  Off by default, so the subsets match what the run scored.
+    combined : ndarray or None, default None
+        Image of the frame size that replaces the combine of all nights, the run's own image that Path A
+        measures.
+
+    Returns
+    -------
+    maps : dict
+        ``subsets`` (name to image), ``stim``, ``weights``, ``subset_index`` (name to night indices) and,
+        with ``fwhm``, ``mf`` (name to map).
+
+    Raises
+    ------
+    ValueError
+        If ``combined`` is not of the stack's frame size.
+
+    Notes
+    -----
+    It follows the IDL predecessor's verify 545-555.
+    """
     stack = np.asarray(stack, float)
     nn = stack.shape[0]
     w = np.ones(nn) if weights is None else np.asarray(weights, float)
@@ -799,6 +1379,26 @@ def verify_maps(stack: np.ndarray, weights: Optional[np.ndarray] = None, fwhm: O
 
 
 def _known_xy(known, pxscale, cx, cy, angle_convention):
+    """Return the pixel of each source given as ``(rho_arcsec, theta_deg)``, such as the known companions.
+
+    Parameters
+    ----------
+    known : sequence of tuple of 2 floats
+        The sources, as ``(rho_arcsec, theta_deg)``.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    cx : float
+        Column of the star, in pixels.
+    cy : float
+        Row of the star, in pixels.
+    angle_convention : {"pa", "math"}
+        How the angles are read.
+
+    Returns
+    -------
+    xy : list of tuple of 2 floats
+        The ``(x, y)`` pixel of each source.
+    """
     if not len(known):
         return []
     kx, ky = source_xy([k[0] for k in known], [k[1] for k in known], pxscale, cx, cy, angle_convention)
@@ -816,58 +1416,98 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
                       combined: Optional[np.ndarray] = None, combined_inj: Optional[np.ndarray] = None,
                       path_a: Optional[str] = None, sidelobes=None,
                       rules: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    """Verify candidates on a per-night image stack (``near2_verify``, verify 493-746).
+    """Verify candidates on a per-night image stack, by Path A and Path B.
+
+    Path A is each candidate's S/N and FAP on the combined image (:func:`snr_fap`, or :func:`ring_snr`
+    under the sidelobe rule).  Path B is its S/N in the night subsets, its night-STIM value with the
+    annulus FAP (:func:`stim_fap`) and the bootstrap over nights (:func:`bootstrap_nights`).  With
+    ``injected``, the injections are measured too (:func:`verify_injections`), for the calibration
+    block and the detection-limit tables.
 
     Parameters
     ----------
-    stack
-        ``(n_night, ny, nx)`` per-night (per-partition) images, NOT flattened.
-    angles_or_night_ids
-        one label per slice (night id / epoch / partition id) used for the
-        report; ``None`` -> ``0..n-1``.  The subset split (halves, even/odd)
-        follows the slice ORDER, so pass the slices in chronological order.
-    candidates
-        ``[(rho_arcsec, theta_deg), ...]``.
-    known
-        real sources left out of the noise rings and the STIM annulus (verify
-        ``exclude``).
-    injected
-        optional ``(inj_stack, sources)`` with ``sources = [(rho, theta,
-        contrast), ...]``: the injected twin of ``stack`` used for the
-        calibration block and the detection-limit tables.  Each source's noise
-        is measured without the other sources (:func:`verify_injections`), and
-        each source's contrasts are solved on its own image
-        (:func:`solved_contrasts`, TABLE 3).
-    weights
-        per-night weights (IDL: ``sqrt(texp)``); default equal.
-    rng
-        ``numpy.random.Generator`` for the bootstrap (IDL ``seed=42``);
-        ``n_boot=0`` skips it (``/lite``).
-    combined, combined_inj
-        the image Path A measures and its injected twin, for the image the run made
-        from these nights (an annulus' combined image, the final stitch).  By default
-        the weighted mean of the nights, as the IDL does.  With ``injected``, give
-        both or neither.  ``path_a`` names the image in the report.
-    sidelobes
-        the run's sidelobe rule (:class:`~klip_tpe.metrics.Sidelobes`), or None for the
-        rings of the IDL's verify (before 2026-11-01).  Each S/N's ring, Path A's and the
-        subsets', leaves out the ADI arcs of the source and of the known companions (and in
-        the injection block of the block's other sources), with the farthest fallback
-        (:func:`ring_snr`), and the STIM annulus and the solved contrasts leave out what the
-        source's Path-A ring left out.  A candidate at a known companion is not left out of
-        its own ring as a companion.  Each row adds ``noise``: ``{arc_deg, n_arcs,
-        fallback}``.
-    rules
-        the run's ring rules (:func:`~klip_tpe.metrics.ring_rules`): every S/N is the search's
-        (:func:`snr_fap`), with its matched filter and pixel mask, and the STIM annulus and the
-        bootstrap take the mask and the matched filter too.  None: the search metric's defaults.
+    stack : ndarray, shape (n, ny, nx) or (ny, nx)
+        The per-night (or per-partition) images of the ``n`` nights, not flattened.  One image is one
+        night.
+    angles_or_night_ids : sequence or None
+        One label per slice, such as a night, epoch or partition id, for the report.  None labels them
+        ``0`` to ``n - 1``.
+    candidates : sequence of tuple of 2 floats
+        The candidates, as ``(rho_arcsec, theta_deg)``.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    known : sequence of tuple of 2 floats, default ()
+        Known companions, left out of the noise rings and the STIM annulus.
+    injected : tuple or None, default None
+        ``(inj_stack, sources)``, the injected twin of ``stack`` and its sources as
+        ``(rho_arcsec, theta_deg, contrast)``.
+    fap_op : float, default 2.87e-7
+        Operating FAP of Path A's decision.
+    drift_px : float, default 1.5
+        Radius of the peak search, in pixels.
+    n_boot : int, default 500
+        Number of bootstrap draws.  0 skips the bootstrap, as the IDL predecessor's ``/lite`` does.
+    rng : numpy.random.Generator or None, default None
+        Generator of the bootstrap.  None seeds one with 42, the IDL predecessor's seed.
+    weights : sequence of float or None, default None
+        Weight of each night, ``sqrt(texp)`` in the IDL predecessor.  None weighs them equally.
+    excl_fwhm : float, default 1.5
+        Radius of the keep-outs, in FWHM.
+    fap_list : sequence of float, default DEFAULT_FAP_LIST
+        FAPs per resolution element of the tables, the first the operating FAP of TABLE 1.
+    tap_list : sequence of float, default DEFAULT_TAP_LIST
+        Completeness levels of the tables.
+    rbin_as : float or None, default None
+        Width of the separation bins, in arcsec.  None takes one FWHM.
+    angle_convention : {"pa", "math"}, default "pa"
+        How the angles are read.
+    return_maps : bool, default False
+        Whether to return the maps too.
+    combined : ndarray or None, default None
+        The image Path A measures, the image the run made from these nights, such as an annulus'
+        combined image or the final stitch.  None takes the weighted mean of the nights.
+    combined_inj : ndarray or None, default None
+        The injected twin of ``combined``, given with it when ``injected`` is.
+    path_a : str or None, default None
+        Name of Path A's image in the report.  None names it from ``combined`` and ``weights``.
+    sidelobes : Sidelobes or None, default None
+        The run's sidelobe rule (:class:`~klip_tpe.metrics.Sidelobes`).  None keeps the rings of the
+        verify before 2026-11-01.
+    rules : dict or None, default None
+        The run's ring rules (:func:`~klip_tpe.metrics.ring_rules`), whose matched filter and pixel mask
+        every S/N, the STIM annulus and the bootstrap take.  None takes the search metric's defaults.
 
-    Returns a list of dicts, one per candidate (``kind='candidate'``) followed
-    by one per injected source (``kind='injection'``) when ``injected`` is given.
-    The candidate dict holds ``rho, theta, x, y, snr, fap, nap, detect,
-    subsets{name: snr}, persistence, stim, stim_fap, boot_sig``.  With
-    ``return_maps=True`` the return is ``(rows, maps)``; ``maps`` also holds the
-    ``limits`` tables (see :func:`limit_tables`).
+    Returns
+    -------
+    rows : list of dict
+        One row per candidate (``kind="candidate"``), then with ``injected`` one per source
+        (``kind="injection"``, :func:`verify_injections`).  A candidate's row holds ``index``, ``rho``,
+        ``theta``, ``x``, ``y``, ``snr``, ``fap``, ``nap``, ``peak``, ``detect``, ``subsets`` (name to
+        S/N), ``persistence``, ``stim``, ``stim_fap``, ``boot_sig``, ``meta`` and, under the sidelobe
+        rule, ``noise`` (:func:`_noise`).
+    maps : dict [return_maps=True]
+        The maps of :func:`verify_maps`, with ``limits`` (:func:`limit_tables`, None without
+        ``injected``), ``injected`` (the injections' maps) and ``meta``.
+
+    Raises
+    ------
+    ValueError
+        If ``injected`` comes with only one of ``combined`` and ``combined_inj``.
+
+    Notes
+    -----
+    The subsets split by the order of the slices, so the slices go in chronological order.  The
+    persistence is the smallest S/N of the four partitions (the halves, even and odd).
+
+    Under the sidelobe rule each ring, Path A's and the subsets', leaves out the ADI arcs of the
+    candidate and of the known companions, with the farthest fallback (:func:`ring_snr`), and the STIM
+    annulus leaves out what Path A's ring left out.  A candidate at a known companion is not left out
+    of its own ring as a companion.
+
+    It is ``near2_verify`` of the IDL predecessor (verify 493-746), with the departures in the module's
+    Notes.
     """
     stack = np.asarray(stack, float)
     if stack.ndim == 2:
@@ -964,30 +1604,76 @@ def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, floa
                       rbin_as: Optional[float] = None, combined: Optional[np.ndarray] = None,
                       clean: Optional[np.ndarray] = None, sidelobes=None,
                       rules: Optional[Dict[str, Any]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Injection calibration block (verify 621-735): Path-A S/N / FAP, subset S/N,
-    injected-STIM value + annulus FAP per injected source ``(rho, theta,
-    contrast)``, then the detection-limit tables from sources with finite
-    ``snr > 0`` and ``contrast > 0``.
+    """Measure the injection calibration block, then the detection-limit tables from its sources.
 
-    Each source's noise ring (combined image and subsets) leaves out the other
-    sources and the ``known`` ones within ``excl_fwhm`` FWHM of their nominal
-    positions, as the run's metric does, and its STIM annulus drops them, and the
-    source itself, within the same keep-out.  So a source's S/N is what it would
-    be injected alone, to the noise.  DEVIATIONS: the IDL (verify 655-656, 660)
-    leaves every other source in the ring and the annulus, and keeps no keep-out
-    around the source in the STIM annulus.
+    Each source ``(rho, theta, contrast)`` gets its Path-A S/N and FAP, its subset S/N and its injected
+    night-STIM value with the annulus FAP.  Its noise ring, on the combined image and the subsets,
+    leaves out the other sources and the known ones within ``excl_fwhm`` FWHM of their nominal
+    positions, as the run's metric does, and its STIM annulus leaves them and the source itself out
+    within the same keep-out.  So a source's S/N is what it would be injected alone, to the noise.  The
+    tables take the sources with a finite positive S/N and a positive contrast.
 
-    ``combined`` is the injected image Path A measures (by default the weighted mean of
-    the nights).  ``clean``, the clean twin of that image, adds each source's contrasts
-    solved on its own image (:func:`solved_contrasts`), ``c_det`` and ``c_tap_solved`` (one
-    per ``tap_list`` entry, at ``fap_list[0]``), and TABLE 3 as ``maps['limits']['solved']``
-    (:func:`_solved_bins`).  Not in the IDL.
+    Parameters
+    ----------
+    inj_stack : ndarray, shape (n, ny, nx) or (ny, nx)
+        The injected per-night images of the ``n`` nights.  One image is one night.
+    sources : sequence of tuple of floats
+        The injected sources, as ``(rho_arcsec, theta_deg, contrast)``, the contrast NaN when left out.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    known : sequence of tuple of 2 floats, default ()
+        Known companions, as ``(rho_arcsec, theta_deg)``.
+    weights : sequence of float or None, default None
+        Weight of each night, of which the first ``n`` are taken.  None weighs them equally.
+    drift_px : float, default 1.5
+        Radius of the peak search, in pixels.
+    excl_fwhm : float, default 1.5
+        Radius of the keep-outs, in FWHM.
+    angle_convention : {"pa", "math"}, default "pa"
+        How the angles are read.
+    fap_list : sequence of float, default DEFAULT_FAP_LIST
+        FAPs per resolution element of the tables, the first the operating FAP.
+    tap_list : sequence of float, default DEFAULT_TAP_LIST
+        Completeness levels of the tables.
+    rbin_as : float or None, default None
+        Width of the separation bins, in arcsec.  None takes one FWHM.
+    combined : ndarray or None, default None
+        The injected image Path A measures.  None takes the weighted mean of the nights.
+    clean : ndarray or None, default None
+        The clean twin of Path A's image, which adds each source's solved contrasts and TABLE 3.
+    sidelobes : Sidelobes or None, default None
+        The run's sidelobe rule.  Each source's rings then leave out the ADI arcs of every source of the
+        block and of the known companions (:func:`ring_snr`), and its STIM annulus and solved contrasts
+        leave out what its Path-A ring left out.
+    rules : dict or None, default None
+        The run's ring rules, as :func:`verify_candidates` takes them.
 
-    ``sidelobes`` (:class:`~klip_tpe.metrics.Sidelobes`): each source's rings leave out the ADI
-    arcs of every source of the block and of the known companions, with the farthest fallback
-    (:func:`ring_snr`), and its STIM annulus and solved contrasts leave out what its Path-A
-    ring left out.  ``noise`` in each row says how its Path-A ring came out.  ``rules``: the
-    run's ring rules, as :func:`verify_candidates` takes them."""
+    Returns
+    -------
+    rows : list of dict
+        One row per source, holding ``kind`` ("injection"), ``index``, ``rho``, ``theta``, ``contrast``,
+        ``x``, ``y``, ``snr``, ``fap``, ``nap``, ``peak``, ``subsets``, ``stim`` and ``stim_fap``, with
+        ``noise`` under the sidelobe rule and, with ``clean``, ``c_det`` and ``c_tap_solved``
+        (:func:`solved_contrasts` at ``fap_list[0]``).
+    maps : dict
+        The maps of :func:`verify_maps`, with ``limits`` (:func:`limit_tables`, TABLE 3 as
+        ``limits["solved"]`` with ``clean``) and ``solved_items``, each solved source's row and
+        detection test, for TABLE 3 over several blocks (:func:`verify_tiles`).
+
+    Raises
+    ------
+    ValueError
+        If ``clean`` is not of the frame size.
+
+    Notes
+    -----
+    It is the calibration block of the IDL predecessor's ``near2_verify`` (verify 621-735).  The
+    predecessor (verify 655-656, 660) leaves every other source in the ring and the annulus, and keeps
+    no keep-out around the source in the STIM annulus.  The solved contrasts are not in the
+    predecessor.
+    """
     inj_stack = np.asarray(inj_stack, float)
     if inj_stack.ndim == 2:
         inj_stack = inj_stack[None]
@@ -1053,13 +1739,42 @@ def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, floa
 
 
 def _place_key(s: Sequence[float]) -> Tuple[float, float]:
-    """A source's place, ``(rho, PA)`` rounded, to tell whether an image holds it."""
+    """Return a source's place, ``(rho, PA)`` rounded, to tell whether an image holds it.
+
+    Parameters
+    ----------
+    s : sequence of float
+        The source, as ``(rho_arcsec, theta_deg, ...)``.
+
+    Returns
+    -------
+    key : tuple of 2 floats
+        The separation rounded to 1e-6 arcsec and the angle to 1e-4 degrees.
+    """
     return (round(float(s[0]), 6), round(float(s[1]), 4))
 
 
 def _tile_stack(stack: Optional[np.ndarray], img: np.ndarray,
                 parts: Optional[Sequence[Any]]) -> Tuple[np.ndarray, Optional[List[str]]]:
-    """An annulus' per-partition images and their ids, or its image alone."""
+    """Return an annulus' per-partition images and their ids, or its image alone.
+
+    Parameters
+    ----------
+    stack : ndarray or None
+        The annulus' per-partition images, ``(n, ny, nx)`` or one ``(ny, nx)``.  None takes the image
+        alone.
+    img : ndarray, shape (ny, nx)
+        The annulus' image.
+    parts : sequence or None
+        Id of each partition.
+
+    Returns
+    -------
+    stack : ndarray, shape (n, ny, nx)
+        The images, one for the image alone.
+    ids : list of str or None
+        The partitions' ids, None for the image alone or when ``parts`` does not match the stack.
+    """
     if stack is None:
         return np.asarray(img, float)[None], None
     st = np.asarray(stack, float)
@@ -1077,39 +1792,81 @@ def verify_tiles(annuli: Sequence[Dict[str, Any]], candidates: Sequence[Tuple[fl
                  rbin_as: Optional[float] = None, angle_convention: str = "pa", sidelobes=None,
                  rules: Optional[Dict[str, Any]] = None, stitch: Optional[Dict[str, Any]] = None
                  ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """The per-tile measure (NEAR2 s7 note, 2026-11-02): each candidate and each injected
-    source measured with the pixels of the annulus whose tile holds it, as that annulus
-    reduced them, beside the stitch, which blends or patches a tile's pixels in places.
+    """Measure each candidate and injected source with the pixels of the annulus whose tile holds it.
 
-    ``stitch`` (the runner passes it): the stitched images, ``clean``, ``inj``, the per-partition
-    cubes ``nights`` and ``nights_inj`` with their ids ``night_ids``, and ``inj_sources``, the
-    sources the injected stitch holds.  Each annulus is then measured on the stitch with its tile
-    put in (:func:`~klip_tpe.stitch.put_tile_in`, each partition by its id): its own pixels on its
-    tile, the stitch's around it.  Without it, each annulus is measured on its image alone, as
-    the search and the validation measure its sources.  That image is NaN outside the annulus'
-    zone, and the matched filter and the noise ring take zeros there.  Where the next annulus in
-    has residuals several times the zone's, that leaves noise out of the ring and the radial
-    band, and inside about 1.3" of NEAR2's runs the image alone read 1.3 to 6 times the
-    stitch's S/N (NEAR2 note, 2026-11-04).  Where a tile takes no blend, the stitch with the
-    tile put in is the stitch itself, so the two S/N agree there.
+    Each position is measured as that annulus reduced it, beside the stitch, which blends or patches a
+    tile's pixels in places (NEAR2 s7 note, 2026-11-02).  The tile holding a position is
+    :func:`~klip_tpe.stitch.tile_of` of its separation, and a position outside every tile gets no row.
+    Each candidate is measured as :func:`verify_candidates` measures it on the stitch, its ring without
+    the known companions.  Each source is measured as :func:`verify_injections` measures it, its ring
+    without the other sources its image holds, those of the other tiles and of the stitch too.
 
-    ``annuli`` holds one dict per annulus in the stitch's order: ``tile`` ``(rin, rout)`` px,
-    ``clean`` and ``inj`` (its Path-A images as the stitch took them), ``clean_stack`` and
-    ``inj_stack`` (its per-partition images, else the image alone), ``parts`` (their ids),
-    ``inj_sources`` (the sources its injected image holds) and ``annulus`` (its index).  The
-    tile holding a position is :func:`~klip_tpe.stitch.tile_of` of its separation.
+    Parameters
+    ----------
+    annuli : sequence of dict
+        One dict per annulus, in the stitch's order, holding ``tile`` (``(rin, rout)`` in pixels),
+        ``clean`` and ``inj`` (its Path-A images as the stitch took them), ``clean_stack`` and
+        ``inj_stack`` (its per-partition images, else the image alone), ``parts`` (their ids),
+        ``inj_sources`` (the sources its injected image holds) and ``annulus`` (its index).
+    candidates : sequence of tuple of 2 floats
+        The candidates, as ``(rho_arcsec, theta_deg)``.
+    sources : sequence of tuple of floats
+        The injected sources, as ``(rho_arcsec, theta_deg, contrast)``.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    known : sequence of tuple of 2 floats, default ()
+        Known companions, as ``(rho_arcsec, theta_deg)``.
+    fap_op : float, default 2.87e-7
+        Operating FAP of Path A's decision.
+    drift_px : float, default 1.5
+        Radius of the peak search, in pixels.
+    n_boot : int, default 500
+        Number of bootstrap draws, 0 to skip the bootstrap.
+    rng : numpy.random.Generator or None, default None
+        Generator of the bootstrap, shared by the annuli.  None seeds one with 42.
+    excl_fwhm : float, default 1.5
+        Radius of the keep-outs, in FWHM.
+    fap_list : sequence of float, default DEFAULT_FAP_LIST
+        FAPs per resolution element of the tables, the first the operating FAP.
+    tap_list : sequence of float, default DEFAULT_TAP_LIST
+        Completeness levels of the tables.
+    rbin_as : float or None, default None
+        Width of the separation bins, in arcsec.  None takes one FWHM.
+    angle_convention : {"pa", "math"}, default "pa"
+        How the angles are read.
+    sidelobes : Sidelobes or None, default None
+        The run's sidelobe rule.
+    rules : dict or None, default None
+        The run's ring rules.
+    stitch : dict or None, default None
+        The stitched images, which the runner passes, holding ``clean``, ``inj``, the per-partition cubes
+        ``nights`` and ``nights_inj`` with their ids ``night_ids``, and ``inj_sources``, the sources the
+        injected stitch holds.  Each annulus is then measured on the stitch with its tile put in
+        (:func:`~klip_tpe.stitch.put_tile_in`, each partition by its id).
 
-    Each candidate is measured as :func:`verify_candidates` measures it on the stitch, its ring
-    without the known companions.  Each source is measured as :func:`verify_injections` does,
-    its ring without the other sources its image holds, those of the other tiles and of the
-    stitch too.  A source whose tile's annulus did not inject it (a run whose annuli each
-    injected only their own, ``RunConfig.stitch_injections = "own"``) gets a row marked
-    ``absent`` and no S/N.
+    Returns
+    -------
+    rows : list of dict
+        The candidate rows, then the source rows, in the order given, each with ``annulus`` (1-based),
+        ``tile_px``, ``meta`` and, when measured on the stitch, ``in_stitch``.  A source whose tile's
+        annulus did not inject it gets a row marked ``absent`` and no S/N.
+    maps : dict
+        ``limits``, the detection-limit tables of the sources measured, TABLE 3 included, and ``meta``.
 
-    Returns ``(rows, maps)``: the candidate rows, then the source rows, in the order given, each
-    with ``annulus`` (1-based), ``tile_px`` and, with ``stitch``, ``in_stitch``, and
-    ``maps["limits"]``, the detection-limit tables of the sources measured, TABLE 3 included.
-    A position outside every tile gets no row."""
+    Notes
+    -----
+    Without ``stitch``, each annulus is measured on its image alone, as the search and the validation
+    measure its sources.  That image is NaN outside the annulus' zone, and the matched filter and the
+    noise ring take zeros there.  Where the next annulus in has residuals several times the zone's,
+    that leaves noise out of the ring and the radial band, and inside about 1.3" of NEAR2's runs the
+    image alone read 1.3 to 6 times the stitch's S/N (NEAR2 note, 2026-11-04).  Where a tile takes no
+    blend, the stitch with the tile put in is the stitch itself, so the two S/N agree there.
+
+    A source is absent where each annulus injected only its own sources
+    (``RunConfig.stitch_injections = "own"``).
+    """
     from .stitch import put_tile_in, put_tile_in_stack, tile_index, tile_of
     if rng is None:
         rng = np.random.default_rng(42)
@@ -1201,9 +1958,24 @@ def verify_tiles(annuli: Sequence[Dict[str, Any]], candidates: Sequence[Tuple[fl
 
 def tile_comparison_lines(rows: Sequence[Dict[str, Any]], tile_rows: Sequence[Dict[str, Any]],
                           report: str = "tile_verify_report.txt") -> List[str]:
-    """The closing section of the stitched report: each candidate's and source's S/N on the
-    stitch beside its S/N with the pixels of the annulus whose tile holds it (:func:`verify_tiles`,
-    in full in ``report``).  Every line is a comment."""
+    """Return the closing section of the stitched report, each S/N on the stitch beside its S/N on its tile.
+
+    The S/N on the tile is that of :func:`verify_tiles`, given in full in ``report``.
+
+    Parameters
+    ----------
+    rows : sequence of dict
+        The rows of the stitched verify.
+    tile_rows : sequence of dict
+        The rows of :func:`verify_tiles`.
+    report : str, default "tile_verify_report.txt"
+        Name of the per-tile report, for the section's heading.
+
+    Returns
+    -------
+    lines : list of str
+        The section, every line a comment.
+    """
     def key(r):
         return (r.get("kind", "candidate"), int(r["index"]))
 
@@ -1236,18 +2008,43 @@ def tile_comparison_lines(rows: Sequence[Dict[str, Any]], tile_rows: Sequence[Di
 def limit_tables(inj_rows: Sequence[Dict[str, Any]], fwhm: float, pxscale: float,
                  fap_list: Sequence[float] = DEFAULT_FAP_LIST, tap_list: Sequence[float] = DEFAULT_TAP_LIST,
                  rbin_as: Optional[float] = None) -> Optional[Dict[str, Any]]:
-    """Binned Path-A detection limits (verify 674-718 / ``near2v_curvetxt`` 447-488).
+    """Bin the Path-A detection limits of the injections by separation, TABLE 1 and TABLE 2.
 
-    Injections with finite ``snr > 0`` and ``contrast > 0`` are binned by ``rho``
-    in ``rbin_as`` (default ``fwhm * pxscale``) bins from ``min(rho)``.  Per bin:
-    ``sep = mean(rho)``, ``n_inj``, ``snr_med``, ``tau = t_thresh(fap_list[0],
-    max(round(mean(nap)), 3))``; TABLE 1 ``c@TAP`` = :func:`contrast_limit`
-    ``(fap_list[0], tap)`` per ``tap``; TABLE 2 (TAP closest to 0.90) per
-    ``fap_list`` entry plus the per-image 10 % column ``aimg = 0.10 / max(mean
-    (nap), 1)``.  Returns ``None`` when no injection qualifies.
+    The injections with a finite positive S/N and a positive contrast are binned by separation, from
+    the smallest.  TABLE 1 gives each bin's :func:`contrast_limit` at the operating FAP for each
+    completeness, and TABLE 2 at the completeness nearest 0.9 for each FAP, with a per-image 10 %
+    column at ``alpha = 0.1 / max(mean(nap), 1)``.
 
-    ``solved`` is None here.  :func:`verify_injections` fills it, TABLE 3, when it has
-    the clean twin of the injected image (:func:`_solved_bins`)."""
+    Parameters
+    ----------
+    inj_rows : sequence of dict
+        Rows of :func:`verify_injections`, rows of another kind skipped.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fap_list : sequence of float, default DEFAULT_FAP_LIST
+        FAPs per resolution element, the first the operating FAP.
+    tap_list : sequence of float, default DEFAULT_TAP_LIST
+        Completeness levels.
+    rbin_as : float or None, default None
+        Width of the bins, in arcsec.  None takes ``fwhm * pxscale``.
+
+    Returns
+    -------
+    limits : dict or None
+        ``rbin_as``, ``fap_list``, ``tap_list``, ``i90`` (the index of the completeness nearest 0.9),
+        ``n_inj``, ``bins``, ``samples`` (the injections' ``rho``, ``snr``, ``contrast`` and ``nap``) and
+        ``solved``, None until :func:`verify_injections` fills it with TABLE 3.  None when no injection
+        qualifies.
+
+    Notes
+    -----
+    Each bin holds ``sep`` (its mean separation), ``n_inj``, ``snr_med``, ``tau``
+    (``t_thresh(fap_list[0], max(round(mean(nap)), 3))``), ``c_tap`` (TABLE 1), ``c_fap`` and
+    ``c_img10`` (TABLE 2), ``ib`` (its index) and ``tau_exact``, the largest exact threshold of its
+    injections.  It is the IDL predecessor's verify 674-718 and ``near2v_curvetxt`` (447-488).
+    """
     ri, si, ci, napi = [], [], [], []
     for r in inj_rows:
         if r.get("kind", "injection") != "injection":
@@ -1288,6 +2085,20 @@ def limit_tables(inj_rows: Sequence[Dict[str, Any]], fwhm: float, pxscale: float
 # text products
 # ----------------------------------------------------------------------------
 def _f(v, fmt="{:.2f}"):
+    """Format a number, "nan" where it is not finite.
+
+    Parameters
+    ----------
+    v : object
+        The value.
+    fmt : str, default "{:.2f}"
+        The format.
+
+    Returns
+    -------
+    text : str
+        The value formatted, or ``str(v)`` for a value that is not a number.
+    """
     try:
         return fmt.format(float(v)) if np.isfinite(float(v)) else "nan"
     except Exception:
@@ -1295,6 +2106,22 @@ def _f(v, fmt="{:.2f}"):
 
 
 def _table_lines(lim: Dict[str, Any], indent: str = "#   ") -> List[str]:
+    """Return TABLE 1 and TABLE 2 of the report as lines.
+
+    Where a bin's exact threshold passes the cap (:data:`TAU_CAP`), a note says where.
+
+    Parameters
+    ----------
+    lim : dict
+        The tables, from :func:`limit_tables`.
+    indent : str, default "#   "
+        Prefix of the headings and notes.
+
+    Returns
+    -------
+    lines : list of str
+        The tables.
+    """
     fl, tl, i90 = lim["fap_list"], lim["tap_list"], lim["i90"]
     out = [f"{indent}TABLE 1 -- contrast at the OPERATING FAP ({fl[0]:8.1E} per resel) vs separation",
            f"{indent}  rho[\"]  n_inj  S/N_med   tau " + "".join(f"   c@TAP{int(round(t*100)):02d}" for t in tl)]
@@ -1318,12 +2145,37 @@ def _table_lines(lim: Dict[str, Any], indent: str = "#   ") -> List[str]:
 
 
 def _e(v: float) -> str:
+    """Format a contrast as ``{:10.3E}``, "inf" or "nan" right-aligned where it is not finite.
+
+    Parameters
+    ----------
+    v : float
+        The contrast.
+
+    Returns
+    -------
+    text : str
+        The contrast, 10 characters wide.
+    """
     v = float(v)
     return f"{v:10.3E}" if np.isfinite(v) else f"{'inf' if np.isinf(v) else 'nan':>10}"
 
 
 def _table3_lines(lim: Dict[str, Any], indent: str = "#   ") -> List[str]:
-    """TABLE 3 of the report, from ``lim['solved']`` (:func:`limit_tables`)."""
+    """Return TABLE 3 of the report as lines, from ``lim["solved"]``.
+
+    Parameters
+    ----------
+    lim : dict
+        The tables, from :func:`limit_tables`, with TABLE 3 filled (:func:`_solved_bins`).
+    indent : str, default "#   "
+        Prefix of the headings and notes.
+
+    Returns
+    -------
+    lines : list of str
+        The table, its notes and a line per source.
+    """
     fl, tl, i90 = lim["fap_list"], lim["tap_list"], lim["i90"]
     pc = int(round(100 * tl[i90]))
     out = [f"{indent}TABLE 3 -- solved on clean + a (injected - clean), at the OPERATING FAP ({fl[0]:8.1E} per resel)",
@@ -1350,8 +2202,18 @@ def _table3_lines(lim: Dict[str, Any], indent: str = "#   ") -> List[str]:
 
 
 def _noise_lines(injs: Sequence[Dict[str, Any]]) -> List[str]:
-    """The injection block's rings under the sidelobe rule, as comment lines: how many kept
-    their samples outside every arc, and which took a fallback."""
+    """Return the injection block's rings under the sidelobe rule as comment lines.
+
+    Parameters
+    ----------
+    injs : sequence of dict
+        The injection rows, each with its ``noise`` (:func:`_noise`).
+
+    Returns
+    -------
+    lines : list of str
+        How many rings kept their samples outside every arc, and a line for each that took a fallback.
+    """
     noted = [(r, r.get("noise") or {}) for r in injs]
     plain = sum(1 for _, n in noted if not n.get("fallback"))
     L = [f"#   sidelobe rule: {plain} of {len(noted)} rings on their samples outside every arc"
@@ -1365,10 +2227,34 @@ def _noise_lines(injs: Sequence[Dict[str, Any]]) -> List[str]:
 
 def write_verify_table(path: str, rows: Sequence[Dict[str, Any]], limits: Optional[Dict[str, Any]] = None,
                        header: Optional[Dict[str, Any]] = None, extra_lines: Sequence[str] = ()) -> str:
-    """Write the ``verify_report.txt`` of ``near2_verify`` (verify 574-724) from
-    the rows of :func:`verify_candidates`.  ``limits`` defaults to the tables
-    derived from the injection rows present.  Rows of :func:`verify_tiles` also say whose
-    image measured them.  ``extra_lines`` close the report.  Returns the text."""
+    """Write the verify report, ``verify_report.txt``, from the rows of :func:`verify_candidates`.
+
+    The report gives each candidate's Path A and Path B, the injection calibration block and the
+    detection-limit tables, TABLE 3 included where solved.  Rows of :func:`verify_tiles` also say whose
+    image measured them.
+
+    Parameters
+    ----------
+    path : str
+        Path of the report.
+    rows : sequence of dict
+        The rows, candidates and injections.
+    limits : dict or None, default None
+        The detection-limit tables.  None makes them from the injection rows present.
+    header : dict or None, default None
+        Settings for the header, such as ``run``, which take precedence over the rows' ``meta``.
+    extra_lines : sequence of str, default ()
+        Lines that close the report.
+
+    Returns
+    -------
+    text : str
+        The report, also written to ``path``.
+
+    Notes
+    -----
+    It is the report of the IDL predecessor's ``near2_verify`` (verify 574-724).
+    """
     meta = dict(header or {})
     for r in rows:
         if "meta" in r:
@@ -1465,9 +2351,29 @@ def write_verify_table(path: str, rows: Sequence[Dict[str, Any]], limits: Option
 
 
 def write_curve_table(path: str, limits: Dict[str, Any], header: str = "") -> str:
-    """``near2v_curvetxt`` (verify 447-488): the TABLE 1 / TABLE 2 content of an
-    aggregated injection set (e.g. all per-eval injections of an annulus,
-    ``near2_verify_annulus``) as a stand-alone ``verify_curve.txt``."""
+    """Write TABLE 1 and TABLE 2 of an aggregated injection set as a stand-alone ``verify_curve.txt``.
+
+    Such a set is, for example, every injection of an annulus' evaluations, as the IDL predecessor's
+    ``near2_verify_annulus`` gathers them.
+
+    Parameters
+    ----------
+    path : str
+        Path of the file.
+    limits : dict
+        The tables, from :func:`limit_tables`.
+    header : str, default ""
+        Line under the title.
+
+    Returns
+    -------
+    text : str
+        The tables, also written to ``path``.
+
+    Notes
+    -----
+    It is ``near2v_curvetxt`` of the IDL predecessor (verify 447-488).
+    """
     L = [f"# klip_tpe.verify detection-limit curve -- {_dt.datetime.now().isoformat(timespec='seconds')}",
          f"# {header}",
          f"# contrast = companion/star flux ratio; binned by rho in {limits['rbin_as']:.2f}\" bins."]
