@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — 2026-11-13 (fmmf.py documented to the rule)
+
+- **`fmmf.py` follows the documentation rule**: the forward-modeled matched filter's functions,
+  `FMTemplates`, the per-aperture templates, `FMMFSNR` with every field and `fmmf_map`.  Only
+  docstrings and comments changed.
+
 ## Unreleased — 2026-11-13 (the MIRI and ALES adapters documented to the rule)
 
 - **`instruments/miri.py` and `ales.py` follow the documentation rule**, which completes the
