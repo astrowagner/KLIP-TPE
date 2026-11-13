@@ -620,7 +620,7 @@ def _fmt(v, fmt: str, default: str = "nan") -> str:
 
 
 def _kept_median(r: Dict[str, Any]) -> Dict[str, Any]:
-    """Return a parameters-table row's parameters, the columns of :data:`PARAM_COLUMNS` as medians over its kept blocks.
+    """Return a table row's parameters, the columns of :data:`PARAM_COLUMNS` as medians over its kept blocks.
 
     The blocks are the per-partition blocks of the partitions the row keeps, all of them when it names
     none, and a column no block gives keeps the row's value.

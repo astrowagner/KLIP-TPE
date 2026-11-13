@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — 2026-11-13 (parallel.py documented to the rule)
+
+- **`parallel.py` follows the documentation rule**: the worker budget, the thread pools, the
+  forked `ProcessPool` with its card workers, and `SharedArrays`.  `pump_wait` no longer points to
+  a `WorkerPool.gather` that is gone: `ProcessPool.map` waits through `pump_wait` too.  A few
+  summary lines of `refine.py`, `stitch.py` and `cli.py` are shorter.  Only docstrings and
+  comments changed.
+
 ## Unreleased — 2026-11-13 (cli.py, space.py and optimizers.py documented to the rule)
 
 - **`cli.py`, `space.py` and `optimizers.py` follow the documentation rule**: every command and

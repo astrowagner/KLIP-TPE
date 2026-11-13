@@ -472,7 +472,7 @@ def _forbidden(a):
 
 
 def _line_mask(red, a, log=print):
-    """Return ``--mask-line PA HALFWIDTH`` as a pixel mask of the reducer's frame, the strips kept out of the noise apertures.
+    """Return ``--mask-line PA HALFWIDTH`` as a pixel mask, the strips kept out of the noise apertures.
 
     Parameters
     ----------
@@ -486,7 +486,7 @@ def _line_mask(red, a, log=print):
     Returns
     -------
     mask : ndarray of bool or None
-        The mask, True to exclude, None without the option.
+        The mask of the reducer's frame, True to exclude, None without the option.
     """
     lines = [tuple(float(v) for v in b) for b in (getattr(a, "mask_line", None) or [])]
     if not lines:
@@ -1890,7 +1890,7 @@ def latest_run_dir(root: str) -> str:
 
 
 def _resolve_run_dir(a) -> str:
-    """Resolve ``--run-dir``, where ``last``, ``latest`` or ``newest`` names the most recent run under ``<root>/comb/opt``.
+    """Resolve ``--run-dir``, ``last``, ``latest`` or ``newest`` naming the newest run under ``<root>/comb/opt``.
 
     Anything else is taken as it is.  The run record has had its say by then (:func:`_fill_from_registry`),
     so reaching here with nothing to go on means there is no run to resume, which it says rather than
@@ -1926,7 +1926,7 @@ def _resolve_run_dir(a) -> str:
 
 
 def _register(run_dir, argv=None) -> None:
-    """Put a run on the record, so ``klip-tpe runs`` sees it and ``klip-tpe resume`` restarts it without being told how.
+    """Put a run on the record, which ``klip-tpe runs`` lists and a bare ``klip-tpe resume`` restarts.
 
     A failure is ignored.
 
@@ -2178,10 +2178,11 @@ def cmd_extend(a):
 
 
 def cmd_fit_chain(a):
-    """Run ``klip-tpe fit-chain``, which fits the node values of a chain of point sources to a finished run's final image.
+    """Run ``klip-tpe fit-chain``, which fits a chain of point sources to a finished run's final image.
 
-    The chain, a line through the star from ``--chain`` or ``--line-nodes``, is fitted through the run's
-    winners (:mod:`klip_tpe.chainfit`) and written to ``--out``, by default beside the run.  With
+    The chain's node values, a line through the star from ``--chain`` or ``--line-nodes``, are fitted
+    through the run's winners (:mod:`klip_tpe.chainfit`) and written to ``--out``, by default beside
+    the run.  With
     ``--per-night`` each night gets its own amplitude of the fitted chain.
 
     Parameters
@@ -2591,7 +2592,7 @@ def _injected_model_fn(a):
 
 
 def cmd_compare(a):
-    """Run ``klip-tpe compare``, which replays the evaluations of a run of the IDL predecessor through the Python objective.
+    """Run ``klip-tpe compare``, which replays an IDL predecessor run's evaluations through the Python objective.
 
     The run may still be running.  Its new evaluations are synced
     (:class:`klip_tpe.idl_compare.LiveComparison`) into ``compare.txt`` in ``--out``, and the statistics

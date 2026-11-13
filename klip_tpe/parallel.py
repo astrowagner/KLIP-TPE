@@ -1,14 +1,16 @@
-"""Worker / thread bookkeeping shared by the reducers and the runner.
+"""Worker and thread bookkeeping shared by the reducers and the runner.
 
-klip-tpe parallelises with threads (numpy's SVD / matmul release the GIL): the
-:class:`~klip_tpe.reducer.PartitionedReducer` maps partitions onto one pool, the KLIP
-engine maps the per-target basis builds of one partition onto a second pool, and the
-runner reduces the injected and the clean cube concurrently.  ``workers`` is the
-budget for all of that: ``"auto"`` / ``None`` / ``0`` = one per physical core the process
-may run on (:func:`physical_cores`), ``"all"`` = every logical CPU, hardware threads
-included (:func:`cpu_count`); an integer pins it.  With more than one worker the BLAS thread
-pools are pinned to one thread inside the KLIP loops (threadpoolctl, when installed) so the
-threads do not fight over cores.
+klip-tpe parallelizes with threads, since numpy's SVD and matmul release the GIL: the
+:class:`~klip_tpe.reducer.PartitionedReducer` maps partitions onto one pool, the KLIP engine maps
+the per-target basis builds of one partition onto a second pool, and the runner reduces the
+injected and the clean cube concurrently.  It also forks worker processes (:class:`ProcessPool`),
+with card workers that reduce on a GPU.
+
+``workers`` is the budget for all of that.  ``"auto"``, None or 0 is one per physical core the
+process may run on (:func:`physical_cores`), ``"all"`` every logical CPU, hardware threads included
+(:func:`cpu_count`), and an integer pins it.  With more than one worker the BLAS thread pools are
+pinned to one thread inside the KLIP loops (threadpoolctl, when installed), so the threads do not
+fight over cores.
 """
 from __future__ import annotations
 
@@ -27,7 +29,13 @@ WorkerSpec = Union[int, str, None]
 
 
 def cpu_count() -> int:
-    """Logical CPUs available to this process, hardware threads (SMT) included."""
+    """Return the logical CPUs available to this process, hardware threads (SMT) included.
+
+    Returns
+    -------
+    n : int
+        The count, at least 1.
+    """
     try:
         return max(len(os.sched_getaffinity(0)), 1)
     except Exception:
@@ -35,7 +43,18 @@ def cpu_count() -> int:
 
 
 def _cpulist(text: str) -> Optional[frozenset]:
-    """A sysfs CPU list (``0,96`` or ``0-3,8``) as a set, None when it does not parse."""
+    """Parse a sysfs CPU list, such as ``0,96`` or ``0-3,8``, as a set.
+
+    Parameters
+    ----------
+    text : str
+        The list.
+
+    Returns
+    -------
+    cpus : frozenset of int or None
+        The CPUs, None when the list does not parse or is empty.
+    """
     out = set()
     try:
         for part in text.strip().split(","):
@@ -52,16 +71,30 @@ _physical: Optional[int] = None
 
 
 def physical_cores(sysfs: str = "/sys/devices/system/cpu") -> int:
-    """Physical cores available to this process: the CPUs it may run on (:func:`cpu_count`)
-    with each core's hardware threads counted once.  Linux reads each allowed CPU's
-    siblings in sysfs (``topology/core_cpus_list``, or ``thread_siblings_list`` on older
-    kernels), macOS asks ``sysctl hw.physicalcpu``.  Where neither answers, the logical
-    count.
+    """Return the physical cores available to this process, each core's hardware threads counted once.
 
-    The default worker budget since 2026-10-27.  On patrick (96 cores, 192 hardware threads)
-    a farm benchmark of NEAR2's annulus 5 ran 1.25x faster with 48 jobs of 2 threads at a
-    budget of 96 than with 48 jobs of 4 at 192.  The second thread of a core added nothing on
-    this code and cost cache and memory bandwidth."""
+    They are the CPUs it may run on (:func:`cpu_count`).  Linux reads each allowed CPU's siblings in
+    sysfs (``topology/core_cpus_list``, or ``thread_siblings_list`` on older kernels), and macOS asks
+    ``sysctl hw.physicalcpu``.  Where neither answers, it is the logical count.  The answer for the
+    default ``sysfs`` is cached.
+
+    Parameters
+    ----------
+    sysfs : str, default "/sys/devices/system/cpu"
+        The sysfs CPU directory.
+
+    Returns
+    -------
+    n : int
+        The count, at least 1 and at most the logical count.
+
+    Notes
+    -----
+    It has been the default worker budget since 2026-10-27.  On patrick (96 cores, 192 hardware
+    threads) a farm benchmark of NEAR2's annulus 5 ran 1.25x faster with 48 jobs of 2 threads at a
+    budget of 96 than with 48 jobs of 4 at 192.  The second thread of a core added nothing on this code
+    and cost cache and memory bandwidth.
+    """
     global _physical
     if _physical is not None and sysfs == "/sys/devices/system/cpu":
         return _physical
@@ -103,10 +136,20 @@ def physical_cores(sysfs: str = "/sys/devices/system/cpu") -> int:
 
 
 def resolve_workers(spec: WorkerSpec = "auto") -> int:
-    """The worker budget, the threads the run's jobs may use together.  ``'auto'`` / ``None``
-    / ``0`` -> :func:`physical_cores`; ``'all'`` / ``'logical'`` / ``'max'`` -> every logical
-    CPU (:func:`cpu_count`, what ``'auto'`` meant before 2026-10-27); ``-k`` -> ``'auto'``
-    less k; an integer -> that many (at least 1)."""
+    """Return the worker budget, the threads the run's jobs may use together.
+
+    Parameters
+    ----------
+    spec : int, str or None, default "auto"
+        ``"auto"``, None or 0 for :func:`physical_cores`, ``"all"``, ``"logical"`` or ``"max"`` for every
+        logical CPU (:func:`cpu_count`, what ``"auto"`` meant before 2026-10-27), ``-k`` for ``"auto"``
+        less k, or a positive count.
+
+    Returns
+    -------
+    workers : int
+        The budget, at least 1.
+    """
     if spec is None:
         return physical_cores()
     if isinstance(spec, str):
@@ -128,9 +171,12 @@ _reaper_installed = False
 
 
 def _after_fork_in_child() -> None:
-    """A forked worker inherits the parent's thread pools without their threads: work
-    submitted to one would wait forever.  It also inherits ``_lock`` as it stood, possibly
-    held by a parent thread that does not exist here.  Start both afresh."""
+    """Start the thread pools and their lock afresh in a forked worker.
+
+    A forked worker inherits the parent's thread pools without their threads, so work submitted to one
+    would wait forever.  It also inherits ``_lock`` as it stood, possibly held by a parent thread that
+    does not exist there.
+    """
     global _lock
     _lock = threading.Lock()
     _pools.clear()
@@ -141,8 +187,11 @@ if hasattr(os, "register_at_fork"):
 
 
 def _install_signal_reaper() -> None:
-    """Terminate worker pools on SIGTERM/SIGHUP as well as on a normal exit, so that
-    ``pkill`` or a closed terminal does not leave workers behind."""
+    """Install handlers that terminate the worker pools on SIGTERM and SIGHUP, as on a normal exit.
+
+    Then ``pkill`` or a closed terminal leaves no workers behind.  It installs once, from the main
+    thread, and only over the default handlers.
+    """
     global _reaper_installed
     if _reaper_installed or threading.current_thread() is not threading.main_thread():
         return
@@ -166,12 +215,14 @@ def _install_signal_reaper() -> None:
         except (ValueError, OSError):
             pass
 
-#: callables run by the main thread while it waits for worker results (the live
-#: display animates the launch movie from here; IDL does the same in its bridge poll loop)
+#: callables the main thread runs while it waits for worker results.  The live display
+#: animates the launch movie from here, as the IDL predecessor does in its bridge poll loop.
 IDLE_HOOKS: list = []
 
 
 def run_idle_hooks() -> None:
+    """Run the idle hooks of :data:`IDLE_HOOKS`, from the main thread only, ignoring a hook that fails.
+    """
     if not IDLE_HOOKS or threading.current_thread() is not threading.main_thread():
         return
     for fn in list(IDLE_HOOKS):
@@ -182,14 +233,28 @@ def run_idle_hooks() -> None:
 
 
 def pump_wait(futures, tick: float = 0.1):
-    """Wait for ``futures``, running the idle hooks every ``tick`` seconds.
+    """Wait for futures, running the idle hooks every ``tick`` seconds.
 
-    The main thread must hand the GUI event loop a turn every couple of seconds or macOS
-    stops compositing the live window.  Waiting on a worker *process* already does that
-    (:meth:`WorkerPool.gather` polls its queue with a timeout), but a bare
-    ``Future.result()`` on a *thread* pool blocks with no such window -- so every place the
-    main thread waits on threads goes through here instead.  Results come back in the order
-    the futures were given, and the first exception is re-raised, exactly like ``result()``.
+    The main thread must hand the GUI event loop a turn every couple of seconds, or macOS stops
+    compositing the live window.  A bare ``Future.result()`` blocks with no such window, so every place
+    the main thread waits on workers goes through here, threads and :meth:`ProcessPool.map` alike.
+
+    Parameters
+    ----------
+    futures : iterable of concurrent.futures.Future
+        The futures.
+    tick : float, default 0.1
+        Period of the idle hooks, in seconds.
+
+    Returns
+    -------
+    results : list
+        The results, in the order the futures were given.
+
+    Raises
+    ------
+    Exception
+        The first future's exception, as ``result()`` raises it.
     """
     import concurrent.futures as _cf
     futs = list(futures)
@@ -202,7 +267,18 @@ def pump_wait(futures, tick: float = 0.1):
 
 
 def target_pool(n: int) -> cf.ThreadPoolExecutor:
-    """Process-wide pool for the per-target KLIP work (one per size; created lazily)."""
+    """Return the process-wide pool for the per-target KLIP work, one per size, made when first asked for.
+
+    Parameters
+    ----------
+    n : int
+        Number of threads.
+
+    Returns
+    -------
+    pool : concurrent.futures.ThreadPoolExecutor
+        The pool.
+    """
     with _lock:
         p = _pools.get(n)
         if p is None:
@@ -212,8 +288,20 @@ def target_pool(n: int) -> cf.ThreadPoolExecutor:
 
 @contextlib.contextmanager
 def single_blas_thread(enabled: bool = True):
-    """Pin BLAS/LAPACK to one thread inside a multi-threaded region (no-op without
-    threadpoolctl)."""
+    """Pin BLAS and LAPACK to one thread inside a multi-threaded region.
+
+    Without threadpoolctl it does nothing.
+
+    Parameters
+    ----------
+    enabled : bool, default True
+        Whether to pin.
+
+    Yields
+    ------
+    None
+        Control inside the region.
+    """
     if not enabled:
         yield
         return
@@ -230,8 +318,20 @@ _pinned = False
 
 
 def pin_blas(limit: int = 1) -> bool:
-    """Pin the process' BLAS/LAPACK pools to ``limit`` threads for the rest of the run
-    (klip-tpe's own threads provide the parallelism).  Returns True when applied."""
+    """Pin the process' BLAS and LAPACK pools to ``limit`` threads for the rest of the run.
+
+    klip-tpe's own threads give the parallelism.
+
+    Parameters
+    ----------
+    limit : int, default 1
+        Number of threads.
+
+    Returns
+    -------
+    applied : bool
+        True when the pin is in place, False without threadpoolctl.
+    """
     global _pinned
     if _pinned:
         return True
@@ -245,8 +345,13 @@ def pin_blas(limit: int = 1) -> bool:
 
 
 def mem_available() -> Optional[int]:
-    """Bytes of memory the kernel says are available to new work (Linux ``MemAvailable``),
-    or None."""
+    """Return the bytes of memory the kernel says are available to new work, Linux's ``MemAvailable``.
+
+    Returns
+    -------
+    nbytes : int or None
+        The bytes, None where ``/proc/meminfo`` does not say.
+    """
     try:
         with open("/proc/meminfo") as f:
             for ln in f:
@@ -258,17 +363,41 @@ def mem_available() -> Optional[int]:
 
 
 def _cores_text() -> str:
-    """``96 cores (192 logical CPUs)``, or ``2 cores`` where each core has one thread."""
+    """Describe the cores, such as ``96 cores (192 logical CPUs)``, or ``2 cores`` where each core has one thread.
+
+    Returns
+    -------
+    text : str
+        The description.
+    """
     phys, log = physical_cores(), cpu_count()
     return f"{phys} cores ({log} logical CPUs)" if log != phys else f"{phys} cores"
 
 
 def describe(workers: int, n_partitions: int, procs: Optional[int] = None,
              per_job: Optional[int] = None, cap: Optional[int] = None, budget: Optional[int] = None) -> str:
-    """The run log's line about the worker budget.  ``procs`` / ``per_job``: the worker
-    processes and threads per job (the thread-pool fallback passes None); ``cap``: the
-    most threads a job expected to be long can get; ``budget``: the most the running jobs
-    use together, when the pool holds them to it."""
+    """Return the run log's line about the worker budget.
+
+    Parameters
+    ----------
+    workers : int
+        The worker budget.
+    n_partitions : int
+        Number of partitions per reduction.
+    procs : int or None, default None
+        Number of worker processes, None for the thread-pool fallback.
+    per_job : int or None, default None
+        Threads per job.
+    cap : int or None, default None
+        Most threads a job expected to be long can get.
+    budget : int or None, default None
+        Most threads the running jobs use together, when the pool holds them to it.
+
+    Returns
+    -------
+    line : str
+        The line.
+    """
     if procs is None:
         conc = 2 if workers >= 2 else 1
         per = max(workers // max(conc * n_partitions, 1), 1) if per_job is None else per_job
@@ -285,7 +414,7 @@ def describe(workers: int, n_partitions: int, procs: Optional[int] = None,
 
 
 # ----------------------------------------------------------------------------
-# forked worker processes (the IDL "bridges"): one copy of the loaded data, N processes
+# forked worker processes (the IDL predecessor's "bridges"): one copy of the loaded data, N processes
 # ----------------------------------------------------------------------------
 import heapq
 import multiprocessing as _mp
@@ -321,12 +450,18 @@ except Exception:                                       # pragma: no cover
 def _watch_parent(ppid: int, period: float = 2.0) -> None:
     """Exit this worker as soon as its parent is gone.
 
-    ``daemon=True`` only covers a *clean* parent exit: multiprocessing's atexit hook
-    terminates the children.  A parent that is SIGKILLed, or that dies with the terminal,
-    never runs that hook, and the worker then blocks on ``inq.get()`` forever -- an
-    invisible process holding a copy of the data until the machine is rebooted.  Polling
-    ``getppid()`` catches every case, because an orphan is re-parented (to init, or to
-    launchd on macOS) the moment its parent dies.
+    ``daemon=True`` only covers a clean exit of the parent, whose atexit hook terminates the children.
+    A parent that is SIGKILLed, or dies with the terminal, never runs that hook, and the worker then
+    blocks on ``inq.get()`` forever, an invisible process holding a copy of the data until the machine
+    is rebooted.  Polling ``getppid()`` catches every case, because an orphan is re-parented, to init or
+    to launchd on macOS, the moment its parent dies.
+
+    Parameters
+    ----------
+    ppid : int
+        The parent's process id.
+    period : float, default 2.0
+        Period of the poll, in seconds.
     """
     def watch():
         while True:
@@ -340,7 +475,22 @@ def _watch_parent(ppid: int, period: float = 2.0) -> None:
 
 
 def _worker_main(reducers, inq, outq, ppid: Optional[int] = None):
-    """Worker loop: ``(job_id, pid, request)`` -> ``(job_id, result | exception)``."""
+    """Run a worker's loop, ``(job_id, pid, request)`` in and ``(job_id, result or exception)`` out.
+
+    The worker ignores SIGINT, since the parent owns the interrupt and the workers stop when it tells
+    them to, or when the watchdog sees it gone.  A None job ends the loop.
+
+    Parameters
+    ----------
+    reducers : dict
+        The reducers, by partition id.
+    inq : multiprocessing.Queue
+        Queue of the jobs.
+    outq : multiprocessing.Queue
+        Queue of the results.
+    ppid : int or None, default None
+        The parent's process id, for the watchdog (:func:`_watch_parent`).
+    """
     pin_blas()
     # Ctrl-C reaches every process in the foreground group, and a worker that takes the
     # KeyboardInterrupt dies inside inq.get() -- leaving the parent waiting on a queue
@@ -372,23 +522,53 @@ def _worker_main(reducers, inq, outq, ppid: Optional[int] = None):
 # the card: worker processes that reduce on a GPU
 # ----------------------------------------------------------------------------
 def card_slot(tag: str) -> int:
-    """A job's place in 0..99 for the card's share, from its tag (which names the evaluation,
-    the draw and the partition): SHA-1, not Python's ``hash()``, which changes from one process
-    to the next.  A job goes to the card when its slot is below the share, so a run and its
-    resumes send the same jobs there."""
+    """Return a job's place in 0 to 99 for the card's share, from its tag.
+
+    The tag names the evaluation, the draw and the partition, and the place comes from SHA-1, not
+    Python's ``hash()``, which changes from one process to the next.  A job goes to the card when its
+    slot is below the share, so a run and its resumes send the same jobs there.
+
+    Parameters
+    ----------
+    tag : str
+        The job's tag.
+
+    Returns
+    -------
+    slot : int
+        The place.
+    """
     import hashlib
     return int.from_bytes(hashlib.sha1(str(tag).encode("utf-8")).digest()[:4], "big") % 100
 
 
 def card_present() -> bool:
-    """Whether this machine shows an NVIDIA card, without loading CUDA (the parent never does:
-    a CUDA context does not survive a fork)."""
+    """Tell whether this machine shows an NVIDIA card, without loading CUDA.
+
+    The parent never loads it, since a CUDA context does not survive a fork.
+
+    Returns
+    -------
+    present : bool
+        True on Linux with ``/dev/nvidia0`` or ``/dev/nvidiactl``.
+    """
     return sys.platform.startswith("linux") and any(
         os.path.exists(p) for p in ("/dev/nvidia0", "/dev/nvidiactl"))
 
 
 def describe_card(summary: Optional[dict]) -> str:
-    """One line on the card workers, for the log, from :meth:`ProcessPool.card_summary`."""
+    """Return one line on the card workers, for the log.
+
+    Parameters
+    ----------
+    summary : dict or None
+        The summary, from :meth:`ProcessPool.card_summary`.
+
+    Returns
+    -------
+    line : str
+        The line, "none" without a summary.
+    """
     if not summary:
         return "none"
     info = summary.get("info") or {}
@@ -404,12 +584,20 @@ def describe_card(summary: Optional[dict]) -> str:
 
 
 class CardSpec:
-    """The card workers of a :class:`ProcessPool`.  ``reducers``: ``{pid: card reducer}``,
-    built in the parent and pure Python there (``from_cpu``); each worker calls their
-    ``warm()`` after the fork, then ``reduce(req)``.  ``supports(req)`` is asked in the parent.
-    ``share``: the percentage of the eligible jobs (``ReductionRequest.card``) the card takes,
-    by :func:`card_slot`.  ``workers``: card processes sharing one queue (at large bins a job
-    leaves the card idle while the host prepares the next, so several keep it busy)."""
+    """The card workers of a :class:`ProcessPool`.
+
+    Parameters
+    ----------
+    reducers : dict
+        The card reducers by partition id, built in the parent and pure Python there (``from_cpu``).
+        Each worker calls their ``warm()`` after the fork, then ``reduce(req)``, and the parent asks
+        ``supports(req)``.
+    share : float
+        Percentage of the eligible jobs (``ReductionRequest.card``) the card takes, by :func:`card_slot`.
+    workers : int, default 3
+        Number of card processes sharing one queue, at least 1.  At large bins a job leaves the card
+        idle while the host prepares the next, so several keep it busy.
+    """
 
     def __init__(self, reducers: dict, share: float, workers: int = 3):
         self.reducers = dict(reducers)
@@ -428,30 +616,77 @@ CARD_MEMORY_FRACTION = 0.9
 
 
 class CardMemoryError(RuntimeError):
-    """A card job that needed more memory than its worker's share of the card (the CuPy
-    pool's limit).  Plain Python, so the parent unpickles it without CuPy."""
+    """Error of a card job that needed more memory than its worker's share of the card, the CuPy pool's limit.
+
+    It is plain Python, so the parent unpickles it without CuPy.
+
+    Parameters
+    ----------
+    tag : str
+        The job's tag.
+    message : str
+        The error's message.
+    """
 
     def __init__(self, tag: str, message: str):
         super().__init__(tag, message)
         self.tag, self.message = str(tag), str(message)
 
     def __str__(self) -> str:
+        """Return ``"tag: message"``.
+
+        Returns
+        -------
+        text : str
+            The text.
+        """
         return f"{self.tag}: {self.message}"
 
 
 def _is_out_of_memory(exc: BaseException) -> bool:
-    """CuPy's ``OutOfMemoryError`` (by name: the parent need not import CuPy), or a
-    ``MemoryError``."""
+    """Tell whether an exception is CuPy's out-of-memory error, by name, or a ``MemoryError``.
+
+    The parent need not import CuPy to tell.
+
+    Parameters
+    ----------
+    exc : BaseException
+        The exception.
+
+    Returns
+    -------
+    oom : bool
+        True for a ``MemoryError``, or an ``OutOfMemoryError`` or ``CUDARuntimeError`` about memory.
+    """
     return isinstance(exc, MemoryError) or (type(exc).__name__ in ("OutOfMemoryError", "CUDARuntimeError")
                                             and "memory" in str(exc).lower())
 
 
 def _card_worker_main(reducers, inq, outq, ppid: Optional[int] = None, index: int = 0, workers: int = 1):
-    """A card worker: ``warm()`` every reducer, hold its memory pool to its share of the card
-    (``limit_memory(workers)``), report ``("card-ready", index, info)`` or ``("card-failed",
-    index, why)``, then ``(job_id, pid, request)`` -> ``("card", job_id, result | exception,
-    seconds)``.  After every job the reducer's ``after_job()`` gives the pool's cache back.  A job
-    that runs out of memory comes back as a :class:`CardMemoryError` naming its tag."""
+    """Run a card worker's loop.
+
+    The worker calls every reducer's ``warm()``, holds its memory pool to its share of the card
+    (``limit_memory(workers)``), and reports ``("card-ready", index, info)`` or
+    ``("card-failed", index, why)``.  It then turns each ``(job_id, pid, request)`` into
+    ``("card", job_id, result or exception, seconds)``.  After every job the reducer's ``after_job()``
+    gives the pool's cache back, and a job that runs out of memory comes back as a
+    :class:`CardMemoryError` naming its tag.
+
+    Parameters
+    ----------
+    reducers : dict
+        The card reducers, by partition id.
+    inq : multiprocessing.Queue
+        Queue of the card's jobs.
+    outq : multiprocessing.Queue
+        Queue of the results, shared with the CPU workers.
+    ppid : int or None, default None
+        The parent's process id, for the watchdog.
+    index : int, default 0
+        The worker's index.
+    workers : int, default 1
+        Number of card workers sharing the card's memory.
+    """
     pin_blas()
     try:
         import signal as _sig
@@ -511,17 +746,57 @@ def _card_worker_main(reducers, inq, outq, ppid: Optional[int] = None, index: in
 
 
 class ProcessPool:
-    """``n`` forked worker processes that each hold a (copy-on-write) reference to the
-    reducers and execute ``reducer.reduce(request)`` jobs.  Fork happens once, after the
-    data are loaded, so the cubes are shared with the parent and never pickled; only
-    requests and the (small) results cross the pipes.  Falls back to ``None`` (caller
-    uses threads) when forking is unavailable.
+    """Forked worker processes that each hold the reducers, copy-on-write, and run their ``reduce`` jobs.
 
-    ``card`` (:class:`CardSpec`) adds card workers with a queue of their own.  A job goes to
-    them when its request is marked ``card``, the card reducer ``supports`` it, and its
-    :func:`card_slot` is below the share, so where a job runs does not depend on timing.
-    When the card cannot start, a worker dies, or :data:`CARD_MAX_ERRORS` jobs fail on it, the
-    jobs it holds go back to the CPU workers and the pool goes on without it."""
+    The fork happens once, after the data are loaded, so the cubes are shared with the parent and never
+    pickled, and only the requests and the small results cross the pipes.
+
+    A :class:`CardSpec` adds card workers with a queue of their own.  A job goes to them when its
+    request is marked ``card``, the card reducer ``supports`` it, and its :func:`card_slot` is below the
+    share, so where a job runs does not depend on timing.  When the card cannot start, a worker dies,
+    or :data:`CARD_MAX_ERRORS` jobs fail on it, the jobs it holds go back to the CPU workers and the
+    pool goes on without it.
+
+    Parameters
+    ----------
+    reducers : dict
+        The reducers, by partition id.
+    n : int
+        Number of CPU workers.
+    log : callable or None, default None
+        Function that takes each line of the log.  None logs nothing.
+    budget : int or None, default None
+        Threads the running jobs may use together (:meth:`_fit`), at least ``n``.  None sets no limit,
+        the default, and what :class:`~klip_tpe.reducer.PartitionedReducer` passes.
+    card : CardSpec or None, default None
+        The card workers.
+
+    Attributes
+    ----------
+    procs : list of multiprocessing.Process
+        The CPU workers.
+    card_procs : list of multiprocessing.Process
+        The card workers.
+    card_info : dict or None
+        What the first card worker reported at ``warm()``.
+    card_busy : float
+        Seconds the card workers spent in jobs.
+    card_jobs : int
+        Number of jobs the card returned.
+    card_marked : int
+        Jobs marked for the card and in its share, while it was up.
+    card_refused : dict of str to int
+        Of those, the ones its reducer turned away, by reason.
+    card_memory : int
+        Jobs sent back to the CPU for want of the worker's memory.
+    card_why : str or None
+        Why the card went away.
+
+    Raises
+    ------
+    RuntimeError
+        If the fork start method is not available, which the caller answers with threads.
+    """
 
     def __init__(self, reducers: dict, n: int, log=None, budget: Optional[int] = None,
                  card: Optional[CardSpec] = None):
@@ -592,9 +867,30 @@ class ProcessPool:
 
     @staticmethod
     def _queues(ctx, tries: int = 3):
-        """``ctx.Queue()`` twice, retrying the import race described at the top of this
-        section.  The pre-import above should make it impossible; this is the belt to that
-        braces, because the cost of losing is a whole run in thread mode."""
+        """Make the two queues, retrying the import race the comment above this section describes.
+
+        The pre-import should make the race impossible, and this is the second guard, since losing it costs
+        a whole run in thread mode.
+
+        Parameters
+        ----------
+        ctx : multiprocessing.context.BaseContext
+            The fork context.
+        tries : int, default 3
+            Number of tries.
+
+        Returns
+        -------
+        inq : multiprocessing.Queue
+            Queue of the jobs.
+        outq : multiprocessing.Queue
+            Queue of the results.
+
+        Raises
+        ------
+        ImportError
+            If every try met the race.
+        """
         last = None
         for _ in range(max(tries, 1)):
             try:
@@ -611,14 +907,34 @@ class ProcessPool:
         raise last if last is not None else RuntimeError("could not create worker queues")
 
     def alive(self) -> bool:
-        """Whether every CPU worker is alive (the card workers are not needed for that)."""
+        """Tell whether every CPU worker is alive, which the card workers are not needed for.
+
+        Returns
+        -------
+        alive : bool
+            True when every CPU worker is alive.
+        """
         return all(p.is_alive() for p in self.procs)
 
     # -- the card ----------------------------------------------------------------------
     def _to_card(self, pid, req) -> bool:
-        """Whether a job goes to the card (call with the lock held).  A job marked for it and in
-        its share counts in ``card_marked``, and one its reducer turns away in ``card_refused``
-        under the reason (``refusal(req)`` where the reducer has it, else ``supports``)."""
+        """Tell whether a job goes to the card, with the lock held.
+
+        A job marked for it and in its share counts in ``card_marked``, and one its reducer turns away in
+        ``card_refused``, under the reason (``refusal(req)`` where the reducer has it, else ``supports``).
+
+        Parameters
+        ----------
+        pid : object
+            The job's partition.
+        req : ReductionRequest
+            The job's request.
+
+        Returns
+        -------
+        to_card : bool
+            True when the job goes to the card.
+        """
         if not self._card_ok or not getattr(req, "card", False) or pid not in self.card.reducers:
             return False
         if card_slot(getattr(req, "tag", "")) >= self.card.share:
@@ -635,8 +951,15 @@ class ProcessPool:
         return True
 
     def _card_down(self, why: str) -> None:
-        """Leave the card out from now on (call with the lock held): its jobs go back to the
-        CPU workers, ahead of the rest, and its workers are told to stop."""
+        """Leave the card out from now on, with the lock held.
+
+        Its jobs go back to the CPU workers, ahead of the rest, and its workers are told to stop.
+
+        Parameters
+        ----------
+        why : str
+            Why, for the log and ``card_why``.
+        """
         if not self._card_ok:
             return
         self._card_ok = False
@@ -656,8 +979,10 @@ class ProcessPool:
         self._dispatch()
 
     def _check_card(self) -> None:
-        """A card worker that died without saying so (the collector's thread, once a second):
-        the job it held is lost with it, so every job the card holds goes back to the CPU."""
+        """Leave the card out when a card worker died without saying so, the job it held lost with it.
+
+        The collector's thread calls it once a second, and every job the card holds goes back to the CPU.
+        """
         with self._lock:
             if not self._card_ok:
                 return
@@ -666,15 +991,29 @@ class ProcessPool:
                 self._card_down(f"card worker(s) {', '.join(dead)} died")
 
     def take_notes(self) -> list:
-        """The pool's log lines since the last call (the card coming up or going away), for the
-        caller to write from its own thread."""
+        """Return the pool's log lines since the last call, such as the card coming up or going away.
+
+        The caller writes them from its own thread.
+
+        Returns
+        -------
+        notes : list of str
+            The lines.
+        """
         with self._lock:
             out, self._notes = self._notes, []
         return out
 
     def card_summary(self) -> Optional[dict]:
-        """The card's share, workers and state, what it reported at ``warm()``, its jobs and the
-        fraction of the time since the pool started that its workers spent in them."""
+        """Summarize the card: its share, workers, state, report at ``warm()``, jobs and busy fraction.
+
+        Returns
+        -------
+        summary : dict or None
+            ``share``, ``workers``, ``up``, ``ready``, ``why_down``, ``info``, ``jobs``, ``busy_s``,
+            ``busy_fraction`` (of the time since the pool started), ``marked``, ``refused`` and ``memory``,
+            None without a card.
+        """
         if self.card is None:
             return None
         wall = max(time.time() - self._card_t0, 1e-9)
@@ -685,7 +1024,18 @@ class ProcessPool:
                 "marked": self.card_marked, "refused": dict(self.card_refused), "memory": self.card_memory}
 
     def _card_result(self, item) -> None:
-        """A card worker's message (the collector's thread)."""
+        """Take a card worker's message, in the collector's thread.
+
+        A ready or failed worker is counted, and the card goes down when none could start.  A result
+        settles its job's future, while a job that ran out of the worker's memory, or failed, goes back to
+        the CPU workers, :data:`CARD_MAX_ERRORS` failures taking the card down.
+
+        Parameters
+        ----------
+        item : tuple
+            The message, ``("card-ready", index, info)``, ``("card-failed", index, why)`` or
+            ``("card", job_id, result, seconds)``.
+        """
         kind = item[0]
         with self._lock:
             if kind in ("card-ready", "card-failed"):
@@ -737,10 +1087,15 @@ class ProcessPool:
             f.set_result(res)
 
     def memory(self) -> Optional[dict]:
-        """Linux only, None elsewhere: each worker's peak resident set (``VmHWM``, which
-        counts in full the copy-on-write data it shares with the parent and the other
-        workers) and the pool's proportional set now (``Pss``, every shared page split
-        between the processes using it), in bytes."""
+        """Return each worker's peak resident set and the pool's proportional set now, on Linux.
+
+        Returns
+        -------
+        memory : dict or None
+            ``peak``, each worker's ``VmHWM`` in bytes, which counts in full the copy-on-write data it
+            shares with the parent and the other workers, and ``pss``, the pool's ``Pss`` in bytes, every
+            shared page split between the processes using it.  None elsewhere than Linux.
+        """
         peaks, pss = [], 0
         for p in self.procs:
             try:
@@ -753,13 +1108,32 @@ class ProcessPool:
         return {"peak": peaks, "pss": pss} if len(peaks) == len(self.procs) else None
 
     def map(self, jobs, keys=None):
-        """``jobs = [(pid, request), ...]`` -> results in order (thread-safe: several
-        callers may map concurrently).  A failed job raises its exception.  Waiting from
-        the main thread services the live window (:func:`pump_wait`).
+        """Run jobs and return their results in order.
 
-        ``keys``: one sort key per job.  A worker that comes free takes the waiting job with
-        the smallest key, so a caller can send long jobs first.  Without keys, and between
-        equal keys, jobs go in the order they came."""
+        It is thread-safe, several callers mapping at once, and waiting from the main thread services the
+        live window (:func:`pump_wait`).
+
+        Parameters
+        ----------
+        jobs : sequence of tuple
+            ``(pid, request)`` per job.
+        keys : sequence of float or None, default None
+            One sort key per job.  A worker that comes free takes the waiting job with the smallest key, so a
+            caller can send long jobs first.  Without keys, and between equal keys, jobs go in the order
+            they came.
+
+        Returns
+        -------
+        results : list
+            The results, in the order of ``jobs``.
+
+        Raises
+        ------
+        RuntimeError
+            If the pool is closed.
+        Exception
+            A failed job's exception.
+        """
         futs = []
         with self._lock:
             if self._closed or not self._collector.is_alive():
@@ -780,33 +1154,50 @@ class ProcessPool:
         return pump_wait(futs)
 
     def _dispatch(self) -> None:
-        """Send waiting jobs, smallest key first, until every worker has one (call with
-        the lock held).  Only as many jobs as workers are ever in the queue, so the order
-        is decided here, when a worker comes free, not when a job was submitted, and so is
-        a job's share of the thread budget (:meth:`_fit`)."""
+        """Send waiting jobs, smallest key first, until every worker has one, with the lock held.
+
+        Only as many jobs as workers are ever in the queue, so the order is decided here, when a worker
+        comes free, not when a job was submitted, and so is a job's share of the thread budget
+        (:meth:`_fit`).
+        """
         while self._waiting and self._busy < self.n:
             _, jid, pid, req = heapq.heappop(self._waiting)
             self.inq.put((jid, pid, self._fit(jid, req)))
             self._busy += 1
 
     def _fit(self, jid: int, req):
-        """``req`` with its ``threads`` cut to the budget's room (call with the lock held):
-        the budget less the running jobs' threads and one for each worker still idle after
-        this one.  That keeps the threads in flight within the budget at every moment, while
-        every worker can still take a job.  Without a budget, or a request without
-        ``threads``, it goes as it is.
+        """Return a request with its ``threads`` cut to the budget's room, with the lock held.
 
-        The by-cost plan (:meth:`klip_tpe.reducer.PartitionedReducer._plan`) gives a long
-        job up to 4x the base and a short one 1, so over the jobs submitted the mean is near
-        the base.  The jobs running at a given moment are not that mean: the long ones run
-        longest, so they and their threads fill the pool.  On patrick, 48 jobs at a base of 4
-        ran at a load average of 234 on 192 CPUs, and at a base of 2 at 134 on a budget of
-        96.
+        The room is the budget less the running jobs' threads and one for each worker still idle after this
+        one.  That keeps the threads in flight within the budget at every moment, while every worker can
+        still take a job.  Without a budget, or for a request without ``threads``, the request goes as it
+        is.
 
-        The cut is not used by default.  Measured on patrick it starved the heavy jobs: with a
-        budget of 96 for 48 workers, the reserve for the idle workers leaves room for only a
-        few jobs above one thread, so the heavy nights ran on 1 and every trial waited on them
-        (0.339 s a reduction against 0.205 s uncut, the pool 25 % busy)."""
+        Parameters
+        ----------
+        jid : int
+            The job's id.
+        req : ReductionRequest
+            The request.
+
+        Returns
+        -------
+        req : ReductionRequest
+            The request, a copy with fewer threads where it was cut.
+
+        Notes
+        -----
+        The by-cost plan (:meth:`klip_tpe.reducer.PartitionedReducer._plan`) gives a long job up to 4x the
+        base and a short one 1, so over the jobs submitted the mean is near the base.  The jobs running at
+        a given moment are not that mean: the long ones run longest, so they and their threads fill the
+        pool.  On patrick, 48 jobs at a base of 4 ran at a load average of 234 on 192 CPUs, and at a base
+        of 2 at 134 on a budget of 96.
+
+        The cut is not used by default.  Measured on patrick it starved the heavy jobs: with a budget of 96
+        for 48 workers, the reserve for the idle workers leaves room for only a few jobs above one thread,
+        so the heavy nights ran on 1 and every trial waited on them (0.339 s a reduction against 0.205 s
+        uncut, the pool 25 % busy).
+        """
         t = getattr(req, "threads", None)
         if self.budget is None or t is None:
             return req
@@ -825,9 +1216,11 @@ class ProcessPool:
         return req
 
     def _collect(self) -> None:
-        """The collector thread: every result off the queue to its job's future, and every
-        outstanding job failed when a worker has died (it can never come back) or the pool
-        closes."""
+        """Run the collector thread, which settles each result's future.
+
+        Every outstanding job fails when a worker has died, since it can never come back, or when the pool
+        closes.  A card worker's message goes to :meth:`_card_result`.
+        """
         last_check = time.time()
         while not self._closed:
             if self.card is not None and time.time() - last_check > 1.0:
@@ -873,6 +1266,13 @@ class ProcessPool:
         self._fail_all(lambda n: RuntimeError(f"klip-tpe worker pool closed with {n} job(s) outstanding"))
 
     def _fail_all(self, make_exc) -> None:
+        """Fail every outstanding job, and clear the waiting and the card's jobs.
+
+        Parameters
+        ----------
+        make_exc : callable
+            Function ``n -> exception``, given the number of outstanding jobs.
+        """
         with self._lock:
             futs, self._futures = self._futures, {}
             self._waiting = []
@@ -883,6 +1283,8 @@ class ProcessPool:
                 f.set_exception(make_exc(len(futs)))
 
     def close(self):
+        """Close the pool: stop the workers, terminate one still alive after 5 s, and wake the collector.
+        """
         self._closed = True
         for _ in self.procs:
             try:
@@ -904,6 +1306,8 @@ class ProcessPool:
             pass
 
     def __del__(self):
+        """Close the pool, ignoring any error.
+        """
         try:
             self.close()
         except Exception:
@@ -915,18 +1319,29 @@ class ProcessPool:
 # arrays made once per reduction and read by every worker: shared memory, not pickles
 # ----------------------------------------------------------------------------
 class SharedArrays:
-    """Named numpy arrays in one shared-memory block, for the worker processes to read in
-    place.
+    """Named numpy arrays in one shared-memory block, for the worker processes to read in place.
 
-    The SDI mode prepares every wavelength group's frames once per reduction and hands all of
-    them to each group's job.  Through the job queue that is tens of MB pickled per job, hundreds
-    per reduction, serialised by the parent; here the parent writes them once into a
-    :class:`multiprocessing.shared_memory.SharedMemory` block and the jobs carry only this
-    descriptor (the block's name and each array's offset, shape and dtype, plus ``extra``, small
-    picklable things that go with them).  A worker :meth:`attach` es, gets views, and closes its
-    handle when its copies are made; the parent :meth:`release` s the block when the reduction is
-    done.  Picklable without the handle.  With threads instead of processes nothing of this is
-    needed: the arrays are passed as they are."""
+    The SDI mode prepares every wavelength group's frames once per reduction and hands all of them to
+    each group's job.  Through the job queue that is tens of MB pickled per job, hundreds per
+    reduction, serialized by the parent.  Here the parent writes them once into a
+    :class:`multiprocessing.shared_memory.SharedMemory` block, and the jobs carry only this descriptor:
+    the block's name, each array's offset, shape and dtype, and ``extra``, small picklable things that
+    go with them.  A worker attaches (:meth:`attach`), takes views, and closes its handle when its
+    copies are made, and the parent releases the block (:meth:`release`) when the reduction is done.
+    It pickles without the handle.  With threads instead of processes none of this is needed, since the
+    arrays are passed as they are.
+
+    Parameters
+    ----------
+    name : str
+        Name of the block.
+    size : int
+        Size of the block, in bytes.
+    index : dict
+        Each array's ``(offset, shape, dtype)``, by name.
+    extra : dict or None, default None
+        Small picklable things that go with the arrays.
+    """
 
     def __init__(self, name: str, size: int, index: Dict[str, Tuple[int, Tuple[int, ...], str]],
                  extra: Optional[Dict[str, Any]] = None):
@@ -936,8 +1351,27 @@ class SharedArrays:
 
     @classmethod
     def create(cls, arrays: Dict[str, np.ndarray], extra: Optional[Dict[str, Any]] = None) -> "SharedArrays":
-        """Write ``arrays`` into a new block (the parent's side).  Raises when shared memory
-        is not available, so a caller can fall back to passing the arrays themselves."""
+        """Write arrays into a new block, the parent's side.
+
+        Each array starts on a 64-byte boundary.
+
+        Parameters
+        ----------
+        arrays : dict of str to ndarray
+            The arrays, by name.
+        extra : dict or None, default None
+            Small picklable things that go with them.
+
+        Returns
+        -------
+        shared : SharedArrays
+            The descriptor, holding the block's handle.
+
+        Raises
+        ------
+        Exception
+            If shared memory is not available, so a caller can fall back to passing the arrays themselves.
+        """
         from multiprocessing import shared_memory
         index: Dict[str, Tuple[int, Tuple[int, ...], str]] = {}
         off = 0
@@ -957,9 +1391,20 @@ class SharedArrays:
         return out
 
     def attach(self):
-        """``(arrays, closer)``: the arrays as views into the block, and a callable that
-        drops this process's handle once the views are no longer needed (a view read after
-        it is undefined)."""
+        """Attach to the block, a worker's side.
+
+        Attaching would register the block with the resource tracker as if this process owned it, and the
+        tracker would then unlink it at exit or complain that it could not.  The parent owns the block, so
+        the registration is stood down for the attach.
+
+        Returns
+        -------
+        arrays : dict of str to ndarray
+            The arrays, as views into the block.
+        closer : callable
+            Function that drops this process's handle once the views are no longer needed, after which a
+            view's contents are undefined.
+        """
         from multiprocessing import shared_memory
         # Attaching registers the block with the resource tracker as if this process owned
         # it, and the tracker (a worker's own, or the parent's when the worker inherited its
@@ -984,7 +1429,8 @@ class SharedArrays:
         return arrays, closer
 
     def release(self) -> None:
-        """The parent's side: close and unlink the block."""
+        """Close and unlink the block, the parent's side.
+        """
         shm, self._shm = self._shm, None
         if shm is None:
             return
@@ -995,11 +1441,20 @@ class SharedArrays:
                 pass
 
     def __getstate__(self):
+        """Return the descriptor's state for pickling, without the block's handle.
+
+        Returns
+        -------
+        state : dict
+            The attributes, ``_shm`` None.
+        """
         d = dict(self.__dict__)
         d["_shm"] = None
         return d
 
     def __del__(self):
+        """Release the block, ignoring any error.
+        """
         try:
             self.release()
         except Exception:
