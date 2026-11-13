@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — 2026-11-21 (the README's panel over three annuli)
+
+- **The README's panel is RX J0534's three-annulus run** (Kevin Wagner, 2026-11-07).
+  `docs/img/step_display.png` is the annulus-done frame of the last annulus of
+  `scripts/readme_panel.py`'s run: the companion's annulus (0.20–0.58") and two more of its
+  width outward (to 1.35"), 3,000 evaluations each, all three validated.  The run began on
+  `895d2bf` and was resumed on `a795c83`, so the frame circles the stitch at the winners'
+  sources and titles the best S/N cell from its validation trial.  On the stitch the companion
+  reads S/N 9.02 (FAP 5.7E-09, a detection at the operating FAP) and the six injected sources
+  10.0 to 14.7.  It replaces the single annulus at 5,000 evaluations of 2026-10-30.
+
 ## Unreleased — 2026-11-21 (frames that hold NaN beyond their edge, the outer regions only some frames cover)
 
 From the NOMIC archive session's note of 2026-11-21, "outer regions not covered by every frame", on
