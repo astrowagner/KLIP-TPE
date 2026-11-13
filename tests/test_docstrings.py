@@ -48,6 +48,7 @@ DONE = [
     "klip_tpe/klip.py",
     "klip_tpe/metrics.py",
     "klip_tpe/optimizers.py",
+    "klip_tpe/parallel.py",
     "klip_tpe/products.py",
     "klip_tpe/reducer.py",
     "klip_tpe/refine.py",

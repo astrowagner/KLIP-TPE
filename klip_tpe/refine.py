@@ -603,7 +603,7 @@ def paired_summary(per_draw: np.ndarray, base: np.ndarray) -> Dict[str, Any]:
 
 
 class StitchScorer:
-    """The base run's stitch with one annulus' images replaced, and sources measured on it as the stitched verify measures them.
+    """The base run's stitch with one annulus' images replaced, its sources measured as the stitched verify does.
 
     Parameters
     ----------
@@ -922,9 +922,10 @@ class StitchScorer:
         return self.r._maybe_flatten(stitch_tiles(imgs, self.itiles, self.weights, pads=self.pads))
 
     def measure(self, img: np.ndarray, sources: Sequence[Source]) -> np.ndarray:
-        """Measure each source's S/N as the stitched verify measures it, Path A of :func:`klip_tpe.verify.verify_injections`.
+        """Measure each source's S/N on the stitch as the stitched verify's Path A does.
 
-        Each ring leaves out the other sources and the known companions.
+        Each ring of :func:`klip_tpe.verify.verify_injections` leaves out the other sources and the known
+        companions.
 
         Parameters
         ----------
@@ -1077,7 +1078,7 @@ class StitchScorer:
 
     def calibrate(self, j: int, rng: np.random.Generator, n_cal: int = 8, target: Tuple[float, float] = TARGET,
                   max_iter: int = 4, window: int = 2, n_src: Optional[int] = None) -> Dict[str, Any]:
-        """Find the contrast of a tile's sources at which the base winners read a median S/N inside ``target`` on the stitch.
+        """Find the tile contrast that puts the base winners' median S/N on the stitch inside ``target``.
 
         The S/N is measured on ``n_cal`` draws of tile ``j`` alone, at the same positions at every step.
         The first step takes the base run's contrast for annulus ``j`` (1e-4 without one), and each step
