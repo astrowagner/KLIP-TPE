@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — 2026-11-13 (cli.py, space.py and optimizers.py documented to the rule)
+
+- **`cli.py`, `space.py` and `optimizers.py` follow the documentation rule**: every command and
+  its helpers, with the module docstring listing all fourteen commands, the search space and its
+  `Param` and `Config`, and the TPE, random and grid strategies with the Parzen helpers.  Their
+  docstrings and comments now name the IDL predecessor where they named the IDL.  Only docstrings
+  and comments changed.
+
 ## Unreleased — 2026-11-13 (stitch.py and products.py documented to the rule)
 
 - **`stitch.py` and `products.py` follow the documentation rule**: the stitch and its tiles, the

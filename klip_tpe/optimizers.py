@@ -1,13 +1,13 @@
-"""Search strategies behind one ``ask``/``tell`` interface.
+"""Search strategies behind one ``ask`` and ``tell`` interface.
 
-:class:`TPE` is a faithful port of the IDL ``near2m_propose`` / ``near2m_bw`` /
-``near2m_kde`` core plus the three adaptations that earn their keep in high
-dimension (``pbest`` best-seeded candidates, ``p_local`` elite local moves and
-``explore_frac`` epsilon-exploration).  :class:`RandomSearch` and
-:class:`GridSearch` are the matched-budget baselines used by the benchmark harness.
+:class:`TPE` succeeds the IDL predecessor's ``near2m_propose``, ``near2m_bw`` and ``near2m_kde``
+core, with the three adaptations that earn their keep in high dimension: ``pbest`` best-seeded
+candidates, ``p_local`` elite local moves and ``explore_frac`` epsilon-exploration.
+:class:`RandomSearch` and :class:`GridSearch` are the matched-budget baselines of the benchmark
+harness.
 
-All strategies are pure functions of the :class:`History` they are handed, so a
-checkpointed history is all that is needed to resume.
+Every strategy is a pure function of the :class:`History` it is handed, so a checkpointed history
+is all a resume needs.
 """
 from __future__ import annotations
 
@@ -27,11 +27,19 @@ __all__ = ["History", "Proposal", "Optimizer", "TPE", "RandomSearch", "GridSearc
 # ----------------------------------------------------------------------------
 @dataclass
 class History:
-    """Evaluated vectors, scores and per-trial flags.
+    """Evaluated vectors, their scores and each trial's flags.
 
-    ``y`` holds ``nan`` for failed / not-yet-scored trials.  ``valid`` is the mask of
-    trials that may train the model.  ``flags[i]["phase"]`` records how the trial
-    was proposed (``seed, warmup, tpe, local, explore, random, grid, resume``).
+    Attributes
+    ----------
+    ndim : int
+        Number of dimensions.
+    X : ndarray, shape (n, ndim), default None
+        The ``n`` vectors.  None starts empty.
+    y : ndarray, shape (n,), default None
+        Their scores, NaN for a trial failed or not yet scored.  None starts empty.
+    flags : list of dict
+        Each trial's flags, ``phase`` recording how it was proposed (``seed``, ``warmup``, ``tpe``,
+        ``local``, ``explore``, ``random``, ``grid``, ``resume``).
     """
 
     ndim: int
@@ -40,30 +48,76 @@ class History:
     flags: List[Dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self):
+        """Start ``X`` and ``y`` empty where they are None.
+        """
         if self.X is None:
             self.X = np.zeros((0, self.ndim))
         if self.y is None:
             self.y = np.zeros(0)
 
     def __len__(self) -> int:
+        """Return the number of trials.
+
+        Returns
+        -------
+        n : int
+            The number of rows of ``X``.
+        """
         return int(self.X.shape[0])
 
     @property
     def valid(self) -> np.ndarray:
+        """Mask of the trials that may train the model, those with a finite score.
+        """
         return np.isfinite(self.y)
 
     def append(self, x: np.ndarray, y: float, flags: Optional[Dict[str, Any]] = None) -> int:
+        """Append a trial.
+
+        Parameters
+        ----------
+        x : ndarray, shape (ndim,)
+            The vector.
+        y : float or None
+            Its score, None or NaN for one not yet scored.
+        flags : dict or None, default None
+            Its flags.
+
+        Returns
+        -------
+        i : int
+            The trial's index.
+        """
         self.X = np.vstack([self.X, np.asarray(x, dtype=float)[None, :]])
         self.y = np.append(self.y, np.nan if y is None else float(y))
         self.flags.append(dict(flags or {}))
         return len(self) - 1
 
     def set_score(self, i: int, y: float, **extra) -> None:
+        """Set a trial's score and add to its flags.
+
+        Parameters
+        ----------
+        i : int
+            The trial's index.
+        y : float or None
+            The score, None for NaN.
+        extra : dict
+            Flags to add.
+        """
         self.y[i] = np.nan if y is None else float(y)
         self.flags[i].update(extra)
 
     def best(self) -> Tuple[int, float]:
-        """Index and score of the best *valid* trial (ties -> earliest)."""
+        """Return the index and score of the best valid trial, the earliest of a tie.
+
+        Returns
+        -------
+        i : int
+            Its index, -1 without a valid trial.
+        score : float
+            Its score, -inf without a valid trial.
+        """
         v = self.valid
         if not v.any():
             return -1, -np.inf
@@ -72,13 +126,30 @@ class History:
         return i, float(yv[i])
 
     def order(self) -> np.ndarray:
-        """Valid trial indices, best first (stable: ties keep evaluation order)."""
+        """Return the valid trials' indices, best first, ties in the order of evaluation.
+
+        Returns
+        -------
+        order : ndarray of int
+            The indices.
+        """
         idx = np.flatnonzero(self.valid)
         return idx[np.argsort(-self.y[idx], kind="stable")]
 
     def to_dict(self, n: Optional[int] = None) -> Dict[str, Any]:
-        """JSON-ready form.  ``n``: the first ``n`` rows only, the history as it stood when
-        it held ``n`` (rows are only ever appended)."""
+        """Return the history as a JSON-ready dict.
+
+        Parameters
+        ----------
+        n : int or None, default None
+            Number of rows, the history as it stood when it held ``n``, since rows are only ever appended.
+            None takes them all.
+
+        Returns
+        -------
+        record : dict
+            ``ndim``, ``X``, ``y`` (None for NaN) and ``flags``.
+        """
         n = len(self) if n is None else int(n)
         return {"ndim": self.ndim, "X": self.X[:n].tolist(),
                 "y": [None if not np.isfinite(v) else float(v) for v in self.y[:n]],
@@ -86,6 +157,18 @@ class History:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "History":
+        """Rebuild a history from :meth:`to_dict`.
+
+        Parameters
+        ----------
+        d : dict
+            The record.
+
+        Returns
+        -------
+        history : History
+            The history.
+        """
         h = cls(ndim=int(d["ndim"]))
         h.X = np.asarray(d["X"], dtype=float).reshape(-1, h.ndim)
         h.y = np.array([np.nan if v is None else float(v) for v in d["y"]])
@@ -95,6 +178,15 @@ class History:
 
 @dataclass
 class Proposal:
+    """A proposed vector and its flags.
+
+    Attributes
+    ----------
+    x : ndarray, shape (ndim,)
+        The vector.
+    flags : dict
+        Its flags, ``phase`` saying how it was proposed.
+    """
     x: np.ndarray
     flags: Dict[str, Any]
 
@@ -103,8 +195,30 @@ class Proposal:
 # Parzen helpers (near2m_bw / near2m_kde)
 # ----------------------------------------------------------------------------
 def parzen_bandwidth(s: np.ndarray, lo: float, hi: float, floor_frac: float = 0.08) -> float:
-    """Scott/Silverman bandwidth ``1.06 std n^-1/5`` floored at ``floor_frac*(hi-lo)``.
-    The floor keeps the search from collapsing once the good set becomes tight."""
+    """Return the Scott-Silverman bandwidth ``1.06 std n^(-1/5)``, floored at ``floor_frac (hi - lo)``.
+
+    The floor keeps the search from collapsing once the good set becomes tight.
+
+    Parameters
+    ----------
+    s : ndarray
+        The samples.
+    lo : float
+        Lower bound of the dimension.
+    hi : float
+        Upper bound of the dimension.
+    floor_frac : float, default 0.08
+        Floor, as a fraction of the range.
+
+    Returns
+    -------
+    h : float
+        The bandwidth, half the range for fewer than 2 samples.
+
+    Notes
+    -----
+    It succeeds the IDL predecessor's ``near2m_bw``.
+    """
     s = np.asarray(s, dtype=float)
     n = s.size
     if n < 2:
@@ -115,7 +229,32 @@ def parzen_bandwidth(s: np.ndarray, lo: float, hi: float, floor_frac: float = 0.
 
 def parzen_density(x: float, s: np.ndarray, h: float, lo: float, hi: float,
                    prior_weight: float = 0.25) -> float:
-    """1-D Gaussian Parzen density at ``x`` mixed with a uniform prior over [lo, hi]."""
+    """Return the 1-D Gaussian Parzen density at a point, mixed with a uniform prior over ``[lo, hi]``.
+
+    Parameters
+    ----------
+    x : float
+        The point.
+    s : ndarray
+        The samples.
+    h : float
+        The bandwidth.
+    lo : float
+        Lower bound.
+    hi : float
+        Upper bound.
+    prior_weight : float, default 0.25
+        Weight of the uniform prior.
+
+    Returns
+    -------
+    density : float
+        The density, the uniform one without samples or without range.
+
+    Notes
+    -----
+    It succeeds the IDL predecessor's ``near2m_kde``.
+    """
     s = np.asarray(s, dtype=float)
     n = s.size
     if n < 1 or hi <= lo:
@@ -126,14 +265,35 @@ def parzen_density(x: float, s: np.ndarray, h: float, lo: float, hi: float,
 
 def parzen_density_many(x: np.ndarray, s: np.ndarray, h: float, lo: float, hi: float,
                         prior_weight: float = 0.25) -> np.ndarray:
-    """:func:`parzen_density` at every point of ``x`` at once, bit for bit the same.
+    """Return :func:`parzen_density` at every point at once, the same to the bit.
 
-    The same operations on the same numbers: each row of the kernel matrix is one call's
-    array, and a row sum of a C-ordered array is the same pairwise sum as ``np.sum`` of
-    that row.  One call per dimension instead of one per candidate: with 48 candidates, 56
-    dimensions and both densities, a TPE proposal made 5,376 calls, each with its own
-    Python overhead and its own copy of the good or bad set, and the bad set grows with the
-    history (tests/test_optimizers.py checks the equality)."""
+    It does the same operations on the same numbers: each row of the kernel matrix is one call's array,
+    and a row sum of a C-ordered array is the same pairwise sum as ``np.sum`` of that row.  It makes one
+    call per dimension instead of one per candidate.  With 48 candidates, 56 dimensions and both
+    densities a TPE proposal made 5,376 calls, each with its own Python overhead and its own copy of
+    the good or the bad set, which grows with the history (``tests/test_optimizers.py`` checks the
+    equality).
+
+    Parameters
+    ----------
+    x : ndarray
+        The points.
+    s : ndarray
+        The samples.
+    h : float
+        The bandwidth.
+    lo : float
+        Lower bound.
+    hi : float
+        Upper bound.
+    prior_weight : float, default 0.25
+        Weight of the uniform prior.
+
+    Returns
+    -------
+    density : ndarray
+        The density at each point.
+    """
     s = np.asarray(s, dtype=float)
     x = np.asarray(x, dtype=float)
     n = s.size
@@ -144,6 +304,22 @@ def parzen_density_many(x: np.ndarray, s: np.ndarray, h: float, lo: float, hi: f
 
 
 def _categorical_pmf(s: np.ndarray, ncat: int, prior_weight: float) -> np.ndarray:
+    """Return a categorical dimension's smoothed probabilities, its frequencies mixed with a uniform prior.
+
+    Parameters
+    ----------
+    s : ndarray
+        The samples, indices rounded and clipped to the choices.
+    ncat : int
+        Number of choices.
+    prior_weight : float
+        Weight of the uniform prior.
+
+    Returns
+    -------
+    pmf : ndarray, shape (ncat,)
+        The probabilities.
+    """
     counts = np.bincount(np.clip(np.round(s).astype(int), 0, ncat - 1), minlength=ncat).astype(float)
     n = counts.sum()
     emp = counts / n if n > 0 else np.full(ncat, 1.0 / ncat)
@@ -152,16 +328,44 @@ def _categorical_pmf(s: np.ndarray, ncat: int, prior_weight: float) -> np.ndarra
 
 def block_log_density(C: np.ndarray, X: np.ndarray, idx: np.ndarray, h: np.ndarray, dims: Sequence[int],
                       lo: np.ndarray, hi: np.ndarray, prior_weight: float = 0.25) -> np.ndarray:
-    """Log of the mixture-of-products Parzen density over ``dims`` at each candidate
-    row of ``C`` (``near2m_blkden``)::
+    """Return the log of the mixture-of-products Parzen density over some dimensions at each candidate.
+
+    The density is::
 
         p(x) = (1-wp) (1/N) sum_i prod_d K(x_d - X[i,d]; h_d)  +  wp prod_d 1/(hi_d-lo_d)
 
-    Every mixture component is anchored on ONE real observation, so a candidate is
-    scored against configurations that actually occurred together.  Bandwidths stay
-    diagonal (no covariance is estimated).  logsumexp throughout and the uniform prior
-    is mixed in log space, so the result stays finite when the kernel sum underflows
-    (it does for large blocks).
+    Every component of the mixture sits on one real observation, so a candidate is scored against
+    configurations that occurred together.  The bandwidths stay diagonal, with no covariance estimated.
+    The sums are logsumexp and the uniform prior is mixed in log space, so the result stays finite
+    where the kernel sum underflows, as it does for large blocks.
+
+    Parameters
+    ----------
+    C : ndarray, shape (nc, ndim)
+        The ``nc`` candidates.
+    X : ndarray, shape (n, ndim)
+        The observations.
+    idx : ndarray of int
+        Indices of the ``N`` observations used, the good or the bad set.
+    h : ndarray, shape (ndim,)
+        Bandwidth of each dimension.
+    dims : sequence of int
+        The block's dimensions.
+    lo : ndarray, shape (ndim,)
+        Lower bounds.
+    hi : ndarray, shape (ndim,)
+        Upper bounds.
+    prior_weight : float, default 0.25
+        Weight ``wp`` of the uniform prior.
+
+    Returns
+    -------
+    log_density : ndarray, shape (nc,)
+        The log density at each candidate.
+
+    Notes
+    -----
+    It succeeds the IDL predecessor's ``near2m_blkden``.
     """
     dims = np.asarray(dims, int)
     C = np.atleast_2d(np.asarray(C, float))
@@ -180,14 +384,22 @@ def block_log_density(C: np.ndarray, X: np.ndarray, idx: np.ndarray, h: np.ndarr
 
 
 def resolve_blocks(space: SearchSpace, blocks) -> List[np.ndarray]:
-    """Normalise the ``blocks`` option into a list of index arrays over the
-    non-categorical dims.
+    """Turn the ``blocks`` option into a list of index arrays over the dimensions that are not categorical.
 
-    ``None`` / ``"univariate"``: one block per dimension (factorized TPE);
-    ``"partitions"``: one block per partition plus one for the global/selection
-    dims (the natural per-epoch blocking);
-    ``"full"``: a single block;
-    an explicit list of lists of dim names or indices.
+    Parameters
+    ----------
+    space : SearchSpace
+        The space.
+    blocks : str, sequence or None
+        None or ``"univariate"`` for one block per dimension (the factorized TPE), ``"partitions"`` for
+        one block per partition and one for the global and selection dimensions, ``"full"`` for a single
+        block, or a list of lists of dimension names or indices.
+
+    Returns
+    -------
+    blocks : list of ndarray of int
+        The blocks.  An explicit list leaves each dimension it misses in a block of its own, and
+        ``"partitions"`` on a space without partitions is univariate.
     """
     cont = [i for i in range(space.ndim) if not space.is_categorical[i]]
     if blocks is None or blocks == "univariate":
@@ -228,21 +440,49 @@ def tpe_propose(X: np.ndarray, y: np.ndarray, space: SearchSpace, rng: np.random
                 gamma: float = 0.25, ncand: int = 48, pbest: float = 0.0,
                 prior_weight: float = 0.25, bw_floor: float = 0.08,
                 blocks=None) -> np.ndarray:
-    """One TPE proposal from history ``(X, y)`` (valid rows only).
+    """Make one TPE proposal from a history.
 
-    1. sort by score, top ``gamma`` fraction = good (l), rest = bad (g);
-    2. Parzen estimators: per dimension (``blocks=None``, univariate -- the IDL
-       reference behaviour) or mixture-of-products within each block of ``blocks``
-       and independent across blocks (block-multivariate); categorical dims always
-       use a smoothed pmf;
-    3. ``ncand`` candidates; each block is seeded from ONE random good observation
-       (or all blocks from the single best with probability ``pbest``) and jittered
-       per dimension by the good-set bandwidth;
-    4. return the candidate maximising the summed log-density ratio ``log l - log g``.
+    The steps are:
 
-    Block-multivariate scoring is a noise-robustness mechanism: it stops the
-    proposal from recombining pieces of good configurations that were never good
-    together (see ``TPE_PYTHON_PORT_ADDENDUM_density.md``).
+    1. sort by score, the top ``gamma`` fraction the good set (l) and the rest the bad set (g),
+    2. fit Parzen estimators per dimension (``blocks=None``, univariate, the IDL predecessor's
+       behavior), or a mixture of products within each block of ``blocks`` and independent across
+       blocks (block-multivariate), with a smoothed pmf for each categorical dimension,
+    3. draw ``ncand`` candidates, each block seeded from one random good observation (or every block
+       from the single best with probability ``pbest``) and jittered per dimension by the good set's
+       bandwidth,
+    4. return the candidate that maximizes the summed log-density ratio ``log l - log g``.
+
+    Block-multivariate scoring makes the proposal robust to noise: it stops it from recombining pieces
+    of good configurations that were never good together (``TPE_PYTHON_PORT_ADDENDUM_density.md``).
+
+    Parameters
+    ----------
+    X : ndarray, shape (n, ndim)
+        The valid vectors.
+    y : ndarray, shape (n,)
+        Their scores.
+    space : SearchSpace
+        The space.
+    rng : numpy.random.Generator
+        The generator.
+    gamma : float, default 0.25
+        Fraction of the history in the good set.
+    ncand : int, default 48
+        Number of candidates.
+    pbest : float, default 0.0
+        Probability that a candidate is seeded from the single best observation in every block.
+    prior_weight : float, default 0.25
+        Weight of the uniform prior in each density.
+    bw_floor : float, default 0.08
+        Floor of the bandwidths, as a fraction of the range.
+    blocks : str, sequence or None, default None
+        The density model (:func:`resolve_blocks`).
+
+    Returns
+    -------
+    x : ndarray, shape (ndim,)
+        The proposal, sanitized, a random vector for fewer than 2 rows.
     """
     X = np.asarray(X, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -300,9 +540,28 @@ def tpe_propose(X: np.ndarray, y: np.ndarray, space: SearchSpace, rng: np.random
 # strategies
 # ----------------------------------------------------------------------------
 class Optimizer:
-    """Base class.  ``ask(history, rng, n)`` returns ``n`` proposals computed from the
-    same posterior (batch mode); ``tell`` is a no-op because the history object is
-    the single source of truth (this is what makes resume trivial)."""
+    """Base class of the search strategies.
+
+    ``ask(history, rng, n)`` returns ``n`` proposals computed from the same posterior, a batch, and
+    ``tell`` does nothing, since the history is the one source of truth, which is what makes a resume
+    trivial.
+
+    Parameters
+    ----------
+    space : SearchSpace
+        The space.
+    n_init : int, default 40
+        Number of history rows, any seed included, before guided proposals start.
+    warmstart_tie : bool, default False
+        Whether to tie every partition slot of each base in the warm-up draws, a global warm start.
+    link_params : sequence of str, default ()
+        Bases whose partition slots are tied on every proposal.
+
+    Attributes
+    ----------
+    name : str
+        Name of the strategy.
+    """
 
     name = "base"
 
@@ -314,59 +573,156 @@ class Optimizer:
         self.link_params = [b for b in link_params if b]
 
     def _finish(self, x: np.ndarray) -> np.ndarray:
+        """Sanitize a proposal and tie its linked bases.
+
+        Parameters
+        ----------
+        x : ndarray, shape (ndim,)
+            The proposal.
+
+        Returns
+        -------
+        x : ndarray, shape (ndim,)
+            The proposal finished.
+        """
         x = self.space.sanitize(x)
         if self.link_params:
             x = self.space.tie(x, self.link_params)
         return x
 
     def ask(self, history: History, rng: np.random.Generator, n: int = 1) -> List[Proposal]:
+        """Return proposals from a history.
+
+        Parameters
+        ----------
+        history : History
+            The history.
+        rng : numpy.random.Generator
+            The generator.
+        n : int, default 1
+            Number of proposals.
+
+        Returns
+        -------
+        proposals : list of Proposal
+            The proposals.
+
+        Raises
+        ------
+        NotImplementedError
+            Always, in the base class.
+        """
         raise NotImplementedError
 
     def tell(self, history: History, i: int, y: float) -> None:  # pragma: no cover
+        """Do nothing, since the history is the one source of truth.
+
+        Parameters
+        ----------
+        history : History
+            The history.
+        i : int
+            Index of the trial scored.
+        y : float
+            Its score.
+        """
         pass
 
     def describe(self) -> Dict[str, Any]:
+        """Return the strategy's settings, for a run's record.
+
+        Returns
+        -------
+        info : dict
+            ``name``, ``n_init``, ``warmstart_tie`` and ``link_params``.
+        """
         return {"name": self.name, "n_init": self.n_init, "warmstart_tie": self.warmstart_tie,
                 "link_params": list(self.link_params)}
 
 
 class RandomSearch(Optimizer):
+    """Uniform random search, a baseline of matched budget, with the parameters of :class:`Optimizer`.
+    """
     name = "random"
 
     def ask(self, history: History, rng: np.random.Generator, n: int = 1) -> List[Proposal]:
+        """Return uniform random proposals.
+
+        Parameters
+        ----------
+        history : History
+            The history, unused.
+        rng : numpy.random.Generator
+            The generator.
+        n : int, default 1
+            Number of proposals.
+
+        Returns
+        -------
+        proposals : list of Proposal
+            The proposals, of phase "random".
+        """
         return [Proposal(self._finish(self.space.random(rng, tie_all=self.warmstart_tie)),
                          {"phase": "random"}) for _ in range(n)]
 
 
 class GridSearch(Optimizer):
-    """Regular grid over ``axes`` (default: all reduction dims), cell-centred and
-    refined in place when the cells run out.  Dims outside ``axes`` sit at the
-    default vector.
+    """Regular grid over ``axes``, cell-centered and refined in place when the cells run out.
 
-    ``gpts = floor(budget**(1/naxes))`` points per axis, so the first pass fits inside
-    the budget; ``floor`` rather than ``round`` because rounding up overruns it and the
-    overrun is what used to wrap.  Few points per axis is the honest grid-search regime
-    in many dimensions -- ``budget**(1/d)`` is the Bergstra & Bengio (2012) argument for
-    why grid search loses to random search as ``d`` grows -- so a small ``gpts`` is
-    reported, not corrected.  Two things about the old implementation were defects
-    rather than that regime:
+    The dimensions outside ``axes`` sit at the base vector.  ``gpts = floor(budget**(1/naxes))`` points
+    per axis make the first pass fit inside the budget, ``floor`` rather than ``round`` since rounding
+    up overruns it.  Few points per axis is the honest regime of grid search in many dimensions, the
+    ``budget**(1/d)`` argument of Bergstra & Bengio (2012) for why grid search loses to random search
+    as ``d`` grows, so a small ``gpts`` is reported, not corrected.
 
-    *Cell centres, not endpoints.*  ``lo + span*i/(g-1)`` puts both points of a
-    two-point axis on the bounds of the box, and in this problem the bounds are where
-    the reduction degenerates: ``corr_thresh = 1`` keeps no frames, the largest
-    ``filter`` smooths the signal away, ``k_klip = 1`` subtracts almost nothing.  A
-    nine-axis grid at ``gpts = 2`` therefore spent its whole budget on the 512 corners
-    of the box and never evaluated one interior configuration.  Cells are now centred --
-    ``lo + span*(i + 0.5)/g`` -- which is the usual convention for a grid design and
-    never lands on a degenerate face.
+    Parameters
+    ----------
+    space : SearchSpace
+        The space.
+    budget : int
+        Number of evaluations.
+    axes : sequence of str or None, default None
+        The dimensions gridded.  None takes every reduction dimension, those with an explicit ``grid``
+        first.
+    base_vector : ndarray or None, default None
+        Vector of the dimensions outside ``axes``.  None takes the default vector.
+    gpts : int or None, default None
+        Points per axis of the first stage, at least 2.  None takes the most whose grid fits the budget.
+    kw : dict
+        ``warmstart_tie`` and ``link_params``, as :class:`Optimizer` takes them.
 
-    *Refinement, not wrap-around.*  Cell ``k`` used to be ``k % g**naxes``, so once the
-    cells ran out the grid re-proposed configurations it had already evaluated.  The
-    objective is deterministic given the configuration, so those evaluations bought
-    nothing: a 1000-evaluation run over 512 cells was charged 1000 reductions for 449
-    distinct configurations.  Exhausting a stage now doubles ``gpts``; because the cells
-    are centred, every node of stage ``s+1`` is new, so the budget always buys distinct
-    configurations.
+    Attributes
+    ----------
+    axes : list of str
+        The dimensions gridded, in order.
+    budget : int
+        The budget.
+    gpts : int
+        Points per axis of the first stage.
+    base_vector : ndarray
+        Vector of the other dimensions.
+
+    Notes
+    -----
+    Two things about the earlier implementation were defects rather than that regime.
+
+    Cells were endpoints, ``lo + span*i/(g-1)``, which puts both points of a two-point axis on the
+    bounds of the box, where the reduction degenerates: ``corr_thresh = 1`` keeps no frames, the largest
+    ``filter`` smooths the signal away, ``k_klip = 1`` subtracts almost nothing.  A nine-axis grid at
+    ``gpts = 2`` spent its whole budget on the 512 corners of the box and never evaluated one interior
+    configuration.  Cells are now centered, ``lo + span*(i + 0.5)/g``, the usual convention for a grid
+    design, which never lands on a degenerate face.
+
+    Cell ``k`` used to be ``k % g**naxes``, so once the cells ran out the grid proposed configurations
+    it had already evaluated.  The objective is deterministic given the configuration, so those
+    evaluations bought nothing: a 1000-evaluation run over 512 cells was charged 1000 reductions for
+    449 distinct configurations.  Exhausting a stage now doubles ``gpts``, and since the cells are
+    centered, every node of stage ``s+1`` is new.
+
+    The axes with an explicit ``grid`` go first because the cell index is an odometer: axis 0 cycles
+    through all its values every ``g`` cells, while the last moves only once the budget has covered
+    ``g**(naxes-1)`` cells, which a real budget never does.  Declared last, ``k_klip`` took three values
+    in a thousand evaluations while ``bin`` took six.
     """
 
     name = "grid"
@@ -400,11 +756,25 @@ class GridSearch(Optimizer):
 
     # ---------------------------------------------------------------- geometry
     def stage_of(self, k: int) -> Tuple[int, int, int]:
-        """``(gpts, cell_within_stage, stage)`` for the ``k``-th grid proposal.
+        """Return the stage of a grid proposal and its cell within the stage.
 
-        Stage ``s`` has ``gpts * 2**s`` points per axis and ``(gpts * 2**s)**naxes``
-        cells.  Stages are walked in order, so a budget larger than one stage keeps
-        producing new configurations instead of repeating the first stage.
+        Stage ``s`` has ``gpts * 2**s`` points per axis and ``(gpts * 2**s)**naxes`` cells.  The stages are
+        walked in order, so a budget larger than one stage keeps producing new configurations instead of
+        repeating the first stage.
+
+        Parameters
+        ----------
+        k : int
+            Index of the grid proposal.
+
+        Returns
+        -------
+        gpts : int
+            Points per axis of the stage.
+        cell : int
+            The cell within the stage.
+        stage : int
+            The stage, at most 24.
         """
         na = max(len(self.axes), 1)
         g, s, k = self.gpts, 0, int(k)
@@ -417,12 +787,26 @@ class GridSearch(Optimizer):
             s += 1
 
     def cell(self, k: int) -> np.ndarray:
+        """Return the vector of a grid proposal, each axis at its cell's center.
+
+        An axis with an explicit ``grid`` takes the entry at the cell's fraction of it.
+
+        Parameters
+        ----------
+        k : int
+            Index of the grid proposal.
+
+        Returns
+        -------
+        x : ndarray, shape (ndim,)
+            The vector, the other dimensions at the base vector.
+        """
         x = self.base_vector.copy()
         g, kk, _ = self.stage_of(k)
         for a, name in enumerate(self.axes):
             i = (kk // (g ** a)) % g
             p = self.space[name]
-            frac = (i + 0.5) / g                 # cell centre, never a box face
+            frac = (i + 0.5) / g                 # cell center, never a box face
             if p.grid is not None:
                 x[self.space.index(name)] = p.grid[min(int(frac * len(p.grid)), len(p.grid) - 1)]
             else:
@@ -430,6 +814,22 @@ class GridSearch(Optimizer):
         return x
 
     def ask(self, history: History, rng: np.random.Generator, n: int = 1) -> List[Proposal]:
+        """Return the next grid proposals, after those the history holds.
+
+        Parameters
+        ----------
+        history : History
+            The history, whose trials of phase "grid" are counted.
+        rng : numpy.random.Generator
+            The generator, unused.
+        n : int, default 1
+            Number of proposals.
+
+        Returns
+        -------
+        proposals : list of Proposal
+            The proposals, their flags giving ``cell``, ``gpts`` and ``stage``.
+        """
         ngrid = sum(1 for f in history.flags if f.get("phase") == "grid")
         out = []
         for k in range(n):
@@ -439,6 +839,14 @@ class GridSearch(Optimizer):
         return out
 
     def describe(self) -> Dict[str, Any]:
+        """Return the grid's settings, for a run's record.
+
+        Returns
+        -------
+        info : dict
+            The base settings, ``axes``, ``gpts``, ``budget``, ``cell_centred``, ``n_cells_stage0``,
+            ``stages`` and ``coarse_by_budget``, True when the budget cannot give three levels per axis.
+        """
         d = super().describe()
         na = max(len(self.axes), 1)
         d.update(axes=self.axes, gpts=self.gpts, budget=self.budget, cell_centred=True,
@@ -454,35 +862,49 @@ class GridSearch(Optimizer):
 class TPE(Optimizer):
     """Tree-structured Parzen Estimator with the KLIP-TPE adaptations.
 
+    Each proposal is a warm-up draw while the history holds fewer than ``n_init`` rows, else a local
+    move with probability ``p_local``, else a uniform draw with probability ``explore_frac``, else a
+    TPE proposal (:func:`tpe_propose`).
+
     Parameters
     ----------
-    n_init
-        number of history rows (including any seed) before guided proposals start.
-    gamma, ncand, prior_weight, bw_floor
-        Parzen split fraction, candidates per proposal, uniform-prior mixing weight and
-        bandwidth floor (fraction of range).
-    pbest
-        fraction of candidates seeded from the single best observation in *all*
-        dimensions.  Default 0: on noisy objectives the running best is usually a
-        noise winner and anchoring to it imports the selection bias into the
-        proposal (-1.1 in TRUE score at noise 0.40 on the synthetic testbed,
-        0/24 seeds won; addendum 2).  Kept as an option for parity experiments.
-    p_local, n_elite
-        probability of a local move (re-jitter ONE reduction dim of a random
-        top-``n_elite`` config) instead of a TPE proposal.
-    explore_frac
-        probability (checked after the local coin) of a uniform random draw.
-    blocks
-        density model: ``"univariate"``/``None`` (default; factorized per-dimension
-        Parzen estimators -- the IDL reference behaviour and the best configuration in
-        the 2x2x3 factorial of addendum 2 once ``pbest=0``), ``"partitions"``
-        (block-multivariate, one block per partition + one for the global/selection
-        dims), ``"full"`` (single block; dominated, kept as a negative control) or an
-        explicit list of dim-name lists.
-    warmstart_tie
-        tie all partition slots of each base in warm-up draws (global warm start).
-    link_params
-        bases whose partition slots are tied on every proposal.
+    space : SearchSpace
+        The space.
+    n_init : int, default 40
+        Number of history rows, any seed included, before guided proposals start.
+    gamma : float, default 0.25
+        Fraction of the history in the good set.
+    ncand : int, default 48
+        Number of candidates per proposal.
+    prior_weight : float, default 0.25
+        Weight of the uniform prior in each density.
+    bw_floor : float, default 0.08
+        Floor of the bandwidths, as a fraction of the range.
+    pbest : float, default 0.0
+        Fraction of candidates seeded from the single best observation in every dimension.  On a noisy
+        objective the running best is usually a noise winner, and anchoring to it imports the selection
+        bias into the proposal, so it is kept for parity experiments only.
+    p_local : float, default 0.15
+        Probability of a local move, which jitters one reduction dimension of a random configuration
+        among the top ``n_elite``, in place of a TPE proposal.
+    n_elite : int, default 5
+        Number of top configurations a local move starts from.
+    explore_frac : float, default 0.15
+        Probability, after the local move's, of a uniform random draw.
+    blocks : str, sequence or None, default "univariate"
+        The density model (:func:`resolve_blocks`): ``"univariate"`` or None for factorized
+        per-dimension estimators, ``"partitions"`` for block-multivariate ones, ``"full"`` for a single
+        block, kept as a negative control, or a list of lists of dimension names.
+    warmstart_tie : bool, default False
+        Whether to tie every partition slot of each base in the warm-up draws, a global warm start.
+    link_params : sequence of str, default ()
+        Bases whose partition slots are tied on every proposal.
+
+    Notes
+    -----
+    Anchoring to the best cost 1.1 in true score at noise 0.40 on the synthetic testbed and won none of
+    24 seeds (addendum 2).  The univariate model is the IDL predecessor's behavior, and the best
+    configuration in the 2x2x3 factorial of addendum 2 once ``pbest = 0``.
     """
 
     name = "tpe"
@@ -500,6 +922,23 @@ class TPE(Optimizer):
 
     # -- individual moves ----------------------------------------------------
     def _local_move(self, history: History, rng: np.random.Generator) -> np.ndarray:
+        """Jitter one random reduction dimension of a random configuration among the top ``n_elite``.
+
+        A continuous dimension moves by the good set's bandwidth times a standard normal draw, and a
+        categorical one takes another choice.
+
+        Parameters
+        ----------
+        history : History
+            The history.
+        rng : numpy.random.Generator
+            The generator.
+
+        Returns
+        -------
+        x : ndarray, shape (ndim,)
+            The moved vector, a random one without a valid trial.
+        """
         sp = self.space
         order = history.order()
         if order.size == 0:
@@ -522,6 +961,22 @@ class TPE(Optimizer):
         return x
 
     def propose_one(self, history: History, rng: np.random.Generator) -> Proposal:
+        """Make one proposal: a warm-up draw, a local move, an exploring draw or a TPE proposal.
+
+        An exploring draw also stands in for a TPE proposal while fewer than 2 trials are valid.
+
+        Parameters
+        ----------
+        history : History
+            The history.
+        rng : numpy.random.Generator
+            The generator.
+
+        Returns
+        -------
+        proposal : Proposal
+            The proposal, its ``phase`` ``warmup``, ``local``, ``explore`` or ``tpe``.
+        """
         sp = self.space
         if len(history) < self.n_init:
             x = sp.random(rng, tie_all=self.warmstart_tie)
@@ -541,6 +996,24 @@ class TPE(Optimizer):
     def ask(self, history: History, rng: np.random.Generator, n: int = 1) -> List[Proposal]:
         # batch proposals share the same posterior (HPBoo-style); the warm-up counter
         # advances with the batch so a batch never over-runs n_init.
+        """Return a batch of proposals from the same posterior.
+
+        The warm-up count advances with the batch, so a batch never overruns ``n_init``.
+
+        Parameters
+        ----------
+        history : History
+            The history.
+        rng : numpy.random.Generator
+            The generator.
+        n : int, default 1
+            Number of proposals.
+
+        Returns
+        -------
+        proposals : list of Proposal
+            The proposals.
+        """
         out = []
         fake = History(history.ndim, history.X.copy(), history.y.copy(), list(history.flags))
         for _ in range(n):
@@ -551,6 +1024,14 @@ class TPE(Optimizer):
         return out
 
     def describe(self) -> Dict[str, Any]:
+        """Return the strategy's settings, with its blocks resolved, for a run's record.
+
+        Returns
+        -------
+        info : dict
+            The base settings, the TPE's parameters, ``blocks`` and ``resolved_blocks``, each block's
+            dimension names.
+        """
         d = super().describe()
         d.update(gamma=self.gamma, ncand=self.ncand, prior_weight=self.prior_weight,
                  bw_floor=self.bw_floor, pbest=self.pbest, p_local=self.p_local,
@@ -561,6 +1042,27 @@ class TPE(Optimizer):
 
 
 def make_optimizer(mode: str, space: SearchSpace, **kw) -> Optimizer:
+    """Make the strategy of a search mode.
+
+    Parameters
+    ----------
+    mode : {"tpe", "random", "grid"}
+        The mode, in any case.
+    space : SearchSpace
+        The space.
+    kw : dict
+        The strategy's keywords, ``budget`` required for a grid.
+
+    Returns
+    -------
+    optimizer : Optimizer
+        The strategy.
+
+    Raises
+    ------
+    ValueError
+        If the mode is unknown.
+    """
     mode = mode.lower()
     if mode == "tpe":
         return TPE(space, **kw)
