@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — 2026-11-13 (OpenCV rotation measured on NEAR2)
+
+- **`docs/RUNNING.md` records OpenCV's rotation on NEAR2** (the NEAR2 processing session,
+  2026-11-13): the same reductions as scipy to float32 rounding, in 0.75 to 0.78 of the time.
+  New runs keep taking OpenCV 5 where it is installed (`--rotate auto`, Kevin Wagner's choice
+  for NEAR), and resumed runs keep the library they recorded.  Only docs changed.
+
 ## Unreleased — 2026-11-13 (synthetic.py, companion.py and positions.py documented to the rule)
 
 - **`synthetic.py`, `companion.py` and `positions.py` follow the documentation rule**: the

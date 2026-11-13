@@ -735,11 +735,18 @@ klip-tpe rereduce --run-dir runA --base-winners picks.txt --no-overlap-pads
 
 ## Frame rotation: scipy or OpenCV
 
-Every reduction rotates its frames, bilinearly as the IDL's `rot(/interp)` does: the
-derotation and three rotations per frame in the noise-weighted combination.  OpenCV's
+Every reduction rotates its frames, bilinearly as the IDL predecessor does with `rot(/interp)`:
+the derotation and three rotations per frame in the noise-weighted combination.  OpenCV's
 `warpAffine` does it about 5 times faster than scipy's `map_coordinates` on a 150 x 150 frame.
 On a synthetic sequence of 800 such frames a reduction took 17 % less time at bin 5 and 31 %
 less at bin 20, and about 2 % less unbinned, where KLIP itself takes the time.
+
+On the NEAR2 data (2026-11-10, commit d3b15d9, OpenCV 5.0.0 against scipy 1.18.1, one command
+and seed), 290 paired startup evaluations had identical parameters, and their scores differed by
+6.5e-6 at the median.  The nine that differed by more than 1e-3 were all in one annulus, where a
+calibration trial read S/N 8.84 against 8.87 and moved the calibrated contrast 0.29 %.
+Identical configurations reduced in 0.75 to 0.78 of scipy's time, and a full run of 100,079
+evaluations with OpenCV reached 5-sigma contrasts within the seed scatter of the scipy run's.
 
 * `--rotate auto` (the default, or `KLIP_TPE_ROTATE=auto`) rotates with OpenCV when it is
   installed and samples where scipy does, else with scipy.  OpenCV 5 agrees with scipy to
