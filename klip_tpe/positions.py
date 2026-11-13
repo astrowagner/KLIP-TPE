@@ -1,10 +1,9 @@
-"""Injection-position samplers (``near2m_randpos`` and the variants' cousins).
+"""Injection-position samplers, successors of the IDL predecessor's ``near2m_randpos`` and its variants.
 
-Every evaluation, calibration trial and validation trial draws *fresh* positions so
-the optimizer cannot garden speckles at fixed sites.  The default strategy keeps
-the radii deterministic (a centred ladder across the band, so every evaluation of
-an annulus injects at the same separations) and randomises only the azimuth
-anchor.
+Every evaluation, calibration trial and validation trial draws fresh positions, so the optimizer
+cannot garden speckles at fixed sites.  The default strategy keeps the radii deterministic, a
+centered ladder across the band so every evaluation of an annulus injects at the same separations,
+and draws only the azimuth's anchor.
 """
 from __future__ import annotations
 
@@ -20,37 +19,51 @@ __all__ = ["PositionSampler", "ReplaySampler"]
 
 @dataclass
 class PositionSampler:
-    """Draw ``n`` sources in the radial band ``[r_lo, r_hi]`` (arcsec).
+    """Sampler of ``n`` sources in the radial band ``[r_lo, r_hi]``.
 
-    strategy
-        ``"spread"``   : deterministic radial ladder + random azimuth anchor with
-                         even 360/n spacing (NEAR / LMIRCam / HPBoo);
-        ``"fixed_pa"`` : all sources at the band centre radius, fully random PAs
-                         subject to the exclusions (NIRCam variant).
-    fwhm_as
-        FWHM in arcsec; used for the inner floor (``min_r_fwhm``), the known-source
-        exclusion radius (``excl_fwhm``) and the mutual-separation warning.
-    known
-        real sources ``[(rho, theta), ...]`` no injection may land within
-        ``excl_fwhm`` FWHM of.
-    forbidden_pa
-        list of ``(centre_deg, half_width_deg)`` PA sectors to avoid (e.g. the
-        JWST N/S axis).
-    forbidden_mask
-        boolean image (True = forbidden) in the reduced frame's pixels, the star at its
-        centre: no injection lands on it, or within ``mask_clear_fwhm`` FWHM of it.  For
-        resolved emission no wedge follows (a spiral or ring disk:
-        :func:`~klip_tpe.metrics.disk_mask_from_image`), paired with the same mask as the
-        metric's ``pixel_mask`` (``default_config(disk_mask=...)`` sets both).  Needs
-        ``mask_pxscale`` (arcsec per pixel); ``mask_angle_convention`` is the sources'
-        (the metric's) angle convention.
+    This one object serves the search, the calibration, the validation, ``param_verify`` and the final
+    products alike, so every stage injects with the same geometry.  The two-source rule (both at the
+    annulus' area-weighted middle radius, addendum 2 section 2b) is applied by the caller collapsing the
+    band to ``r_lo == r_hi``, where ``span == 0`` puts every source at that radius, the inner-working
+    clamp included, as the IDL predecessor's ``near2m_randpos`` does.
 
-    This one object is used by search, calibration, validation, param_verify and the
-    final products alike, so every stage injects with identical geometry.  The
-    two-source rule (both at the annulus' area-weighted mid radius, addendum 2 §2b) is
-    applied by the *caller* collapsing the band to ``r_lo == r_hi`` -- the routine itself
-    is unchanged (``span == 0`` puts every source at that radius, IWA clamp included),
-    exactly as IDL's ``near2m_randpos``.
+    Attributes
+    ----------
+    fwhm_as : float
+        FWHM, in arcsec, for the inner floor, the known sources' keep-outs and the mutual separation.
+    strategy : {"spread", "fixed_pa"}, default "spread"
+        ``"spread"`` for a deterministic radial ladder with a random anchor of evenly spaced azimuths
+        (NEAR, LMIRCam, HPBoo), ``"fixed_pa"`` for every source at the band's middle radius at random
+        PAs (the NIRCam variant).
+    min_r_fwhm : float, default 1.5
+        Inner floor of the band, in FWHM.
+    excl_fwhm : float, default 1.5
+        Radius of the known sources' keep-outs, in FWHM.
+    known : sequence of tuple of 2 floats, default ()
+        Real sources, as ``(rho, theta)``, no injection may land within ``excl_fwhm`` FWHM of.
+    forbidden_pa : sequence of tuple of 2 floats, default ()
+        Sectors of PA to avoid, as ``(center_deg, half_width_deg)``, such as the JWST N/S axis.
+    min_mutual_fwhm : float, default 2.0
+        Smallest distance between two sources of ``"fixed_pa"``, in FWHM.
+    max_tries : int, default 30
+        Number of draws tried before the last is kept, at least 400 with a mask.
+    forbidden_mask : ndarray of bool or None, default None
+        Pixels of the reduced frame no injection lands on or within ``mask_clear_fwhm`` FWHM of, True
+        forbidden, the star at the center.  It is for resolved emission no wedge follows, such as a
+        spiral or ring disk (:func:`~klip_tpe.metrics.disk_mask_from_image`), and goes with the same
+        mask as the metric's ``pixel_mask`` (``default_config(disk_mask=...)`` sets both).
+    mask_pxscale : float or None, default None
+        Plate scale of the mask, in arcsec per pixel, which the mask needs.
+    mask_clear_fwhm : float, default 0.0
+        Clearance from the mask, in FWHM.
+    mask_angle_convention : {"pa", "math"}, default "pa"
+        The sources' angle convention, the metric's.
+    sidelobes : Sidelobes or None, default None
+        The noise rings' sidelobe rule (:class:`~klip_tpe.metrics.Sidelobes`), under which no source is
+        drawn in another's ADI sidelobe arc, where its signal would carry the other's negative lobe.
+        The :class:`~klip_tpe.runner.Runner` sets it from ``RunConfig.sidelobes``.
+    _mask_dist : ndarray or None
+        Cache of each pixel's distance from the mask, in pixels, made on the first check.
     """
 
     fwhm_as: float
@@ -72,11 +85,45 @@ class PositionSampler:
     _mask_dist: Optional[np.ndarray] = field(default=None, init=False, repr=False, compare=False)
 
     def _xy(self, rho, theta):
+        """Return positions as offsets from the star, PA East of North.
+
+        Parameters
+        ----------
+        rho : float or array_like
+            Separation of each source, in arcsec.
+        theta : float or array_like
+            Angle of each source, in degrees.
+
+        Returns
+        -------
+        x : ndarray
+            Offset along x, in arcsec.
+        y : ndarray
+            Offset along y, in arcsec.
+        """
         phi = np.deg2rad(np.asarray(theta, float) + 90.0)
         return np.asarray(rho, float) * np.cos(phi), np.asarray(rho, float) * np.sin(phi)
 
     def _on_mask(self, rho, theta) -> bool:
-        """Does any source fall on ``forbidden_mask`` or within ``mask_clear_fwhm`` FWHM of it?"""
+        """Tell whether any source falls on ``forbidden_mask`` or within ``mask_clear_fwhm`` FWHM of it.
+
+        Parameters
+        ----------
+        rho : float or array_like
+            Separation of each source, in arcsec.
+        theta : float or array_like
+            Angle of each source, in degrees.
+
+        Returns
+        -------
+        on_mask : bool
+            True when one does, False without a mask.
+
+        Raises
+        ------
+        ValueError
+            If the mask comes without ``mask_pxscale``.
+        """
         if self.forbidden_mask is None:
             return False
         if not self.mask_pxscale:
@@ -97,6 +144,20 @@ class PositionSampler:
         return False
 
     def _bad(self, rho, theta) -> bool:
+        """Tell whether a draw breaks a rule: a known source's keep-out, a forbidden sector, a sidelobe or the mask.
+
+        Parameters
+        ----------
+        rho : float or array_like
+            Separation of each source, in arcsec.
+        theta : float or array_like
+            Angle of each source, in degrees.
+
+        Returns
+        -------
+        bad : bool
+            True when the draw breaks one.
+        """
         exr = self.excl_fwhm * self.fwhm_as
         x, y = self._xy(rho, theta)
         for kr, kt in self.known:
@@ -112,7 +173,20 @@ class PositionSampler:
         return self._on_mask(rho, theta)
 
     def _in_sidelobes(self, rho, theta) -> bool:
-        """Does any source sit in another's sidelobe arc (``sidelobes``)?"""
+        """Tell whether any source sits in another's sidelobe arc, under ``sidelobes``.
+
+        Parameters
+        ----------
+        rho : float or array_like
+            Separation of each source, in arcsec.
+        theta : float or array_like
+            Angle of each source, in degrees.
+
+        Returns
+        -------
+        inside : bool
+            True when one does, False without a rule or with fewer than 2 sources.
+        """
         rule = self.sidelobes
         rho, theta = np.atleast_1d(np.asarray(rho, float)), np.atleast_1d(np.asarray(theta, float))
         if rule is None or rho.size < 2:
@@ -128,6 +202,26 @@ class PositionSampler:
 
     def sample(self, n: int, r_lo: float, r_hi: float, rng: np.random.Generator,
                contrast: float = 0.0) -> List[Source]:
+        """Draw ``n`` sources in a band, until a draw breaks no rule or the tries run out.
+
+        Parameters
+        ----------
+        n : int
+            Number of sources, at least 1.
+        r_lo : float
+            Inner radius of the band, in arcsec, raised to the inner floor.
+        r_hi : float
+            Outer radius of the band, in arcsec.
+        rng : numpy.random.Generator
+            The generator.
+        contrast : float, default 0.0
+            Contrast of the sources.
+
+        Returns
+        -------
+        sources : list of Source
+            The sources, the last draw's when none passed.
+        """
         n = max(int(n), 1)
         rmin = self.min_r_fwhm * self.fwhm_as
         r_lo = max(float(r_lo), rmin)
@@ -163,6 +257,15 @@ class PositionSampler:
         return [Source(float(r), float(t), float(contrast)) for r, t in zip(rho, theta)]
 
     def describe(self) -> dict:
+        """Return the sampler's settings, for a run's record.
+
+        Returns
+        -------
+        info : dict
+            ``strategy``, ``min_r_fwhm``, ``excl_fwhm``, ``known``, ``forbidden_pa`` and, with a mask,
+            ``forbidden_mask_px`` and ``mask_clear_fwhm``, since positions drawn off a mask are not those
+            drawn without.
+        """
         d = {"strategy": self.strategy, "min_r_fwhm": self.min_r_fwhm, "excl_fwhm": self.excl_fwhm,
              "known": [list(k) for k in self.known], "forbidden_pa": [list(f) for f in self.forbidden_pa]}
         if self.forbidden_mask is not None:
@@ -175,17 +278,21 @@ class PositionSampler:
 class ReplaySampler:
     """Recorded injection draws handed back in order, instead of new ones.
 
-    A sampler's draws depend on the frames: its forbidden sectors come from the rolls and
-    the dead zones, so the same seed draws different positions on another processing of
-    the same data (the archive calints and a re-reduction from the raw ramps, say).  To
-    score a configuration on other frames at the SAME injections, replay the positions an
-    earlier run recorded -- ``library_ablation.json``'s ``draws``, or an evaluation's
-    ``meta['draw_sources']`` -- through this.
+    A sampler's draws depend on the frames: its forbidden sectors come from the rolls and the dead
+    zones, so the same seed draws different positions on another processing of the same data, such as
+    the archive calints and a reduction from the raw ramps.  To score a configuration on other frames
+    at the same injections, the positions an earlier run recorded (``library_ablation.json``'s
+    ``draws``, or an evaluation's ``meta['draw_sources']``) are replayed through this.  Running out of
+    recorded draws is an error, not a quiet switch to fresh ones.
 
-    ``draws`` is a list of draws, each a list of ``(rho, theta[, contrast])``; the contrast
-    given to :meth:`sample` is the one injected.  Other attributes (``fwhm_as``, ``known``,
-    ``forbidden_pa``, ``describe``) come from ``base``, the sampler being stood in for.
-    Running out of recorded draws is an error, not a quiet switch to fresh ones.
+    Parameters
+    ----------
+    draws : sequence of sequence of tuple
+        The draws, each a list of ``(rho, theta)`` or ``(rho, theta, contrast)``.  The contrast given to
+        :meth:`sample` is the one injected.
+    base : PositionSampler or None, default None
+        The sampler stood in for, which gives the other attributes (``fwhm_as``, ``known``,
+        ``forbidden_pa``, ``describe``).
     """
 
     def __init__(self, draws, base: Optional[PositionSampler] = None):
@@ -194,12 +301,56 @@ class ReplaySampler:
         self.i = 0
 
     def __getattr__(self, name):
+        """Return an attribute of the base sampler.
+
+        Parameters
+        ----------
+        name : str
+            The attribute.
+
+        Returns
+        -------
+        value : object
+            The base's attribute.
+
+        Raises
+        ------
+        AttributeError
+            If there is no base.
+        """
         base = self.__dict__.get("base")
         if base is None:
             raise AttributeError(name)
         return getattr(base, name)
 
     def sample(self, n: int, r_lo: float, r_hi: float, rng=None, contrast: float = 0.0) -> List[Source]:
+        """Return the next recorded draw at a contrast.
+
+        Parameters
+        ----------
+        n : int
+            Number of sources, which must be the draw's.
+        r_lo : float
+            Inner radius of the band, unused.
+        r_hi : float
+            Outer radius of the band, unused.
+        rng : numpy.random.Generator or None, default None
+            The generator, unused.
+        contrast : float, default 0.0
+            Contrast of the sources.
+
+        Returns
+        -------
+        sources : list of Source
+            The draw.
+
+        Raises
+        ------
+        IndexError
+            If every recorded draw has been replayed.
+        ValueError
+            If the draw holds another number of sources than ``n``.
+        """
         if self.i >= len(self.draws):
             raise IndexError(f"all {len(self.draws)} recorded draws have been replayed")
         d = self.draws[self.i]
@@ -209,6 +360,13 @@ class ReplaySampler:
         return [Source(r, t, float(contrast)) for r, t in d]
 
     def describe(self) -> dict:
+        """Return the base sampler's settings, with ``replay`` and ``n_recorded``.
+
+        Returns
+        -------
+        info : dict
+            The settings.
+        """
         d = dict(self.base.describe()) if self.base is not None else {}
         d.update(replay=True, n_recorded=len(self.draws))
         return d
@@ -217,37 +375,47 @@ class ReplaySampler:
 def max_sources_for_noise(inner_px: float, fwhm: float, *, excl_fwhm: float = 1.5,
                           min_ring: int = 6, n_known: int = 0,
                           blocked_fraction: float = 0.0) -> int:
-    """How many **co-radial** sources a ring can hold and still leave ``min_ring`` clean
-    noise apertures for the Mawet S/N.
+    """Return how many co-radial sources a ring can hold and still leave ``min_ring`` clean noise apertures.
 
-    .. warning::
-       This assumes every source sits on the SAME ring, which is only how
-       :meth:`PositionSampler.sample` places them for ``fixed_pa``, for a collapsed band
-       (``opt_width``), and for the ``pair_area_midpoint`` pair.  The default strategy steps
-       ``rho`` across the injection band, so sources sit at different radii and mostly stay
-       out of each other's exclusion zones -- and then this bound is far too pessimistic:
-       on MIRI's 6.7-36 px annulus it returns 2 where the measured answer is past 14.
-       ``Runner._ring_survives`` therefore does the real thing, sampling actual positions
-       and scoring them with :func:`~klip_tpe.metrics.mawet_peak_snr`.  Use this only as a
-       cheap bound when there is no sampler to ask.
+    The geometry is :func:`klip_tpe.metrics.mawet_peak_snr`'s: it lays ``nap = floor(2 pi r / fwhm)``
+    apertures round the ring, walks ``q = 1 .. nap-1`` (the source's own aperture is never a noise
+    sample), and drops any aperture whose center falls within ``excl_fwhm * fwhm`` of any injected
+    source, not only the one measured.  So every extra source costs the ring about ``2 excl_fwhm + 1``
+    apertures, and below ``min_ring`` survivors the estimator stops using the ring and falls back to the
+    radial band.
 
-    The geometry is :func:`klip_tpe.metrics.mawet_peak_snr`'s, not an approximation of
-    it: that estimator lays ``nap = floor(2*pi*r/fwhm)`` apertures round the ring, walks
-    ``q = 1 .. nap-1`` (the source's own aperture is never a noise sample), and DROPS any
-    aperture whose centre falls within ``excl_fwhm*fwhm`` of **any** injected source --
-    not just the one being measured.  So every extra source costs the ring roughly
-    ``2*excl_fwhm + 1`` apertures, and below ``min_ring`` survivors the estimator stops
-    using the ring at all and falls back to the radial band.
+    Parameters
+    ----------
+    inner_px : float
+        The radius the count has to hold at, in pixels, the annulus's inner edge, where the ring starves
+        first.  The middle radius would over-fill the inner half.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    excl_fwhm : float, default 1.5
+        Radius of the keep-outs, in FWHM.
+    min_ring : int, default 6
+        Fewest clean apertures the ring must keep.
+    n_known : int, default 0
+        Number of real companions on the ring.
+    blocked_fraction : float, default 0.0
+        Share of the ring lost to dead zones, forbidden sectors or the frame's edge, such as the about
+        12 % of MIRI's 4QPM quadrant boundaries.
 
-    ``inner_px`` is the radius the count has to hold at, which is the annulus's INNER
-    edge: apertures scale with r, so the inner edge is where the ring starves first.
-    Using the mid-radius silently over-fills the inner half.
+    Returns
+    -------
+    n : int
+        The count, at least 1, since a separation too tight to hold one source with a clean ring is a
+        real case for the caller to decide on.
 
-    ``n_known`` (real companions) and ``blocked_fraction`` (the share of the ring lost to
-    dead zones, forbidden sectors or the frame edge -- MIRI's 4QPM quadrant boundaries
-    eat ~12%) shrink the budget the same way.  Returns at least 1: a separation too
-    tight to hold even one source with a clean ring is a real situation, and the caller
-    decides whether to skip it, widen the annulus, or accept the band fallback.
+    Notes
+    -----
+    It assumes every source sits on the same ring, which is how :meth:`PositionSampler.sample` places
+    them only for ``fixed_pa``, a collapsed band (``opt_width``) and the ``pair_area_midpoint`` pair.
+    The default strategy steps ``rho`` across the band, so sources mostly stay out of each other's
+    keep-outs, and there this bound is far too pessimistic: on MIRI's 6.7-36 px annulus it returns 2
+    where the measured answer is past 14.  ``Runner._ring_survives`` therefore samples real positions
+    and scores them with :func:`~klip_tpe.metrics.mawet_peak_snr`, and this serves only as a cheap bound
+    where there is no sampler to ask.
     """
     r = float(inner_px)
     f = float(fwhm)
@@ -257,7 +425,7 @@ def max_sources_for_noise(inner_px: float, fwhm: float, *, excl_fwhm: float = 1.
     if nap < 5:                                  # mawet_peak_snr abandons the ring below this
         return 1
     # Apertures one source removes.  The estimator's exclusion test is a CHORD distance
-    # between pixel centres, so count the q that actually fail it rather than converting
+    # between pixel centers, so count the q that actually fail it rather than converting
     # excl_fwhm to a number of apertures -- at small nap the chord is meaningfully shorter
     # than the arc.  Worst case is sources far enough apart that their zones do not
     # overlap; clustered sources block fewer in total.
@@ -274,14 +442,39 @@ def n_sources_rule(annulus_index: int, outer_as: float, override: Optional[int] 
                    inner_px: Optional[float] = None, fwhm: Optional[float] = None,
                    excl_fwhm: float = 1.5, min_ring: int = 6, n_known: int = 0,
                    blocked_fraction: float = 0.0) -> int:
-    """Default per-annulus source count (``nsrc_a`` in IDL): 4 in the innermost
-    annulus, 6 outside, reduced to 3 when the outer edge is < 2", to <= 2 when < 1".
+    """Return the default number of sources of an annulus, the IDL predecessor's ``nsrc_a``.
 
-    When ``inner_px`` and ``fwhm`` are given the count is additionally capped by
-    :func:`max_sources_for_noise`, so a small field of view cannot be packed so full
-    that the noise ring starves.  That cap is what binds on NIRCam, whose coronagraphic
-    annuli are only a few FWHM around: the IDL's angular thresholds were written for
-    NEAR's much larger field and do not notice.
+    It is 4 in the innermost annulus and 6 outside, 3 where the outer edge is under 2", and at most 2
+    under 1".  With ``inner_px`` and ``fwhm`` the count, an explicit one included, is also capped by
+    :func:`max_sources_for_noise`, so a small field of view cannot be packed so full that the noise ring
+    starves.  That cap binds on NIRCam, whose coronagraphic annuli are only a few FWHM around, where the
+    predecessor's angular thresholds, written for NEAR's larger field, do not notice.
+
+    Parameters
+    ----------
+    annulus_index : int
+        The annulus, counted from 0.
+    outer_as : float
+        Outer edge of the annulus, in arcsec.
+    override : int or None, default None
+        An explicit count, at least 1, which the cap still binds.
+    inner_px : float or None, default None
+        Inner edge of the annulus, in pixels, for the cap.
+    fwhm : float or None, default None
+        FWHM of the PSF, in pixels, for the cap.
+    excl_fwhm : float, default 1.5
+        Radius of the keep-outs, in FWHM.
+    min_ring : int, default 6
+        Fewest clean apertures the ring must keep.
+    n_known : int, default 0
+        Number of real companions on the ring.
+    blocked_fraction : float, default 0.0
+        Share of the ring lost.
+
+    Returns
+    -------
+    n : int
+        The count, at least 1.
     """
     if override is not None and override >= 1:
         n = int(override)

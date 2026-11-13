@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — 2026-11-13 (synthetic.py, companion.py and positions.py documented to the rule)
+
+- **`synthetic.py`, `companion.py` and `positions.py` follow the documentation rule**: the
+  synthetic reducer and dataset, the negative-fake-companion fit and the companion's
+  forward-model S/N, and the position samplers with the source-count rules.  Their docstrings
+  now name the IDL predecessor where they named the IDL.  Only docstrings and comments changed.
+
 ## Unreleased — 2026-11-13 (stpsf_psf.py and klip_gpu.py documented to the rule)
 
 - **`stpsf_psf.py` and `klip_gpu.py` follow the documentation rule**: the STPSF off-axis grid, its
