@@ -1,13 +1,23 @@
-"""Command-line entry points.
+"""Command-line entry points of ``klip-tpe``.
 
-    klip-tpe near   --root <NEAR root> --nights 1 2 3 4 5 6 --run-dir runs/run_001 [...]
-    klip-tpe resume --run-dir runs/run_001 --root ...          (config comes from the checkpoint)
-    klip-tpe extend --run-dir runs/run_001 --root ... --n-iter 800 800 0   (per-annulus new totals)
-    klip-tpe replay --root ... --idl-log optimize_tpe_results.txt --n 30
-    klip-tpe fit-chain --run-dir runs/run_001 --root ... --chain chain.txt   (a line's node values)
-    klip-tpe rereduce --run-dir runs/run_001 --root ... --subtract-line nodes.txt   (winners on other frames)
-    klip-tpe testbed --nseed 8 --noise 0.25                    (synthetic density-model comparison)
-    klip-tpe plots  --run-dir runs/run_001
+Each command has its own ``--help``::
+
+    klip-tpe near      --root <NEAR root> --nights 1 2 3 4 5 6 --run-dir runs/run_001 [...]
+    klip-tpe generic   --cube <cube> --angles <angles> --psf <psf> --pxscale ... --lam ...
+    klip-tpe resume    --run-dir runs/run_001 --root ...      (config comes from the checkpoint)
+    klip-tpe extend    --run-dir runs/run_001 --root ... --n-iter 800 800 0   (new totals per annulus)
+    klip-tpe fit-chain --run-dir runs/run_001 --root ... --chain chain.txt    (a line's node values)
+    klip-tpe rereduce  --run-dir runs/run_001 --root ... --subtract-line nodes.txt   (other frames)
+    klip-tpe rescore   --run-dir runs/run_001 --root ... --entrants-from runs/run_002
+    klip-tpe replay    --root ... --idl-log optimize_tpe_results.txt --n 30
+    klip-tpe compare   --root ... --idl-run <IDL run directory> --out compare
+    klip-tpe testbed   --nseed 8 --noise 0.25                 (synthetic density-model comparison)
+    klip-tpe plots     --run-dir runs/run_001
+    klip-tpe render    --run-dir runs/run_001                 (every evaluation's panel, after the fact)
+    klip-tpe runs                                             (the runs on record, and stopping strays)
+    klip-tpe view      --run-dir last                         (a live window on a run)
+
+``replay`` and ``compare`` read runs of the IDL predecessor.
 """
 from __future__ import annotations
 
@@ -21,9 +31,38 @@ from typing import Any, Dict, Optional
 
 
 def _near_objects(a, log=print):
-    """Reducer / objective / sampler / guard / throughput for the selected instrument
-    (``--instrument near`` reads the NEAR campaign tree; ``--instrument nomic`` reads a
-    pyNOMIC working directory -- see ``klip_tpe.instruments.nomic``)."""
+    """Build the reducer, objective, sampler, guard and throughput of the instrument selected.
+
+    ``--instrument near`` reads the NEAR campaign tree, and ``nomic``, ``generic`` and ``ales`` hand over
+    to :func:`_nomic_objects`, :func:`_generic_objects` and :func:`_ales_objects`.  ``--rotate`` sets the
+    rotation backend first.  The NEAR reducer takes the data edits (:func:`_subtract`), the threads per
+    job, the card and the KLIP Gram mode before its workers start.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+    log : callable, default print
+        Function that takes each line of the log.
+
+    Returns
+    -------
+    reducer : Reducer
+        The reducer, its workers started.
+    objective : Objective
+        The objective.
+    sampler : Sampler
+        The source sampler.
+    guard : callable or None
+        The guard on the reference frames, None with ``--fast``.
+    throughput : callable
+        The coronagraph's transmission, from the PSF library, else the analytic one.
+
+    Raises
+    ------
+    SystemExit
+        If ``--root`` is missing, or ``--drop-frames`` or the north files do not fit the data.
+    """
     if getattr(a, "rotate", None):
         # before the reducer and its workers: a new run records it, a resume takes its own
         from .klip import set_rotation_backend
@@ -73,14 +112,33 @@ def _near_objects(a, log=print):
 
 
 def _set_threads_per_job(red, a) -> None:
-    """``--threads-per-job``, before the worker pool starts (it sizes the pool)."""
+    """Set ``--threads-per-job`` on a reducer, before its worker pool starts, which it sizes.
+
+    Parameters
+    ----------
+    red : Reducer
+        The reducer.
+    a : argparse.Namespace
+        The parsed command line.
+    """
     if hasattr(red, "threads_per_job"):
         red.threads_per_job = max(int(getattr(a, "threads_per_job", 2) or 2), 1)
 
 
 def _set_klip_gram(red, a, log=print) -> None:
-    """``--klip-gram`` on every KLIP reducer, before the worker pool starts (the workers keep
-    the reducers they were forked with)."""
+    """Set ``--klip-gram`` on every KLIP reducer, before the worker pool starts.
+
+    The workers keep the reducers they were forked with.
+
+    Parameters
+    ----------
+    red : Reducer
+        The reducer.
+    a : argparse.Namespace
+        The parsed command line.
+    log : callable, default print
+        Function that takes each line of the log.
+    """
     from .reducer import set_klip_gram
     mode = str(getattr(a, "klip_gram", None) or "target")
     if set_klip_gram(red, mode) and mode == "zone":
@@ -90,17 +148,47 @@ def _set_klip_gram(red, a, log=print) -> None:
 
 
 def _first_partition(red):
-    """The first partition's reducer of a partitioned reducer, or the reducer itself."""
+    """Return the first partition's reducer of a partitioned reducer, or the reducer itself.
+
+    Parameters
+    ----------
+    red : Reducer
+        The reducer.
+
+    Returns
+    -------
+    reducer : Reducer
+        The first partition's reducer, or ``red``.
+    """
     subs = getattr(red, "reducers", None)
     return next(iter(subs.values())) if isinstance(subs, dict) and subs else red
 
 
 def _sources_file(path: str, option: str = "--subtract-sources"):
-    """A source list for ``--subtract-sources``, ``--inject-sources`` or ``--verify-sources``.
-    All three take the sources' own contrasts, as they are (or will be) in the data, so a
-    list whose contrasts are all negative is refused: for ``--subtract-sources`` it is most
-    likely the negatives written to take a line out by injection (``c = -a step / L``), which
-    would double the line.  ``--verify-sources`` takes positive contrasts only."""
+    """Read the source list of ``--subtract-sources``, ``--inject-sources`` or ``--verify-sources``.
+
+    All three take the sources' own contrasts, as they are or will be in the data.  A list whose
+    contrasts are all negative is refused, since for ``--subtract-sources`` it is most likely the
+    negatives written to take a line out by injection (``c = -a step / L``), which would double the
+    line.  ``--verify-sources`` takes positive contrasts only.
+
+    Parameters
+    ----------
+    path : str
+        Path of the list.
+    option : str, default "--subtract-sources"
+        The option the list comes with, for the checks and the messages.
+
+    Returns
+    -------
+    sources : list of Source
+        The sources.
+
+    Raises
+    ------
+    SystemExit
+        If the file cannot be read, holds no sources or fails the option's check of the contrasts.
+    """
     from .injection import read_sources
     try:
         lst = read_sources(path)
@@ -129,10 +217,32 @@ def _sources_file(path: str, option: str = "--subtract-sources"):
 
 
 def _subtract_request(red, a):
-    """The sources to take out and the notes for the record: what the checkpoint recorded, on a
-    command that types neither option (:func:`_data_edits_for_run`), else the sources of
-    ``--subtract-sources`` and the chain ``--subtract-line`` describes (built with the first
-    partition's injection model, :func:`klip_tpe.chainfit.line_chain`)."""
+    """Return the sources to take out of the frames, and the notes for the record.
+
+    On a command that types neither option they are what the checkpoint recorded
+    (:func:`_data_edits_for_run`).  Otherwise they are the sources of ``--subtract-sources`` and the
+    chain ``--subtract-line`` describes, built with the first partition's injection model
+    (:func:`klip_tpe.chainfit.line_chain`).
+
+    Parameters
+    ----------
+    red : Reducer
+        The reducer.
+    a : argparse.Namespace
+        The parsed command line.
+
+    Returns
+    -------
+    sources : list of Source
+        The sources to subtract.
+    meta : dict
+        The notes for the record, ``subtract_file`` and ``subtract_line``.
+
+    Raises
+    ------
+    SystemExit
+        If the line's file cannot be read.
+    """
     restored = getattr(a, "_restored_sources", None)
     if restored is not None:
         return list(restored), dict(getattr(a, "_restored_meta", None) or {})
@@ -155,8 +265,23 @@ def _subtract_request(red, a):
 
 
 def _inject_request(a):
-    """The sources to add (``--inject-sources``), or the checkpoint's list on a command that
-    does not type the option (:func:`_data_edits_for_run`), and the notes for the record."""
+    """Return the sources to add to the frames, and the notes for the record.
+
+    They are those of ``--inject-sources``, or the checkpoint's list on a command that does not type the
+    option (:func:`_data_edits_for_run`).
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+
+    Returns
+    -------
+    sources : list of Source
+        The sources to inject.
+    meta : dict
+        The notes for the record, ``inject_file``.
+    """
     restored = getattr(a, "_restored_injected", None)
     if restored is not None:
         return list(restored), dict(getattr(a, "_restored_inject_meta", None) or {})
@@ -168,8 +293,19 @@ def _inject_request(a):
 
 
 def _subtract(red, a, log=print) -> None:
-    """``--subtract-sources`` / ``--subtract-line``, then ``--inject-sources``, on a freshly
-    built reducer, before its worker processes start."""
+    """Apply ``--subtract-sources`` and ``--subtract-line``, then ``--inject-sources``, to a reducer just built.
+
+    They go in before its worker processes start, and the reducer's ``data_edits`` records them.
+
+    Parameters
+    ----------
+    red : Reducer
+        The reducer.
+    a : argparse.Namespace
+        The parsed command line.
+    log : callable, default print
+        Function that takes each line of the log.
+    """
     from .reducer import _taken_text
     src, meta = _subtract_request(red, a)
     if src:
@@ -198,15 +334,46 @@ def _subtract(red, a, log=print) -> None:
 
 
 def _no_cube_name(a, what: str) -> None:
+    """Refuse ``--cube-name`` on a command that reads its cubes another way.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+    what : str
+        The command or instrument, for the message.
+
+    Raises
+    ------
+    SystemExit
+        If ``--cube-name`` is given.
+    """
     if getattr(a, "cube_name", None):
         raise SystemExit(f"--cube-name names the cube in each NEAR night's directory; {what} reads its cubes "
                          f"another way")
 
 
 def _parse_drop_frames(values) -> dict:
-    """``--drop-frames NIGHT:INDEX[,INDEX...]`` values (the option may repeat) as ``{"n4": [551],
-    ...}``.  ``n4:551`` and ``4:551`` both name frame 551 of night 4, counted from 0 in the
-    night's cube.  ``none`` alone is the empty list, which drops nothing."""
+    """Parse ``--drop-frames NIGHT:INDEX[,INDEX...]`` values into ``{"n4": [551], ...}``.
+
+    ``n4:551`` and ``4:551`` both name frame 551 of night 4, counted from 0 in the night's cube, and the
+    option may repeat.  ``none`` alone is the empty list, which drops nothing.
+
+    Parameters
+    ----------
+    values : str or sequence of str
+        The option's values.
+
+    Returns
+    -------
+    frames : dict of str to list of int
+        The sorted indices of each night, the nights in order.
+
+    Raises
+    ------
+    SystemExit
+        If a value is malformed, an index is negative, or ``none`` comes with frames.
+    """
     out = {}
     nones = []
     for v in ([values] if isinstance(values, str) else (values or [])):
@@ -236,30 +403,91 @@ def _parse_drop_frames(values) -> dict:
 
 
 def _drop_frames(a):
-    """``--drop-frames`` on this command line, or the run's list restored in its place
-    (:func:`_data_edits_for_run`), as ``{"n4": [551], ...}``.  None when the option is not given."""
+    """Return ``--drop-frames`` on this command line, or the run's list restored in its place.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+
+    Returns
+    -------
+    frames : dict of str to list of int or None
+        The frames, as :func:`_parse_drop_frames` gives them, None when the option is not given.
+    """
     vals = getattr(a, "drop_frames", None)
     return None if not vals else _parse_drop_frames(vals)
 
 
 def _drop_argv(d) -> list:
-    """A ``dropped_frames`` record as ``--drop-frames`` values, ``["n4:551", ...]``."""
+    """Return a ``dropped_frames`` record as ``--drop-frames`` values, ``["n4:551", ...]``.
+
+    Parameters
+    ----------
+    d : dict
+        The record.
+
+    Returns
+    -------
+    values : list of str
+        The values.
+    """
     from .runner import _dropped
     return [f"{k}:{','.join(str(i) for i in v)}" for k, v in _dropped(d).items()]
 
 
 def _no_drop_frames(a, what: str) -> None:
+    """Refuse ``--drop-frames`` on a command that does not take it.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+    what : str
+        The command or instrument, for the message.
+
+    Raises
+    ------
+    SystemExit
+        If ``--drop-frames`` gives frames.
+    """
     if _drop_frames(a):
         raise SystemExit(f"--drop-frames leaves frames out of a NEAR night at load, and {what} does not take it")
 
 
 def _forbidden(a):
+    """Return ``--forbidden-pa`` as a list of ``(pa_deg, halfwidth_deg)`` tuples.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+
+    Returns
+    -------
+    bands : list of tuple of 2 floats
+        The bands of position angle where no source is injected, empty without the option.
+    """
     return [tuple(b) for b in (getattr(a, "forbidden_pa", None) or [])]
 
 
 def _line_mask(red, a, log=print):
-    """``--mask-line PA HALFWIDTH``: the strips to keep out of the noise apertures, as a
-    ``pixel_mask`` of the reducer's frame (None for none)."""
+    """Return ``--mask-line PA HALFWIDTH`` as a pixel mask of the reducer's frame, the strips kept out of the noise apertures.
+
+    Parameters
+    ----------
+    red : Reducer
+        The reducer.
+    a : argparse.Namespace
+        The parsed command line.
+    log : callable, default print
+        Function that takes each line of the log.
+
+    Returns
+    -------
+    mask : ndarray of bool or None
+        The mask, True to exclude, None without the option.
+    """
     lines = [tuple(float(v) for v in b) for b in (getattr(a, "mask_line", None) or [])]
     if not lines:
         return None
@@ -273,16 +501,28 @@ def _line_mask(red, a, log=print):
 
 
 def _constants_for_run(a) -> None:
-    """Settle ``--pxscale``, ``--psflib`` and ``--north`` for a NEAR command on a run
-    directory: what this command line says, else what the run was made with
-    (``run_setup.json``'s reducer ``provenance``), else, for a run made before 2026-11-01,
-    which recorded none of them, ``NEAR.legacy_pxscale``, ``ROOT/psflib`` and the constant
-    north.  A new run takes ``NEAR.pxscale`` and the nights' north files.
+    """Settle ``--pxscale``, ``--psflib`` and ``--north`` for a NEAR command on a run directory.
 
-    The constants decide where every source is injected and how every S/N is measured, so a
-    resume, an extension, a re-reduction and a check reproduce the run only with its own.  A
-    recorded library that is not on this machine is refused rather than replaced, and so is a
-    recorded north file that is gone or has changed (when the reducer is built)."""
+    Each is what this command line says, else what the run was made with (``run_setup.json``'s reducer
+    ``provenance``), else, for a run made before 2026-11-01, which recorded none of them,
+    ``NEAR.legacy_pxscale``, ``ROOT/psflib`` and the constant north.  A new run takes ``NEAR.pxscale``
+    and the nights' north files.
+
+    The constants decide where every source is injected and how every S/N is measured, so a resume, an
+    extension, a re-reduction and a check reproduce the run only with its own.  A recorded library that
+    is not on this machine is refused rather than replaced, and so is a recorded north file that is
+    gone or has changed (when the reducer is built).
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line, changed in place.
+
+    Raises
+    ------
+    SystemExit
+        If the run was made with another instrument, or its PSF library is not on this machine.
+    """
     import json
     from .instruments.near import NEAR
     if getattr(a, "instrument", "near") not in (None, "near"):
@@ -333,9 +573,17 @@ def _constants_for_run(a) -> None:
 
 
 def _idl_constants(a) -> None:
-    """The constants of ``reduce_near_2.pro`` for a command that mirrors an IDL run (``replay``,
-    ``compare``, a new ``near --from-idl-setup``): 0.0456"/px and 36.5 deg for every frame,
-    unless typed.  The IDL derotates by one north and has not taken the 2026 plate scale."""
+    """Set the constants of the IDL predecessor's ``reduce_near_2.pro`` for a command that mirrors one of its runs.
+
+    Such commands are ``replay``, ``compare`` and a new ``near --from-idl-setup``.  The constants are
+    0.0456"/px and a north of 36.5 degrees for every frame, unless typed, since the predecessor
+    derotates by one north and has not taken the 2026 plate scale.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line, changed in place.
+    """
     from .instruments.near import NEAR
     given = _explicit_dests(getattr(a, "_argv", None))
     if "pxscale" not in given:
@@ -346,13 +594,25 @@ def _idl_constants(a) -> None:
 
 
 def _data_edits_for_run(a) -> None:
-    """``--cube-name``, ``--drop-frames``, ``--subtract-sources`` and ``--inject-sources`` on a
-    run directory that holds a checkpoint.
+    """Settle the data edits of a command on a run directory that holds a checkpoint.
 
-    A run's evaluations were made on particular frames, so a later command on it reduces the
-    same ones.  What the checkpoint recorded (``RunConfig.data_edits``) is used when an option
-    is not typed.  A typed value that differs from the record is refused rather than mixed in.
-    ``klip-tpe rereduce``, which only reads the run, uses :func:`_data_edits_for_rereduce`."""
+    They are ``--cube-name``, ``--drop-frames``, ``--subtract-sources`` and ``--inject-sources``.  A
+    run's evaluations were made on particular frames, so a later command on it reduces the same ones.
+    What the checkpoint recorded (``RunConfig.data_edits``) is used where an option is not typed, the
+    sources restored as ``a._restored_sources`` and ``a._restored_injected``.  A typed value that
+    differs from the record is refused rather than mixed in.  ``klip-tpe rereduce``, which only reads
+    the run, uses :func:`_data_edits_for_rereduce`.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line, changed in place.
+
+    Raises
+    ------
+    SystemExit
+        If a typed option differs from the record.
+    """
     run_dir = getattr(a, "run_dir", None)
     if not run_dir or not os.path.isdir(str(run_dir)):
         return
@@ -419,12 +679,18 @@ def _data_edits_for_run(a) -> None:
 
 
 def _data_edits_for_rereduce(a) -> None:
-    """The frames ``klip-tpe rereduce`` reduces a finished run's winners on: what this command
-    line types, and for each option it leaves out, what the run was made on (its checkpoint).
+    """Settle the frames ``klip-tpe rereduce`` reduces a finished run's winners on.
 
-    A typed ``--subtract-sources`` or ``--subtract-line`` replaces the run's subtraction as a
-    whole, a typed ``--inject-sources`` its added sources, and a typed ``--drop-frames`` its
-    dropped frames (``none`` for none).  Nothing is refused, since the run is only read."""
+    Each option is what this command line types, else what the run was made on (its checkpoint).  A
+    typed ``--subtract-sources`` or ``--subtract-line`` replaces the run's subtraction as a whole, a
+    typed ``--inject-sources`` its added sources, and a typed ``--drop-frames`` its dropped frames
+    (``none`` for none).  Nothing is refused, since the run is only read.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line, changed in place.
+    """
     run_dir = getattr(a, "run_dir", None)
     rec = {}
     if run_dir and os.path.isdir(str(run_dir)):
@@ -467,12 +733,20 @@ _KLIP_GRAM_FILE = "klip_gram.json"
 
 
 def _klip_gram_for_run(a, record: bool = True) -> None:
-    """Settle ``--klip-gram`` for a command on a run directory: what this command line says,
-    else what the run has been using (``<run>/klip_gram.json``), else ``target``.
+    """Settle ``--klip-gram`` for a command on a run directory.
 
-    The two modes give the same KLIP to float64 rounding but not to the bit, so a run keeps
-    its mode across resumes, however they are typed.  A command line that changes it writes
-    the new mode there with the time, and every later resume reads it back."""
+    It is what this command line says, else what the run has been using (``<run>/klip_gram.json``),
+    else ``target``.  The two modes give the same KLIP to float64 rounding but not to the bit, so a run
+    keeps its mode across resumes, however they are typed.  A command line that changes it writes the
+    new mode there with the time, and every later resume reads it back.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line, changed in place.
+    record : bool, default True
+        Whether a change is written to ``klip_gram.json``.  False keeps it for this command only.
+    """
     import json
     import time
     run_dir = getattr(a, "run_dir", None)
@@ -510,8 +784,14 @@ _CARD_FILE = "card.json"
 
 
 def _auto_card_share() -> float:
-    """``--gpu-share auto``: 30 where Linux shows a card and CuPy is installed (found, not
-    imported: the parent never loads CUDA), else 0."""
+    """Return the card's share of ``--gpu-share auto``.
+
+    Returns
+    -------
+    share : float
+        30 where Linux shows a card and CuPy is installed (found, not imported, since the parent never
+        loads CUDA), else 0.
+    """
     import importlib.util
     from .parallel import card_present
     from .reducer import _gpu_card_factory
@@ -523,7 +803,23 @@ def _auto_card_share() -> float:
 
 
 def _card_share_value(v):
-    """``--gpu-share`` as a percentage, None for ``auto``."""
+    """Parse ``--gpu-share`` as a percentage.
+
+    Parameters
+    ----------
+    v : str, float or None
+        The option's value.
+
+    Returns
+    -------
+    share : float or None
+        The percentage, None for ``auto`` or no value.
+
+    Raises
+    ------
+    SystemExit
+        If the value is not a number from 0 to 100 or ``auto``.
+    """
     if v is None or str(v).strip().lower() == "auto":
         return None
     try:
@@ -536,13 +832,20 @@ def _card_share_value(v):
 
 
 def _card_for_run(a, record: bool = True) -> None:
-    """Settle ``--gpu-share`` and ``--gpu-workers`` for a command that searches a run directory:
-    what this command line says, else what the run has been using (``<run>/card.json``), else
-    ``auto`` and 3 workers.
+    """Settle ``--gpu-share`` and ``--gpu-workers`` for a command that searches a run directory.
 
-    The share decides which draws the card reduces, and the card's images differ from the
-    CPU's at about 1e-5 of the noise, so a run keeps its share across resumes, however they are
-    typed.  A command line that changes it writes the new values there with the time."""
+    Each is what this command line says, else what the run has been using (``<run>/card.json``), else
+    ``auto`` and 3 workers.  The share decides which draws the card reduces, and the card's images
+    differ from the CPU's at about 1e-5 of the noise, so a run keeps its share across resumes, however
+    they are typed.  A command line that changes it writes the new values there with the time.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line, changed in place.
+    record : bool, default True
+        Whether a change is written to ``card.json``.
+    """
     import json
     import time
     run_dir = getattr(a, "run_dir", None)
@@ -587,8 +890,17 @@ def _card_for_run(a, record: bool = True) -> None:
 
 
 def _set_card(red, a) -> None:
-    """The card's share and workers on the reducer, before the worker pool starts.  A command
-    that did not settle them for a run (:func:`_card_for_run`) gets no card."""
+    """Set the card's share and workers on a reducer, before its worker pool starts.
+
+    A command that did not settle them for a run (:func:`_card_for_run`) gets no card.
+
+    Parameters
+    ----------
+    red : Reducer
+        The reducer.
+    a : argparse.Namespace
+        The parsed command line.
+    """
     if not hasattr(red, "card_share"):
         return
     share = getattr(a, "gpu_share", None)
@@ -597,7 +909,34 @@ def _set_card(red, a) -> None:
 
 
 def _generic_objects(a, log=print):
-    """Reducer / objective / sampler / guard for plain registered cubes (``--cube``)."""
+    """Build the reducer, objective, sampler and guard of plain registered cubes (``--cube``).
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+    log : callable, default print
+        Function that takes each line of the log.
+
+    Returns
+    -------
+    reducer : Reducer
+        The reducer.
+    objective : Objective
+        The objective.
+    sampler : Sampler
+        The source sampler.
+    guard : callable or None
+        The guard on the reference frames, None with ``--fast``.
+    throughput : None
+        No transmission, which this instrument does not give.
+
+    Raises
+    ------
+    SystemExit
+        If ``--cube``, ``--angles``, ``--pxscale`` or ``--lam`` is missing, a per-cube option gives
+        another number of values than cubes, or ``--star-flux halo`` is given.
+    """
     import os as _os
     from .instruments import generic
     from .parallel import resolve_workers
@@ -654,7 +993,18 @@ def _generic_objects(a, log=print):
 
 
 def _groups_spec(v):
-    """``--groups``: none | auto | a list of JD split times | @file with one label per frame."""
+    """Parse ``--groups``, which is none, auto, a list of JD split times or ``@file`` with one label per frame.
+
+    Parameters
+    ----------
+    v : str, sequence of str or None
+        The option's value.
+
+    Returns
+    -------
+    groups : str, list of float, ndarray of int or None
+        The keyword, the split times, the labels read from the file, or None without the option.
+    """
     if v is None:
         return None
     if isinstance(v, (list, tuple)):
@@ -673,6 +1023,28 @@ def _groups_spec(v):
 
 
 def _nomic_objects(a, log=print):
+    """Build the reducer, objective, sampler and guard of pyNOMIC working directories.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+    log : callable, default print
+        Function that takes each line of the log.
+
+    Returns
+    -------
+    reducer : Reducer
+        The reducer.
+    objective : Objective
+        The objective.
+    sampler : Sampler
+        The source sampler.
+    guard : callable or None
+        The guard on the reference frames, None with ``--fast``.
+    throughput : None
+        No transmission, which this instrument does not give.
+    """
     from .instruments import nomic
     objs = a.obj if isinstance(a.obj, (list, tuple)) else [a.obj]
     roots = a.root if isinstance(a.root, (list, tuple)) else [a.root]
@@ -707,10 +1079,37 @@ def _nomic_objects(a, log=print):
 
 
 def _ales_objects(a, log=print):
-    """Reducer / objective / sampler / guard for ALES integral-field cubes, wavelength groups as
-    partitions (``klip_tpe.instruments.ales``): a reduction's products under ``--root``, or a
-    public data set in the release layout (``--ales-dataset``, one partition per night and
-    group)."""
+    """Build the reducer, objective, sampler and guard of ALES integral-field cubes, wavelength groups as partitions.
+
+    The cubes are a reduction's products under ``--root``, or a public data set in the release layout
+    (``--ales-dataset``), one partition per night and group (:mod:`klip_tpe.instruments.ales`).
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+    log : callable, default print
+        Function that takes each line of the log.
+
+    Returns
+    -------
+    reducer : Reducer
+        The reducer.
+    objective : Objective
+        The objective.
+    sampler : Sampler
+        The source sampler.
+    guard : callable or None
+        The guard on the reference frames, None with ``--fast``.
+    throughput : None
+        No transmission, which this instrument does not give.
+
+    Raises
+    ------
+    SystemExit
+        If neither ``--root`` nor ``--ales-dataset`` is given, ``--ales-reflib`` lacks ``--ales-ref``,
+        ``--ales-ref`` comes with a data set, or the data set is unknown or not in the release layout.
+    """
     from .instruments import ales
     from .parallel import resolve_workers
     dataset = getattr(a, "ales_dataset", None)
@@ -775,6 +1174,13 @@ def _ales_objects(a, log=print):
 
 
 def _add_near_args(p):
+    """Add the options that build a command's reducer, from its instrument and data, to its parser.
+
+    Parameters
+    ----------
+    p : argparse.ArgumentParser
+        The command's parser.
+    """
     p.add_argument("--instrument", default="near", choices=["near", "nomic", "generic", "ales"],
                    help="near: NEAR campaign tree under --root; nomic: pyNOMIC working directory under --root; "
                         "generic: any registered cube (--cube/--angles/--psf ...); "
@@ -983,7 +1389,16 @@ def _add_near_args(p):
 
 
 def _protocol_args(p):
-    """Run-protocol options shared by ``near`` (A §3.1 opt_width, §5.9 scan mode, §9 products, C hooks)."""
+    """Add the run-protocol options of a new run to a parser.
+
+    They cover the adaptive annuli (A §3.1, ``--opt-width``), the scan modes (§5.9), the products (§9)
+    and the verification hooks (C).
+
+    Parameters
+    ----------
+    p : argparse.ArgumentParser
+        The command's parser.
+    """
     p.add_argument("--opt-width", action="store_true",
                    help="adaptive annuli: --ann-edges gives the first inner edge; 'width' becomes a searched dim")
     p.add_argument("--width-range", type=float, nargs=2, default=[15.0, 30.0], metavar=("W0", "W1"))
@@ -1076,8 +1491,16 @@ def _protocol_args(p):
 
 
 def _stitch_args(p, rerun: bool = False):
-    """``--stitch-injections`` and ``--overlap-pads``, for a new run (``near``, ``generic``) or,
-    with ``rerun``, for ``rereduce``, where the default is what the run did."""
+    """Add ``--stitch-injections`` and ``--overlap-pads`` to a parser.
+
+    Parameters
+    ----------
+    p : argparse.ArgumentParser
+        The command's parser.
+    rerun : bool, default False
+        Whether the command is ``rereduce``, whose defaults are what the run did, rather than a new run
+        (``near``, ``generic``).
+    """
     was = ("the run's, all for a run made since 2026-11-03 and own before" if rerun else "all")
     p.add_argument("--stitch-injections", choices=("all", "own"), default=None,
                    help="what the final stitch's injected images hold. all: each annulus' winner reduced once "
@@ -1096,7 +1519,23 @@ def _stitch_args(p, rerun: bool = False):
 
 
 def _n_sources(a):
-    """``--n-sources`` as ``RunConfig.n_sources``: one count, or one per annulus."""
+    """Return ``--n-sources`` as ``RunConfig.n_sources``, one count or one per annulus.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+
+    Returns
+    -------
+    n_sources : int, list of int or None
+        The count, the counts per annulus, or None without the option.
+
+    Raises
+    ------
+    SystemExit
+        If a count is negative.
+    """
     ns = getattr(a, "n_sources", None)
     if ns is None:
         return None
@@ -1106,7 +1545,23 @@ def _n_sources(a):
 
 
 def _min_r_fwhm(a):
-    """``--min-r-fwhm`` as ``RunConfig.min_r_fwhm``."""
+    """Return ``--min-r-fwhm`` as ``RunConfig.min_r_fwhm``.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+
+    Returns
+    -------
+    min_r_fwhm : float or None
+        The radius, in FWHM, None without the option.
+
+    Raises
+    ------
+    SystemExit
+        If it is negative.
+    """
     v = getattr(a, "min_r_fwhm", None)
     if v is None:
         return None
@@ -1116,8 +1571,21 @@ def _min_r_fwhm(a):
 
 
 def _contrast_grid_config(a):
-    """``RunConfig.contrast_grid`` from the ``--contrast-grid`` / ``--cg-*`` options.  Without
-    ``--contrast-grid`` the mode is :class:`ContrastGridConfig`'s default (grid)."""
+    """Return ``RunConfig.contrast_grid`` from the ``--contrast-grid`` and ``--cg-*`` options.
+
+    Without ``--contrast-grid`` the mode is :class:`~klip_tpe.contrast_grid.ContrastGridConfig`'s
+    default, the grid.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+
+    Returns
+    -------
+    config : ContrastGridConfig
+        The configuration.
+    """
     from .contrast_grid import ContrastGridConfig
     mode = getattr(a, "contrast_grid", None)
     return ContrastGridConfig(**({"mode": mode} if mode else {}), n_pa=int(getattr(a, "cg_pa", 12)),
@@ -1131,7 +1599,23 @@ def _contrast_grid_config(a):
 
 
 def _ann_extra(a) -> list:
-    """``--ann-extra IN:OUT ...`` as ``[[inner, outer], ...]`` px."""
+    """Return ``--ann-extra IN:OUT ...`` as ``[[inner, outer], ...]``, in pixels.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+
+    Returns
+    -------
+    annuli : list of list of 2 floats
+        The extra annuli, empty without the option.
+
+    Raises
+    ------
+    SystemExit
+        If an annulus is not ``IN:OUT``.
+    """
     out = []
     for item in getattr(a, "ann_extra", None) or []:
         parts = str(item).replace(",", ":").split(":")
@@ -1144,7 +1628,23 @@ def _ann_extra(a) -> list:
 
 
 def _score_floor(text):
-    """``--score-floor S`` as ``RunConfig.score_floor``: a number, or None for ``off``."""
+    """Parse ``--score-floor S`` as ``RunConfig.score_floor``.
+
+    Parameters
+    ----------
+    text : str
+        The option's value, a number or ``off``.
+
+    Returns
+    -------
+    floor : float or None
+        The floor, None for ``off``.
+
+    Raises
+    ------
+    SystemExit
+        If the value is not a finite number or ``off``.
+    """
     t = str(text).strip().lower()
     if t in ("off", "none"):
         return None
@@ -1158,6 +1658,18 @@ def _score_floor(text):
 
 
 def _protocol_config(a) -> dict:
+    """Return the ``RunConfig`` keywords the run-protocol options set.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+
+    Returns
+    -------
+    kwargs : dict
+        The keywords, the optional ones only where their option is given.
+    """
     ns = _n_sources(a)
     rmin = _min_r_fwhm(a)
     extra = _ann_extra(a)
@@ -1186,8 +1698,24 @@ def _protocol_config(a) -> dict:
 
 
 def build_near_space(red, a):
-    """The NEAR search space plus the protocol adjustments: a searched ``width`` dim for
-    ``--opt-width`` and no ``k_klip`` dims in the scan modes (k comes from the k-scan)."""
+    """Build the search space of the instrument selected, with the protocol's adjustments.
+
+    ``--opt-width`` adds a searched ``width`` dimension, and the scan modes drop the ``k_klip``
+    dimensions, k coming from the k-scan.  An ALES space has one block shared by every group, whatever
+    ``--global-block`` says.
+
+    Parameters
+    ----------
+    red : Reducer
+        The reducer.
+    a : argparse.Namespace
+        The parsed command line.
+
+    Returns
+    -------
+    space : SearchSpace
+        The search space.
+    """
     from .instruments import near
     if getattr(a, "instrument", "near") == "generic":
         from .instruments import generic
@@ -1218,7 +1746,21 @@ def build_near_space(red, a):
 
 
 def _default_run_dir(a) -> str:
-    """IDL layout: ``<root>/comb/opt/run_YYYYMMDD_HHMMSS`` (generic cubes: ``./runs/run_...``)."""
+    """Return a new run's directory, in the IDL predecessor's layout ``<root>/comb/opt/run_YYYYMMDD_HHMMSS``.
+
+    Generic cubes take ``<root>/run_...``, or ``runs/run_...`` without ``--root``, and ALES takes
+    ``runs/run_...``, since its ``--root`` stays as it is.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+
+    Returns
+    -------
+    run_dir : str
+        The directory, named by the time.
+    """
     root = a.root[0] if isinstance(a.root, (list, tuple)) else a.root
     if getattr(a, "instrument", "near") == "generic":
         return os.path.join(root or "runs", time.strftime("run_%Y%m%d_%H%M%S"))
@@ -1229,6 +1771,21 @@ def _default_run_dir(a) -> str:
 
 
 def cmd_near(a):
+    """Run ``klip-tpe near``, which starts a run, or goes on with one on a directory that holds a checkpoint.
+
+    With ``--from-idl-setup`` it mirrors a run of the IDL predecessor: its nights, annulus, budget,
+    contrast, validation and TPE settings.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+
+    Raises
+    ------
+    SystemExit
+        If ``--ann-extra`` does not fit the annuli.
+    """
     from .runner import CalibrationConfig, RunConfig, Runner, ValidationConfig
     if not a.run_dir:
         a.run_dir = _default_run_dir(a)
@@ -1241,10 +1798,10 @@ def cmd_near(a):
     if getattr(a, "from_idl_setup", None) and not os.path.exists(os.path.join(a.run_dir, "run_setup.json")):
         _idl_constants(a)
     if getattr(a, "from_idl_setup", None):
-        # mirror an IDL run: nights, annulus, budget, contrast, validation and TPE settings
+        # mirror a run of the IDL predecessor: nights, annulus, budget, contrast, validation and TPE settings
         from .idl_compare import matched_run_config
         cfg, info = matched_run_config(a.from_idl_setup, seed=a.seed, **_protocol_config(a))
-        # the IDL's validation rules unless asked otherwise
+        # the IDL predecessor's validation rules unless asked otherwise
         if getattr(a, "n_rescore", None) is not None:
             cfg.validation.n_rescore = int(a.n_rescore)
         if getattr(a, "validation_dedup", None):
@@ -1286,6 +1843,18 @@ def cmd_near(a):
 
 
 def _callbacks(a):
+    """Return the run's callbacks, the live display unless it is turned off.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+
+    Returns
+    -------
+    callbacks : list
+        The :class:`~klip_tpe.display.LiveDisplay`, or nothing with ``--no-display``.
+    """
     if not getattr(a, "display", True):
         return []
     from .display import LiveDisplay
@@ -1295,7 +1864,23 @@ def _callbacks(a):
 
 
 def latest_run_dir(root: str) -> str:
-    """The newest ``run_*`` directory under ``<root>/comb/opt`` (by name, i.e. by start time)."""
+    """Return the newest ``run_*`` directory under ``<root>/comb/opt``, by name and so by start time.
+
+    Parameters
+    ----------
+    root : str
+        The data root.
+
+    Returns
+    -------
+    run_dir : str
+        The directory.
+
+    Raises
+    ------
+    SystemExit
+        If there is none.
+    """
     d = os.path.join(root, "comb", "opt")
     runs = sorted(x for x in (os.listdir(d) if os.path.isdir(d) else []) if x.startswith("run_")
                   and os.path.isdir(os.path.join(d, x)))
@@ -1305,11 +1890,27 @@ def latest_run_dir(root: str) -> str:
 
 
 def _resolve_run_dir(a) -> str:
-    """``--run-dir last`` (also ``latest`` / ``newest``) -> the most recent run under
-    ``<root>/comb/opt``; anything else is taken literally.  By this point the run record
-    has already had its say (:func:`_fill_from_registry`), so reaching here with nothing to
-    go on means there is genuinely no run to resume -- say so, rather than failing on a
-    ``None`` path deep inside ``os.path.join``."""
+    """Resolve ``--run-dir``, where ``last``, ``latest`` or ``newest`` names the most recent run under ``<root>/comb/opt``.
+
+    Anything else is taken as it is.  The run record has had its say by then (:func:`_fill_from_registry`),
+    so reaching here with nothing to go on means there is no run to resume, which it says rather than
+    failing on a None path.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line, changed in place.
+
+    Returns
+    -------
+    run_dir : str
+        The run directory.
+
+    Raises
+    ------
+    SystemExit
+        If ``last`` comes without ``--root``, or no run lies under it.
+    """
     if str(a.run_dir).strip().lower() in ("last", "latest", "newest"):
         root = a.root[0] if isinstance(a.root, (list, tuple)) else a.root
         if not root:
@@ -1325,12 +1926,18 @@ def _resolve_run_dir(a) -> str:
 
 
 def _register(run_dir, argv=None) -> None:
-    """Put this run on the record so ``klip-tpe runs`` can see it and ``klip-tpe resume``
-    can restart it without being told how.
+    """Put a run on the record, so ``klip-tpe runs`` sees it and ``klip-tpe resume`` restarts it without being told how.
 
-    ``argv`` overrides what is recorded.  A resume passes the *complete* command line it
-    resolved to rather than the sparse one that was typed: recording ``klip-tpe resume
-    --show`` would leave the next resume with an entry carrying no data root.
+    A failure is ignored.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run directory.
+    argv : sequence of str or None, default None
+        The command line recorded in place of this one.  A resume passes the complete command line it
+        resolved to, since recording ``klip-tpe resume --show`` would leave the next resume an entry
+        with no data root.
     """
     try:
         from .registry import register
@@ -1340,12 +1947,21 @@ def _register(run_dir, argv=None) -> None:
 
 
 def _explicit_dests(argv=None) -> set:
-    """The option names actually typed on this command line.
+    """Return the options typed on a command line, by their ``dest`` names.
 
-    argparse fills in defaults, so ``a.nights == [1..6]`` cannot be distinguished from a
-    user who typed it -- and quietly preferring the default over the value a run was
-    started with would resume a three-night run as a six-night one.  Re-parsing with every
-    default suppressed leaves only what was really given.
+    argparse fills in defaults, so ``a.nights == [1..6]`` cannot tell the default from a user who typed
+    it, and preferring the default over the value a run was started with would resume a three-night run
+    as a six-night one.  Parsing again with every default suppressed leaves only what was given.
+
+    Parameters
+    ----------
+    argv : sequence of str or None, default None
+        The command line, without the program's name.  None takes ``sys.argv``.
+
+    Returns
+    -------
+    dests : set of str
+        The options typed, empty when the line does not parse.
     """
     import argparse as _ap
     import copy as _copy
@@ -1364,8 +1980,24 @@ def _explicit_dests(argv=None) -> set:
 
 
 def _fill_from_registry(a, argv=None) -> None:
-    """Make ``klip-tpe resume`` work with no arguments: take the data root (and the rest of
-    what the reducer needs) from the argv the run recorded when it started."""
+    """Make ``klip-tpe resume`` work with no arguments, from the command line the run recorded when it started.
+
+    The data root and the rest of what the reducer needs come from the newest record of the run that
+    carries a data root, each option only where this command line does not type it.
+    ``a._record_argv`` gets the complete command line this resume runs, for the record.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line, changed in place.
+    argv : sequence of str or None, default None
+        This command line, for :func:`_explicit_dests`.
+
+    Raises
+    ------
+    SystemExit
+        If the run is still running.
+    """
     from .registry import known_runs
     import shlex
     need_root = not getattr(a, "root", None)
@@ -1464,6 +2096,13 @@ def _fill_from_registry(a, argv=None) -> None:
 
 
 def cmd_runs(a):
+    """Run ``klip-tpe runs``, which lists the runs on record and stops those asked.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+    """
     from .registry import format_table, known_runs, stop_run
     root = a.root[0] if isinstance(a.root, (list, tuple)) else a.root
     runs = known_runs(root=root)
@@ -1487,6 +2126,15 @@ def cmd_runs(a):
 
 
 def cmd_resume(a):
+    """Run ``klip-tpe resume``, which restarts a run from its checkpoint.
+
+    A failure to read the run record does not stop the resume, but a run still running does.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+    """
     from .runner import Runner
     try:
         _fill_from_registry(a, getattr(a, "_argv", None))
@@ -1509,6 +2157,16 @@ def cmd_resume(a):
 
 
 def cmd_extend(a):
+    """Run ``klip-tpe extend``, which reopens a run with new totals of evaluations per annulus.
+
+    A total of 0 or less leaves its annulus untouched, one at most the annulus' count re-validates it
+    only, and a larger one goes on with its search.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+    """
     from .runner import Runner
     _resolve_run_dir(a)
     _klip_gram_for_run(a)
@@ -1520,8 +2178,23 @@ def cmd_extend(a):
 
 
 def cmd_fit_chain(a):
-    """``klip-tpe fit-chain``: the node values of a chain of point sources (a line through the
-    star) fitted to a finished run's final image through its winners (:mod:`klip_tpe.chainfit`)."""
+    """Run ``klip-tpe fit-chain``, which fits the node values of a chain of point sources to a finished run's final image.
+
+    The chain, a line through the star from ``--chain`` or ``--line-nodes``, is fitted through the run's
+    winners (:mod:`klip_tpe.chainfit`) and written to ``--out``, by default beside the run.  With
+    ``--per-night`` each night gets its own amplitude of the fitted chain.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+
+    Raises
+    ------
+    SystemExit
+        If both or neither of ``--chain`` and ``--line-nodes`` are given, a file cannot be read, or the
+        fit fails.
+    """
     from .chainfit import fit_chain, fit_per_night, line_basis, read_chain, read_line_nodes
     from .runner import Runner
     try:
@@ -1572,9 +2245,24 @@ def cmd_fit_chain(a):
 
 
 def cmd_rereduce(a):
-    """``klip-tpe rereduce``: a finished run's winners reduced again, on other frames (a line
-    subtracted, planets added), with the final stitch at the run's weights, its S/N map and
-    the final verify, beside the run (:meth:`klip_tpe.runner.Runner.rereduce`)."""
+    """Run ``klip-tpe rereduce``, which reduces a finished run's winners again on other frames, beside the run.
+
+    The frames may have a line subtracted or planets added (:func:`_data_edits_for_rereduce`).  The
+    final stitch at the run's weights, its S/N map and the final verify follow
+    (:meth:`klip_tpe.runner.Runner.rereduce`), and ``--base-winners`` takes other configurations as the
+    winners of some annuli.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+
+    Raises
+    ------
+    SystemExit
+        If ``--base-winners`` cannot be read, ``--out`` already holds a re-reduction without
+        ``--overwrite``, or the re-reduction fails.
+    """
     from .runner import Runner
     try:
         _fill_from_registry(a, getattr(a, "_argv", None))
@@ -1615,9 +2303,22 @@ def cmd_rereduce(a):
 
 
 def cmd_rescore(a):
-    """``klip-tpe rescore``: candidates for annuli of a finished run scored on its stitch, the
-    other annuli at its winners, with the candidates of other runs of the same setup
-    (:func:`klip_tpe.refine.rescore`).  The runs are only read."""
+    """Run ``klip-tpe rescore``, which scores candidates for annuli of a finished run on its stitch.
+
+    The other annuli stay at the run's winners, and the candidates of other runs of the same setup
+    enter too (:func:`klip_tpe.refine.rescore`).  The runs are only read, and the log also goes to
+    ``rescore.log`` in ``--out``.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+
+    Raises
+    ------
+    SystemExit
+        If a picks file cannot be read or the re-score fails.
+    """
     from .refine import parse_annuli, rescore
     from .runner import Runner
     try:
@@ -1668,6 +2369,16 @@ def cmd_rescore(a):
 
 
 def cmd_replay(a):
+    """Run ``klip-tpe replay``, which reduces again a sample of the evaluations in the IDL predecessor's log.
+
+    The ``--n`` evaluations are spread over the log by score, and each is scored through the Python
+    objective.  The results go to ``replay.json`` in the run directory, with a summary printed.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+    """
     import numpy as np
     from .idl_replay import read_idl_log, replay, summarize
     from .instruments import near
@@ -1679,7 +2390,7 @@ def cmd_replay(a):
     if space.names != log.names:
         print("WARNING: space names differ from the IDL log header; mapping by name where possible")
     cfg = RunConfig(ann_edges=a.ann_edges, n_iter=1, n_init=1, seed=a.seed, contrast0=a.contrast,
-                    calibration=CalibrationConfig(forced=[a.contrast]), edge_padding="all")   # the IDL's zones
+                    calibration=CalibrationConfig(forced=[a.contrast]), edge_padding="all")   # the IDL predecessor's zones
     r = Runner(red, space, objective, sampler, cfg, a.run_dir, throughput_fn=thr, log=lambda s: None)
     r.contrast = a.contrast
     fin = np.flatnonzero(np.isfinite(log.score))
@@ -1690,6 +2401,13 @@ def cmd_replay(a):
 
 
 def cmd_testbed(a):
+    """Run ``klip-tpe testbed``, which compares the TPE density models on a synthetic problem.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.  The results go to ``--out`` as JSON when it is given.
+    """
     from .testbed import compare_density_models
     out = compare_density_models(nblock=a.nblock, bdim=a.bdim, n_iter=a.n_iter, n_init=a.n_init, nseed=a.nseed,
                                  noise=a.noise, ridge=a.ridge, transposed=a.transposed, pbest=a.pbest)
@@ -1699,20 +2417,40 @@ def cmd_testbed(a):
 
 
 def cmd_plots(a):
+    """Run ``klip-tpe plots``, which draws and saves a run's plots (:func:`klip_tpe.plots.plot_all`).
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+    """
     from .plots import plot_all
     figs = plot_all(a.run_dir, save=True)
     print("wrote", ", ".join(sorted(figs)))
 
 
 def cmd_render(a):
-    """Every evaluation's panel, drawn after the fact.
+    """Run ``klip-tpe render``, which draws every evaluation's panel after the fact.
 
-    The live display skips a panel whenever the render thread is still drawing the last one
-    (so the window shows the present instead of falling behind), and says so with a pointer
-    here.  The run's log and its per-evaluation crops hold everything a panel needs, so the
-    complete set can be drawn afterwards -- into its own directory, because the live
-    ``steps/`` also holds the calibration and validation frames this cannot redraw, and
-    renumbering over them would leave the two sets interleaved."""
+    The live display skips a panel whenever the render thread is still drawing the last one, so the
+    window shows the present instead of falling behind, and says so with a pointer here.  The run's log
+    and its per-evaluation crops hold everything a panel needs, so the complete set can be drawn
+    afterwards.  It goes into its own directory, ``steps_rebuilt`` by default, because the live
+    ``steps/`` also holds the calibration and validation frames this cannot redraw, and renumbering
+    over them would leave the two sets interleaved.  With ``--with-data`` each frame's injected-PSF
+    model is drawn from the run's frames (:func:`_injected_model_fn`), and a movie follows unless
+    ``--no-movie``.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+
+    Raises
+    ------
+    SystemExit
+        If the run directory does not exist.
+    """
     from .display import render_steps
     if not os.path.isdir(a.run_dir):
         raise SystemExit(f"no run directory {a.run_dir}")
@@ -1732,7 +2470,18 @@ _RUN_INSTRUMENTS = {"near": "near", "ales": "ales", "nomic": "nomic", "generic":
 
 
 def _run_setup_reducer(run_dir) -> Dict[str, Any]:
-    """``run_setup.json``'s reducer record of a run directory, or ``{}``."""
+    """Return ``run_setup.json``'s reducer record of a run directory.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run directory.
+
+    Returns
+    -------
+    record : dict
+        The record, empty when the file is missing or unreadable.
+    """
     import json
     try:
         with open(os.path.join(str(run_dir), "run_setup.json")) as f:
@@ -1742,8 +2491,18 @@ def _run_setup_reducer(run_dir) -> Dict[str, Any]:
 
 
 def _run_instrument(run_dir) -> Optional[str]:
-    """The ``--instrument`` a run was made with, from its ``run_setup.json`` (the reducer's name,
-    else its provenance), or None when the record does not say."""
+    """Return the ``--instrument`` a run was made with, from its ``run_setup.json``.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run directory.
+
+    Returns
+    -------
+    instrument : str or None
+        The instrument, from the reducer's name, else its provenance, None when the record does not say.
+    """
     rec = _run_setup_reducer(run_dir)
     name = str(rec.get("name") or "").lower()
     if name in _RUN_INSTRUMENTS:
@@ -1753,15 +2512,35 @@ def _run_instrument(run_dir) -> Optional[str]:
 
 
 def _injected_model_fn(a):
-    """``render --with-data``: ``fn(sources, shape)``, the injected-PSF model of ``sources`` on
-    the run's reducer (:func:`klip_tpe.injection.injected_model`), the reducer built from the
-    data arguments as ``rereduce`` builds it, the ones left out filled from the run's record.
+    """Return the injected-PSF model of ``render --with-data``, built on the run's reducer.
 
-    The instrument and the plate scale are the run's, from ``run_setup.json``: the command
-    refuses rather than take another instrument's defaults (the WISPIT 2 ALES session,
-    2026-11-10), and so does a run whose data arguments were never recorded (one started from
-    a script), which the Python entry draws instead (:func:`klip_tpe.display.render_steps`
-    with ``reducer=``)."""
+    The reducer is built from the data arguments as ``rereduce`` builds it, the ones left out filled
+    from the run's record.  The instrument, the plate scale and the rotation library are the run's, from
+    ``run_setup.json``.  The command refuses rather than take another instrument's defaults, and so does
+    a run whose data arguments were never recorded (one started from a script), which the Python entry
+    draws instead (:func:`klip_tpe.display.render_steps` with ``reducer=``).
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line, changed in place.
+
+    Returns
+    -------
+    model_fn : callable
+        Function ``fn(sources, shape)``, the injected-PSF model of ``sources``
+        (:func:`klip_tpe.injection.injected_model`).
+
+    Raises
+    ------
+    SystemExit
+        If the instrument is unknown or not the run's, the reducer cannot be built, or its plate scale
+        is not the run's.
+
+    Notes
+    -----
+    The refusal dates from the WISPIT 2 ALES session of 2026-11-10.
+    """
     from .injection import injected_model
     try:
         _fill_from_registry(a, getattr(a, "_argv", None))
@@ -1812,7 +2591,17 @@ def _injected_model_fn(a):
 
 
 def cmd_compare(a):
-    """Replay the evaluations of a (running) IDL run through the Python objective."""
+    """Run ``klip-tpe compare``, which replays the evaluations of a run of the IDL predecessor through the Python objective.
+
+    The run may still be running.  Its new evaluations are synced
+    (:class:`klip_tpe.idl_compare.LiveComparison`) into ``compare.txt`` in ``--out``, and the statistics
+    of the agreement are printed.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+    """
     from .idl_compare import LiveComparison
     from .runner import CalibrationConfig, RunConfig, Runner, ValidationConfig
     if getattr(a, "instrument", "near") in (None, "near"):
@@ -1823,7 +2612,7 @@ def cmd_compare(a):
     cfg = RunConfig(ann_edges=list(a.ann_edges), n_iter=1, n_init=1, seed=a.seed, contrast0=a.contrast,
                     calibration=CalibrationConfig(forced=[a.contrast]), validation=ValidationConfig(n_top=1, n_valid=1),
                     fm_curve=False, save_fits=False, write_setup_files=False, param_verify=False,
-                    edge_padding="all")                  # the IDL pads every zone edge
+                    edge_padding="all")                  # the IDL predecessor pads every zone edge
     r = Runner(red, space, objective, sampler, cfg, os.path.join(a.out, "_runner"), throughput_fn=thr,
                log=lambda s: None)
     r.contrast = a.contrast
@@ -1842,7 +2631,13 @@ def cmd_compare(a):
 
 
 def _add_run_args(p):
-    """The search / protocol arguments shared by ``near`` and ``generic``."""
+    """Add the search and protocol options shared by ``near`` and ``generic`` to a parser.
+
+    Parameters
+    ----------
+    p : argparse.ArgumentParser
+        The command's parser.
+    """
     p.add_argument("--run-dir", default=None,
                    help="output directory (default: <root>/comb/opt/run_YYYYMMDD_HHMMSS, the IDL layout; "
                         "generic and ales: ./runs/run_...)")
@@ -1935,24 +2730,68 @@ def _add_run_args(p):
 
 
 def cmd_view(a):
+    """Run ``klip-tpe view``, a live window on a run, running or finished, in a process of its own.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+
+    Raises
+    ------
+    SystemExit
+        Always, with the viewer's exit status.
+    """
     from .viewer import view
     raise SystemExit(view(run_dir=a.run_dir, root=a.root, interval=a.interval,
                           scale=a.window_scale, once=a.once))
 
 
 class _Version(argparse.Action):
-    """``--version``: one unwrapped line (argparse's own version action wraps a long path)."""
+    """Action of ``--version``, which prints one unwrapped line, where argparse's own wraps a long path.
+
+    Parameters
+    ----------
+    option_strings : sequence of str
+        The option's strings.
+    dest : str, default argparse.SUPPRESS
+        The option's destination, none.
+    default : object, default argparse.SUPPRESS
+        The option's default, none.
+    help : str or None, default None
+        The option's help.
+    """
 
     def __init__(self, option_strings, dest=argparse.SUPPRESS, default=argparse.SUPPRESS, help=None):
         super().__init__(option_strings=option_strings, dest=dest, default=default, nargs=0, help=help)
 
     def __call__(self, parser, namespace, values, option_string=None):
+        """Print the version (:func:`klip_tpe.version.describe`) and exit.
+
+        Parameters
+        ----------
+        parser : argparse.ArgumentParser
+            The parser.
+        namespace : argparse.Namespace
+            The namespace, unused.
+        values : object
+            The values, none.
+        option_string : str or None, default None
+            The option string, unused.
+        """
         from .version import describe
         print(describe())
         parser.exit()
 
 
 def _build_parser():
+    """Build the parser of ``klip-tpe`` and its commands.
+
+    Returns
+    -------
+    parser : argparse.ArgumentParser
+        The parser, each command's ``func`` its ``cmd_*`` function.
+    """
     ap = argparse.ArgumentParser(prog="klip-tpe", description="KLIP-TPE reduction-parameter optimizer")
     ap.add_argument("--version", action=_Version,
                     help="print the version, the git commit and where klip_tpe is imported from")
@@ -2201,6 +3040,13 @@ def _build_parser():
 
 
 def main(argv=None):
+    """Parse a command line and run its command.
+
+    Parameters
+    ----------
+    argv : sequence of str or None, default None
+        The command line, without the program's name.  None takes ``sys.argv``.
+    """
     a = _build_parser().parse_args(argv)
     a._argv = argv
     a.func(a)
