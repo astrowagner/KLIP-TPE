@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — 2026-11-13 (stitch.py and products.py documented to the rule)
+
+- **`stitch.py` and `products.py` follow the documentation rule**: the stitch and its tiles, the
+  FITS helpers and text products, the noise profiles, the contrast curves, the sensitivity-weighted
+  stitch, the S/N map and the KLIP-FM cross-check.  Their docstrings now name the IDL predecessor
+  where they named the IDL.  Only docstrings and comments changed.
+
 ## Unreleased — 2026-11-13 (refine.py documented to the rule)
 
 - **`refine.py` follows the documentation rule**: the re-score's module docstring, with the NEAR2

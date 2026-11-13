@@ -1,7 +1,10 @@
-"""Per-annulus and run-level products: noise profiles, injection-calibrated
-5-sigma contrast curves, the sensitivity-weighted stitch across annuli and
-matched-filter S/N maps (ports of ``near2m_noiseprof``, ``near2m_kfit``, the
-contrast-curve block, the final stitch and ``near2m_snrmap``)."""
+"""Products of an annulus and of a run: noise profiles, contrast curves, the stitch across annuli and S/N maps.
+
+The noise profiles, the injection-calibrated 5-sigma contrast curves, the sensitivity-weighted
+stitch and the matched-filter S/N maps succeed the IDL predecessor's ``near2m_noiseprof``,
+``near2m_kfit``, contrast-curve block, final stitch and ``near2m_snrmap``.  The KLIP-FM cross-check
+curve succeeds its ``near2_fmresp`` and FM curve.
+"""
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -20,14 +23,43 @@ def noise_profile(img: np.ndarray, fwhm: float, rmin: float, rmax: float,
                   kernel: Optional[np.ndarray] = None, known: Sequence[Tuple[float, float]] = (),
                   pxscale: Optional[float] = None, excl_fwhm: float = 1.5,
                   pixel_mask: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
-    """Small-sample-corrected 1-sigma noise vs integer radius (px) from ``nap =
-    floor(2 pi r / fwhm)`` apertures per ring.  Default aperture = tophat sum of
-    radius ``fwhm/2`` (``near2m_noiseprof``); pass ``kernel`` to measure the
-    matched-filter noise instead.  ``known`` = [(rho_arcsec, pa_deg), ...] real companions
-    whose apertures (within ``excl_fwhm * fwhm``) are left out of the ring statistics, so a
-    detected planet does not inflate its own contrast limit (needs ``pxscale``).
-    ``pixel_mask`` (True = left out, the run's disk mask): no sample on it, as no ring of the
-    run takes one there.  Returns ``(sigma, radii)``."""
+    """Return the small-sample-corrected 1-sigma noise at each integer radius.
+
+    Each ring holds ``nap = floor(2 pi r / fwhm)`` apertures, and its noise is
+    ``std(ddof=1) sqrt(1 + 1/n)`` over the ``n`` apertures used.  The default aperture is a top-hat sum
+    of radius ``fwhm / 2``, as the IDL predecessor's ``near2m_noiseprof`` takes, and ``kernel``
+    measures the matched-filter noise instead.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    rmin : float
+        Smallest radius, in pixels, rounded up.
+    rmax : float
+        Largest radius, in pixels, rounded down.
+    kernel : ndarray or None, default None
+        The aperture's kernel.  None takes the top-hat.
+    known : sequence of tuple of 2 floats, default ()
+        Known companions, as ``(rho_arcsec, pa_deg)``, whose apertures within ``excl_fwhm`` FWHM are left
+        out, so a detected planet does not raise its own contrast limit.  They need ``pxscale``.
+    pxscale : float or None, default None
+        Plate scale, in arcsec per pixel.
+    excl_fwhm : float, default 1.5
+        Radius of the keep-out around each companion, in FWHM.
+    pixel_mask : ndarray of bool or None, default None
+        Pixels no aperture is placed on, True to exclude, such as the run's disk mask.
+
+    Returns
+    -------
+    sigma : ndarray
+        The noise at each radius, NaN where the ring holds fewer than 4 apertures or fewer than 3 are
+        used.
+    radii : ndarray
+        The radii, in pixels.
+    """
     img = np.asarray(img, float)
     cx, cy = star_center(img.shape)
     if kernel is None:
@@ -67,12 +99,34 @@ def noise_profile(img: np.ndarray, fwhm: float, rmin: float, rmax: float,
 
 
 def throughput_fit(r_s: np.ndarray, k_s: np.ndarray, r_eval: np.ndarray, order: int = 2) -> np.ndarray:
-    """Robust polynomial fit of ``log K`` vs separation (``near2m_kfit``): the order is
-    reduced until there are enough points, 3-sigma clipped once, and the evaluation
-    is clamped to the sampled radius range.  Fewer than 3 points -> median.  The order
-    never exceeds the number of distinct radii less one, so samples all at one radius
-    (``--inject-rho``) take order 0, the mean of ``log K``, rather than a fit numpy warns is
-    rank-deficient (NEAR2, 2026-11-02)."""
+    """Fit ``log K`` against separation with a robust polynomial, and evaluate it.
+
+    The order drops until there are enough points, and never exceeds the number of distinct radii less
+    one, so samples all at one radius (``--inject-rho``) take order 0, the mean of ``log K``, rather
+    than a fit numpy warns is rank-deficient.  The residuals are clipped at 3 sigma once, and the
+    evaluation is clamped to the sampled range of radii.
+
+    Parameters
+    ----------
+    r_s : ndarray
+        Separation of each sample.
+    k_s : ndarray
+        Throughput of each sample, positive.
+    r_eval : ndarray
+        Separations to evaluate at, in the units of ``r_s``.
+    order : int, default 2
+        Order of the polynomial at most.
+
+    Returns
+    -------
+    k : ndarray
+        The fitted throughput at ``r_eval``, the samples' median for fewer than 3 samples, NaN for none.
+
+    Notes
+    -----
+    It succeeds the IDL predecessor's ``near2m_kfit``.  The cap on the order dates from NEAR2,
+    2026-11-02.
+    """
     r_s, k_s = np.asarray(r_s, float), np.asarray(k_s, float)
     g = np.isfinite(r_s) & np.isfinite(k_s) & (k_s > 0)
     r_s, k_s = r_s[g], k_s[g]
@@ -105,14 +159,48 @@ def contrast_curve(clean_img: np.ndarray, sample_r_as: Sequence[float], sample_s
                    kfit_order: int = 2, nsigma: float = 5.0,
                    known: Sequence[Tuple[float, float]] = (),
                    pixel_mask: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
-    """Injection-calibrated ``nsigma`` contrast curve.
+    """Return the injection-calibrated ``nsigma`` contrast curve of an annulus.
 
-    ``K(r) = SNR_inj * sigma(r) / contrast`` measures the recovered throughput at
-    each validation sample; the coronagraph transmission ``T(r)`` is factored out
-    before a smooth fit and re-applied, and ``c5 = nsigma * sigma(r) / K_fit(r)``.
-    ``known`` = real companions [(rho_arcsec, pa_deg), ...] excluded from the noise ring.
-    Returns radii (arcsec), curve, the per-sample ``nsigma*contrast/SNR`` points and
-    the noise profile.
+    Each validation sample measures the recovered throughput ``K = SNR_inj sigma(r) / contrast``, with
+    ``sigma`` the :func:`noise_profile` of the clean image.  The coronagraph's transmission ``T(r)`` is
+    factored out before a smooth fit (:func:`throughput_fit`) and put back, and the curve is
+    ``nsigma sigma(r) / K_fit(r)``.
+
+    Parameters
+    ----------
+    clean_img : ndarray, shape (ny, nx)
+        The clean reduction.
+    sample_r_as : sequence of float
+        Separation of each sample, in arcsec.
+    sample_snr : sequence of float
+        S/N of each sample.
+    contrast : float
+        Contrast the samples were injected at.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    rin_px : float
+        Inner edge of the annulus, in pixels, raised to one FWHM.
+    rout_px : float
+        Outer edge of the annulus, in pixels.
+    throughput_fn : callable or None, default None
+        The coronagraph's transmission, ``T(r_arcsec)``, floored at 1e-3 at the samples.  None takes 1.
+    kfit_order : int, default 2
+        Order of the throughput fit at most.
+    nsigma : float, default 5.0
+        Number of sigma of the curve.
+    known : sequence of tuple of 2 floats, default ()
+        Known companions, as ``(rho_arcsec, pa_deg)``, left out of the noise rings.
+    pixel_mask : ndarray of bool or None, default None
+        Pixels left out of the noise rings, True to exclude.
+
+    Returns
+    -------
+    curve : dict of str to ndarray
+        ``r_as`` (the radii, in arcsec), ``sigma`` (the noise profile), ``curve`` (NaN for fewer than 3
+        samples), ``sample_r`` and ``sample_c`` (each sample's ``nsigma contrast / SNR``) and, with 3
+        samples or more, ``K_samples``.
     """
     r_s = np.asarray(sample_r_as, float)
     s_s = np.asarray(sample_snr, float)
@@ -140,12 +228,41 @@ def contrast_curve(clean_img: np.ndarray, sample_r_as: Sequence[float], sample_s
 def stitch_annuli(images: Sequence[np.ndarray], edges: Sequence[float], fwhm: float,
                   legacy: bool = False, pad: float = 2.0, pad_ends: bool = False,
                   pixel_mask: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
-    """Sensitivity-weighted stitch of per-annulus images.  Weight of annulus ``ia`` =
-    ``1 / median(sigma(r))^2`` over its interior ``[in+fwhm, out-fwhm]`` (normalised
-    to the max), tile mask ``edge_ia - pad <= r <= edge_ia+1 + pad``; overlaps are
-    weighted means.  The first inner edge and the last outer edge are not padded unless
-    ``pad_ends`` (the IDL pads them).  ``legacy=True`` uses equal weights.  ``pixel_mask``
-    (True = left out, the run's disk mask) stays out of the noise behind the weights."""
+    """Stitch per-annulus images, each weighted by its sensitivity.
+
+    Annulus ``ia``'s weight is ``1 / median(sigma(r))^2`` over its interior ``[in + fwhm, out - fwhm]``,
+    normalized to the largest, and its tile is ``edge_ia - pad <= r <= edge_ia+1 + pad``.  Where tiles
+    overlap the pixels are weighted means.
+
+    Parameters
+    ----------
+    images : sequence of ndarray
+        One image per annulus, ``(ny, nx)``.
+    edges : sequence of float
+        The annuli's edges, ``nann + 1`` of them, in pixels.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    legacy : bool, default False
+        Whether to weigh the annuli equally.
+    pad : float, default 2.0
+        Pad of the edges, in pixels.
+    pad_ends : bool, default False
+        Whether to pad the first inner edge and the last outer edge too, as the IDL predecessor does.
+    pixel_mask : ndarray of bool or None, default None
+        Pixels left out of the noise behind the weights, True to exclude.
+
+    Returns
+    -------
+    stitch : ndarray, shape (ny, nx)
+        The stitched image.
+    weights : ndarray, shape (nann,)
+        Each annulus' weight.
+
+    Raises
+    ------
+    ValueError
+        If there are no images.
+    """
     n = len(images)
     if n == 0:
         raise ValueError("no images")
@@ -185,22 +302,57 @@ def snr_map(img: np.ndarray, fwhm: float, kernel: Optional[np.ndarray] = None,
             pxscale: Optional[float] = None, angle_convention: str = "pa",
             pixel_mask: Optional[np.ndarray] = None, band_min: int = SNR_BAND_MIN,
             info: Optional[Dict[str, Any]] = None) -> np.ndarray:
-    """Matched-filter S/N map with a per-radius robust (MAD-floored) sigma and the
-    Mawet small-sample penalty (``near2m_snrmap``).  A display/diagnostic quantity
-    -- NOT the search score (different noise convention).
+    """Make a matched-filter S/N map, with a robust noise per radius and the Mawet small-sample penalty.
 
-    ``excl_arcs`` (with ``pxscale``): ``(rho_arcsec, theta_deg, half_width_deg,
-    radial_fwhm)`` arcs whose pixels are left out of every ring's noise, as the known
-    companions' ADI sidelobes under the run's sidelobe rule.  ``pixel_mask`` (True = left
-    out, the run's disk mask): its pixels are left out of every ring's noise, as the search's
-    rings leave them out.  The map still has a value there.
+    At each radius the S/N is ``(A - mean) / (sigma sqrt(1 + 1/nap))``, with ``A`` the matched-filter
+    map, ``nap = max(floor(2 pi r / fwhm), 3)`` and ``sigma`` the larger of the standard deviation and
+    the MAD-based sigma of the radius' 1 px band.  It is a quantity for display and diagnosis, not the
+    search's score, whose noise is measured otherwise.
 
-    Where the mask leaves a radius' 1 px band fewer than ``band_min`` pixels, the band widens
-    a pixel each side at a time until it holds that many, up to 3 FWHM each side (Kevin
-    Wagner, 2026-11-01: a mask over whole rings left the map blank there).  The pixels at that
-    radius take their S/N from the wider band, and ``info`` (a dict), when given, gets
-    ``widened``, each such radius (px) with the half-width its band took.  A band the mask
-    does not touch is never widened."""
+    Where the pixel mask leaves a radius' band fewer than ``band_min`` pixels, the band widens a pixel
+    each side at a time until it holds that many, up to 3 FWHM each side, and the pixels at that radius
+    take their S/N from the wider band.  A band the mask does not touch is never widened.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    kernel : ndarray or None, default None
+        The matched filter.  None takes the FWHM Gaussian.
+    exclude_xy : sequence of tuple of 2 floats, default ()
+        The ``(x, y)`` pixels of sources left out of every band's noise.
+    excl_fwhm : float, default 1.5
+        Radius of their keep-outs, in FWHM.
+    rmin : float, default 1.0
+        Smallest radius mapped, in pixels.
+    excl_arcs : sequence of tuple of 4 floats, default ()
+        Arcs ``(rho_arcsec, theta_deg, half_width_deg, radial_fwhm)`` whose pixels are left out of every
+        band's noise, such as the known companions' ADI sidelobes under the run's sidelobe rule.
+    pxscale : float or None, default None
+        Plate scale, in arcsec per pixel, without which ``excl_arcs`` is ignored.
+    angle_convention : {"pa", "math"}, default "pa"
+        How the arcs' angles are read.
+    pixel_mask : ndarray of bool or None, default None
+        Pixels left out of every band's noise, True to exclude, as the search's rings leave them out.
+        The map still has a value there.
+    band_min : int, default SNR_BAND_MIN
+        Fewest pixels of a band before it widens past the mask.
+    info : dict or None, default None
+        Dict that gets ``widened``, each widened radius in pixels with its band's half-width.
+
+    Returns
+    -------
+    snr : ndarray, shape (ny, nx)
+        The S/N map, NaN where a band holds fewer than 5 pixels or has no scatter.
+
+    Notes
+    -----
+    It succeeds the IDL predecessor's ``near2m_snrmap``.  The widened band dates from 2026-11-01 (Kevin
+    Wagner), after a mask over whole rings left the map blank there.  A
+    :class:`~klip_tpe.metrics.RingRecorder` that is on records the bands' pixels.
+    """
     img = np.asarray(img, float)
     ny, nx = img.shape
     cx, cy = star_center(img.shape)
@@ -261,8 +413,22 @@ def snr_map(img: np.ndarray, fwhm: float, kernel: Optional[np.ndarray] = None,
 
 
 def snr_widened_note(info: Optional[Dict[str, Any]], pxscale: Optional[float] = None, short: bool = False) -> str:
-    """The radii whose S/N came from a band widened past the pixel mask (:func:`snr_map`'s
-    ``info``), as one line, or a few words for a panel (``short``): ``""`` when there are none."""
+    """Describe the radii whose S/N came from a band widened past the pixel mask, as one line or a few words.
+
+    Parameters
+    ----------
+    info : dict or None
+        The ``info`` of :func:`snr_map`.
+    pxscale : float or None, default None
+        Plate scale, in arcsec per pixel, to give the radii in arcsec.  None gives them in pixels.
+    short : bool, default False
+        Whether to give a few words, for a panel.
+
+    Returns
+    -------
+    note : str
+        The note, empty when no band was widened.
+    """
     w = (info or {}).get("widened") or {}
     if not w:
         return ""
@@ -282,8 +448,19 @@ def snr_widened_note(info: Optional[Dict[str, Any]], pxscale: Optional[float] = 
 
 
 def snr_widened_header(info: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """FITS keywords for :func:`snr_map`'s widened radii: ``SNRWIDEN``, their count, and
-    ``SNRWIDR``, the radii (px), ``SNRWIDHW`` the widest half-width (px).  Empty when none."""
+    """Return FITS keywords for the radii :func:`snr_map` widened.
+
+    Parameters
+    ----------
+    info : dict or None
+        The ``info`` of :func:`snr_map`.
+
+    Returns
+    -------
+    keywords : dict
+        ``SNRWIDEN`` (their count), ``SNRWIDR`` (their spans, in pixels) and ``SNRWIDHW`` (the widest
+        half-width, in pixels), empty when no band was widened.
+    """
     w = (info or {}).get("widened") or {}
     if not w:
         return {}
@@ -297,16 +474,47 @@ def snr_widened_header(info: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 # ----------------------------------------------------------------------------
-# KLIP-FM cross-check curve (optimize_near_2_tpe.pro near2_fmresp L398-441, curve L7566-7677)
+# KLIP-FM cross-check curve (the IDL predecessor's optimize_near_2_tpe.pro: near2_fmresp L398-441,
+# curve L7566-7677)
 # ----------------------------------------------------------------------------
 def fm_response(img: np.ndarray, rho, theta, pxscale: float, fwhm: float,
                 kernel_fn: Optional[Callable[[float], Optional[np.ndarray]]] = None,
                 search_px: float = 1.5, angle_convention: str = "pa") -> np.ndarray:
-    """``near2_fmresp``: matched-filter PEAK of the (noiseless) KLIP-FM image at each
-    source, located as the maximum within ``search_px`` of the nominal position.
-    No ring / background subtraction.  ``kernel_fn(rho_as) -> kernel`` supplies a
-    per-source kernel at each source's OWN separation (the measured library PSF
-    broadens toward small separation); None / a None return -> FWHM Gaussian."""
+    """Return the matched-filter peak of a noiseless KLIP-FM image at each source.
+
+    The peak is the maximum of the matched-filter map within ``search_px`` of the source's position,
+    with no ring or background subtracted.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The KLIP-FM image.
+    rho : float or array_like
+        Separation of each source, in arcsec.
+    theta : float or array_like
+        Angle of each source, in degrees.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    kernel_fn : callable or None, default None
+        Function ``rho_arcsec -> kernel`` giving each source the filter at its own separation, since the
+        measured library PSF broadens toward small separations.  None, or a None kernel, takes the FWHM
+        Gaussian.
+    search_px : float, default 1.5
+        Radius of the peak search, in pixels.
+    angle_convention : {"pa", "math"}, default "pa"
+        How ``theta`` is read.
+
+    Returns
+    -------
+    resp : ndarray
+        The peak at each source, NaN where no pixel of the search is finite.
+
+    Notes
+    -----
+    It succeeds the IDL predecessor's ``near2_fmresp``.
+    """
     img = np.asarray(img, float)
     ny, nx = img.shape
     cx, cy = star_center(img.shape)
@@ -346,8 +554,32 @@ def fm_response(img: np.ndarray, rho, theta, pxscale: float, fwhm: float,
 def fm_responses(fm_image: np.ndarray, sources: Sequence[Source], pxscale: float, fwhm: float,
                  kernel_fn: Optional[Callable[[float], Optional[np.ndarray]]] = None,
                  search_px: float = 1.5, angle_convention: str = "pa", flatten: bool = False) -> np.ndarray:
-    """:func:`fm_response` of ``fm_image`` at each of ``sources``, after :func:`radprof` with
-    ``flatten`` (as :func:`fm_contrast_curve` measures them)."""
+    """Return :func:`fm_response` of a KLIP-FM image at each source, as :func:`fm_contrast_curve` measures them.
+
+    Parameters
+    ----------
+    fm_image : ndarray, shape (ny, nx)
+        The KLIP-FM image.
+    sources : sequence of Source
+        The sources.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    kernel_fn : callable or None, default None
+        Function ``rho_arcsec -> kernel``.
+    search_px : float, default 1.5
+        Radius of the peak search, in pixels.
+    angle_convention : {"pa", "math"}, default "pa"
+        How the sources' angles are read.
+    flatten : bool, default False
+        Whether to subtract the image's azimuthal mean profile first (:func:`~klip_tpe.metrics.radprof`).
+
+    Returns
+    -------
+    resp : ndarray
+        The peak at each source.
+    """
     rho = np.array([s.rho for s in sources], float)
     th = np.array([s.theta for s in sources], float)
     img = radprof(fm_image) if flatten else np.asarray(fm_image, float)
@@ -356,10 +588,31 @@ def fm_responses(fm_image: np.ndarray, sources: Sequence[Source], pxscale: float
 
 
 def fm_test_sources(rin_px: float, rout_px: float, pxscale: float, contrast: float) -> List[Source]:
-    """The KLIP-FM cross-check test sources (L7574-7576): ``nfm = clip(floor((rout-1-rin)
-    /1.5)+1, 5, 24)`` radii from ``rin`` to ``rout-1`` px on a golden-angle spiral
-    ``theta_i = (i*137.508) mod 360`` deg, all at ``contrast``.  ``rin_px`` should
-    already be ``max(annulus inner edge, fwhm)``."""
+    """Return the KLIP-FM cross-check's test sources, on a golden-angle spiral through the annulus.
+
+    There are ``nfm = clip(floor((rout - 1 - rin) / 1.5) + 1, 5, 24)`` radii from ``rin`` to
+    ``rout - 1`` px, at angles ``theta_i = (137.508 i) mod 360`` degrees, all at ``contrast``.
+
+    Parameters
+    ----------
+    rin_px : float
+        Inner radius, in pixels, already ``max(inner edge, fwhm)``.
+    rout_px : float
+        Outer edge of the annulus, in pixels.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    contrast : float
+        Contrast of the sources.
+
+    Returns
+    -------
+    sources : list of Source
+        The test sources.
+
+    Notes
+    -----
+    They are the IDL predecessor's (L7574-7576).
+    """
     rin, rout = float(rin_px), float(rout_px)
     nfm = int(min(24, max(5, int(np.floor((rout - 1.0 - rin) / 1.5)) + 1)))
     i = np.arange(nfm, dtype=float)
@@ -376,29 +629,68 @@ def fm_contrast_curve(fm_image: np.ndarray, clean_image: np.ndarray, contrast: f
                       known: Sequence[Tuple[float, float]] = (),
                       resp: Optional[np.ndarray] = None,
                       pixel_mask: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
-    """KLIP-FM ``nsigma`` contrast curve (A_main_procedure.md section 9.1, L7655-7677).
+    """Return the KLIP-FM ``nsigma`` contrast curve of an annulus.
 
-    ``resp = fm_response(fm_image, sources)``; ``K_fm = resp / contrast``;
-    ``sigma_mf`` = :func:`noise_profile` of ``clean_image`` measured with the
-    unit-sum matched-filter kernel (``kernel_fn`` at the median valid test
-    separation, else the FWHM Gaussian); ``curve = nsigma * interp(sigma_mf)(r) /
-    K_fm`` at the test radii with ``K_fm > 0`` (at least 3 needed, else NaN).
+    The response of each test source gives ``K_fm = resp / contrast``, and the curve is
+    ``nsigma sigma_mf(r) / K_fm`` at the test radii with ``K_fm > 0``, at least 3 of them.  ``sigma_mf``
+    is the :func:`noise_profile` of the clean image measured with the unit-sum matched filter,
+    ``kernel_fn`` at the median valid test separation, else the FWHM Gaussian.
 
-    ``flatten`` applies :func:`radprof` to BOTH images first -- the IDL behaviour, and
-    off by default here.  It has to be both or neither: ``K_fm`` is a response measured
-    on the model and divided into a noise measured on the data, so flattening one and
-    not the other puts a bias straight into the contrast axis.
+    Parameters
+    ----------
+    fm_image : ndarray, shape (ny, nx)
+        The KLIP-FM image of the test sources.
+    clean_image : ndarray, shape (ny, nx)
+        The clean reduction.
+    contrast : float
+        Contrast of the test sources.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    rin_px : float
+        Inner radius of the noise profile, in pixels.
+    rout_px : float
+        Outer radius of the noise profile, in pixels.
+    sources : sequence of Source
+        The test sources (:func:`fm_test_sources`).
+    kernel_fn : callable or None, default None
+        Function ``rho_arcsec -> kernel``.
+    nsigma : float, default 5.0
+        Number of sigma of the curve.
+    search_px : float, default 1.5
+        Radius of the peak search, in pixels.
+    angle_convention : {"pa", "math"}, default "pa"
+        How the sources' angles are read.
+    flatten : bool, default False
+        Whether to subtract the azimuthal mean profile (:func:`~klip_tpe.metrics.radprof`) from both
+        images first, as the IDL predecessor does.  It has to be both or neither, since ``K_fm`` is
+        measured on the model and divided into a noise measured on the data.
+    known : sequence of tuple of 2 floats, default ()
+        Known companions, as ``(rho_arcsec, pa_deg)``, left out of the noise rings.
+    resp : ndarray or None, default None
+        The responses already measured, one per source (:func:`fm_responses`), such as each on a
+        forward-model pass of its own (``Runner._fm_pass(one_at_a_time=True)``), so that no source is
+        read through another's self-subtraction lobes.  None measures them on ``fm_image``.
+    pixel_mask : ndarray of bool or None, default None
+        Pixels left out of the noise rings, True to exclude.
 
-    ``known`` = real companions [(rho_arcsec, pa_deg), ...] left out of the noise rings.
+    Returns
+    -------
+    curve : dict of str to ndarray
+        ``r_as`` (the valid test radii, in arcsec), ``curve``, ``K_fm`` and ``resp`` (all the sources,
+        NaN where not valid), ``r_test_as`` (all the test radii) and, with 3 valid sources or more,
+        ``sigma_mf`` and ``r_sigma_px`` (the noise profile).  The curve is NaN for fewer than 3 valid
+        sources or fewer than 2 finite radii of the profile.
 
-    ``resp`` = the responses already measured, one per source (:func:`fm_responses`), in
-    place of measuring them on ``fm_image``: each on a forward-model pass of its own, say
-    (``Runner._fm_pass(one_at_a_time=True)``), so that no source is read through another's
-    self-subtraction lobes.
+    Raises
+    ------
+    ValueError
+        If ``resp`` does not hold one response per source.
 
-    Returns ``r_as`` (valid test radii, arcsec), ``curve``, ``K_fm`` and ``resp`` (all
-    sources, NaN where invalid), plus ``sigma_mf`` / ``r_sigma_px`` (the profile) and
-    ``r_test_as`` (all test radii).
+    Notes
+    -----
+    It follows A_main_procedure.md section 9.1 and the IDL predecessor's L7655-7677.
     """
     rho = np.array([s.rho for s in sources], float)
     _flat = radprof if flatten else (lambda a: np.asarray(a, float))
