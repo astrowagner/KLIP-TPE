@@ -37,7 +37,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: the modules brought up to the rule, checked here.  The list grows module by module.
 DONE = [
     "klip_tpe/injection.py",
+    "klip_tpe/instruments/ales.py",
     "klip_tpe/instruments/generic.py",
+    "klip_tpe/instruments/miri.py",
     "klip_tpe/instruments/near.py",
     "klip_tpe/instruments/nomic.py",
     "klip_tpe/instruments/search_space.py",
