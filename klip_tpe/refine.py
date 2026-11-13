@@ -1,38 +1,43 @@
-"""The re-score: candidates for an annulus scored on the stitch, the first piece of ``refine``
-(NEAR2's notes of 2026-11-06 to 2026-11-09).
+"""Re-score of each annulus' candidate configurations on the stitch, the first piece of ``refine``.
 
-A finished run, the base, gives the stitch: its annuli, tiles, pads and weights, and its winners
-for every annulus but the one being scored.  The candidates for annulus k are configurations of
-the base run and of other runs of the same setup: their winners, their validation's entrants and,
-when asked, the best of their histories.  Each candidate is reduced on common draws.  A draw puts
-sources in tile k and in tiles k - 1 and k + 1, each tile's at the contrast that makes the base
-winners read S/N 5 to 8 on the stitch (:meth:`StitchScorer.calibrate`).
+A finished run, the base, gives the stitch: its annuli, tiles, pads and weights, and its winners for
+every annulus but the one being scored.  The candidates for annulus k are configurations of the base
+run and of other runs of the same setup: their winners, their validation's entrants and, when asked,
+the best of their histories.  Each candidate is reduced on common draws.  A draw puts sources in
+tile k and in tiles k - 1 and k + 1, each tile's at the contrast that makes the base winners read
+S/N 5 to 8 on the stitch (:meth:`StitchScorer.calibrate`).
 
 The annuli whose zones hold any of the sources reduced together are reduced with them: the base
-winners for the neighbors and the candidate for annulus k, as the final stitch reduces every
-annulus with every source (``RunConfig.stitch_injections = "all"``).  The other annuli take the
-base winners' clean images, which those sources do not reach.  The injected stitch is built as
-the final stitch builds it, with the base run's tiles, pads, weights and flattening, and each
-source is measured as the stitched verify measures it (Path A of
-:func:`klip_tpe.verify.verify_injections`).  The seam patches of the final stitch go into its
-clean image only, which the injected sources are not measured on.
+winners for the neighbors and the candidate for annulus k, as the final stitch reduces every annulus
+with every source (``RunConfig.stitch_injections = "all"``).  The other annuli take the base winners'
+clean images, which those sources do not reach.  The injected stitch is built as the final stitch
+builds it, with the base run's tiles, pads, weights and flattening, and each source is measured as
+the stitched verify measures it (Path A of :func:`klip_tpe.verify.verify_injections`).  The seam
+patches of the final stitch go into its clean image only, which the injected sources are not
+measured on.
+
+With ``tiles="apart"``, the default for a new directory, each tile's sources go into reductions and
+a stitch of their own and are measured there, as their contrast was set.  ``"together"`` puts all of
+a draw's sources in each reduction.
+
+A composite base (``base_winners``) takes other configurations as the base winners of some annuli,
+for the stitch, the neighbors' reductions and the paired differences.  ``draws_from`` takes the
+draws, their rule and the contrasts of an earlier re-score of the same base run, and compares each
+annulus' base with that re-score's, draw for draw.
 
 The runs are only read.  :func:`rescore` writes ``rescore.txt`` and ``rescore.json`` to its own
 directory, with a ``state/`` directory from which an interrupted re-score resumes.
 
-Each tile's contrast is set with that tile's sources alone, and the inner tiles' are brighter:
-on NEAR2's s7 tile 2's sources were 7 and 28 times as bright as tiles 3 and 4's.  Reduced
-together, the bright sources' residuals and the KL modes they take reach the faint ones (NEAR2,
-2026-11-10: s7's winner read 3.47 and 1.77 in tiles 3 and 4 of annulus 3's draws, against the
-calibration's 5 to 8).  With ``tiles="apart"``, the default for a new directory, each tile's
-sources go into reductions and a stitch of their own and are measured there, as their contrast
-was set.  ``"together"`` puts all of a draw's sources in each reduction, as the re-score did
-before.
+Notes
+-----
+The re-score follows NEAR2's notes of 2026-11-06 to 2026-11-09.
 
-A composite base (``base_winners``) takes other configurations as the base winners of some
-annuli, for the stitch, the neighbors' reductions and the paired differences.  ``draws_from``
-takes the draws, their rule and the contrasts of an earlier re-score of the same base run, and
-compares each annulus' base with that re-score's, draw for draw.
+Each tile's contrast is set with that tile's sources alone, and the inner tiles' are brighter: on
+NEAR2's s7 tile 2's sources were 7 and 28 times as bright as tiles 3 and 4's.  Reduced together, the
+bright sources' residuals and the KL modes they take reach the faint ones (NEAR2, 2026-11-10: s7's
+winner read 3.47 and 1.77 in tiles 3 and 4 of annulus 3's draws, against the calibration's 5 to 8).
+Hence ``tiles="apart"``.  Before, the re-score reduced each draw's sources together, as
+``"together"`` still does.
 """
 from __future__ import annotations
 
@@ -66,18 +71,35 @@ RELAXED_FWHM = 1.5
 
 
 class RescoreStop(RuntimeError):
-    """An annulus of the re-score stops here; the re-score goes on with the next one."""
+    """Error that stops one annulus of the re-score, which goes on with the next.
+    """
 
 
 class PlacementError(RescoreStop):
-    """No placement of a draw's sources under the rule asked."""
+    """Error raised when a draw's sources have no placement under the rule asked.
+    """
 
 
 @dataclass
 class Entrant:
-    """One candidate configuration for an annulus: the run it comes from, how it got there
-    (``"winner"``, ``"validation"`` or ``"top"``, the best of the history), its evaluation and
-    its configuration as the run stored it (``Config.to_dict``)."""
+    """One candidate configuration for an annulus, with the run and the evaluation it comes from.
+
+    Attributes
+    ----------
+    run : str
+        Name of the run.
+    kind : {"winner", "validation", "top", "history"}
+        How it got there: the run's winner, an entrant of its validation, one of the best of its history
+        or an evaluation of its history picked by index.
+    eval_index : int or None
+        Its evaluation, counted from 0.
+    config : dict
+        Its configuration as the run stored it (``Config.to_dict``).
+    search_score : float or None, default None
+        Its score in the search.
+    validated_score : float or None, default None
+        Its score in the validation.
+    """
     run: str
     kind: str
     eval_index: Optional[int]
@@ -87,22 +109,54 @@ class Entrant:
 
     @property
     def key(self) -> str:
+        """The configuration's identity, from :func:`config_key`.
+        """
         return config_key(self.config)
 
     @property
     def tag(self) -> str:
-        """A short, stable name for its state file."""
+        """Short, stable name for its state file, from its run and its configuration.
+        """
         return hashlib.sha1((self.run + "|" + self.key).encode()).hexdigest()[:12]
 
 
 def config_key(d: Dict[str, Any]) -> str:
-    """A configuration's identity: its parameters, its per-partition blocks and its partitions."""
+    """Return a configuration's identity, its parameters, per-partition blocks and partitions as JSON.
+
+    Parameters
+    ----------
+    d : dict
+        The configuration, as ``Config.to_dict`` stores it.
+
+    Returns
+    -------
+    key : str
+        The JSON of ``params``, ``per_partition`` and the sorted ``selected``, its keys sorted.
+    """
     return json.dumps({"params": d.get("params", {}), "per_partition": d.get("per_partition", {}),
                        "selected": sorted(str(s) for s in d.get("selected", []))}, sort_keys=True, default=float)
 
 
 def parse_annuli(spec: str, nann: int) -> List[int]:
-    """``"1-5"``, ``"2,4,6"`` or ``"all"`` (1-based) as 0-based annulus indices."""
+    """Parse a list of annuli, such as ``"1-5"``, ``"2,4,6"`` or ``"all"`` (1-based), into 0-based indices.
+
+    Parameters
+    ----------
+    spec : str
+        The list, ranges and single annuli separated by commas.  Empty or "all" takes every annulus.
+    nann : int
+        Number of the run's annuli.
+
+    Returns
+    -------
+    annuli : list of int
+        The 0-based indices, sorted, each once.
+
+    Raises
+    ------
+    ValueError
+        If an annulus is not among the run's.
+    """
     s = str(spec).strip().lower()
     if s in ("", "all"):
         return list(range(nann))
@@ -121,15 +175,48 @@ def parse_annuli(spec: str, nann: int) -> List[int]:
 
 
 def _read_json(path: str) -> Any:
+    """Read a JSON file.
+
+    Parameters
+    ----------
+    path : str
+        Path of the file.
+
+    Returns
+    -------
+    data : object
+        The file's content.
+    """
     with open(path) as f:
         return json.load(f)
 
 
 def run_entrants(run_dir: str, annulus: int, top: int = 0) -> List[Entrant]:
-    """The candidates a finished run offers for annulus ``annulus`` (0-based): the configurations
-    its validation scored, the elected one marked ``"winner"``, and with ``top`` the ``top``
-    best of its history that are not among them.  Read from ``final_results.json`` and
-    ``results.jsonl``."""
+    """Return the candidates a finished run offers for an annulus.
+
+    They are the configurations its validation scored, the elected one marked ``"winner"``, and with
+    ``top`` the ``top`` best of its history that are not among them.  They are read from
+    ``final_results.json`` and ``results.jsonl``, and a configuration offered twice comes once.
+
+    Parameters
+    ----------
+    run_dir : str
+        Directory of the run.
+    annulus : int
+        The annulus, counted from 0.
+    top : int, default 0
+        Number of the best evaluations of the history added.
+
+    Returns
+    -------
+    entrants : list of Entrant
+        The candidates, the validation's first.
+
+    Raises
+    ------
+    ValueError
+        If ``final_results.json`` has no such annulus.
+    """
     name = os.path.basename(os.path.abspath(run_dir).rstrip(os.sep))
     fr = _read_json(os.path.join(run_dir, "final_results.json"))
     ann = next((a for a in fr.get("annuli") or [] if int(a.get("annulus", -1)) == int(annulus)), None)
@@ -178,9 +265,30 @@ def run_entrants(run_dir: str, annulus: int, top: int = 0) -> List[Entrant]:
 
 
 def entrant_at(run_dir: str, annulus: int, eval_index: int) -> Entrant:
-    """Evaluation ``eval_index`` (0-based, as ``rescore.json`` and ``final_results.json`` count)
-    of annulus ``annulus`` (0-based) of a finished run, as a candidate: its validation's entrant
-    or its winner when it is one, else its configuration in ``results.jsonl`` (``"history"``)."""
+    """Return an evaluation of a finished run's annulus as a candidate.
+
+    It is the validation's entrant or the winner when it is one, else its configuration in
+    ``results.jsonl``, of kind ``"history"``.
+
+    Parameters
+    ----------
+    run_dir : str
+        Directory of the run.
+    annulus : int
+        The annulus, counted from 0.
+    eval_index : int
+        The evaluation, counted from 0 as ``rescore.json`` and ``final_results.json`` count.
+
+    Returns
+    -------
+    entrant : Entrant
+        The candidate.
+
+    Raises
+    ------
+    ValueError
+        If the annulus has no such evaluation.
+    """
     name = os.path.basename(os.path.abspath(run_dir).rstrip(os.sep))
     for e in run_entrants(run_dir, annulus):
         if e.eval_index is not None and int(e.eval_index) == int(eval_index):
@@ -203,14 +311,45 @@ def entrant_at(run_dir: str, annulus: int, eval_index: int) -> Entrant:
 
 @dataclass
 class Pick:
-    """A line of a ``--base-winners`` or ``--candidates`` file: the annulus (0-based here, 1-based
-    in the file), the run's directory and the evaluation (0-based, as ``rescore.json`` counts)."""
+    """Line of a ``--base-winners`` or ``--candidates`` file, an annulus with a run's evaluation.
+
+    Attributes
+    ----------
+    annulus : int
+        The annulus, counted from 0 here and from 1 in the file.
+    run : str
+        Directory of the run.
+    eval_index : int
+        The evaluation, counted from 0 as ``rescore.json`` counts.
+    """
     annulus: int
     run: str
     eval_index: int
 
 
 def _resolve_run(token: str, known: Sequence[str], base_dir: str) -> str:
+    """Return the directory of a run named in a picks file.
+
+    Parameters
+    ----------
+    token : str
+        The run, as a directory, the name of a run in ``known`` or the name of a run beside the base
+        run.
+    known : sequence of str
+        Directories of the runs known, the base run's first.
+    base_dir : str
+        Directory of the base run.
+
+    Returns
+    -------
+    run_dir : str
+        The run's absolute directory.
+
+    Raises
+    ------
+    ValueError
+        If the token names none of these.
+    """
     t = str(token).strip().rstrip("/" + os.sep) or str(token)
     if os.path.isdir(t):
         return os.path.abspath(t)
@@ -226,11 +365,38 @@ def _resolve_run(token: str, known: Sequence[str], base_dir: str) -> str:
 
 def read_picks(path: str, base_dir: str, known: Sequence[str] = (), nann: Optional[int] = None,
                one_per_annulus: bool = False) -> List[Pick]:
-    """The lines of a ``--base-winners`` or ``--candidates`` file: the annulus (1-based), the run
-    and the evaluation (0-based, as ``rescore.json`` counts), ``#`` starting a comment.  A JSON
-    list of ``{"annulus", "run", "eval"}`` is read too.  The run is a directory, the name of the
-    base run or of a run in ``known``, or the name of a run beside the base run.
-    ``one_per_annulus``: an annulus listed twice is an error."""
+    """Read a ``--base-winners`` or ``--candidates`` file.
+
+    Each line gives the annulus (1-based), the run and the evaluation (0-based, as ``rescore.json``
+    counts), with ``#`` starting a comment.  A JSON list of ``{"annulus", "run", "eval"}`` is read too.
+    The run is a directory, the name of the base run or of a run in ``known``, or the name of a run
+    beside the base run (:func:`_resolve_run`).
+
+    Parameters
+    ----------
+    path : str
+        Path of the file.
+    base_dir : str
+        Directory of the base run.
+    known : sequence of str, default ()
+        Directories of other runs whose names the file may use, such as those of ``--entrants-from``.
+    nann : int or None, default None
+        Number of the run's annuli, to check the annuli against.  None checks only that each is at
+        least 1.
+    one_per_annulus : bool, default False
+        Whether an annulus listed twice is an error.
+
+    Returns
+    -------
+    picks : list of Pick
+        The picks, in the file's order.
+
+    Raises
+    ------
+    ValueError
+        If a line or entry is malformed, an annulus is out of range, an evaluation is negative, an
+        annulus repeats under ``one_per_annulus``, a run is not found or the file lists nothing.
+    """
     with open(path) as f:
         text = f.read()
     try:
@@ -273,7 +439,24 @@ def read_picks(path: str, base_dir: str, known: Sequence[str] = (), nann: Option
 
 
 def _setup(run_dir: str) -> Dict[str, Any]:
-    """What must agree between the runs: the annuli, the space's dimensions and the frames."""
+    """Return what must agree between the runs, their annuli, the search space's dimensions and the frames.
+
+    Parameters
+    ----------
+    run_dir : str
+        Directory of the run.
+
+    Returns
+    -------
+    setup : dict
+        ``zones`` (each annulus' ``(inrad, outrad)``, rounded), ``names`` (the dimensions' names) and
+        ``frames`` (the data edits that say what the frames are, as JSON).
+
+    Raises
+    ------
+    ValueError
+        If the run has no readable checkpoint.
+    """
     from .runner import _core_edits, load_checkpoint
     st, _ = load_checkpoint(run_dir, log=lambda s: None)
     if st is None:
@@ -286,7 +469,20 @@ def _setup(run_dir: str) -> Dict[str, Any]:
 
 
 def _check_setup(rd: str, ref: Dict[str, Any]) -> None:
-    """``rd`` has the base run's annuli, search space and frames (``ref``, :func:`_setup`)."""
+    """Check that a run has the base run's annuli, search space and frames.
+
+    Parameters
+    ----------
+    rd : str
+        Directory of the run.
+    ref : dict
+        The base run's setup, from :func:`_setup`.
+
+    Raises
+    ------
+    ValueError
+        If any of them differs.
+    """
     s = _setup(rd)
     name = os.path.basename(rd)
     if s["zones"] != ref["zones"]:
@@ -300,8 +496,28 @@ def _check_setup(rd: str, ref: Dict[str, Any]) -> None:
 
 def resolve_picks(base_dir: str, picks: Sequence[Pick], ref: Optional[Dict[str, Any]] = None
                   ) -> List[Tuple[Pick, Entrant]]:
-    """Each pick with its configuration (:func:`entrant_at`), its run checked against the base
-    run's annuli, search space and frames."""
+    """Return each pick with its configuration, its run checked against the base run's setup.
+
+    Parameters
+    ----------
+    base_dir : str
+        Directory of the base run.
+    picks : sequence of Pick
+        The picks.
+    ref : dict or None, default None
+        The base run's setup (:func:`_setup`).  None reads it.
+
+    Returns
+    -------
+    resolved : list of tuple
+        ``(pick, entrant)`` per pick, the entrant from :func:`entrant_at`.
+
+    Raises
+    ------
+    ValueError
+        If a run's annuli, search space or frames are not the base run's, or a pick's evaluation is not
+        found.
+    """
     base_dir = os.path.abspath(base_dir)
     ref = _setup(base_dir) if ref is None else ref
     checked = {base_dir}
@@ -316,21 +532,61 @@ def resolve_picks(base_dir: str, picks: Sequence[Pick], ref: Optional[Dict[str, 
 
 
 def _nanmedian(v) -> float:
+    """Return the median of the finite values, NaN without any.
+
+    Parameters
+    ----------
+    v : array_like
+        The values.
+
+    Returns
+    -------
+    median : float
+        The median.
+    """
     v = np.asarray(v, float)
     v = v[np.isfinite(v)]
     return float(np.median(v)) if v.size else float("nan")
 
 
 def _pct(v, q) -> float:
+    """Return a percentile of the finite values, NaN without any.
+
+    Parameters
+    ----------
+    v : array_like
+        The values.
+    q : float
+        The percentile, from 0 to 100.
+
+    Returns
+    -------
+    value : float
+        The percentile.
+    """
     v = np.asarray(v, float)
     v = v[np.isfinite(v)]
     return float(np.percentile(v, q)) if v.size else float("nan")
 
 
 def paired_summary(per_draw: np.ndarray, base: np.ndarray) -> Dict[str, Any]:
-    """An entrant's statistic over the common draws, and its paired difference from the base
-    winner's: the mean difference with its standard error, the median difference and the
-    fraction of draws where the entrant reads higher."""
+    """Summarize an entrant's statistic over the common draws and its paired difference from the base winner's.
+
+    Parameters
+    ----------
+    per_draw : ndarray, shape (n,)
+        The entrant's statistic on each of the ``n`` draws.
+    base : ndarray, shape (n,)
+        The base winner's statistic on the same draws.
+
+    Returns
+    -------
+    summary : dict
+        ``median``, ``p16`` and ``p84`` of the entrant's finite values, ``n`` (their number),
+        ``n_paired`` (the draws finite for both), ``diff_mean`` with its standard error ``diff_se``,
+        ``diff_median`` and ``p_better``, the fraction of paired draws where the entrant reads higher.
+        The differences are NaN without paired draws, and ``diff_se`` with one.
+    """
     a = np.asarray(per_draw, float)
     b = np.asarray(base, float)
     ok = np.isfinite(a) & np.isfinite(b)
@@ -347,11 +603,55 @@ def paired_summary(per_draw: np.ndarray, base: np.ndarray) -> Dict[str, Any]:
 
 
 class StitchScorer:
-    """The base run's stitch with one annulus' images replaced, and sources measured on it as the
-    stitched verify measures them.  ``runner`` is the base run resumed read-only
-    (``Runner.resume(..., same_frames=False)``), ``overlap_pads`` overrides its pads between
-    overlapping annuli (``RunConfig.stitch_overlap_pads``), as ``rereduce`` does.  ``card``: the
-    injected reductions may go to the card workers, as the search's draws do."""
+    """The base run's stitch with one annulus' images replaced, and sources measured on it as the stitched verify measures them.
+
+    Parameters
+    ----------
+    runner : Runner
+        The base run, resumed read-only (``Runner.resume(..., same_frames=False)``).
+    overlap_pads : bool or None, default None
+        Whether overlapping annuli take pads between them (``RunConfig.stitch_overlap_pads``), as
+        ``rereduce`` sets it.  None keeps the run's.
+    log : callable, default print
+        Function that takes each line of the log.
+    card : bool, default False
+        Whether the injected reductions may go to the card workers, as the search's draws do.
+
+    Attributes
+    ----------
+    results : dict of int to AnnulusResult
+        The base run's result for each annulus.
+    order : list of int
+        The annuli, sorted.
+    zones : list of tuple of 2 floats
+        Each annulus' zone, ``(inrad, outrad)`` in pixels.
+    tiles : list of tuple of 2 floats
+        Each annulus' tile, in pixels.
+    pads : list of tuple of 2 floats
+        Each tile's ``(pad_in, pad_out)``, in pixels.
+    itiles : list of tuple of 2 floats
+        The tiles the stitched images are made over, the innermost and the outermost reaching the
+        whole KLIP zones of their annuli.
+    base_cfg : dict of int to Config
+        Each annulus' base winner.
+    base_from : dict of int to Entrant
+        The annuli whose base winner is another configuration than the run's (:meth:`use_winners`).
+    known : list of tuple
+        The known companions of the run's sampler.
+    clean : dict of int to ndarray
+        Each annulus' clean image under its base winner (:meth:`prepare`).
+    weights : ndarray or None
+        The stitch weights (:meth:`prepare`).
+    weights_from : str
+        Where the weights came from.
+    n_reductions : int
+        Number of reductions made.
+
+    Raises
+    ------
+    ValueError
+        If the run has not finished, searched the widths of its annuli (``opt_width``) or scanned k.
+    """
 
     def __init__(self, runner, overlap_pads: Optional[bool] = None, log: Callable[[str], None] = print,
                  card: bool = False):
@@ -392,12 +692,43 @@ class StitchScorer:
 
     # ---------------------------------------------------------------- geometry
     def pos(self, ia: int) -> int:
+        """Return an annulus' position in the stitch's order.
+
+        Parameters
+        ----------
+        ia : int
+            The annulus, counted from 0.
+
+        Returns
+        -------
+        pos : int
+            Its index in ``order``.
+        """
         return self.order.index(ia)
 
     def tile(self, ia: int) -> Tuple[float, float]:
+        """Return an annulus' tile.
+
+        Parameters
+        ----------
+        ia : int
+            The annulus, counted from 0.
+
+        Returns
+        -------
+        tile : tuple of 2 floats
+            The tile's inner and outer radii, in pixels.
+        """
         return self.tiles[self.pos(ia)]
 
     def _zone_pad(self) -> float:
+        """Return the reducer's pad around a KLIP zone, the largest of a partitioned reducer's.
+
+        Returns
+        -------
+        pad : float
+            The pad, in pixels, 2 where the reducer gives none.
+        """
         red = self.r.reducer
         zp = getattr(red, "zone_pad", None)
         if zp is None and getattr(red, "reducers", None):
@@ -405,8 +736,23 @@ class StitchScorer:
         return 2.0 if zp is None else float(zp)
 
     def reach(self, ia: int) -> Tuple[float, float]:
-        """Radii annulus ``ia``'s KLIP zone can cover under its base winner (px): its zone with the
-        reducer's pad and the winner's ``zone_in`` / ``zone_out``, and 1 px to spare."""
+        """Return the radii an annulus' KLIP zone can cover under its base winner.
+
+        They are its zone widened by the reducer's pad and the winner's largest ``zone_in`` and
+        ``zone_out``, with 1 px to spare.
+
+        Parameters
+        ----------
+        ia : int
+            The annulus, counted from 0.
+
+        Returns
+        -------
+        r_in : float
+            Inner radius, in pixels, at least 0.
+        r_out : float
+            Outer radius, in pixels.
+        """
         cfg = self.base_cfg[ia]
         blocks = [cfg.params] + list(cfg.per_partition.values())
         zi = max([float(b.get("zone_in", 0.0) or 0.0) for b in blocks] + [0.0])
@@ -416,8 +762,22 @@ class StitchScorer:
         return max(a_in - zi - m, 0.0), a_out + zo + m
 
     def affected(self, sources: Sequence[Source], k: int, force: bool = True) -> List[int]:
-        """The annuli whose zones a draw's sources reach (within 2.5 FWHM of each), and ``k``
-        unless ``force`` is False."""
+        """Return the annuli whose zones a draw's sources reach, within 2.5 FWHM of each.
+
+        Parameters
+        ----------
+        sources : sequence of Source
+            The draw's sources.
+        k : int
+            The annulus scored, counted from 0.
+        force : bool, default True
+            Whether ``k`` is among them whatever the sources reach.
+
+        Returns
+        -------
+        annuli : list of int
+            The annuli, in the stitch's order.
+        """
         R = 2.5 * float(self.r.fwhm)
         rs = [float(s.rho) / float(self.r.pxscale) for s in sources]
         out = []
@@ -428,9 +788,21 @@ class StitchScorer:
         return out
 
     def use_winners(self, winners: Dict[int, Entrant]) -> None:
-        """A composite base: annulus ``a``'s base winner is ``winners[a]``'s configuration in place
-        of the base run's winner, for the clean stitch, the neighbors' reductions, the calibration
-        and its zone's reach.  Before :meth:`prepare`."""
+        """Make a composite base, with other configurations as the base winners of some annuli.
+
+        Each such winner serves for the clean stitch, the neighbors' reductions, the calibration and its
+        zone's reach, and its clean image is reduced again.  Call it before :meth:`prepare`.
+
+        Parameters
+        ----------
+        winners : dict of int to Entrant
+            The base winner of each annulus replaced, by 0-based annulus.
+
+        Raises
+        ------
+        ValueError
+            If an annulus is not among the base run's.
+        """
         for a, e in winners.items():
             if a not in self.base_cfg:
                 raise ValueError(f"annulus {a + 1} is not among the base run's")
@@ -440,7 +812,31 @@ class StitchScorer:
 
     # ---------------------------------------------------------------- reductions
     def reduce(self, ia: int, cfg, sources: Optional[Sequence[Source]], tag: str) -> np.ndarray:
-        """``cfg`` reduced in annulus ``ia``'s zone, with ``sources`` (no KLIP-FM pass)."""
+        """Reduce a configuration in an annulus' zone, with injected sources and no KLIP-FM pass.
+
+        Each call counts in ``n_reductions``.
+
+        Parameters
+        ----------
+        ia : int
+            The annulus, counted from 0.
+        cfg : Config
+            The configuration.
+        sources : sequence of Source or None
+            The sources injected, None for the clean image.
+        tag : str
+            Label of the reduction, for logs.
+
+        Returns
+        -------
+        image : ndarray, shape (ny, nx)
+            The reduced image.
+
+        Raises
+        ------
+        ValueError
+            If the reduction returns no image.
+        """
         more = {"card": True} if (self.card and sources) else {}
         ev = self.r._reduce(cfg, list(sources) if sources else None, tag=tag, zone=self.r._zone(ia, cfg),
                             fm_sources=[], **more)
@@ -451,16 +847,44 @@ class StitchScorer:
         return np.asarray(ev.image, float)
 
     def run(self, calls: Sequence[Callable[[], Any]], window: int):
-        """The reductions in ``calls``, at most ``window`` in flight, in order
-        (:meth:`klip_tpe.runner.Runner._run_ordered`).  A failed reduction raises."""
+        """Run reductions, at most ``window`` in flight, and yield their results in order.
+
+        Parameters
+        ----------
+        calls : sequence of callable
+            The reductions, each a function of no arguments.
+        window : int
+            Number of reductions in flight at most (:meth:`klip_tpe.runner.Runner._run_ordered`).
+
+        Yields
+        ------
+        i : int
+            Index of the call.
+        result : object
+            Its result.
+
+        Raises
+        ------
+        Exception
+            The exception of a failed reduction.
+        """
         for i, res in self.r._run_ordered(calls, window):
             if isinstance(res, Exception):
                 raise res
             yield i, res
 
     def prepare(self, window: int) -> None:
-        """The base winners' clean images, reduced again on this code, and the stitch weights:
-        the base run's (``final_results.json``), else worked out from those images as the run did."""
+        """Reduce the base winners' clean images again on this code, and set the stitch weights.
+
+        The weights are the base run's (``final_results.json``), else worked out from those images as the
+        run worked them out.  Only the annuli without a clean image are reduced.  It fills ``clean``,
+        ``weights`` and ``weights_from``.
+
+        Parameters
+        ----------
+        window : int
+            Number of reductions in flight at most.
+        """
         todo = [a for a in self.order if a not in self.clean]
         calls = [(lambda a=a: self.reduce(a, self.base_cfg[a], None, f"rescore_a{a + 1}_clean")) for a in todo]
         for i, img in self.run(calls, window):
@@ -479,15 +903,41 @@ class StitchScorer:
 
     # ---------------------------------------------------------------- the stitch and the measure
     def stitch(self, images: Dict[int, np.ndarray]) -> np.ndarray:
-        """The injected stitch of ``images`` (annulus -> image), the base winners' clean images for
-        the rest, as the final stitch builds it."""
+        """Build the injected stitch of some annuli's images, with the base winners' clean images for the rest.
+
+        It is built as the final stitch builds it, with the base run's tiles, pads, weights and flattening.
+
+        Parameters
+        ----------
+        images : dict of int to ndarray
+            The images, by 0-based annulus.
+
+        Returns
+        -------
+        stitch : ndarray, shape (ny, nx)
+            The stitched image.
+        """
         from .stitch import stitch_tiles
         imgs = [images.get(a, self.clean[a]) for a in self.order]
         return self.r._maybe_flatten(stitch_tiles(imgs, self.itiles, self.weights, pads=self.pads))
 
     def measure(self, img: np.ndarray, sources: Sequence[Source]) -> np.ndarray:
-        """Each source's S/N as the stitched verify measures it (Path A), its ring without the other
-        sources and the known companions."""
+        """Measure each source's S/N as the stitched verify measures it, Path A of :func:`klip_tpe.verify.verify_injections`.
+
+        Each ring leaves out the other sources and the known companions.
+
+        Parameters
+        ----------
+        img : ndarray, shape (ny, nx)
+            The stitched image.
+        sources : sequence of Source
+            The sources.
+
+        Returns
+        -------
+        snr : ndarray, shape (n,)
+            S/N of each of the ``n`` sources.
+        """
         from .verify import verify_injections
         rows, _ = verify_injections(np.asarray(img, float)[None], [s.as_tuple() for s in sources], self.r.fwhm,
                                     self.r.pxscale, known=self.known, excl_fwhm=self.r._excl_fwhm(),
@@ -498,24 +948,53 @@ class StitchScorer:
     # ---------------------------------------------------------------- draws
     @property
     def clear_fwhm(self) -> float:
-        """The run's sampler's distance between sources (FWHM), the draws' clearance by default."""
+        """The run's sampler's distance between sources, in FWHM, the draws' clearance by default.
+        """
         return float(getattr(self.r.sampler, "min_mutual_fwhm", 2.0))
 
     @property
     def fwhm_px(self) -> float:
+        """The FWHM the run's sampler places sources by, in pixels.
+        """
         return float(getattr(self.r.sampler, "fwhm_as", self.r.fwhm * self.r.pxscale)) / float(self.r.pxscale)
 
     def draw(self, tiles: Sequence[int], contrasts: Dict[int, float], rng: np.random.Generator,
              counts: Optional[Dict[int, int]] = None, clear_fwhm: Optional[float] = None, restarts: int = 20
              ) -> List[Tuple[int, Source]]:
-        """One draw: ``counts[j]`` sources in each of ``tiles`` (annuli; default the run's number),
-        placed by the run's sampler in the tile's radii, each at its tile's contrast, at least
-        ``clear_fwhm`` FWHM (default the sampler's distance) from the sources of the other tiles.
+        """Draw sources in some tiles, each at its tile's contrast and clear of the other tiles' sources.
 
-        The tile with the most sources is placed first: a pair 180 deg apart, placed after the
-        other tiles' sources, has to clear all of them at once.  A tile that finds no place in 300
-        tries starts the draw again, ``restarts`` times, before :class:`PlacementError`.  The
-        sources come back in the order of ``tiles``."""
+        The run's sampler places each tile's sources in its radii, at least ``clear_fwhm`` FWHM from the
+        sources of the other tiles and, where the sampler checks them, outside each other's ADI sidelobes.
+        The tile with the most sources is placed first, since a pair 180 degrees apart, placed after the
+        other tiles' sources, has to clear all of them at once.  A tile that finds no place in 300 tries
+        starts the draw again.
+
+        Parameters
+        ----------
+        tiles : sequence of int
+            The tiles, by 0-based annulus.
+        contrasts : dict of int to float
+            Contrast of each tile's sources.
+        rng : numpy.random.Generator
+            Generator of the positions.
+        counts : dict of int to int or None, default None
+            Number of sources in each tile.  None, or a tile left out, takes the run's number.
+        clear_fwhm : float or None, default None
+            Smallest distance between two tiles' sources, in FWHM.  None takes the sampler's
+            (:attr:`clear_fwhm`).
+        restarts : int, default 20
+            Number of starts before giving up.
+
+        Returns
+        -------
+        draw : list of tuple
+            ``(tile, source)`` per source, in the order of ``tiles``.
+
+        Raises
+        ------
+        PlacementError
+            If no start places every tile.
+        """
         smp = self.r.sampler
         px = float(self.r.pxscale)
         fwhm_as = float(getattr(smp, "fwhm_as", self.r.fwhm * px))
@@ -551,9 +1030,29 @@ class StitchScorer:
 
     def score_draws(self, draws: Sequence[Sequence[Tuple[int, Source]]], k: int, window: int,
                     cfg_k=None, apart: bool = False) -> List[np.ndarray]:
-        """Each draw's sources measured on the stitch with every annulus they reach reduced with
-        them: annulus ``k`` under ``cfg_k`` (default its base winner), the others under their base
-        winners.  ``apart``: each tile's sources in reductions and a stitch of their own."""
+        """Measure each draw's sources on the stitch, with every annulus they reach reduced with them.
+
+        Annulus ``k`` is reduced under ``cfg_k`` and the others under their base winners.
+
+        Parameters
+        ----------
+        draws : sequence of sequence of tuple
+            The draws, ``(tile, source)`` per source (:meth:`draw`).
+        k : int
+            The annulus scored, counted from 0.
+        window : int
+            Number of reductions in flight at most.
+        cfg_k : Config or None, default None
+            Configuration of annulus ``k``.  None takes its base winner.
+        apart : bool, default False
+            Whether each tile's sources go into reductions and a stitch of their own.  Annulus ``k`` is then
+            reduced only where a tile's sources reach it.
+
+        Returns
+        -------
+        snr : list of ndarray
+            Each draw's S/N, one per source in the draw's order.
+        """
         cfg_k = self.base_cfg[k] if cfg_k is None else cfg_k
         subs = [_subdraws(d, apart) for d in draws]
         jobs, slots = [], []
@@ -578,10 +1077,36 @@ class StitchScorer:
 
     def calibrate(self, j: int, rng: np.random.Generator, n_cal: int = 8, target: Tuple[float, float] = TARGET,
                   max_iter: int = 4, window: int = 2, n_src: Optional[int] = None) -> Dict[str, Any]:
-        """The contrast of tile ``j``'s sources at which the base winners read a median S/N inside
-        ``target`` on the stitch, on ``n_cal`` draws of tile ``j`` alone, the same positions at
-        every step: from the base run's contrast for annulus ``j``, each step as
-        :meth:`_next_contrast` takes it.  ``n_src``: the sources per draw (default the run's)."""
+        """Find the contrast of a tile's sources at which the base winners read a median S/N inside ``target`` on the stitch.
+
+        The S/N is measured on ``n_cal`` draws of tile ``j`` alone, at the same positions at every step.
+        The first step takes the base run's contrast for annulus ``j`` (1e-4 without one), and each step
+        after takes the contrast :meth:`_next_contrast` gives.
+
+        Parameters
+        ----------
+        j : int
+            The tile, by 0-based annulus.
+        rng : numpy.random.Generator
+            Generator of the positions.
+        n_cal : int, default 8
+            Number of draws.
+        target : tuple of 2 floats, default TARGET
+            Range of the median S/N sought.
+        max_iter : int, default 4
+            Number of steps at most.
+        window : int, default 2
+            Number of reductions in flight at most.
+        n_src : int or None, default None
+            Number of sources per draw.  None takes the run's.
+
+        Returns
+        -------
+        calibration : dict
+            ``contrast``, ``converged`` (whether a step read inside ``target``) and ``history``, each step's
+            ``contrast``, ``median_snr`` and ``n``.  Without convergence the contrast is the next one, not
+            measured.
+        """
         c = float(self.results[j].contrast or 0.0)
         if not np.isfinite(c) or c <= 0:
             c = 1e-4
@@ -605,10 +1130,24 @@ class StitchScorer:
 
     @staticmethod
     def _next_contrast(hist: Sequence[Dict[str, Any]], target: Tuple[float, float]) -> float:
-        """The next contrast to try.  Once one step read below ``target`` and one above, the
-        contrast between the nearest two, interpolated in log contrast against their S/N.  Before,
-        the last contrast scaled by the target's middle over its S/N (times 3 when it read
-        nothing)."""
+        """Return the next contrast to try in a calibration.
+
+        Once a step has read below ``target`` and one above, it is the contrast between the nearest two,
+        interpolated in log contrast against their S/N.  Before, it is the last contrast scaled by the
+        target's middle over its S/N, or by 3 where that S/N is not finite or at most 0.5.
+
+        Parameters
+        ----------
+        hist : sequence of dict
+            The steps so far, each with ``contrast`` and ``median_snr``.
+        target : tuple of 2 floats
+            Range of the median S/N sought.
+
+        Returns
+        -------
+        contrast : float
+            The next contrast.
+        """
         lo, hi = float(target[0]), float(target[1])
         mid = 0.5 * (lo + hi)
         pts = [(float(h["contrast"]), float(h["median_snr"])) for h in hist if np.isfinite(h["median_snr"])]
@@ -623,13 +1162,40 @@ class StitchScorer:
 
 
 def _dist(a: Source, b: Source) -> float:
+    """Return the distance between two sources.
+
+    Parameters
+    ----------
+    a : Source
+        The first source.
+    b : Source
+        The second source.
+
+    Returns
+    -------
+    dist : float
+        The distance, in arcsec.
+    """
     pa, pb = np.deg2rad(a.theta + 90.0), np.deg2rad(b.theta + 90.0)
     return float(np.hypot(a.rho * np.cos(pa) - b.rho * np.cos(pb), a.rho * np.sin(pa) - b.rho * np.sin(pb)))
 
 
 def _subdraws(d: Sequence[Tuple[int, Source]], apart: bool) -> List[Tuple[List[int], List[Source], Optional[int]]]:
-    """A draw as the parts reduced and measured together, each as (its sources' places in the
-    draw, the sources, the tile): the whole draw (tile None), or with ``apart`` each tile's."""
+    """Split a draw into the parts reduced and measured together.
+
+    Parameters
+    ----------
+    d : sequence of tuple
+        The draw, ``(tile, source)`` per source.
+    apart : bool
+        Whether each tile's sources form a part of their own.
+
+    Returns
+    -------
+    parts : list of tuple
+        ``(places, sources, tile)`` per part, ``places`` being the sources' indices in the draw.  Without
+        ``apart`` the whole draw is one part, of tile None.
+    """
     if not apart:
         return [(list(range(len(d))), [s for _, s in d], None)]
     parts: Dict[int, Tuple[List[int], List[Source], Optional[int]]] = {}
@@ -641,14 +1207,45 @@ def _subdraws(d: Sequence[Tuple[int, Source]], apart: bool) -> List[Tuple[List[i
 
 
 def _tag(a: int, t: int, j: Optional[int], cand: bool = False) -> str:
-    """A reduction's tag: the annulus, ``_c`` for a candidate's, the draw and, apart, the tile."""
+    """Return a reduction's tag, from the annulus, the draw and, apart, the tile.
+
+    Parameters
+    ----------
+    a : int
+        The annulus, counted from 0.
+    t : int
+        Index of the draw.
+    j : int or None
+        The tile, by 0-based annulus, None for a whole draw.
+    cand : bool, default False
+        Whether the reduction is a candidate's, marked ``_c``.
+
+    Returns
+    -------
+    tag : str
+        The tag, such as ``rescore_a3_c_d4_t2``.
+    """
     return f"rescore_a{a + 1}{'_c' if cand else ''}_d{t}" + ("" if j is None else f"_t{j + 1}")
 
 
 def _options_record(sd: str) -> Optional[Dict[str, Any]]:
-    """What a re-score directory's ``state`` was started with (``options.json``).  A directory
-    started before that record (2026-11-11) scored its tiles together on the base run's winners
-    and its own draws.  None for a directory not started."""
+    """Return what a re-score directory's ``state`` was started with, its ``options.json``.
+
+    Parameters
+    ----------
+    sd : str
+        The ``state`` directory.
+
+    Returns
+    -------
+    options : dict or None
+        The options, None for a directory not started.
+
+    Notes
+    -----
+    A directory started before the record (2026-11-11) scored its tiles together on the base run's
+    winners and its own draws, and gets those options.
+    """
     p = os.path.join(sd, "options.json")
     if os.path.exists(p):
         return _read_json(p)
@@ -658,9 +1255,32 @@ def _options_record(sd: str) -> Optional[Dict[str, Any]]:
 
 
 def _copy_draws(src_dir: str, sd: str, k: int, n: Optional[int]) -> int:
-    """Annulus ``k``'s draws and their rule from the re-score in ``src_dir`` into ``sd``, its
-    first ``n`` (default all), unless ``sd`` holds them from an earlier start.  Returns the
-    number of draws."""
+    """Copy an annulus' draws and their rule from an earlier re-score, unless the directory holds them already.
+
+    It writes ``annKK_draws.json`` and, where the earlier re-score has it, ``annKK_placement.json`` into
+    ``sd``.
+
+    Parameters
+    ----------
+    src_dir : str
+        Directory of the earlier re-score.
+    sd : str
+        This re-score's ``state`` directory.
+    k : int
+        The annulus, counted from 0.
+    n : int or None
+        Number of draws, the first ones.  None takes all.
+
+    Returns
+    -------
+    n_draws : int
+        Number of draws in ``sd``.
+
+    Raises
+    ------
+    RescoreStop
+        If the earlier re-score has no draws of the annulus, or fewer than ``n``.
+    """
     dst = os.path.join(sd, f"ann{k + 1:02d}_draws.json")
     if os.path.exists(dst):
         return len(_read_json(dst))
@@ -680,7 +1300,20 @@ def _copy_draws(src_dir: str, sd: str, k: int, n: Optional[int]) -> int:
 
 
 def _per_draw(snr: Sequence[np.ndarray], tiles_of: Sequence[Sequence[int]]) -> Dict[Any, np.ndarray]:
-    """Per draw, the median S/N of its sources (``"all"``) and of each tile's (key: the tile)."""
+    """Return each draw's median S/N, of all its sources and of each tile's.
+
+    Parameters
+    ----------
+    snr : sequence of ndarray
+        Each draw's S/N, per source.
+    tiles_of : sequence of sequence of int
+        Each draw's tile of each source.
+
+    Returns
+    -------
+    medians : dict
+        ``"all"`` and each tile (0-based) to an array of one median per draw.
+    """
     out: Dict[Any, np.ndarray] = {"all": np.array([_nanmedian(v) for v in snr])}
     for j in sorted({int(j) for tj in tiles_of for j in tj}):
         out[j] = np.array([_nanmedian(np.asarray(v)[np.asarray(tj) == j]) for v, tj in zip(snr, tiles_of)])
@@ -688,13 +1321,45 @@ def _per_draw(snr: Sequence[np.ndarray], tiles_of: Sequence[Sequence[int]]) -> D
 
 
 def _entrant_brief(e: Dict[str, Any]) -> Dict[str, Any]:
+    """Return an entrant's record cut to its run, kind and evaluation.
+
+    Parameters
+    ----------
+    e : dict
+        The entrant's record, as ``rescore.json`` stores it.
+
+    Returns
+    -------
+    brief : dict
+        ``run``, ``kind`` and ``eval_index``.
+    """
     return {"run": e.get("run"), "kind": e.get("kind"), "eval_index": e.get("eval_index")}
 
 
 def _against(src_dir: str, k: int, rep_k: Dict[str, Any], draws, tiles_of) -> Dict[str, Any]:
-    """This re-score's base winner of annulus ``k`` against the re-score in ``src_dir``'s, on the
-    same draws: the paired differences of their per-draw medians, for all of a draw's sources,
-    for tile ``k`` and for each tile of the draws.  ``missing`` says why there is none."""
+    """Compare this re-score's base winner of an annulus with an earlier re-score's, on the same draws.
+
+    Parameters
+    ----------
+    src_dir : str
+        Directory of the earlier re-score.
+    k : int
+        The annulus, counted from 0.
+    rep_k : dict
+        This re-score's report of the annulus, with its ``entrants``.
+    draws : sequence of sequence of tuple
+        The annulus' draws, ``(tile, source)`` per source.
+    tiles_of : sequence of sequence of int
+        Each draw's tile of each source.
+
+    Returns
+    -------
+    comparison : dict
+        ``dir`` and either ``missing``, why there is no comparison, or ``base`` (the earlier base
+        winner), ``tiles`` and ``base_winners`` (the earlier re-score's options) and the paired
+        differences of the per-draw medians, this base's from the earlier one's (:func:`paired_summary`):
+        ``all`` for all of a draw's sources, ``tile`` for tile ``k`` and ``per_tile`` for each tile.
+    """
     name = os.path.basename(src_dir)
     out: Dict[str, Any] = {"dir": src_dir}
     try:
@@ -723,14 +1388,47 @@ def _against(src_dir: str, k: int, rep_k: Dict[str, Any], draws, tiles_of) -> Di
 
 
 def _draw_json(d: Sequence[Tuple[int, Source]]) -> List[List[float]]:
+    """Return a draw as JSON lists, ``[tile, rho, theta, contrast]`` per source.
+
+    Parameters
+    ----------
+    d : sequence of tuple
+        The draw, ``(tile, source)`` per source.
+
+    Returns
+    -------
+    rows : list of list
+        One row per source.
+    """
     return [[int(j), float(s.rho), float(s.theta), float(s.contrast)] for j, s in d]
 
 
 def _draw_from_json(d) -> List[Tuple[int, Source]]:
+    """Return a draw from its JSON lists (:func:`_draw_json`).
+
+    Parameters
+    ----------
+    d : sequence of sequence
+        ``[tile, rho, theta, contrast]`` per source.
+
+    Returns
+    -------
+    draw : list of tuple
+        ``(tile, source)`` per source.
+    """
     return [(int(v[0]), Source(float(v[1]), float(v[2]), float(v[3]))) for v in d]
 
 
 def _atomic_json(path: str, obj: Any) -> None:
+    """Write an object as JSON, through a temporary file replaced into place.
+
+    Parameters
+    ----------
+    path : str
+        Path of the file.
+    obj : object
+        The object.
+    """
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(obj, f, indent=1, default=float)
@@ -738,17 +1436,50 @@ def _atomic_json(path: str, obj: Any) -> None:
 
 
 def _neighbors(scorer: StitchScorer, k: int) -> List[int]:
+    """Return an annulus and its neighbors in the stitch, the tiles of its draws.
+
+    Parameters
+    ----------
+    scorer : StitchScorer
+        The scorer.
+    k : int
+        The annulus, counted from 0.
+
+    Returns
+    -------
+    annuli : list of int
+        Annulus ``k`` with the annuli before and after it in the stitch's order, where there are.
+    """
     p = scorer.pos(k)
     return [scorer.order[q] for q in (p - 1, p, p + 1) if 0 <= q < len(scorer.order)]
 
 
 def _placements(scorer: StitchScorer, k: int, sources_per_tile: Optional[int] = None,
                 clear_fwhm: Optional[float] = None) -> List[Dict[str, Any]]:
-    """The rules annulus ``k``'s draws are placed by, in the order they are tried: the sources in
-    each tile (``counts``) and their clearance (``clear_fwhm``).  Asked for, ``sources_per_tile``
-    (at most that many in each tile) and ``clear_fwhm`` are the one rule.  Otherwise the run's
-    numbers at the sampler's distance, then at :data:`RELAXED_FWHM`, then one source in each
-    neighbor's tile, annulus ``k``'s own keeping the run's number."""
+    """Return the rules annulus ``k``'s draws are placed by, in the order they are tried.
+
+    A rule asked for, by ``sources_per_tile`` or ``clear_fwhm``, is the one rule.  Otherwise the rules
+    are the run's numbers at the sampler's distance, the same numbers at :data:`RELAXED_FWHM` where that
+    is smaller, then one source in each neighbor's tile at the smaller distance, annulus ``k``'s own
+    keeping the run's number, where that changes the numbers.
+
+    Parameters
+    ----------
+    scorer : StitchScorer
+        The scorer.
+    k : int
+        The annulus, counted from 0.
+    sources_per_tile : int or None, default None
+        Most sources in each tile.
+    clear_fwhm : float or None, default None
+        Smallest distance between two tiles' sources, in FWHM.
+
+    Returns
+    -------
+    rules : list of dict
+        ``counts`` (sources per tile), ``clear_fwhm`` and ``rule`` ("asked", "the run's" or "relaxed")
+        per rule.
+    """
     tiles = _neighbors(scorer, k)
     run_n = {j: int(scorer.r._nsrc(j)) for j in tiles}
     cf0 = scorer.clear_fwhm
@@ -765,7 +1496,22 @@ def _placements(scorer: StitchScorer, k: int, sources_per_tile: Optional[int] = 
 
 
 def _rule_text(rule: Dict[str, Any], fwhm_px: float) -> str:
-    """``1 source in tile 1, 1 in tile 2 and 2 in tile 3, 2 FWHM (12.8 px) apart``"""
+    """Describe a placement rule in words.
+
+    An example is ``1 source in tile 1, 1 in tile 2 and 2 in tile 3, 2 FWHM (12.8 px) apart``.
+
+    Parameters
+    ----------
+    rule : dict
+        The rule, with ``counts`` and ``clear_fwhm``.
+    fwhm_px : float
+        FWHM, in pixels.
+
+    Returns
+    -------
+    text : str
+        The rule in words.
+    """
     items = sorted((int(j), int(n)) for j, n in rule["counts"].items())
     parts = [f"{n} in tile {j + 1}" for j, n in items]
     parts[0] = parts[0].replace(" in ", " source in " if items[0][1] == 1 else " sources in ", 1)
@@ -775,11 +1521,35 @@ def _rule_text(rule: Dict[str, Any], fwhm_px: float) -> str:
 
 
 def _rule_json(rule: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a placement rule as JSON, its tiles counted from 1.
+
+    Parameters
+    ----------
+    rule : dict
+        The rule, its tiles counted from 0.
+
+    Returns
+    -------
+    record : dict
+        ``counts``, ``clear_fwhm`` and ``rule``.
+    """
     return {"counts": {str(int(j) + 1): int(n) for j, n in rule["counts"].items()},
             "clear_fwhm": float(rule["clear_fwhm"]), "rule": rule["rule"]}
 
 
 def _rule_from_json(d: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a placement rule from its JSON (:func:`_rule_json`), its tiles counted from 0.
+
+    Parameters
+    ----------
+    d : dict
+        The record.
+
+    Returns
+    -------
+    rule : dict
+        ``counts``, ``clear_fwhm`` and ``rule``.
+    """
     return {"counts": {int(j) - 1: int(n) for j, n in d["counts"].items()}, "clear_fwhm": float(d["clear_fwhm"]),
             "rule": d.get("rule", "")}
 
@@ -787,10 +1557,46 @@ def _rule_from_json(d: Dict[str, Any]) -> Dict[str, Any]:
 def _annulus_draws(scorer: StitchScorer, k: int, contrasts: Dict[int, float], n_draws: int, seed: int, sd: str,
                    rules: Sequence[Dict[str, Any]], log: Callable[[str], None]
                    ) -> Tuple[List[List[Tuple[int, Source]]], Dict[str, Any]]:
-    """Annulus ``k``'s draws and the rule they were placed by: the ones kept in ``sd`` from an
-    earlier start, else placed by the first of ``rules`` that places every draw, each rule with
-    its own random stream (the first the stream of the code before the rules).  Raises
-    :class:`RescoreStop` when the kept draws do not fit the options or no rule places them."""
+    """Return annulus ``k``'s draws and the rule they were placed by.
+
+    They are the draws kept in ``sd`` from an earlier start, else those placed by the first of ``rules``
+    that places every draw, each rule with its own random stream (the first the stream of the code
+    before the rules).  New draws and their rule are written to ``annKK_draws.json`` and
+    ``annKK_placement.json`` in ``sd``.
+
+    Parameters
+    ----------
+    scorer : StitchScorer
+        The scorer.
+    k : int
+        The annulus, counted from 0.
+    contrasts : dict of int to float
+        Contrast of each tile's sources.
+    n_draws : int
+        Number of draws.
+    seed : int
+        Seed of the random streams.
+    sd : str
+        The re-score's ``state`` directory.
+    rules : sequence of dict
+        The placement rules, in the order tried (:func:`_placements`).
+    log : callable
+        Function that takes each line of the log.
+
+    Returns
+    -------
+    draws : list of list of tuple
+        The draws, ``(tile, source)`` per source.
+    rule : dict
+        The rule they were placed by.
+
+    Raises
+    ------
+    RescoreStop
+        If the kept draws are not ``n_draws``, or were placed by another rule than the one asked.
+    PlacementError
+        If no rule places every draw.
+    """
     dpath = os.path.join(sd, f"ann{k + 1:02d}_draws.json")
     ppath = os.path.join(sd, f"ann{k + 1:02d}_placement.json")
     fw = scorer.fwhm_px
@@ -831,10 +1637,35 @@ def _annulus_draws(scorer: StitchScorer, k: int, contrasts: Dict[int, float], n_
 
 def rescore_plan(scorer: StitchScorer, entrants: Dict[int, List[Entrant]], n_draws: Union[int, Dict[int, int]],
                  n_cal: int = 8, max_iter: int = 4, apart: bool = False, calibrate: bool = True) -> Dict[str, Any]:
-    """How many reductions a re-score makes, at most: the base winners' clean images, the
-    calibration of each tile (none with ``calibrate`` False) and, per annulus, the neighbors'
-    and the entrants' reductions of its draws (``n_draws``, or per annulus).  ``apart``: each
-    tile's sources reduced on their own.  No reduction is made."""
+    """Count the reductions a re-score makes at most, without making any.
+
+    They are the base winners' clean images, the calibration of each tile and, per annulus, the
+    neighbors' and the entrants' reductions of its draws.
+
+    Parameters
+    ----------
+    scorer : StitchScorer
+        The scorer.
+    entrants : dict of int to list of Entrant
+        The entrants of each annulus scored, by 0-based annulus.
+    n_draws : int or dict of int to int
+        Number of draws, or per annulus.
+    n_cal : int, default 8
+        Number of draws of each calibration step.
+    max_iter : int, default 4
+        Number of calibration steps at most.
+    apart : bool, default False
+        Whether each tile's sources are reduced on their own.
+    calibrate : bool, default True
+        Whether the tiles are calibrated.
+
+    Returns
+    -------
+    plan : dict
+        ``base_clean``, ``calibration`` (per tile), ``annuli`` (per annulus its ``entrants``,
+        ``affected``, ``draws``, ``own_per_draw``, ``neighbors`` and ``entrant`` counts), ``total`` and
+        ``tiles`` ("apart" or "together").
+    """
     R = 2.5 * float(scorer.r.fwhm)
     tiles_needed = sorted({j for k in entrants for j in _neighbors(scorer, k)})
 
@@ -868,7 +1699,18 @@ def rescore_plan(scorer: StitchScorer, entrants: Dict[int, List[Entrant]], n_dra
 
 
 def _base_reduce_seconds(run_dir: str) -> Optional[float]:
-    """The median time the base run's search took to reduce a trial (``reduce_s``)."""
+    """Return the median time the base run's search took to reduce a trial.
+
+    Parameters
+    ----------
+    run_dir : str
+        Directory of the base run.
+
+    Returns
+    -------
+    seconds : float or None
+        The median ``reduce_s`` in ``results.jsonl``, the validation left out, None without any.
+    """
     path = os.path.join(run_dir, "results.jsonl")
     vals = []
     if os.path.exists(path):
@@ -891,30 +1733,84 @@ def rescore(runner, entrant_runs: Sequence[str], out_dir: str, *, annuli: Sequen
             clear_fwhm: Optional[float] = None, base_winners: Optional[Sequence[Pick]] = None,
             candidates: Optional[Sequence[Pick]] = None, draws_from: Optional[str] = None,
             tiles: Optional[str] = None, log: Callable[[str], None] = print) -> Dict[str, Any]:
-    """Score the candidates of ``annuli`` (0-based) on the base run's stitch, the other annuli at
-    the base winners.  ``runner`` is the base run resumed read-only, ``entrant_runs`` the other
-    runs of the same setup whose candidates enter too (the base run's always do).
+    """Score the candidates of some annuli on the base run's stitch, the other annuli at the base winners.
 
-    Writes ``rescore.json`` and ``rescore.txt`` to ``out_dir`` after each annulus, and keeps its
+    Each annulus' candidates are its base winner first, then the entrants of the base run and of
+    ``entrant_runs`` (:func:`run_entrants`), or with ``candidates`` only the base run's winner and those
+    picks.  Each tile's contrast is calibrated on the base winners' stitch
+    (:meth:`StitchScorer.calibrate`), or taken from ``draws_from``.  An annulus whose draws find no
+    place under any rule stops with a message, and the re-score goes on with the next.
+
+    It writes ``rescore.json`` and ``rescore.txt`` to ``out_dir`` after each annulus, and keeps its
     draws, its calibration, its options and each entrant's S/N in ``out_dir/state``, from which a
-    re-score started again on the same directory resumes.  ``plan``: count the reductions and
-    return, making none.  ``card``: the injected reductions may go to the card workers.
-    ``n_draws``: common draws per annulus (default 50, or all of ``draws_from``'s).
+    re-score started again on the same directory resumes.
 
-    ``sources_per_tile`` (at most that many sources in each tile of a draw) and ``clear_fwhm``
-    (the distance between the tiles' sources, FWHM) set the rule the draws are placed by.  Without
-    them an annulus whose draws find no place under the run's rule falls back as
-    :func:`_placements` lists.  An annulus whose draws find no place under any rule stops with a
-    message, and the re-score goes on with the next.
+    Parameters
+    ----------
+    runner : Runner
+        The base run, resumed read-only.
+    entrant_runs : sequence of str
+        Directories of the other runs of the same setup whose candidates enter too.  The base run's
+        always do.
+    out_dir : str
+        Directory of the re-score, beside the runs.
+    annuli : sequence of int
+        The annuli scored, counted from 0.
+    n_draws : int or None, default None
+        Number of common draws per annulus.  None takes 50, or all of ``draws_from``'s.
+    top : int, default 0
+        Number of the best evaluations of each run's history that enter too.
+    seed : int, default 1
+        Seed of the draws and the calibration.
+    target : tuple of 2 floats, default TARGET
+        Range of the base winners' median S/N the calibration seeks.
+    n_cal : int, default 8
+        Number of draws of each calibration step.
+    max_iter : int, default 4
+        Number of calibration steps at most.
+    window : int or None, default None
+        Number of reductions in flight at most.  None takes the runner's.
+    overlap_pads : bool or None, default None
+        Whether overlapping annuli take pads between them.  None keeps the base run's.
+    plan : bool, default False
+        Whether to count the reductions and return, making none.
+    card : bool, default False
+        Whether the injected reductions may go to the card workers.
+    sources_per_tile : int or None, default None
+        Most sources in each tile of a draw, which with ``clear_fwhm`` sets the one placement rule.
+    clear_fwhm : float or None, default None
+        Distance between the tiles' sources, in FWHM.  Without it and ``sources_per_tile``, an annulus
+        whose draws find no place under the run's rule falls back as :func:`_placements` lists.
+    base_winners : sequence of Pick or None, default None
+        Picks (:func:`read_picks`) whose configurations replace the base run's winners of their annuli,
+        which then enter as candidates.
+    candidates : sequence of Pick or None, default None
+        The only picks that enter, with each annulus' base winner.
+    draws_from : str or None, default None
+        Directory of an earlier re-score of the same base run, whose draws, their rule and contrasts
+        this one takes, without calibration, and against whose base winner each annulus' base is
+        compared, draw for draw.
+    tiles : {"apart", "together"} or None, default None
+        Whether each tile's sources are reduced and measured on their own, or all of a draw's at once.
+        None takes "apart" for a new directory, the directory's own for one started before, and
+        ``draws_from``'s with it.
+    log : callable, default print
+        Function that takes each line of the log.
 
-    ``tiles``: ``"apart"`` reduces and measures each tile's sources on their own, ``"together"``
-    all of a draw's sources at once.  A new directory defaults to apart, one started before keeps
-    its own, and with ``draws_from`` the default is that re-score's.  ``base_winners``: picks
-    (:func:`read_picks`) whose configurations are those annuli' base winners in place of the base
-    run's, whose own winners then enter as candidates.  ``candidates``: only these picks enter,
-    with each annulus' base winner.  ``draws_from``: an earlier re-score of the same base run,
-    whose draws, their rule and contrasts this one takes (no calibration), its first ``n_draws``,
-    and against whose base winner each annulus' base is compared, draw for draw."""
+    Returns
+    -------
+    report : dict
+        The report written to ``rescore.json``, with each annulus' ranked entrants and their paired
+        differences from the base winner.  With ``plan``, ``plan`` (:func:`rescore_plan`), ``reduce_s``,
+        ``tiles`` and ``entrants`` instead.
+
+    Raises
+    ------
+    ValueError
+        If an option is out of range or clashes with another, ``out_dir`` lies inside a run, the
+        reducer's frames or a run's setup are not the base run's, an annulus has two base winners, or
+        ``out_dir`` was started with other options.
+    """
     if sources_per_tile is not None and int(sources_per_tile) < 1:
         raise ValueError("sources_per_tile must be at least 1")
     if clear_fwhm is not None and not float(clear_fwhm) > 0:
@@ -1210,9 +2106,37 @@ def rescore(runner, entrant_runs: Sequence[str], out_dir: str, *, annuli: Sequen
 
 def _annulus_report(scorer: StitchScorer, k: int, ents: Sequence[Entrant], draws, tiles_of, sd: str,
                     base_key: str) -> Dict[str, Any]:
-    """Each entrant's statistics over the common draws: the median over each draw's sources of
-    their S/N, for all the draw's sources, for tile ``k``'s alone and for each tile's (``tiles``),
-    and the paired differences from the base winner."""
+    """Rank an annulus' entrants by their statistics over the common draws.
+
+    Each entrant's statistic is, per draw, the median of its sources' S/N, for all of the draw's
+    sources, for tile ``k``'s alone and for each tile's, with the paired differences from the base
+    winner (:func:`paired_summary`).  The entrants rank by their median over all the sources, then by
+    their mean difference.
+
+    Parameters
+    ----------
+    scorer : StitchScorer
+        The scorer.
+    k : int
+        The annulus, counted from 0.
+    ents : sequence of Entrant
+        The entrants, each with its S/N in ``sd``.
+    draws : sequence of sequence of tuple
+        The draws, ``(tile, source)`` per source.
+    tiles_of : sequence of sequence of int
+        Each draw's tile of each source.
+    sd : str
+        The re-score's ``state`` directory.
+    base_key : str
+        The base winner's :func:`config_key`.
+
+    Returns
+    -------
+    report : dict
+        ``tile_px``, ``draw_tiles`` (1-based), ``draws``, ``entrants`` (ranked, each with ``entrant``,
+        ``base``, ``snr``, ``all``, ``tile``, ``tiles`` and ``rank``), ``base_rank``, ``position`` and
+        ``base_tiles`` (the base winner's median S/N per tile).
+    """
     rows = []
     for e in ents:
         rec = _read_json(os.path.join(sd, f"ann{k + 1:02d}_{e.tag}.json"))
@@ -1240,19 +2164,69 @@ def _annulus_report(scorer: StitchScorer, k: int, ents: Sequence[Entrant], draws
 
 
 def _f(v, fmt="{:.2f}") -> str:
+    """Format a number, "-" where it is None or not finite.
+
+    Parameters
+    ----------
+    v : float or None
+        The value.
+    fmt : str, default "{:.2f}"
+        The format.
+
+    Returns
+    -------
+    text : str
+        The value formatted.
+    """
     return fmt.format(v) if v is not None and np.isfinite(v) else "-"
 
 
 def _ev1(v) -> str:
-    """An evaluation as the text reports count it, from 1."""
+    """Return an evaluation as the text reports count it, from 1.
+
+    Parameters
+    ----------
+    v : int or None
+        The evaluation, counted from 0.
+
+    Returns
+    -------
+    text : str
+        The evaluation counted from 1, "-" for None.
+    """
     return "-" if v is None else str(int(v) + 1)
 
 
 def _diff_text(st: Optional[Dict[str, Any]]) -> str:
+    """Format a paired difference as "mean +/- standard error".
+
+    Parameters
+    ----------
+    st : dict or None
+        The summary, from :func:`paired_summary`.
+
+    Returns
+    -------
+    text : str
+        The difference, "-" without a summary.
+    """
     return "-" if not st else f"{_f(st.get('diff_mean'), '{:+.2f}')} +/- {_f(st.get('diff_se'))}"
 
 
 def _write_reports(out_dir: str, report: Dict[str, Any], log: Optional[Callable[[str], None]]) -> None:
+    """Write the re-score's ``rescore.json`` and ``rescore.txt`` to its directory.
+
+    Each is written through a temporary file replaced into place.
+
+    Parameters
+    ----------
+    out_dir : str
+        Directory of the re-score.
+    report : dict
+        The report.
+    log : callable or None
+        Function that takes the line saying where the reports went.  None logs nothing.
+    """
     _atomic_json(os.path.join(out_dir, "rescore.json"), report)
     mode = report.get("tiles", "together")
     bw = report.get("base_winners") or {}
