@@ -47,6 +47,7 @@ DONE = [
     "klip_tpe/klip.py",
     "klip_tpe/metrics.py",
     "klip_tpe/reducer.py",
+    "klip_tpe/refine.py",
     "klip_tpe/verify.py",
     "tests/test_docstrings.py",
     "tests/test_klip_annular_doc.py",

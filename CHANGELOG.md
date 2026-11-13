@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — 2026-11-13 (refine.py documented to the rule)
+
+- **`refine.py` follows the documentation rule**: the re-score's module docstring, with the NEAR2
+  notes behind `tiles="apart"` under Notes, the entrants and picks, `StitchScorer`, the draws and
+  their placement rules, `rescore_plan`, `rescore` and the reports.  Only docstrings and comments
+  changed.
+
 ## Unreleased — 2026-11-13 (verify.py documented to the rule)
 
 - **`verify.py` follows the documentation rule**: its module docstring, with the departures from
