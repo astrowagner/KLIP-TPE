@@ -1,35 +1,29 @@
-"""Forward-modelled matched filter (FMMF).
+"""Forward-modeled matched filter (FMMF, Pueyo 2016, Ruffio et al. 2017).
 
-A matched filter is only optimal if the template is what the planet actually looks like
-*in the reduced image*.  KLIP is not flux-conserving: it eats a separation- and
-configuration-dependent fraction of the planet and surrounds what is left with negative
-self-subtraction lobes, so filtering the residual frame with the instrumental PSF -- or
-worse, a Gaussian -- throws away signal and mismatches the wings.  The forward-modelled
-matched filter (Pueyo 2016; Ruffio et al. 2017) instead propagates the PSF model through
-the *same* KLIP projection and filters with the result.
+A matched filter is optimal only when the template is what the planet looks like in the reduced
+image.  KLIP removes a separation- and configuration-dependent fraction of the planet and leaves
+negative self-subtraction lobes around the rest, so filtering with the instrumental PSF, or a
+Gaussian, loses signal and mismatches the wings.  The FMMF propagates the PSF model through the
+same KLIP projection and filters with the result.
 
-This module plugs that idea into the optimizer.  :class:`FMMFSNR` is a drop-in
-replacement for :class:`~klip_tpe.metrics.MawetPeakSNR` that asks the runner for the
-KLIP-FM pass of every configuration it evaluates and builds one matched filter **per
-source**, from the local forward-modelled response.  Everything downstream -- the
-small-sample-corrected ring statistics, the clean-subtraction rule, the validation
-protocol -- is unchanged, so an FMMF run and a PSF-matched-filter run are directly
-comparable; only the filter differs.
+:class:`FMMFSNR` replaces :class:`~klip_tpe.metrics.MawetPeakSNR`.  It asks the runner for the
+KLIP-FM pass of every configuration it evaluates and builds one matched filter per source from
+the local forward-modeled response.  The ring statistics, the clean-subtraction rule and the
+validation are unchanged, so an FMMF run and a PSF-matched-filter run differ only in the filter.
+On JWST the PSF model comes from :mod:`klip_tpe.stpsf_psf`, the combination
+``optimize_jwst(..., psf="stpsf", metric="fmmf")`` sets up.
 
-On JWST the PSF model to forward-model comes from :mod:`klip_tpe.stpsf_psf` (STPSF /
-WebbPSF off-axis coronagraphic PSFs), which is the combination
-``optimize_jwst(..., psf='stpsf', metric='fmmf')`` sets up.
+The forward model is not defined for the per-evaluation k-scan, where the metric falls back to
+``kernel_fn``, the ordinary PSF matched filter, and says so in :meth:`FMMFSNR.describe`.
 
-Typical use::
+Examples
+--------
+::
 
     from klip_tpe import fmmf, stpsf_psf
-    model  = stpsf_psf.model_for_datasets(dsets, star_flux=fstar)
+    model = stpsf_psf.model_for_datasets(dsets, star_flux=fstar)
     metric = fmmf.FMMFSNR(pxscale=px, fwhm=fw, kernel_fn=model.matched_filter_kernel)
     runner = Runner(..., objective=Objective(metric))
-
-The forward model is unavailable in one place, the per-evaluation k-scan (KLIP-FM is not
-defined for a stack of k values at once); there the metric falls back to ``kernel_fn``,
-i.e. to the ordinary PSF matched filter, and says so in :meth:`FMMFSNR.describe`.
 """
 from __future__ import annotations
 
@@ -47,28 +41,63 @@ __all__ = ["fm_kernel", "fm_kernels", "fm_stamp", "template_from_stamp", "FMMFSN
 
 
 def turn_template(k: np.ndarray, dphi_deg: float, order: int = 1) -> np.ndarray:
-    """``k`` turned by ``dphi_deg`` degrees about its center, counterclockwise in the image's
-    ``(x, y) = (column, row)`` frame, the sense of ``arctan2(y - cy, x - cx)``.  An ADI forward
-    model's template turned by the azimuth from its source to another position is the template
-    a source there would have.  ``scipy.ndimage.rotate`` turns the other way for a positive
-    angle, hence the sign."""
+    """Turn a template about its center, counter-clockwise in the image's ``(x, y)`` frame.
+
+    The sense is that of ``arctan2(y - cy, x - cx)``.  An ADI forward model's template turned by the
+    azimuth from its source to another position is the template a source there would have.
+
+    Parameters
+    ----------
+    k : ndarray, shape (K, K)
+        The template.
+    dphi_deg : float
+        Turn, in degrees, counter-clockwise.
+    order : int, default 1
+        Spline order of the rotation.
+
+    Returns
+    -------
+    turned : ndarray, shape (K, K)
+        The turned template, 0 where it rotated in from outside.
+
+    Notes
+    -----
+    ``scipy.ndimage.rotate`` turns the other way for a positive angle, hence the sign in the code.
+    """
     return ndimage.rotate(np.asarray(k, float), -float(dphi_deg), reshape=False, order=int(order),
                           mode="constant", cval=0.0)
 
 
 def fm_kernel(fm_image: np.ndarray, x: float, y: float, size: int, *, zero_mean: bool = True,
               lsq_norm: bool = True, min_snr_px: float = 0.0) -> Optional[np.ndarray]:
-    """The forward-modelled matched filter at pixel ``(x, y)``.
+    """Return the forward-modeled matched filter at a pixel.
 
-    Cuts a ``size`` x ``size`` stamp of the KLIP-FM response around the source, optionally
-    removes its mean (``zero_mean``, so the filter ignores a flat pedestal) and normalises
-    it by ``sum(m^2)`` (``lsq_norm``), which makes the filtered image the least-squares
-    amplitude of the template -- the FMMF estimate of the source's flux in the units the
-    forward model was computed in.
+    It cuts a stamp of the KLIP-FM response around the source (:func:`fm_stamp`), removes its mean so
+    the filter ignores a flat pedestal, and normalizes it by ``sum(m^2)``, which makes the filtered
+    image the least-squares amplitude of the template, the FMMF estimate of the source's flux.
 
-    Returns None when the stamp holds no usable signal (outside the KLIP zone, all-NaN,
-    or a peak below ``min_snr_px`` times the stamp's own robust scatter), so the caller
-    can fall back to an analytic filter.
+    Parameters
+    ----------
+    fm_image : ndarray, shape (ny, nx)
+        The KLIP-FM response image.
+    x : float
+        Column of the source, in pixels.
+    y : float
+        Row of the source, in pixels.
+    size : int
+        Width of the stamp in pixels, made odd.
+    zero_mean : bool, default True
+        Whether to remove the stamp's mean.
+    lsq_norm : bool, default True
+        Whether to normalize by the sum of squares.  False normalizes by the peak.
+    min_snr_px : float, default 0.0
+        Minimum peak of the stamp, in units of its own robust scatter.  0 sets no minimum.
+
+    Returns
+    -------
+    kernel : ndarray or None
+        The filter, or None when the stamp holds no usable signal (off the frame, outside the KLIP
+        zone, all NaN, or below ``min_snr_px``), so the caller can fall back to an analytic filter.
     """
     st = fm_stamp(fm_image, x, y, size)
     if st is None:
@@ -77,8 +106,25 @@ def fm_kernel(fm_image: np.ndarray, x: float, y: float, size: int, *, zero_mean:
 
 
 def fm_stamp(fm_image: np.ndarray, x: float, y: float, size: int) -> Optional[np.ndarray]:
-    """The ``size`` x ``size`` stamp (``size`` made odd) of ``fm_image`` around the pixel of
-    ``(x, y)``, NaN and whatever lies off the frame as 0, or None when it lies off the frame."""
+    """Cut a stamp of an image around the pixel of a position.
+
+    Parameters
+    ----------
+    fm_image : ndarray, shape (ny, nx)
+        The image.
+    x : float
+        Column of the position, in pixels.
+    y : float
+        Row of the position, in pixels.
+    size : int
+        Width of the stamp in pixels, made odd.
+
+    Returns
+    -------
+    stamp : ndarray or None
+        The stamp, with NaN and whatever lies off the frame as 0, or None when it lies wholly off the
+        frame.
+    """
     fm = np.asarray(fm_image, float)
     ny, nx = fm.shape
     size = int(size) | 1
@@ -97,9 +143,24 @@ def fm_stamp(fm_image: np.ndarray, x: float, y: float, size: int) -> Optional[np
 
 def template_from_stamp(st: np.ndarray, *, zero_mean: bool = True, lsq_norm: bool = True,
                         min_snr_px: float = 0.0) -> Optional[np.ndarray]:
-    """:func:`fm_kernel`'s filter from a stamp :func:`fm_stamp` cut: None without usable signal,
-    else zero-meaned (``zero_mean``) and normalized by its sum of squares (``lsq_norm``) or by
-    its peak."""
+    """Turn a stamp into :func:`fm_kernel`'s filter.
+
+    Parameters
+    ----------
+    st : ndarray
+        The stamp (:func:`fm_stamp`).
+    zero_mean : bool, default True
+        Whether to remove the stamp's mean.
+    lsq_norm : bool, default True
+        Whether to normalize by the sum of squares.  False normalizes by the peak.
+    min_snr_px : float, default 0.0
+        Minimum peak of the stamp, in units of its own robust scatter.  0 sets no minimum.
+
+    Returns
+    -------
+    kernel : ndarray or None
+        The filter, or None without usable signal.
+    """
     st = np.asarray(st, float)
     pk = float(np.max(np.abs(st)))
     if not np.isfinite(pk) or pk <= 0:
@@ -120,7 +181,39 @@ def fm_kernels(fm_image: Optional[np.ndarray], rho, theta, pxscale: float, fwhm:
                size_fwhm: float = 2.5, angle_convention: str = "pa", zero_mean: bool = True,
                lsq_norm: bool = True, min_snr_px: float = 0.0,
                shape: Optional[Tuple[int, int]] = None) -> List[Optional[np.ndarray]]:
-    """One :func:`fm_kernel` per source, ``None`` where the forward model gives nothing."""
+    """Return one :func:`fm_kernel` per source.
+
+    Parameters
+    ----------
+    fm_image : ndarray or None
+        The KLIP-FM response image, shape (ny, nx), with the star at ``((nx-1)/2, (ny-1)/2)``.
+    rho : float or array_like
+        Separation of each source, in arcsec.
+    theta : float or array_like
+        Angle of each source, in degrees.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    size_fwhm : float, default 2.5
+        Half width of the stamps, in FWHM.
+    angle_convention : {"pa", "math"}, default "pa"
+        How ``theta`` is read (:func:`~klip_tpe.metrics.source_xy`).
+    zero_mean : bool, default True
+        Whether to remove each stamp's mean.
+    lsq_norm : bool, default True
+        Whether to normalize by the sum of squares.
+    min_snr_px : float, default 0.0
+        Minimum peak of a stamp, in units of its robust scatter.
+    shape : tuple of int or None, default None
+        Shape the image must have, such as the science image's.  None does not check.
+
+    Returns
+    -------
+    kernels : list of ndarray or None
+        One filter per source, None where the forward model gives nothing, and all None for a missing,
+        empty or mismatched image.
+    """
     rho = np.atleast_1d(np.asarray(rho, float))
     theta = np.atleast_1d(np.asarray(theta, float))
     if fm_image is None:
@@ -139,19 +232,37 @@ def fm_kernels(fm_image: Optional[np.ndarray], rho, theta, pxscale: float, fwhm:
 
 # --------------------------------------------------------------------------- a forward model at each aperture
 class FMTemplates:
-    """The forward models of one configuration at positions of the image, each from a
-    forward-model pass with a source alone there: the template a source at that position has,
-    its PSF, its throughput and its self-subtraction included, where turning the source's own
-    template (:func:`klip_tpe.metrics.turn_kernel`) is exact only for a PSF and a coronagraph
-    round about the star (NEAR2 note, 2026-11-01, asked 2).
+    """Forward models of one configuration at positions of the image, each from a pass with a source alone there.
 
-    ``make(sources) -> [image, ...]``: one forward-model image per model source, in order, each
-    from a pass of its own (:meth:`klip_tpe.runner.Runner._fm_passes` yields them as they come,
-    made in parallel, by KLIP-FM or, on a backend without it, as ``injected - clean``), None
-    for a pass that gave nothing.  The model sources are at ``contrast``, in ``angle_convention``.  Each position is
-    forward-modelled once and its stamp kept, so the injected and the clean terms of a score
-    share the passes.  ``n_passes`` counts the positions asked for, ``n_empty`` those that came
-    back with no stamp (outside the zone, a pass that failed, or no clean image to subtract)."""
+    Each template includes the source's PSF, throughput and self-subtraction at its position, where
+    turning the source's own template (:func:`klip_tpe.metrics.turn_kernel`) is exact only for a PSF
+    and coronagraph round about the star (NEAR2 note, 2026-11-01, asked 2).  Each position is
+    forward-modeled once and its stamp kept, so the injected and the clean terms of a score share the
+    passes.
+
+    Parameters
+    ----------
+    make : callable
+        Function ``make(sources) -> [image, ...]``, one forward-model image per model source, in order,
+        from a pass of its own, None for a pass that gave nothing.  :meth:`klip_tpe.runner.Runner._fm_passes`
+        yields them as they come, by KLIP-FM or, on a backend without it, as ``injected - clean``.
+    shape : tuple of int
+        Shape of the images, whose last two entries are ``(ny, nx)``.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    contrast : float, default 1.0
+        Contrast of the model sources.
+    angle_convention : {"pa", "math"}, default "pa"
+        Angle convention of the model sources.
+
+    Attributes
+    ----------
+    n_passes : int
+        Number of positions asked for.
+    n_empty : int
+        Number of positions that came back without a stamp, outside the zone, from a failed pass or
+        without a clean image to subtract.
+    """
 
     def __init__(self, make: Callable[[List[Source]], Sequence[Optional[np.ndarray]]], shape: Tuple[int, ...],
                  pxscale: float, *, contrast: float = 1.0, angle_convention: str = "pa"):
@@ -165,7 +276,20 @@ class FMTemplates:
         self.n_empty = 0
 
     def source_at(self, x: float, y: float) -> Source:
-        """The model source at pixel ``(x, y)``."""
+        """Return the model source at a pixel.
+
+        Parameters
+        ----------
+        x : float
+            Column of the pixel.
+        y : float
+            Row of the pixel.
+
+        Returns
+        -------
+        source : Source
+            The source, at the model contrast.
+        """
         cx, cy = star_center(self.shape)
         rho = float(np.hypot(x - cx, y - cy)) * self.pxscale
         phi = float(np.degrees(np.arctan2(y - cy, x - cx)))
@@ -173,9 +297,28 @@ class FMTemplates:
         return Source(rho, th % 360.0, self.contrast)
 
     def stamps(self, xy: Sequence[Tuple[float, float]], size: int) -> List[Optional[np.ndarray]]:
-        """The forward model of a source alone at each of ``xy`` (px), as the ``size`` x ``size``
-        stamp :func:`fm_stamp` cuts around its pixel, None where its pass gave nothing.  The
-        positions not seen before are forward-modelled now, in one call of ``make``."""
+        """Return the forward model of a source alone at each position, as a stamp around its pixel.
+
+        The positions not seen before are forward-modeled now, in one call of ``make``, and each image is
+        cut as it comes, so a lazy ``make`` never holds them all.
+
+        Parameters
+        ----------
+        xy : sequence of tuple of 2 floats
+            The ``(x, y)`` positions, in pixels.
+        size : int
+            Width of the stamps in pixels, made odd (:func:`fm_stamp`).
+
+        Returns
+        -------
+        stamps : list of ndarray or None
+            One stamp per position, None where the pass gave nothing.
+
+        Raises
+        ------
+        ValueError
+            If ``make`` returns another number of images than sources.
+        """
         size = int(size) | 1
         keys = [(round(float(x), 3), round(float(y), 3), size) for x, y in xy]
         at: Dict[Tuple[float, float, int], Tuple[float, float]] = {}
@@ -202,10 +345,33 @@ class FMTemplates:
 
 def ring_positions(rho: float, theta: float, pxscale: float, fwhm: float, shape,
                    angle_convention: str = "pa") -> Tuple[float, List[Tuple[float, float]]]:
-    """The noise ring :func:`~klip_tpe.metrics.mawet_peak_snr` lays out for a source at
-    ``(rho, theta)``, through the position given: ``nap = floor(2 pi r / fwhm)`` apertures
-    ``2 pi / nap`` apart, the source's own first.  Returns ``(az0, [(x, y), ...])``, ``az0`` the
-    source's azimuth in radians (``arctan2(y - cy, x - cx)``) and the positions in pixels."""
+    """Lay out the noise ring :func:`~klip_tpe.metrics.mawet_peak_snr` uses for a source.
+
+    The ring runs through the source's position, with ``nap = floor(2 pi r / fwhm)`` apertures
+    ``2 pi / nap`` apart, the source's own first.
+
+    Parameters
+    ----------
+    rho : float
+        Separation of the source, in arcsec.
+    theta : float
+        Angle of the source, in degrees.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    shape : tuple of int
+        Shape of the image, whose last two entries are ``(ny, nx)``.
+    angle_convention : {"pa", "math"}, default "pa"
+        How ``theta`` is read.
+
+    Returns
+    -------
+    az0 : float
+        Azimuth of the source, ``arctan2(y - cy, x - cx)``, in radians.
+    positions : list of tuple of 2 floats
+        The ``(x, y)`` aperture positions, in pixels.
+    """
     cx, cy = star_center(shape)
     xs, ys = source_xy([rho], [theta], pxscale, cx, cy, angle_convention)
     r = float(np.hypot(xs[0] - cx, ys[0] - cy))
@@ -218,20 +384,48 @@ def ring_positions(rho: float, theta: float, pxscale: float, fwhm: float, shape,
 
 
 def _wrap(a: float) -> float:
+    """Wrap an angle onto (-pi, pi].
+
+    Parameters
+    ----------
+    a : float
+        The angle, in radians.
+
+    Returns
+    -------
+    wrapped : float
+        The angle, in radians.
+    """
     return float(np.angle(np.exp(1j * a)))
 
 
 class _ApertureTemplates:
-    """``(x, y) -> template`` for one source's noise samples (``templates_at`` of
-    :func:`~klip_tpe.metrics.mawet_peak_snr`): at an aperture of the source's ring, the forward
-    model of a source alone there.  Between two apertures, their two models weighted by how near
-    in azimuth each is, then zero-meaned and normalized again.  Turning a model by the azimuth
-    between them would turn a PSF that is not round with it, and keeping one would keep the self
-    subtraction's lobes along another azimuth, each wrong to first order in the apertures'
-    spacing.  The weighted pair is wrong to second order either way.  An aperture whose pass gave
-    no template leaves its neighbor alone, and between two such apertures the sample takes the
-    source's own template turned to it, as ``turn`` does (``n_turned`` counts them).  ``azs``:
-    each template's azimuth, the source's first, then each aperture's pixel's."""
+    """Templates for one source's noise samples, the forward model of a source alone at each aperture of its ring.
+
+    It is ``templates_at`` of :func:`~klip_tpe.metrics.mawet_peak_snr`.  Between two apertures it takes
+    their two models weighted by how near in azimuth each is, zero-meaned and normalized again, which is
+    wrong only to second order in the apertures' spacing.  An aperture without a template leaves its
+    neighbor alone, and between two such apertures the sample takes the source's own template turned
+    to it.
+
+    Parameters
+    ----------
+    cx : float
+        Column of the star, in pixels.
+    cy : float
+        Row of the star, in pixels.
+    az0 : float
+        Azimuth of the source, in radians.
+    kernels : sequence of ndarray or None
+        The least-squares filter of each aperture, the source's first, None where a pass gave none.
+    azs : sequence of float or None, default None
+        Azimuth of each filter, in radians.  None spaces them evenly from ``az0``.
+
+    Attributes
+    ----------
+    n_turned : int
+        Number of apertures without a template of their own.
+    """
 
     def __init__(self, cx: float, cy: float, az0: float, kernels: Sequence[Optional[np.ndarray]],
                  azs: Optional[Sequence[float]] = None):
@@ -247,6 +441,20 @@ class _ApertureTemplates:
         self._made: Dict[Tuple[int, ...], np.ndarray] = {}
 
     def __call__(self, x: float, y: float) -> np.ndarray:
+        """Return the template for a noise sample at a pixel.
+
+        Parameters
+        ----------
+        x : float
+            Column of the sample.
+        y : float
+            Row of the sample.
+
+        Returns
+        -------
+        template : ndarray
+            The least-squares filter for a source there.
+        """
         phi = float(np.arctan2(float(y) - self.cy, float(x) - self.cx))
         u = _wrap(phi - self.az0) / self.step
         qa = int(np.floor(u)) % self.n
@@ -281,12 +489,43 @@ class _ApertureTemplates:
 def aperture_templates(fm_at: FMTemplates, rho, theta, own: Sequence[Optional[np.ndarray]], pxscale: float,
                        fwhm: float, size: int, shape, *, zero_mean: bool = True, min_snr_px: float = 0.0,
                        angle_convention: str = "pa") -> List[Optional[_ApertureTemplates]]:
-    """For each source with a template of its own (``own[s]``, its least-squares filter), the
-    forward model of a source alone at the pixel of each aperture of its ring
-    (:func:`ring_positions`), from ``fm_at``'s passes, all asked for at once, and cut and
-    normalized as :func:`fm_kernel` cuts the source's.  A source without a template of its own
-    takes None.  The model sources sit on the pixels' centers, so each template is the filter for
-    a source on the pixel it is applied at, wherever on the pixel the ring crossed it."""
+    """Build the per-aperture templates of each source that has a template of its own.
+
+    For each such source it asks ``fm_at`` for the forward model of a source alone at the pixel of
+    each aperture of its ring (:func:`ring_positions`), all at once, and cuts and normalizes them as
+    :func:`fm_kernel` does.  The model sources sit on the pixels' centers, so each template is the filter
+    for a source on the pixel it is applied at.
+
+    Parameters
+    ----------
+    fm_at : FMTemplates
+        The forward-model passes.
+    rho : float or array_like
+        Separation of each source, in arcsec.
+    theta : float or array_like
+        Angle of each source, in degrees.
+    own : sequence of ndarray or None
+        Each source's own least-squares filter, None where it has none.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    size : int
+        Width of the stamps, in pixels.
+    shape : tuple of int
+        Shape of the image.
+    zero_mean : bool, default True
+        Whether to remove each stamp's mean.
+    min_snr_px : float, default 0.0
+        Minimum peak of a stamp, in units of its robust scatter.
+    angle_convention : {"pa", "math"}, default "pa"
+        How ``theta`` is read.
+
+    Returns
+    -------
+    templates : list of _ApertureTemplates or None
+        One per source, None for a source without a template of its own.
+    """
     rho = np.atleast_1d(np.asarray(rho, float))
     theta = np.atleast_1d(np.asarray(theta, float))
     cx, cy = star_center(shape)
@@ -320,57 +559,84 @@ def aperture_templates(fm_at: FMTemplates, rho, theta, own: Sequence[Optional[np
 
 @dataclass
 class FMMFSNR(Metric):
-    """Mawet small-sample S/N with a **forward-modelled** matched filter per source.
+    """Mawet small-sample S/N with a forward-modeled matched filter per source.
 
-    Identical to :class:`~klip_tpe.metrics.MawetPeakSNR` except for the filter: the
-    kernel at each source is the KLIP-FM response of that source under the configuration
-    being scored (``fm=`` supplied by the runner), normalised so the filtered image is the
-    least-squares amplitude of the template.  Where no forward model is available the
-    metric uses ``kernel_fn`` (the instrument PSF, e.g. the STPSF off-axis library) and
-    finally a Gaussian, so a run never fails for want of an FM image.
+    It is :class:`~klip_tpe.metrics.MawetPeakSNR` but for the filter.  The kernel at each source is its
+    KLIP-FM response under the configuration being scored (``fm=`` from the runner), normalized so the
+    filtered image is the least-squares amplitude of the template.  Where no forward model is
+    available it uses ``kernel_fn``, then a Gaussian, so a run never fails for want of an FM image.
 
-    ``size_fwhm`` sets the filter support (default 2.5 FWHM, wider than the PSF matched
-    filter because the self-subtraction lobes carry real information); ``zero_mean``
-    removes a flat pedestal from the template; ``min_snr_px`` rejects an FM stamp whose
-    peak is below that many times its own robust scatter (0 = accept any finite stamp).
+    Attributes
+    ----------
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    kernel_fn : callable or None, default None
+        Fallback filter ``rho_arcsec -> kernel``, such as the STPSF off-axis library's.  None, or a None
+        kernel, falls back to the Gaussian.
+    mf_fwhm : float or None, default None
+        FWHM of the Gaussian fallback, in pixels.  None takes ``fwhm``.
+    size_fwhm : float, default 2.5
+        Half width of the filter's support, in FWHM, wider than a PSF filter's since the
+        self-subtraction lobes carry information.
+    zero_mean : bool, default True
+        Whether to remove a flat pedestal from each template.
+    min_snr_px : float, default 0.0
+        Minimum peak of an FM stamp, in units of its own robust scatter.  0 accepts any finite stamp.
+    fm_from_difference : bool, default True
+        Whether a reducer without analytic KLIP-FM may supply ``injected - clean`` as the forward
+        model (:meth:`klip_tpe.runner.Runner._fm_for`), the same to first order and free with
+        ``clean_subtract``.
+    search_px : float, default 1.5
+        Radius of the peak search, in pixels.
+    excl_fwhm : float, default 1.5
+        Radius of the keep-outs, in FWHM.
+    known : sequence of tuple of 2 floats, default ()
+        Known companions, as ``(rho_arcsec, theta_deg)``.
+    declip_nsig : float or None, default 6.0
+        Threshold of the despike in robust sigma.  None does not despike.
+    band_fwhm : float, default 0.6
+        Half width of the radial band, in FWHM.
+    min_ring : int, default 6
+        Minimum number of clean ring samples for the ring to give the noise.
+    penalty : {"geometric", "retained"}, default "geometric"
+        Count in the small-sample penalty.
+    pixel_mask : ndarray of bool or None, default None
+        Pixels left out of the noise samples, True to exclude.
+    flatten : bool, default False
+        Whether to subtract the azimuthal mean profile before scoring.
+    angle_convention : {"pa", "math"}, default "pa"
+        How the sources' angles are read.
+    name : str, default "fmmf"
+        Name of the metric, for a run's record.
+    needs_fm : bool, default True
+        Whether the metric asks for the KLIP-FM pass, always True here.
+    stats : dict of str to int
+        Counts of the filters used, ``fm`` and ``fallback``, and with ``fm_apertures`` the passes
+        asked for (``fm_passes``) and those that came back empty (``fm_empty``).
+    inner_fwhm : float, default 1.0
+        Inner guard, in FWHM, which the runner fits to the injection floor.
+    turn : bool, default True
+        Whether each noise sample takes the source's template turned to its azimuth
+        (:func:`klip_tpe.metrics.turn_kernel`), the template a source there would have.  A run saved
+        before ``RunConfig.fmmf_turn`` keeps the one map (False).
+    fm_apertures : bool, default False
+        Whether each noise aperture takes the forward model of a source alone on its pixel, from the
+        runner's ``fm_at`` (:class:`FMTemplates`), at the cost of about ``2 pi r / FWHM`` passes per
+        source.  Without ``fm_at`` the samples are turned or read off the one map.
+    correlate : bool, default True
+        Whether the image is correlated with each template, as a matched filter is.  False convolves,
+        as runs saved before 2026-11-04 did (``RunConfig.fmmf_correlate``).
 
-    ``turn`` (default True): each noise aperture of the ring and each pixel of the radial band
-    is filtered with the source's template turned by its azimuth from the source
-    (:func:`klip_tpe.metrics.turn_kernel`), the template a source there would have.  The
-    self-subtraction lobes of an ADI forward model lie along the azimuth through the source,
-    so read off the one map of the unturned template, an aperture 90 deg away saw them along
-    the radius, and against anisotropic residuals the ring's scatter was not the noise of the
-    source's own filter (NEAR2 note, 2026-11-01).  ``RunConfig.fmmf_turn`` sets it for a run,
-    and a run saved before keeps the one map (``False``).
-
-    ``fm_apertures`` (default False): each noise aperture takes the forward model of a source
-    alone on its pixel, made by a forward-model pass of its own (:class:`FMTemplates`, handed
-    over as ``fm_at=`` by the runner), and a sample between two apertures, as each bin of the
-    radial band, their two models weighted by azimuth.  Each sample is then filtered as a source
-    there would be, where the PSF or the coronagraph is not round about the star too, and the
-    ring's scatter is that of the forward-modelled amplitude map at the source's separation
-    (NEAR2 note, 2026-11-01, asked 2).  For the noise of the source's own filter, turning stays
-    exact where the noise is round about the star, and each aperture's own model is exact where
-    the noise changes as the PSF does, a PSF and a noise pattern both fixed on the detector, say
-    (``tests/test_fmmf_apertures.py``).  It costs a pass per aperture, about ``2 pi r / FWHM``
-    per source.  Without ``fm_at`` the samples are turned (``turn``) or read off the one map.
-    ``RunConfig.fmmf_fm_apertures`` sets it for a run.  ``stats['fm_passes']`` counts the
-    passes, ``stats['fm_empty']`` those that gave no template.
-
-    ``correlate`` (default True): the matched filter correlates the image with each template, so
-    a source shaped like it gives its least-squares amplitude.  ``False`` convolves, which turns
-    the template 180 deg first.  On the KLIP-FM templates of the runs' cross-check passes that
-    kept 0.82 to 0.93 of the amplitude and S/N in the median, and 0.53 to 0.64 of a source at a
-    zone's inner edge (GitHub agent's finding 13, 2026-11-04).  The fallback filters are round and
-    give the same map either way.  ``RunConfig.fmmf_correlate`` sets it for a run, and a run
-    saved before keeps the convolution (``False``).
-
-    ``fm_from_difference`` (read by :meth:`klip_tpe.runner.Runner._fm_for`) lets a reducer
-    with no analytic KLIP-FM -- this package's pyKLIP, VIP and spaceKLIP backends -- supply
-    the *numerical* forward model ``injected - clean`` instead, which is the same thing to
-    first order and costs nothing extra when ``clean_subtract=True`` (the production
-    default, and what this metric expects: without a clean reduction there is no forward
-    model to fall back on).
+    Notes
+    -----
+    The self-subtraction lobes of an ADI forward model lie along the azimuth through the source.  Read
+    off the one map of the unturned template, an aperture 90 degrees away saw them along the radius,
+    and against anisotropic residuals the ring's scatter was not the noise of the source's own filter
+    (NEAR2 note, 2026-11-01).  Turning is exact where the noise is round about the star, and each
+    aperture's own model is exact where the noise changes as the PSF does, such as a PSF and a noise
+    pattern both fixed on the detector (``tests/test_fmmf_apertures.py``).
     """
 
     pxscale: float
@@ -405,6 +671,18 @@ class FMMFSNR(Metric):
     correlate: bool = True
 
     def _fallback(self, rho_one: float) -> np.ndarray:
+        """Return the fallback filter at a separation, ``kernel_fn``'s or the Gaussian.
+
+        Parameters
+        ----------
+        rho_one : float
+            Separation, in arcsec.
+
+        Returns
+        -------
+        kernel : ndarray
+            The filter.
+        """
         if self.kernel_fn is not None:
             k = self.kernel_fn(float(rho_one))
             if k is not None:
@@ -412,7 +690,26 @@ class FMMFSNR(Metric):
         return gaussian_kernel(self.mf_fwhm or self.fwhm)
 
     def kernels(self, fm, rho, theta, shape=None) -> List[np.ndarray]:
-        """The per-source filters actually used (FM template where available)."""
+        """Return the filter used at each source, the FM template where available.
+
+        Each call counts the templates and the fallbacks in ``stats``.
+
+        Parameters
+        ----------
+        fm : ndarray or None
+            The KLIP-FM response image.
+        rho : float or array_like
+            Separation of each source, in arcsec.
+        theta : float or array_like
+            Angle of each source, in degrees.
+        shape : tuple of int or None, default None
+            Shape the FM image must have.  None does not check.
+
+        Returns
+        -------
+        kernels : list of ndarray
+            One filter per source.
+        """
         rho = np.atleast_1d(np.asarray(rho, float))
         ks = fm_kernels(fm, rho, theta, self.pxscale, self.fwhm, size_fwhm=self.size_fwhm,
                         angle_convention=self.angle_convention, zero_mean=self.zero_mean,
@@ -429,9 +726,33 @@ class FMMFSNR(Metric):
 
     def per_source(self, img_inj, img_clean, rho, theta, fm=None, why: Optional[list] = None,
                    fm_at: Optional[FMTemplates] = None) -> np.ndarray:
+        """Return each source's S/N, with forward-modeled filters.
+
+        Parameters
+        ----------
+        img_inj : ndarray, shape (ny, nx)
+            The image scored.
+        img_clean : ndarray or None
+            The clean reduction, unused here.
+        rho : sequence of float
+            Separation of each source, in arcsec.
+        theta : sequence of float
+            Angle of each source, in degrees.
+        fm : ndarray or None, default None
+            The KLIP-FM response image of the configuration.
+        why : list or None, default None
+            List filled with each source's reason for a NaN.
+        fm_at : FMTemplates or None, default None
+            Forward-model passes at the noise apertures, used with ``fm_apertures``.
+
+        Returns
+        -------
+        snr : ndarray
+            S/N of each source.
+        """
         img = radprof(img_inj) if self.flatten else np.asarray(img_inj, float)
         ks = self.kernels(fm, rho, theta, shape=np.shape(img))
-        # the forward-modelled templates are turned to each noise sample's azimuth, or each
+        # the forward-modeled templates are turned to each noise sample's azimuth, or each
         # sample takes the forward model of a source there (fm_apertures).  The fallbacks, round
         # PSF or Gaussian filters, are neither
         turn, tat = None, None
@@ -464,6 +785,14 @@ class FMMFSNR(Metric):
         return snr
 
     def describe(self) -> Dict:
+        """Return the metric's settings and its filter counts, for a run's record.
+
+        Returns
+        -------
+        info : dict
+            The settings, ``fm_fraction`` (the share of filters that were FM templates), ``n_filtered`` and
+            the aperture passes.
+        """
         n = max(self.stats["fm"] + self.stats["fallback"], 1)
         return {"name": self.name, "fwhm": self.fwhm, "pxscale": self.pxscale,
                 "mf_fwhm": self.mf_fwhm, "measured_kernel": self.kernel_fn is not None,
@@ -487,29 +816,61 @@ def fmmf_map(image: np.ndarray, fm_image: np.ndarray, sources: Sequence[Any], px
              angle_convention: str = "pa", zero_mean: bool = True, flatten: bool = False,
              n_theta: Optional[int] = None, fm_at: Optional[FMTemplates] = None,
              correlate: bool = True) -> Dict[str, np.ndarray]:
-    """A full-frame FMMF amplitude and S/N map from a ring of forward-modelled templates.
+    """Make a full-frame FMMF amplitude and S/N map from a ring of forward-modeled templates.
 
-    ``sources`` are the FM test sources whose response ``fm_image`` holds (a golden-angle
-    spiral from :func:`klip_tpe.products.fm_test_sources` works well): each supplies the
-    template for the separations around its own, the templates are interpolated in radius,
-    and every pixel is filtered with the template of its radius.  ``contrast`` is the
-    contrast those sources were forward-modelled at, so ``amplitude`` comes out in
-    contrast units.
+    Each FM test source supplies the template for the separations nearest its own, turned so its
+    star-ward axis points at -x, and every pixel is filtered with the template of its radius turned to
+    its bin of azimuth.
 
-    Returns ``{'amplitude', 'snr', 'seps_px', 'templates'}``: the LSQ amplitude map, the
-    map divided by the azimuthal robust scatter at the same radius (a detection map that
-    is directly comparable across separations), the template radii in pixels, and the
-    templates themselves.
+    Parameters
+    ----------
+    image : ndarray, shape (ny, nx)
+        The reduced image.
+    fm_image : ndarray, shape (ny, nx)
+        The KLIP-FM response of the test sources.
+    sources : sequence of Source
+        The FM test sources, such as the golden-angle spiral of
+        :func:`klip_tpe.products.fm_test_sources`.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    contrast : float, default 1.0
+        Contrast the test sources were forward-modeled at, so ``amplitude`` comes out in contrast units.
+    size_fwhm : float, default 2.5
+        Half width of the templates, in FWHM.
+    angle_convention : {"pa", "math"}, default "pa"
+        How the sources' angles are read.
+    zero_mean : bool, default True
+        Whether to remove each template's mean.
+    flatten : bool, default False
+        Whether to subtract the image's azimuthal mean profile first.
+    n_theta : int or None, default None
+        Number of azimuth bins.  None takes the circumference at the largest radius in FWHM, at least 8.
+    fm_at : FMTemplates or None, default None
+        This configuration's forward-model passes.  Each bin of azimuth at each template radius then
+        takes the forward model of a source alone on the pixel nearest its center, and a bin whose
+        pass gave nothing keeps the turned template.
+    correlate : bool, default True
+        Whether each pixel is the image correlated with its template.  False convolves, as before
+        2026-11-04 (GitHub agent's finding 13).
 
-    ``fm_at`` (:class:`FMTemplates`, this configuration's forward-model passes): each bin of
-    azimuth at each template radius takes the forward model of a source alone on the pixel
-    nearest its center in place of the radius' template turned there, a pass per bin and radius.
-    A bin whose pass gave nothing keeps the turned template.  ``n_fm_bins``, returned with
-    ``fm_at``, counts the bins that took their own.
+    Returns
+    -------
+    maps : dict
+        ``amplitude``, the least-squares amplitude map, ``snr``, the map over its azimuthal robust
+        scatter at each radius, ``seps_px``, the template radii in pixels, and ``templates``.  With
+        ``fm_at``, ``n_fm_bins`` counts the bins that took their own model.
 
-    ``correlate`` (default True): each pixel's value is the image correlated with its template,
-    the least-squares amplitude of a source shaped like it.  ``False`` convolves, which turns
-    the template 180 deg first, as before 2026-11-04 (GitHub agent's finding 13).
+    Raises
+    ------
+    ValueError
+        If ``fm_image`` holds no usable template.
+
+    Notes
+    -----
+    Until 2026-11-01 both turns went the other way, which mirrored every template about its own
+    azimuth, and a planet 30 to 60 degrees from its test source kept about 0.7 of its amplitude.
     """
     img = radprof(image) if flatten else np.asarray(image, float)
     img = np.where(np.isfinite(img), img, 0.0)
@@ -540,7 +901,7 @@ def fmmf_map(image: np.ndarray, fm_image: np.ndarray, sources: Sequence[Any], px
     yy, xx = np.mgrid[0:ny, 0:nx]
     rr = np.hypot(xx - cx, yy - cy) * pxscale
     az = np.degrees(np.arctan2(yy - cy, xx - cx))
-    # radial bins: each pixel is filtered with the template of the nearest modelled radius
+    # radial bins: each pixel is filtered with the template of the nearest modeled radius
     edges = np.concatenate([[-np.inf], (radii[1:] + radii[:-1]) / 2.0, [np.inf]])
     amp = np.full((ny, nx), np.nan)
     nth = int(n_theta or max(8, int(round(2 * np.pi * np.max(rr) / (pxscale * fwhm)))))
