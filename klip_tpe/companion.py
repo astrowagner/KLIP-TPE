@@ -1,33 +1,32 @@
 """Known companions: fit one, take it out of the frames, and measure its S/N honestly.
 
-Two jobs, both done with the negative-fake-companion method: a companion injected with the
-NEGATIVE of its contrast at its position cancels it in every frame, before PSF subtraction,
-so nothing of it reaches the KL basis, the noise rings or the score.
+Both jobs use the negative-fake-companion method: a companion injected with the negative of its
+contrast at its position cancels it in every frame before PSF subtraction, so nothing of it reaches
+the KL basis, the noise rings or the score.
 
 :func:`fit_negative_companion`
-    the contrast (and optionally a sub-pixel position correction) that minimises the
-    residual energy in a stamp around the companion.  Fit it in a configuration whose
-    reference library does not contain the companion (RDI): there the reduction is linear
-    in the companion's flux and the fit is unbiased.  A basis built from frames that hold
-    the companion (ADI) subtracts a bright source non-linearly, and the fitted contrast
-    then absorbs that configuration's self-subtraction instead of measuring the source.
-
+    The contrast, and optionally a sub-pixel correction of the position, that minimizes the residual
+    energy in a stamp around the companion.  It is fitted in a configuration whose reference library
+    does not hold the companion (RDI), where the reduction is linear in the companion's flux and the
+    fit is unbiased.  A basis built from frames that hold the companion (ADI) subtracts a bright
+    source non-linearly, and the fitted contrast then absorbs that configuration's self-subtraction
+    instead of measuring the source.
 :func:`companion_snr`
-    the companion's S/N in one configuration, from its own reduced image (clean minus
-    companion-removed) over the ring scatter of the companion-removed image.  The search
-    metric applied to the clean image does worse on a bright companion in three ways,
-    each by a different amount per configuration: its de-spiking clips the companion's
-    core; the companion's own light beyond the 1.5-FWHM exclusion -- PSF lobes, the
-    negative wings ADI leaves, the imprint KLIP spreads over the companion's sector --
-    lands in the noise ring (on JWST/NIRCam it set the ring scatter at 5-14 times the
-    companion-free value across the whole annulus); and at small separations its few
-    apertures make the scatter depend on where they fall.  Here the companion's light
-    goes into the signal model, the noise image holds none of it, nothing is de-spiked,
-    and the ring scatter is averaged over phases of the aperture ring.
+    The companion's S/N in one configuration, from its own reduced image (clean minus
+    companion-removed) over the ring scatter of the companion-removed image.
 
-Both take a ``reduce_fn(sources) -> 2-D image`` that reduces ONE fixed configuration with
-the given extra injections (``None`` for none), so they work with any engine, partition
-layout or zone: wrap ``Runner._reduce`` or a reducer's ``reduce`` in a lambda.
+The search metric applied to the clean image does worse on a bright companion in three ways, each by
+a different amount per configuration.  Its despike clips the companion's core.  The companion's own
+light beyond the 1.5 FWHM exclusion (PSF lobes, the negative wings ADI leaves, the imprint KLIP
+spreads over the companion's sector) lands in the noise ring, which on JWST/NIRCam set the ring
+scatter at 5 to 14 times the companion-free value across the whole annulus.  And at small
+separations its few apertures make the scatter depend on where they fall.  Here the companion's
+light goes into the signal model, the noise image holds none of it, nothing is despiked, and the
+ring scatter is averaged over phases of the aperture ring.
+
+Both take a ``reduce_fn(sources) -> 2-D image`` that reduces one fixed configuration with the given
+extra injections (None for none), so they work with any engine, partition layout or zone: wrap
+``Runner._reduce`` or a reducer's ``reduce`` in a lambda.
 """
 from __future__ import annotations
 
@@ -42,13 +41,56 @@ __all__ = ["fit_negative_companion", "companion_snr", "ring_sigma"]
 
 
 def _xy(shape, rho, pa, pxscale, angle_convention):
+    """Return the pixel of a position given as separation and angle.
+
+    Parameters
+    ----------
+    shape : tuple of 2 ints
+        Shape of the image, ``(ny, nx)``.
+    rho : float
+        Separation, in arcsec.
+    pa : float
+        Angle, in degrees.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    angle_convention : {"pa", "math"}
+        How ``pa`` is read.
+
+    Returns
+    -------
+    x : float
+        Column, in pixels.
+    y : float
+        Row, in pixels.
+    """
     cx, cy = star_center(shape)
     xs, ys = source_xy([rho], [pa], pxscale, cx, cy, angle_convention)
     return float(xs[0]), float(ys[0])
 
 
 def _rho_pa(shape, x, y, pxscale, angle_convention):
-    """Inverse of :func:`source_xy` for one position."""
+    """Return the separation and angle of a pixel, the inverse of :func:`~klip_tpe.metrics.source_xy` for one position.
+
+    Parameters
+    ----------
+    shape : tuple of 2 ints
+        Shape of the image, ``(ny, nx)``.
+    x : float
+        Column, in pixels.
+    y : float
+        Row, in pixels.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    angle_convention : {"pa", "math"}
+        How the angle is given.
+
+    Returns
+    -------
+    rho : float
+        Separation, in arcsec.
+    pa : float
+        Angle, in degrees, in [0, 360).
+    """
     cx, cy = star_center(shape)
     rho = float(np.hypot(x - cx, y - cy)) * pxscale
     phi = float(np.degrees(np.arctan2(y - cy, x - cx)))
@@ -63,17 +105,54 @@ def fit_negative_companion(reduce_fn: Callable[[Optional[Sequence[Source]]], np.
                            rel_grid: Sequence[float] = (0.5, 0.7, 0.85, 1.0, 1.15, 1.3, 1.6, 2.0),
                            max_evals: int = 40, clean: Optional[np.ndarray] = None,
                            log: Optional[Callable[[str], None]] = None) -> Dict[str, float]:
-    """Fit the companion's contrast (and position) by the negative-fake-companion method.
+    """Fit a companion's contrast, and its position, by the negative-fake-companion method.
 
-    The figure of merit is the sum of squared residuals within ``radius_fwhm`` FWHM of the
-    starting position in ``reduce_fn([Source(rho, pa, -c)])``.  A contrast grid at the
-    starting position (``rel_grid`` x ``contrast0``, re-centred once if the minimum falls on
-    an edge) gives the start; with ``fit_position`` a Nelder-Mead over (contrast, dx, dy)
-    refines it, for at most ``max_evals`` further reductions.
+    The figure of merit is the sum of squared residuals within ``radius_fwhm`` FWHM of the starting
+    position in ``reduce_fn([Source(rho, pa, -c)])``.  A grid of contrasts at the starting position
+    (``rel_grid`` times ``contrast0``, centered again once where the minimum falls on an edge) gives the
+    start, and with ``fit_position`` a Nelder-Mead over (contrast, dx, dy) refines it.
 
-    Returns ``{'rho', 'pa', 'contrast', 'chi2', 'chi2_clean', 'removed_fraction',
-    'n_reductions'}``; ``removed_fraction = 1 - chi2 / chi2_clean`` is how much of the
-    stamp's energy the fitted companion accounts for.
+    Parameters
+    ----------
+    reduce_fn : callable
+        Function ``reduce_fn(sources) -> image`` that reduces one fixed configuration with the given
+        extra injections, None for none.
+    rho : float
+        Starting separation, in arcsec.
+    pa : float
+        Starting angle, in degrees.
+    contrast0 : float
+        Starting contrast.
+    fwhm_px : float
+        FWHM of the PSF, in pixels.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    angle_convention : {"pa", "math"}, default "pa"
+        How ``pa`` is read.
+    fit_position : bool, default True
+        Whether to refine the position too.
+    radius_fwhm : float, default 2.0
+        Radius of the stamp, in FWHM.
+    rel_grid : sequence of float, default (0.5, 0.7, 0.85, 1.0, 1.15, 1.3, 1.6, 2.0)
+        The grid of contrasts, as factors on the reference contrast.
+    max_evals : int, default 40
+        Most reductions of the Nelder-Mead.
+    clean : ndarray or None, default None
+        The clean reduction, ``reduce_fn(None)``, made already.
+    log : callable or None, default None
+        Function that takes the line of the result.
+
+    Returns
+    -------
+    fit : dict
+        ``rho``, ``pa``, ``contrast``, ``chi2``, ``chi2_clean``, ``removed_fraction``
+        (``1 - chi2 / chi2_clean``, how much of the stamp's energy the fitted companion accounts for),
+        ``n_reductions``, ``dx_px`` and ``dy_px``.
+
+    Raises
+    ------
+    ValueError
+        If fewer than 5 finite pixels lie in the stamp.
     """
     clean = np.asarray(reduce_fn(None), float) if clean is None else np.asarray(clean, float)
     shape = clean.shape
@@ -147,12 +226,45 @@ def ring_sigma(img: np.ndarray, rho: float, pa: float, fwhm_px: float, pxscale: 
                pixel_mask: Optional[np.ndarray] = None, angle_convention: str = "pa",
                exclude: Sequence[Tuple[float, float]] = (), excl_fwhm: float = 1.5,
                n_phase: int = 8) -> Dict[str, float]:
-    """Scatter of the matched-filtered ``img`` at ``rho``: FWHM-spaced apertures on the ring
-    through (``rho``, ``pa``), skipping masked pixels and apertures within ``excl_fwhm`` FWHM
-    of (``rho``, ``pa``) and of every ``exclude`` position, with Mawet's small-sample factor;
-    the RMS over ``n_phase`` phase offsets of the aperture ring, so the value does not depend
-    on where the apertures happen to fall.  Also the scatter of all matched-filtered pixels in
-    a 1-px band at that radius (same exclusions), for comparison."""
+    """Return the scatter of a matched-filtered image at a separation, over FWHM-spaced apertures on the ring.
+
+    The apertures lie on the ring through (``rho``, ``pa``), skipping masked pixels and apertures within
+    ``excl_fwhm`` FWHM of (``rho``, ``pa``) and of every ``exclude`` position, with Mawet's small-sample
+    factor.  The scatter is the RMS over ``n_phase`` phase offsets of the aperture ring, so it does not
+    depend on where the apertures fall.  The scatter of every matched-filtered pixel in a 1 px band at
+    that radius, with the same exclusions, comes for comparison.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image.
+    rho : float
+        Separation, in arcsec.
+    pa : float
+        Angle of the position kept out, in degrees.
+    fwhm_px : float
+        FWHM of the PSF, in pixels.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    kernel : ndarray
+        The matched filter.
+    pixel_mask : ndarray of bool or None, default None
+        Pixels left out, True to exclude.
+    angle_convention : {"pa", "math"}, default "pa"
+        How the angles are read.
+    exclude : sequence of tuple of 2 floats, default ()
+        More positions kept out, as ``(rho_arcsec, pa_deg)``.
+    excl_fwhm : float, default 1.5
+        Radius of the keep-outs, in FWHM.
+    n_phase : int, default 8
+        Number of phases of the aperture ring.
+
+    Returns
+    -------
+    scatter : dict
+        ``sigma`` (the RMS over the phases), ``sigma_min``, ``sigma_max``, ``sigma_band``, ``n_ap`` (the
+        median number of apertures used) and ``nap`` (the ring's count).
+    """
     img = np.asarray(img, float)
     A = ndimage.correlate(np.where(np.isfinite(img), img, 0.0), kernel, mode="nearest")
     ny, nx = img.shape
@@ -195,14 +307,48 @@ def companion_snr(reduce_fn: Callable[[Optional[Sequence[Source]]], np.ndarray],
                   pixel_mask: Optional[np.ndarray] = None, angle_convention: str = "pa",
                   clean: Optional[np.ndarray] = None, removed: Optional[np.ndarray] = None,
                   search_px: float = 1.5, n_phase: int = 8) -> Dict[str, object]:
-    """Forward-model S/N of a known companion in one configuration.
+    """Return the forward-model S/N of a known companion in one configuration.
 
-    ``signal`` is the matched-filter peak (within ``search_px`` of the position) of the
-    companion's own reduced image, ``clean - removed``, where ``removed`` is the reduction with
-    the companion cancelled by a negative injection at (``rho``, ``pa``, ``contrast``) -- use
-    the values :func:`fit_negative_companion` returns.  ``sigma`` is :func:`ring_sigma` of
-    ``removed`` at the companion's separation.  Returns the S/N (``snr``; ``snr_band`` with the
-    band scatter), both images, and the pieces.
+    The signal is the matched-filter peak, within ``search_px`` of the position, of the companion's own
+    reduced image ``clean - removed``, where ``removed`` is the reduction with the companion cancelled by
+    a negative injection at (``rho``, ``pa``, ``contrast``), the values :func:`fit_negative_companion`
+    returns.  The noise is :func:`ring_sigma` of ``removed`` at the companion's separation.
+
+    Parameters
+    ----------
+    reduce_fn : callable
+        Function ``reduce_fn(sources) -> image`` that reduces one fixed configuration with the given
+        extra injections, None for none.
+    rho : float
+        Separation of the companion, in arcsec.
+    pa : float
+        Angle of the companion, in degrees.
+    contrast : float
+        Contrast of the companion.
+    fwhm_px : float
+        FWHM of the PSF, in pixels.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    kernel : ndarray
+        The matched filter.
+    pixel_mask : ndarray of bool or None, default None
+        Pixels left out of the noise, True to exclude.
+    angle_convention : {"pa", "math"}, default "pa"
+        How ``pa`` is read.
+    clean : ndarray or None, default None
+        The clean reduction, made already.
+    removed : ndarray or None, default None
+        The reduction with the companion removed, made already.
+    search_px : float, default 1.5
+        Radius of the peak search, in pixels.
+    n_phase : int, default 8
+        Number of phases of the aperture ring.
+
+    Returns
+    -------
+    result : dict
+        ``snr``, ``snr_band`` (with the band's scatter), ``signal``, ``peak_xy``, ``sigma``, ``sigma_band``,
+        ``sigma_range``, ``n_ap``, ``nap``, ``contrast``, ``clean`` and ``removed``.
     """
     clean = np.asarray(reduce_fn(None), float) if clean is None else np.asarray(clean, float)
     removed = (np.asarray(reduce_fn([Source(rho, pa, -float(contrast))]), float) if removed is None
