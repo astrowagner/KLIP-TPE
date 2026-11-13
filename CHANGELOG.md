@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — 2026-11-13 (the MIRI and ALES adapters documented to the rule)
+
+- **`instruments/miri.py` and `ales.py` follow the documentation rule**, which completes the
+  instrument adapters.  `load_miri`'s docstring now says what its default `mask_quadrants=True`
+  does under the default high-pass (NaN spread over every frame, as `apply_quadrant_mask`
+  warns), where it used to say the NaN kept the dead zones out of the basis.  Only docstrings and
+  comments changed.
+
 ## Unreleased — 2026-11-12 (the NEAR, NOMIC and generic adapters documented to the rule)
 
 - **`instruments/generic.py`, `near.py`, `nomic.py` and `search_space.py` follow the

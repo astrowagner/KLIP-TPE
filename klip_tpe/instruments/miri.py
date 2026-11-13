@@ -1,13 +1,15 @@
-"""JWST/MIRI coronagraphy: four-quadrant phase masks and the Lyot spot.
+"""JWST/MIRI coronagraphy, the four-quadrant phase masks and the Lyot spot.
 
-MIRI is not NIRCam with different numbers in it.  Three of its four coronagraphs are
-*four-quadrant phase masks*, which suppress starlight by putting a pi phase step across
-two perpendicular lines through the star rather than by blocking a disc.  Everything
-downstream that assumes a round occulter is wrong here, and the one that matters most is
-the throughput model.
+Three of MIRI's four coronagraphs are four-quadrant phase masks (4QPM), which suppress the stellar
+PSF with a pi phase step across two perpendicular lines through the star rather than by blocking a
+disk.  Everything that assumes a round occulter is wrong here, above all the throughput model, so
+this module carries a two-dimensional throughput map on a (separation, detector azimuth) grid,
+cached like the radial grids.
 
-Measured from STPSF for F1065C/FQPM1065 (:func:`throughput_map`), over the default grid --
-the extremes over azimuth at each separation::
+Notes
+-----
+Measured from STPSF for F1065C/FQPM1065 (:func:`throughput_map`), the extremes over azimuth at each
+separation are::
 
      rho      min    max   ratio
     0.30"    0.176  0.421   x2.4
@@ -18,65 +20,37 @@ the extremes over azimuth at each separation::
     5.63"    0.233  0.999   x4.3
    10.80"    0.406  0.991   x2.4
 
-A factor of up to **six and a half** at constant separation.  The plateau between the
-boundaries sits at 1.00 within half a per cent, which is what it should be: the unocculted
-reference carries the same Lyot stop, so far from a boundary the phase mask takes nothing.
-The dip does not deepen much with radius -- the minimum stays near 0.15 out to 5 arcsec --
-so the *ratio* falls only because the plateau is already at unity.
+The throughput varies by up to a factor of 6.5 at constant separation.  The plateau between the
+boundaries sits at 1.00 within half a percent, since the unocculted reference carries the same Lyot
+stop.  The minimum stays near 0.15 out to 5 arcsec, so the ratio falls only because the plateau is
+already at 1.  At 2 arcsec, ``|T(az) - T(az+180)| <= 0.003`` while ``|T(az) - T(az+90)|`` reaches
+0.18, a two-fold symmetry, which is why the map covers the whole circle.
 
-The measured symmetry is the mask's own: at 2 arcsec, ``|T(az) - T(az+180)| <= 0.003``
-while ``|T(az) - T(az+90)|`` reaches 0.18.  Two-fold, not four-fold, which is why this map
-is measured over the whole circle rather than folded into one quadrant.
+A throughput of separation alone, such as ``klip_tpe.stpsf_psf.offaxis_grid``'s, is wrong on a 4QPM
+in a way that tracks position angle.  A companion near a quadrant boundary is reported up to three
+times fainter than it is, and one between boundaries too bright.  Three more consequences of the
+geometry are handled here:
 
-``klip_tpe.stpsf_psf.offaxis_grid`` returns ``transmission`` as a function of separation
-alone, and ``throughput_fn`` hands back ``f(rho)``.  On a 4QPM that model does not merely
-lose precision, it is systematically wrong in a way that tracks position angle -- a
-companion sitting near a quadrant boundary is reported up to three times fainter than it
-is, and one sitting between boundaries too bright.  A contrast curve built that way is an
-azimuthal average of two different things.
+* The boundaries sit at az = 356, 86, 176 and 266, four degrees off the detector axes on all four,
+  the mask's mounting angle.  :func:`locate_boundaries` measures them and :func:`quadrant_mask`
+  thresholds the measured map, so both follow the instrument model's rotation.
+* The boundaries are not usable, since the mask distorts the stamp there as well as attenuating it.
+  :func:`quadrant_mask` marks those pixels on the detector, :func:`dead_zone_pixel_mask` carries
+  them through the rolls to keep them out of the noise statistics, and :func:`forbidden_pa` keeps
+  the sampler from injecting into them.  They stay in the cube and the KLIP basis, since NaN ahead
+  of the high-pass destroys the whole frame (:func:`apply_quadrant_mask`).
+* Throughput is a per-frame quantity.  The boundaries are fixed to the detector and a companion at
+  a fixed sky PA crosses them as the telescope rolls, which is why :func:`throughput_map_fn` takes
+  a detector azimuth.
 
-So this module carries its own two-dimensional throughput map, sampled on an
-(separation, detector azimuth) grid and cached like the radial grids are.  Three further
-consequences follow from the same geometry and are handled here:
+The stamp library stays radial, and only the scalar throughput is two-dimensional.  Near a boundary
+the PSF is distorted as well as attenuated, which is survivable only because :func:`quadrant_mask`
+removes that region from the analysis.  A full (separation, azimuth) stamp library would cost
+``n_azimuth`` times more PSFs.
 
-* **The boundaries are not where they look.**  :func:`locate_boundaries` measures them at
-  az = 356, 86, 176 and 266 -- four degrees off the detector axes, the same on all four,
-  so this is the mask's mounting angle and not noise.
-  Masking the dead zone along detector rows and columns would be off by about 1.5 pixels
-  at 2 arcsec -- leaving the real dead zone in the data and discarding good pixels beside
-  it.  Nothing here assumes where the boundaries are: :func:`locate_boundaries` measures
-  them and :func:`quadrant_mask` thresholds the measured map, so both follow whatever
-  rotation the instrument model carries.
-
-* **The boundaries are not usable.**  Where the mask has taken most of the flux the
-  photometry is unreliable and the stamp is distorted, not merely attenuated.
-  :func:`quadrant_mask` marks those pixels on the detector; :func:`dead_zone_pixel_mask`
-  carries them through the rolls into the de-rotated frame, where they are excluded from the
-  noise statistics the objective is computed from, and :func:`forbidden_pa` keeps the
-  sampler from injecting into them.  Injecting into a dead zone and then "recovering"
-  nothing is not a measurement of contrast, it is a measurement of the mask.  They stay *in*
-  the cube and in the KLIP basis: they are attenuated measurements, not missing ones, and
-  NaN-ing them ahead of a high-pass filter destroys the whole frame (see
-  :func:`apply_quadrant_mask`).
-
-* **Throughput is a per-frame quantity.**  The quadrant boundaries are fixed to the
-  detector, so as the telescope rolls, a companion at a fixed sky position angle moves
-  across them.  The attenuation of a real source therefore differs frame to frame, which
-  is why :func:`throughput_map_fn` takes a detector azimuth rather than a sky PA.
-
-KNOWN LIMITATION.  The stamp library stays radial: only the scalar throughput is
-two-dimensional.  Near a boundary the PSF is distorted as well as attenuated, so a radial
-stamp is the wrong shape exactly where the throughput is lowest.  That is survivable only
-because :func:`quadrant_mask` removes that region from the analysis entirely -- the model
-is used where it is trustworthy and the rest is masked, rather than extrapolated into.
-Lifting this would mean a full (separation, azimuth) stamp library, which is a factor of
-``n_azimuth`` more PSF computations.
-
-References for the instrument numbers: Boccaletti et al. 2022 (A&A 667, A165, JWST/MIRI
-coronagraphic performances as measured on-sky) for the 110 mas pixel scale, the filter
-central wavelengths and the 2.16 arcsec Lyot spot radius; the pixel scale used in the
-code is taken from the STPSF instrument model itself (0.109655 arcsec/px) rather than the
-rounded documentation value.
+The instrument numbers come from Boccaletti et al. 2022 (A&A 667, A165): the 110 mas pixel scale,
+the filters' central wavelengths and the 2.16 arcsec Lyot spot radius.  The code takes the pixel
+scale from the STPSF instrument model itself, 0.109655 arcsec per pixel.
 """
 from __future__ import annotations
 
@@ -100,7 +74,7 @@ DIAMETER_M = 6.5
 
 # Central wavelengths and bandwidths from Boccaletti et al. 2022, Table 1.  ``kind`` is
 # what the focal-plane mask actually is, which is what decides the throughput geometry:
-# a 4QPM has two suppression lines through the star, a Lyot has a disc and a support bar.
+# a 4QPM has two suppression lines through the star, a Lyot has a disk and a support bar.
 MODES: Dict[str, Dict[str, Any]] = {
     "F1065C": dict(image_mask="FQPM1065", pupil_mask="MASKFQPM", kind="4qpm",
                    lam_m=10.575e-6, dlam_m=0.75e-6, fov_as=24.0),
@@ -116,7 +90,24 @@ _CACHE_VERSION = 1
 
 
 def mode_for_filter(filter: str) -> Dict[str, Any]:
-    """The coronagraphic mode a MIRI filter names, with its masks and wavelength."""
+    """Return the coronagraphic mode a MIRI filter names, with its masks and wavelength.
+
+    Parameters
+    ----------
+    filter : str
+        The filter, such as "F1065C", in any case.
+
+    Returns
+    -------
+    mode : dict
+        ``image_mask``, ``pupil_mask``, ``kind`` ("4qpm" or "lyot"), ``lam_m``, ``dlam_m``,
+        ``fov_as``, ``filter`` and, for the Lyot, ``spot_radius_as``.
+
+    Raises
+    ------
+    ValueError
+        If the filter is not a MIRI coronagraphic one.
+    """
     f = str(filter).upper().strip()
     if f not in MODES:
         raise ValueError(f"{filter!r} is not a MIRI coronagraphic filter; expected one of "
@@ -125,13 +116,21 @@ def mode_for_filter(filter: str) -> Dict[str, Any]:
 
 
 def pixelscale(filter: str = "F1065C") -> float:
-    """MIRI's pixel scale, from the STPSF instrument model.
+    """Return MIRI's pixel scale from the STPSF instrument model.
 
-    The documentation rounds it to 110 mas; the model carries 0.109655, and a 0.3% scale
-    error is a third of a pixel across a 24 arcsec field, which is enough to move a
-    companion between annuli at the outer edge.  Falls back to the documented value when
-    STPSF is not installed, and says so in the returned value's provenance only through
-    this docstring -- callers that care should check :func:`have_stpsf`.
+    The documentation rounds it to 110 mas, the model carries 0.109655, and a 0.3% scale error is a
+    third of a pixel across a 24 arcsec field.
+
+    Parameters
+    ----------
+    filter : str, default "F1065C"
+        The coronagraphic filter.
+
+    Returns
+    -------
+    pxscale : float
+        The pixel scale, in arcsec per pixel, or the documented 0.110 when STPSF is not installed
+        (:func:`~klip_tpe.stpsf_psf.have_stpsf` tells which).
     """
     if not have_stpsf():
         return 0.110
@@ -142,6 +141,18 @@ def pixelscale(filter: str = "F1065C") -> float:
 
 # --------------------------------------------------------------------------- throughput
 def _map_cache_name(meta: Dict[str, Any]) -> str:
+    """Return the cache file name of a throughput map.
+
+    Parameters
+    ----------
+    meta : dict
+        The map's configuration.
+
+    Returns
+    -------
+    name : str
+        The file name.
+    """
     return f"miri_thrumap_{meta['filter']}_{_key(meta)}.npz"
 
 
@@ -155,12 +166,21 @@ _BOUNDARY_OFFSETS = (0.0, 2.5, 6.0, 12.0, 22.0, 34.0, 45.0)
 
 
 def default_azimuths(boundaries: Sequence[float] = (0.0, 90.0, 180.0, 270.0)) -> np.ndarray:
-    """Detector azimuths for :func:`throughput_map`: dense on the quadrant boundaries.
+    """Return detector azimuths for :func:`throughput_map`, dense on the quadrant boundaries.
 
-    The grid mirrors :data:`_BOUNDARY_OFFSETS` about each entry of ``boundaries``; points
-    shared between neighbouring sectors collapse, which is why four boundaries give 48
-    azimuths rather than 56.  The default is the detector axes, which is where the
-    boundaries are *not* -- pass the angles :func:`locate_boundaries` measured.
+    The grid mirrors :data:`_BOUNDARY_OFFSETS` about each boundary, and points shared between
+    neighboring sectors collapse, so four boundaries give 48 azimuths rather than 56.
+
+    Parameters
+    ----------
+    boundaries : sequence of float, default (0.0, 90.0, 180.0, 270.0)
+        Azimuths of the boundaries, in degrees.  The default is the detector axes, where the
+        boundaries are not, so pass the angles :func:`locate_boundaries` measured.
+
+    Returns
+    -------
+    az : ndarray
+        The azimuths, in degrees, sorted.
     """
     az = {(b + s * o) % 360.0 for b in np.asarray(boundaries, float).ravel()
           for o in _BOUNDARY_OFFSETS for s in (1, -1)}
@@ -168,15 +188,21 @@ def default_azimuths(boundaries: Sequence[float] = (0.0, 90.0, 180.0, 270.0)) ->
 
 
 def default_separations(filter: str = "F1065C") -> np.ndarray:
-    """Separations for :func:`throughput_map`, out to the edge of the coronagraphic field.
+    """Return separations for :func:`throughput_map`, out to the edge of the coronagraphic field.
 
-    Geometric rather than uniform.  The throughput climbs steeply over the first arcsecond
-    and is flat past a few, and the field is 24 arcsec across for the 4QPMs and 30 for the
-    Lyot -- so a uniform ladder fine enough for the inner region costs hundreds of PSFs to
-    describe a plateau.  A grid that stops short is worse than a coarse one: the
-    interpolator clamps outside its range, so a map sampled to 3 arcsec silently reports
-    the 3 arcsec throughput for every source beyond it, across a field that goes four times
-    further.
+    The ladder is geometric, 12 steps from 0.3 arcsec to 0.45 times the field of view.  The throughput
+    climbs steeply over the first arcsecond and is flat past a few, and a grid that stops short is
+    worse than a coarse one, since the interpolator clamps outside its range.
+
+    Parameters
+    ----------
+    filter : str, default "F1065C"
+        The coronagraphic filter, whose field sets the outer separation.
+
+    Returns
+    -------
+    seps : ndarray
+        The separations, in arcsec, rounded to the milliarcsecond.
     """
     m = mode_for_filter(filter)
     r_max = 0.45 * float(m["fov_as"])                     # corner-to-corner is further
@@ -187,25 +213,39 @@ def default_separations(filter: str = "F1065C") -> np.ndarray:
 def locate_boundaries(inst, rho_as: float, fov: float, oversample: int, nlambda: int,
                       rap_px: float, step: float = 2.0, window: float = 14.0,
                       log: Callable[[str], None] = print) -> np.ndarray:
-    """Where the four suppression lines actually are, in detector azimuth.
+    """Measure where the four suppression lines are, in detector azimuth.
 
-    Sampling densely on the detector axes and calling that "dense on the boundaries" is
-    only right if the mask is square to the detector, and it is not: the minima sit four
-    to five degrees off, the same on both axes.  A dense grid centred 4.5 degrees away
-    from the feature it is meant to resolve is dense in the wrong place, and the dead-zone
-    mask built from it is offset by the same amount -- about 1.5 pixels at 2 arcsec, which
-    leaves the real dead zone unmasked and throws away good pixels beside it.
+    It scans ``+/- window`` about each nominal axis at ``step``, finer and cheaper than a sweep of the
+    whole circle, which at 15 degree steps reported the boundaries exactly on the detector axes.  A
+    minimum at the edge of the window means the premise is wrong rather than the mask, so the window
+    widens once, by 2.5, and says so.
 
-    The scan therefore has to resolve the offset it is looking for.  A first version swept
-    the whole circle in 15 degree steps, which cannot: it reported all four boundaries
-    exactly on the detector axes, the answer it would have given if they were, and the
-    2 degree scan that had already measured -4 and +86 was the only reason anyone noticed.
-    It also spent 21 of its 24 PSFs on azimuths it then discarded.  This scans
-    ``+/- window`` about each nominal axis at ``step``, which is both finer and cheaper.
+    Parameters
+    ----------
+    inst : object
+        The STPSF MIRI instrument with the coronagraph in place.
+    rho_as : float
+        Separation of the scan, in arcsec.
+    fov : float
+        Field of view of the PSFs, in arcsec.
+    oversample : int
+        Oversampling of the PSFs.
+    nlambda : int
+        Number of wavelengths of the PSFs.
+    rap_px : float
+        Radius of the photometric aperture, in pixels.
+    step : float, default 2.0
+        Step of the scan, in degrees.
+    window : float, default 14.0
+        Half width of the scan about each axis, in degrees, which bounds how far the mask may be
+        rotated.
+    log : callable, default print
+        Function called with each log line.
 
-    ``window`` bounds how far the mask may be rotated.  A minimum at the edge of it means
-    the premise is wrong rather than the mask, so the window widens once and says so.
-    Returns four angles in [0, 360).
+    Returns
+    -------
+    boundaries : ndarray, shape (4,)
+        The four azimuths, in degrees, in [0, 360).
     """
     nominal = np.array([0.0, 90.0, 180.0, 270.0])
     out = []
@@ -236,29 +276,48 @@ def throughput_map(filter: str = "F1065C", seps_as: Optional[Sequence[float]] = 
                    az_deg: Optional[Sequence[float]] = None, oversample: int = 2,
                    nlambda: int = 1, date: Optional[str] = None, cache: bool = True,
                    log: Callable[[str], None] = print) -> Dict[str, Any]:
-    """Coronagraph throughput on an (separation, detector azimuth) grid.
+    """Compute the coronagraph's throughput on a (separation, detector azimuth) grid.
 
-    One STPSF PSF per grid node, each divided by the unocculted PSF of the same
-    configuration summed over the same aperture, so the result is the fraction of a
-    point source's flux that survives the mask at that position.
+    Each grid node takes one STPSF PSF, summed over an aperture and divided by the unocculted PSF of
+    the same configuration summed over the same aperture.  The map is never folded into one quadrant,
+    since the four-fold symmetry is only nominal (it repeats under 180 degrees to three decimals but
+    not under 90).  Each separation row is saved as it completes, so a restart picks up where an
+    interrupted map stopped.
 
-    ``az_deg`` is the azimuth in the DETECTOR frame, measured counter-clockwise from +x,
-    because that is the frame the quadrant boundaries are fixed in.  Left as ``None`` the
-    grid is chosen in two passes: one coarse scan locates the boundaries
-    (:func:`locate_boundaries`), then :func:`default_azimuths` concentrates the sampling
-    on the angles that scan found.  The one-pass alternative -- dense on the detector axes
-    -- is dense four to five degrees away from the feature it is meant to resolve.  The
-    map is never folded into one quadrant: the four-fold symmetry is only nominal, and
-    measuring the full circle is what shows which parts of it the as-built model has.
-    This map repeats under 180 degrees to three decimals but not under 90.
+    Parameters
+    ----------
+    filter : str, default "F1065C"
+        The coronagraphic filter.
+    seps_as : sequence of float or None, default None
+        Separations, in arcsec, at least two.  None takes :func:`default_separations`.
+    az_deg : sequence of float or None, default None
+        Azimuths in the detector frame, counter-clockwise from +x, in degrees, at least two.  None
+        locates the boundaries first (:func:`locate_boundaries`) and samples densely about them
+        (:func:`default_azimuths`).
+    oversample : int, default 2
+        Oversampling of the PSFs.
+    nlambda : int, default 1
+        Number of wavelengths, 1 since the chromatic terms of a ratio of two PSFs in one filter
+        largely cancel.
+    date : str or None, default None
+        Date of the observation, for STPSF's optical model.
+    cache : bool, default True
+        Whether to read and write the cache under :func:`~klip_tpe.stpsf_psf.cache_dir`.
+    log : callable, default print
+        Function called with each log line.
 
-    ``nlambda=1`` is the default because this is a ratio of two PSFs in the same filter,
-    where the chromatic terms largely cancel; the stamps in :func:`library` are computed
-    polychromatically as usual.
+    Returns
+    -------
+    map : dict
+        ``seps``, ``az``, ``trans`` of shape (nsep, naz), ``boundaries``, ``pxscale``, ``fwhm_px``,
+        ``ee_radius_px``, ``meta`` and ``path``.
 
-    Returns ``{'seps', 'az', 'trans', 'boundaries', 'pxscale', 'fwhm_px', 'ee_radius_px',
-    'meta'}`` with ``trans`` of shape ``(nsep, naz)``.  Cached by configuration under
-    :func:`~klip_tpe.stpsf_psf.cache_dir`.
+    Raises
+    ------
+    ValueError
+        If fewer than two separations or azimuths are given.
+    RuntimeError
+        If the map is not cached and STPSF is not installed.
     """
     m = mode_for_filter(filter)
     seps = np.asarray(list(seps_as) if seps_as is not None else
@@ -362,7 +421,19 @@ def throughput_map(filter: str = "F1065C", seps_as: Optional[Sequence[float]] = 
 
 
 def _fwhm(img: np.ndarray) -> float:
-    """FWHM in pixels of a centred PSF, by counting the pixels above half its peak."""
+    """Estimate the FWHM of a centered PSF from the pixels above half its peak.
+
+    Parameters
+    ----------
+    img : ndarray
+        The PSF.
+
+    Returns
+    -------
+    fwhm : float
+        ``2 sqrt(n / pi)`` for the n pixels at or above half the peak, in pixels, or NaN for a peak
+        that is not positive.
+    """
     img = np.asarray(img, float)
     pk = float(np.nanmax(img))
     if not np.isfinite(pk) or pk <= 0:
@@ -372,18 +443,36 @@ def _fwhm(img: np.ndarray) -> float:
 
 def _offset_sum(inst, rho_as: float, az_deg: float, fov: float, oversample: int,
                 nlambda: int, rap_px: float) -> float:
-    """Aperture sum of the PSF of a source ``rho_as`` from the star at detector azimuth
-    ``az_deg``, measured in the same aperture as the reference.
+    """Sum the PSF of an offset source in an aperture centered on it.
 
-    STPSF's ``source_offset_theta`` runs from +Y towards -X, not towards +X, so the
-    detector azimuth (counter-clockwise from +X) is ``theta + 90`` and the conversion
-    below is ``theta = az - 90``.  Verified against the PSF rather than assumed: at
-    ``theta`` = 0, 45, 90, 180, 270 the peak lands at az = 90, 135, 180, 270, 0.
+    Parameters
+    ----------
+    inst : object
+        The STPSF instrument, whose source offset is set.
+    rho_as : float
+        Separation of the source, in arcsec.
+    az_deg : float
+        Detector azimuth of the source, counter-clockwise from +x, in degrees.
+    fov : float
+        Field of view of the PSF, in arcsec.
+    oversample : int
+        Oversampling of the PSF.
+    nlambda : int
+        Number of wavelengths.
+    rap_px : float
+        Radius of the aperture, in pixels.
 
-    Getting this backwards puts the aperture somewhere the source is not, and the two
-    coincide only where ``az = 180 - az``, i.e. at 90 and 270 degrees.  The map then comes
-    back with two bright lobes and near-zero everywhere else -- which looks enough like a
-    mask feature to believe, and is not one.
+    Returns
+    -------
+    total : float
+        The PSF's sum in the aperture.
+
+    Notes
+    -----
+    STPSF's ``source_offset_theta`` runs from +Y towards -X, so ``theta = az - 90``, verified on the
+    PSF: at ``theta`` 0, 45, 90, 180 and 270 the peak lands at az 90, 135, 180, 270 and 0.  The other
+    sign puts the aperture where the source is not, except at 90 and 270, and the map comes back with
+    two bright lobes that look like a mask feature.
     """
     inst.options["source_offset_r"] = float(rho_as)
     inst.options["source_offset_theta"] = float(az_deg - 90.0)
@@ -399,10 +488,20 @@ def _offset_sum(inst, rho_as: float, az_deg: float, fov: float, oversample: int,
 
 
 def throughput_map_fn(g: Dict[str, Any]) -> Callable[[Any, Any], Any]:
-    """``(rho_arcsec, az_deg) -> throughput``, bilinear in separation and azimuth.
+    """Return the throughput as a function of separation and detector azimuth, bilinear in both.
 
-    Azimuth wraps at 360 degrees, so a source between the last sampled azimuth and 0
-    interpolates across the seam instead of being clamped to one end of the table.
+    The azimuth wraps at 360 degrees, so a source between the last sampled azimuth and 0 interpolates
+    across the seam.  Separations outside the map are clamped to its ends.
+
+    Parameters
+    ----------
+    g : dict
+        A throughput map (:func:`throughput_map`).
+
+    Returns
+    -------
+    fn : callable
+        Function ``(rho_arcsec, az_deg) -> throughput``, for scalars or arrays.
     """
     seps = np.asarray(g["seps"], float)
     az = np.asarray(g["az"], float)
@@ -427,20 +526,35 @@ def quadrant_mask(shape: Tuple[int, int], center: Tuple[float, float], pxscale: 
                   filter: str = "F1065C", g: Optional[Dict[str, Any]] = None,
                   min_throughput: float = 0.30,
                   bar_width_px: Optional[float] = None) -> np.ndarray:
-    """``True`` where the mask has taken enough of the flux that the pixel is unusable.
+    """Mark the pixels where the mask has taken enough of the flux that they are unusable.
 
-    The threshold is on measured throughput rather than on a hardcoded boundary width,
-    so the mask follows whatever the STPSF model says for this filter instead of a number
-    written down once and then wrong for the other three.  ``min_throughput=0.30`` is
-    roughly half the best throughput the 4QPMs reach, which is where the stamp starts
-    being distorted rather than simply attenuated -- the regime the radial stamp library
-    cannot represent (see the module docstring).
+    The threshold is on the measured throughput rather than on a boundary width written down once, so
+    the mask follows the STPSF model for each filter.  For the Lyot mode the spot is masked out to its
+    catalogued 2.16 arcsec radius.  Pixels inside the map's innermost separation are masked too.
 
-    For the Lyot mode the occulting spot is masked from its catalogued 2.16 arcsec radius
-    and the support bar from ``bar_width_px`` if given; the throughput map covers the bar
-    too, so the default is to let the threshold find it.
+    Parameters
+    ----------
+    shape : tuple of int
+        Shape of the frames, whose last two entries are ``(ny, nx)``.
+    center : tuple of 2 floats
+        The star's ``(x, y)`` pixel.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    filter : str, default "F1065C"
+        The coronagraphic filter.
+    g : dict or None, default None
+        A throughput map to reuse.  None loads one from the cache.
+    min_throughput : float, default 0.30
+        Throughput below which a pixel is unusable, about half the best the 4QPMs reach, where the
+        stamp starts to be distorted rather than attenuated.
+    bar_width_px : float or None, default None
+        Width of the Lyot support bar, in pixels.  None lets the threshold find it, since the map
+        covers the bar.
 
-    Pass ``g`` to reuse a map already computed; otherwise one is loaded from the cache.
+    Returns
+    -------
+    bad : ndarray of bool, shape (ny, nx)
+        True for each unusable pixel.
     """
     m = mode_for_filter(filter)
     ny, nx = int(shape[-2]), int(shape[-1])
@@ -463,14 +577,20 @@ def quadrant_mask(shape: Tuple[int, int], center: Tuple[float, float], pxscale: 
 
 # ------------------------------------------------------------------- the injection model
 class MIRILibraryPSF(LibraryPSF):
-    """:class:`~klip_tpe.injection.LibraryPSF` whose throughput depends on where the
-    source is, not just how far out.
+    """:class:`~klip_tpe.injection.LibraryPSF` whose throughput depends on where the source is, not just how far out.
 
-    ``throughput(rho, az_deg)`` reads the two-dimensional map.  Called without an azimuth
-    -- which is what every call site that predates MIRI does -- it returns the azimuthal
-    *median* at that separation and warns once, rather than silently handing back a number
-    that is wrong by up to a factor of three in either direction.  A median is the least
-    misleading single number available, and it is still not good enough to publish.
+    Called without an azimuth, :meth:`throughput` returns the azimuthal median at that separation and
+    warns once, the least misleading single number, which is still not good enough to publish.
+
+    Parameters
+    ----------
+    a : tuple
+        Positional arguments of :class:`~klip_tpe.injection.LibraryPSF`.
+    thru2d : callable or None, default None
+        Throughput map ``(rho_arcsec, az_deg) -> throughput`` (:func:`throughput_map_fn`).  None makes
+        an ordinary radial library, which does not pay for the per-frame path.
+    kw : dict
+        Keyword arguments of :class:`~klip_tpe.injection.LibraryPSF`.
     """
 
     name = "miri_library"
@@ -485,6 +605,25 @@ class MIRILibraryPSF(LibraryPSF):
         self.azimuth_dependent = thru2d is not None
 
     def throughput(self, rho_as: float, az_deg: Optional[float] = None) -> float:
+        """Return the throughput at a separation and detector azimuth.
+
+        Parameters
+        ----------
+        rho_as : float
+            Separation, in arcsec.
+        az_deg : float or None, default None
+            Detector azimuth, in degrees.  None returns the azimuthal median and warns once.
+
+        Returns
+        -------
+        throughput : float
+            The throughput.
+
+        Warns
+        -----
+        RuntimeWarning
+            Once per process, when asked without an azimuth.
+        """
         if self._thru2d is None:
             return super().throughput(rho_as)
         if az_deg is None:
@@ -500,12 +639,20 @@ class MIRILibraryPSF(LibraryPSF):
         return float(self._thru2d(float(rho_as), float(az_deg)))
 
     def typical_throughput(self, rho_as: float) -> float:
-        """The azimuthal median, without the warning.
+        """Return the azimuthal median throughput at a separation, without the warning.
 
-        For callers that need a scale rather than a value -- the float32 headroom check
-        wants to know whether an injection will survive being added to the cube, which is
-        an order-of-magnitude question.  Making that check warn on every injection would
-        train the warning out of anyone's attention, which is the opposite of the point.
+        It serves callers that need a scale rather than a value, such as the float32 headroom check, which
+        would otherwise warn on every injection.
+
+        Parameters
+        ----------
+        rho_as : float
+            Separation, in arcsec.
+
+        Returns
+        -------
+        throughput : float
+            The median over a uniform 1 degree grid of azimuths.
         """
         if self._thru2d is None:
             return float(super().throughput(rho_as))
@@ -514,25 +661,46 @@ class MIRILibraryPSF(LibraryPSF):
 
     @property
     def _az_grid(self) -> np.ndarray:
-        """Uniform, and fine, on purpose.  The median stands for "a source at an azimuth
-        we were not told", so it has to be taken over azimuth uniformly; taking it over
-        the map's own grid would weight the boundaries heavily, since that grid is dense
-        exactly where the throughput is worst, and bias the answer low."""
+        """Uniform 1 degree grid of azimuths for the median, so the boundaries, where the map's own grid is dense, do not bias it low.
+        """
         return np.arange(0.0, 360.0, 1.0)
 
 
 def library(filter: str = "F1065C", star_flux: float = 1.0,
             seps_as: Optional[Sequence[float]] = None, date: Optional[str] = None,
             log: Callable[[str], None] = print, **kw) -> MIRILibraryPSF:
-    """Injection model for a MIRI coronagraphic mode: radial stamps, 2-D throughput.
+    """Build the injection model of a MIRI coronagraphic mode, radial stamps with a 2-D throughput.
 
-    ``seps_as`` is the ladder the STAMP library is built on.  The throughput map keeps its
-    own (:func:`default_separations`) rather than being forced onto the same one: the two
-    answer different questions -- where a stamp is wanted, against where the throughput is
-    changing -- and tying them together makes whichever ladder is chosen wrong for the
-    other.  Concretely, passing the stamps' separations through cut a map already computed
-    over 0.3 to 10.8 arcsec down to 0.2 to 3.0, discarded a 576-PSF cache on a key that no
-    longer matched, and recomputed a shorter map that then clamped across most of the field.
+    The stamps are translated to the source, never rotated, since the lobe pattern comes from the
+    MASKFQPM Lyot stop and the segmented pupil, both fixed to the spacecraft.
+
+    Parameters
+    ----------
+    filter : str, default "F1065C"
+        The coronagraphic filter.
+    star_flux : float, default 1.0
+        The flux unit, one unit of contrast in the science frames' units
+        (:func:`star_flux_from_flux_density`).
+    seps_as : sequence of float or None, default None
+        Separations of the stamp library, in arcsec.  None takes :func:`default_separations`, and the
+        throughput map keeps its own ladder either way.
+    date : str or None, default None
+        Date of the observation, for STPSF's optical model.
+    log : callable, default print
+        Function called with each log line.
+    kw : dict
+        More keywords for :func:`~klip_tpe.stpsf_psf.offaxis_grid`.
+
+    Returns
+    -------
+    model : MIRILibraryPSF
+        The injection model.
+
+    Notes
+    -----
+    Tying the stamps' ladder to the map's once cut a map computed over 0.3 to 10.8 arcsec down to 0.2
+    to 3.0, discarded a 576-PSF cache and recomputed a shorter map that clamped across most of the
+    field.  :func:`klip_tpe.stpsf_psf.library` has the measurement of the fixed lobes.
     """
     m = mode_for_filter(filter)
     seps = np.asarray(list(seps_as) if seps_as is not None else
@@ -546,7 +714,8 @@ def library(filter: str = "F1065C", star_flux: float = 1.0,
     # coronagraphic PSF comes from the MASKFQPM Lyot stop and the segmented pupil, both fixed
     # to the SPACECRAFT -- it does not turn as a companion moves round the field, so neither
     # does the template.  See klip_tpe.stpsf_psf.library for the measurement and for the IDL
-    # reduction that does the same thing (translation only, one template per data set).
+    # predecessor's reduction that does the same thing (translation only, one template per
+    # data set).
     return MIRILibraryPSF(sl, grid["seps"], center=c,
                           ee_radius_px=float(grid.get("ee_radius_px") or 3.0),
                           refpa_deg=None, flux_unit=float(star_flux),
@@ -558,20 +727,40 @@ def star_flux_from_flux_density(filter: str, flux_density_jy: float, pixar_sr: f
                                 seps_as: Optional[Sequence[float]] = None,
                                 optics_transmission: float = 1.0,
                                 log: Callable[[str], None] = print) -> float:
-    """``star_flux`` for :func:`library` from the star's flux density in this filter [Jy].
+    """Compute :func:`library`'s ``star_flux`` from the star's flux density in this filter.
 
-    The number :func:`library` calls ``flux_unit``: what one unit of *contrast* is worth in
-    the science frames' own units.  Without it the default is 1.0 -- a source of one count
-    against a MIRI cube whose pixels reach several hundred MJy/sr, which is **1.1e5 times
-    too faint** for HIP 65426 in F1140C.  Injections then do nothing at any contrast: the
-    calibration walks its whole ladder from 3e-5 to the 1e-1 cap with the S/N flat at zero,
-    reports that it could not calibrate, and the search runs for hours ranking noise.  Which
-    is exactly what happened, so :mod:`scripts.run_miri` now refuses to start at 1.0.
+    It wraps :func:`klip_tpe.stpsf_psf.star_flux_from_flux_density` on the grid :func:`library`
+    builds, so the flux is normalized to the encircled-energy radius the stamps are normalized by.
 
-    This wraps :func:`klip_tpe.stpsf_psf.star_flux_from_flux_density` on the grid
-    :func:`library` builds, so the encircled-energy radius the flux is normalised to is the
-    one the stamps are normalised by.  Computing it against a differently-parameterised grid
-    is a quiet way to be wrong by the ratio of two EEs.
+    Parameters
+    ----------
+    filter : str
+        The coronagraphic filter.
+    flux_density_jy : float
+        The star's flux density in the filter, in Jy.
+    pixar_sr : float
+        Solid angle of a pixel, in steradians.
+    bunit : str, default "MJy/sr"
+        Unit of the science frames.
+    date : str or None, default None
+        Date of the observation, for STPSF's optical model.
+    seps_as : sequence of float or None, default None
+        Separations of the stamp library, as for :func:`library`.
+    optics_transmission : float, default 1.0
+        Transmission of the optics, applied to the flux.
+    log : callable, default print
+        Function called with each log line.
+
+    Returns
+    -------
+    star_flux : float
+        One unit of contrast in the science frames' units.
+
+    Notes
+    -----
+    The default flux unit of 1.0 is one count against a MIRI cube whose pixels reach several hundred
+    MJy/sr, 1.1e5 times too faint for HIP 65426 in F1140C, and the calibration then walked its whole
+    ladder with the S/N flat at zero.  ``scripts/run_miri`` refuses to start at 1.0.
     """
     from ..stpsf_psf import star_flux_from_flux_density as _sf
     m = mode_for_filter(filter)
@@ -587,28 +776,39 @@ def forbidden_pa(angles, rho_as: float, filter: str = "F1065C", truenorth: float
                  g: Optional[Dict[str, Any]] = None, min_throughput: float = 0.30,
                  dead_frac: float = 0.34, step_deg: float = 1.0,
                  log: Callable[[str], None] = print):
-    """Sky position-angle sectors an injection must not be placed in, as
-    ``[(centre_deg, half_width_deg), ...]`` for
-    :class:`~klip_tpe.positions.PositionSampler`.
+    """Return the sky position-angle sectors an injection must not be placed in, for :class:`~klip_tpe.positions.PositionSampler`.
 
-    The dead zones are fixed to the DETECTOR and the sampler works in sky position angle,
-    so the two are only related through the roll of each frame:
-    ``az = theta - truenorth - 270 - parang``.  A sky PA that lands on a quadrant boundary
-    in one frame may clear it in another, which is why this takes the whole ``angles``
-    array rather than a single roll and forbids a PA only when it is suppressed in more
-    than ``dead_frac`` of the frames.
+    The dead zones are fixed to the detector and the sampler works in sky PA, related through each
+    frame's roll, ``az = theta - truenorth - 270 - parang``.  A PA is forbidden when it is suppressed in
+    more than ``dead_frac`` of the frames.  Without this the search reads the mask's suppression as a
+    property of the parameters it tries.
 
-    Without this the sampler happily injects into a dead zone, the reduction recovers
-    almost nothing there, and the search reads that as a property of the parameters it was
-    trying -- it is a property of the mask.  Worse than useless: it is a measurement of the
-    coronagraph presented as a measurement of the reduction.
+    Parameters
+    ----------
+    angles : array_like
+        Parallactic angle of every frame, in degrees.
+    rho_as : float
+        Separation of the injections, in arcsec.
+    filter : str, default "F1065C"
+        The coronagraphic filter.
+    truenorth : float, default 0.0
+        True-north offset, in degrees.
+    g : dict or None, default None
+        A throughput map to reuse.  None loads one from the cache.
+    min_throughput : float, default 0.30
+        Throughput below which a position is dead.
+    dead_frac : float, default 0.34
+        Fraction of the frames in which a PA must be dead to be forbidden.  It is below a half since a
+        JWST sequence is usually two rolls, where a ``> 0.5`` test would forbid nothing on an exact tie.
+    step_deg : float, default 1.0
+        Step of the PA scan, in degrees.
+    log : callable, default print
+        Function called with each log line.
 
-    ``dead_frac`` is 0.34 rather than a half on purpose.  A JWST coronagraphic sequence is
-    usually **two** rolls, so a PA that a boundary eats in one of them is dead in exactly
-    0.5 of the frames -- and a ``> 0.5`` test would then forbid nothing at all, for the
-    most common observation there is, on an exact floating-point tie.  Losing one of two
-    rolls to the mask costs about half the signal at that PA, which is more than enough to
-    make an injection there unrepresentative of the separation it is supposed to measure.
+    Returns
+    -------
+    sectors : list of tuple of 2 floats
+        The sectors, as ``(center_deg, half_width_deg)``, joined across 0 and 360.
     """
     ang = np.asarray(angles, float).ravel()
     if not ang.size:
@@ -645,39 +845,50 @@ def dead_zone_pixel_mask(shape: Tuple[int, int], pxscale: float, angles,
                          g: Optional[Dict[str, Any]] = None, min_throughput: float = 0.30,
                          dead_frac: float = 0.34, center: Optional[Tuple[float, float]] = None,
                          log: Callable[[str], None] = print) -> np.ndarray:
-    """``True`` where the *de-rotated* image must stay out of the noise estimate, for
-    :class:`~klip_tpe.metrics.MawetPeakSNR`'s ``pixel_mask``.
+    """Mark the derotated image's pixels that must stay out of the noise estimate, for :class:`~klip_tpe.metrics.MawetPeakSNR`'s ``pixel_mask``.
 
-    This is the pixel-space twin of :func:`forbidden_pa` -- same geometry, same rolls, same
-    ``min_throughput`` and ``dead_frac``, evaluated per pixel instead of per position angle
-    at one separation -- and the two are meant to be passed together, as
-    ``default_config(red, forbidden_pa=fpa, pixel_mask=pmask)``.  Doing only one of them is
-    worse than doing neither: injections that avoid the dead zones while the dead zones are
-    still in the ring sigma are scored against a noise level nothing is measuring them at.
+    It is the pixel-space twin of :func:`forbidden_pa`, with the same geometry, rolls,
+    ``min_throughput`` and ``dead_frac``, and the two go together, as
+    ``default_config(red, forbidden_pa=fpa, pixel_mask=pmask)``.  The pixels stay in the cube and the
+    KLIP basis, as attenuated measurements, and out of the statistic.
 
-    It exists because the obvious alternative -- NaN the dead zones into the science cube,
-    which is what :func:`apply_quadrant_mask` does -- cannot work in this pipeline.  The
-    reducer high-passes each frame at ``nan_aware=False``, which spreads every NaN over a
-    box the width of the filter; the 4QPM dead zones are lines through the star reaching the
-    frame edges, so a width-12 filter dilates 5% of the frame into 100% of it, ``np.nansum``
-    of an all-NaN frame is 0.0, ``bin_frames`` drops zero-sum bins, and the reduction is left
-    with no frames.  There is no crop that fixes it either: the dead zones cross the middle
-    of the array, so no rectangle excludes them.  The pixels are attenuated measurements,
-    not missing ones, so they stay in the cube and in the KLIP basis; what they must stay
-    out of is the *statistic*.
+    Parameters
+    ----------
+    shape : tuple of int
+        Shape of the reduced image, whose last two entries are ``(ny, nx)``.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    angles : array_like
+        Parallactic angle of every frame, in degrees.
+    filter : str, default "F1065C"
+        The coronagraphic filter.
+    truenorth : float, default 0.0
+        True-north offset, in degrees.
+    g : dict or None, default None
+        A throughput map to reuse.  None loads one from the cache.
+    min_throughput : float, default 0.30
+        Throughput below which a position is dead.
+    dead_frac : float, default 0.34
+        Fraction of the frames in which a pixel must be dead to be masked.
+    center : tuple of 2 floats or None, default None
+        The star's ``(x, y)`` pixel in the reduced image.  None takes ``((nx-1)/2, (ny-1)/2)``, where
+        derotation puts it.
+    log : callable, default print
+        Function called with each log line.
 
-    Note which way this biases the answer.  Where the phase mask has taken the starlight it
-    has also taken the speckles, so a dead-zone pixel is *quieter* than the ring it sits in.
-    Leaving it in depresses sigma, inflates every S/N, and gives the optimizer an incentive
-    to choose parameters that preserve the dead zones; taking it out raises sigma and lowers
-    the reported contrast.  The conservative direction, and -- unlike a cut made because a
-    region looked bright -- one justified by the mask design before anyone looks at the
-    image.
+    Returns
+    -------
+    mask : ndarray of bool, shape (ny, nx)
+        True for each pixel to exclude, the map's innermost separation included.
 
-    ``shape`` and ``center`` are the *reduced image's*, not the detector's: derotation puts
-    the star at ``((nx-1)/2, (ny-1)/2)``, which is where the metric looks for it and the
-    default here.  ``angles`` is every frame's parallactic angle, because a sky position
-    that one roll puts on a boundary another roll may clear.
+    Notes
+    -----
+    NaN in the cube cannot do this job.  The reducer's high-pass spreads each NaN over the filter's
+    box and the dead zones reach the frame edges, so a 12 px filter turns 5% of the frame into all of
+    it and every bin is dropped.  Where the mask has taken the stellar PSF it has taken the speckles
+    too, so a dead-zone pixel is quieter than its ring.  Leaving it in depresses sigma and inflates
+    every S/N, so taking it out is the conservative direction, justified by the mask's design before
+    anyone looks at the image.
     """
     ang = np.asarray(angles, float).ravel()
     ny, nx = int(shape[-2]), int(shape[-1])
@@ -712,21 +923,29 @@ def dead_zone_pixel_mask(shape: Tuple[int, int], pxscale: float, angles,
 # ------------------------------------------------------------------------------ loading
 def apply_quadrant_mask(datasets, min_throughput: float = 0.30, filter: Optional[str] = None,
                         log: Callable[[str], None] = print):
-    """NaN the dead zones of every MIRI dataset in ``{name: Dataset}``, in place-ish.
+    """Set the dead zones of every MIRI dataset to NaN, for reductions without a high-pass.
 
-    **Do not put this in front of the reducer.**  It is kept for reductions that run with no
-    high-pass filter at all (``filter <= 1``) and for inspecting the mask geometry; the
-    driver does not call it.  The reducer high-passes at ``nan_aware=False``, which spreads
-    each NaN over a box the width of the filter, and the 4QPM dead zones are lines through
-    the star reaching the frame edges -- so at the default width of 12 px, 5% of the frame
-    becomes 100% of it, ``np.nansum`` of an all-NaN frame is 0.0, ``bin_frames`` drops
-    zero-sum bins, and every frame is dropped as empty.  No crop rescues it: the dead zones
-    cross the middle of the array.  Use :func:`dead_zone_pixel_mask` instead, which keeps
-    the attenuated pixels in the cube and out of the noise statistic, where the problem
-    actually is.
+    Do not put this in front of the reducer.  Its high-pass spreads each NaN over the filter's box, so
+    at the default 12 px every frame is dropped as empty, and :func:`dead_zone_pixel_mask` is the tool
+    for the noise statistic.  It is kept for reductions with ``filter <= 1`` and for inspecting the
+    mask's geometry.
 
-    Returns a new dict; datasets whose filter is not a MIRI coronagraphic one are passed
-    through untouched, so this is safe to call on a mixed or NIRCam set.
+    Parameters
+    ----------
+    datasets : dict of str to Dataset
+        The datasets.
+    min_throughput : float, default 0.30
+        Throughput below which a pixel is set to NaN (:func:`quadrant_mask`).
+    filter : str or None, default None
+        The coronagraphic filter.  None reads each dataset's ``meta["filter"]`` or header.
+    log : callable, default print
+        Function called with each log line.
+
+    Returns
+    -------
+    masked : dict of str to Dataset
+        New datasets with NaN in the dead zones, the others passed through, so a mixed or NIRCam set
+        is safe.
     """
     out = {}
     for pid, ds in datasets.items():
@@ -754,14 +973,43 @@ def apply_quadrant_mask(datasets, min_throughput: float = 0.30, filter: Optional
 def load_miri(cube, angles, filter: Optional[str] = None, name: str = "miri",
               mask_quadrants: bool = True, min_throughput: float = 0.30,
               header=None, **kw):
-    """A :class:`~klip_tpe.datasets.Dataset` from MIRI coronagraphic frames.
+    """Build a :class:`~klip_tpe.reducer.Dataset` from MIRI coronagraphic frames.
 
-    Everything :func:`klip_tpe.instruments.generic.load_cube` does, plus: the filter is
-    taken from ``header['FILTER']`` when not given, the pixel scale comes from the STPSF
-    model, and -- unless ``mask_quadrants=False`` -- the dead zones are set to NaN so they
-    stay out of the KLIP basis and out of the noise statistics.  NaN rather than zero
-    because the engine treats NaN as missing, while a zero is a measurement of zero and
-    drags every statistic computed over the annulus towards it.
+    It does what :func:`klip_tpe.instruments.generic.load_cube` does, and takes the filter from
+    ``header["FILTER"]`` when not given and the pixel scale from the STPSF model.  With
+    ``mask_quadrants`` the dead zones are set to NaN, which the default high-pass (``hp_nan_aware``
+    False) spreads over every frame (see :func:`apply_quadrant_mask`).  Such a reduction wants
+    ``mask_quadrants=False`` and :func:`dead_zone_pixel_mask` instead.
+
+    Parameters
+    ----------
+    cube : str or ndarray
+        The frames, or a FITS path.
+    angles : str or array_like
+        Parallactic angle of each frame in degrees, or a FITS path.
+    filter : str or None, default None
+        The coronagraphic filter.  None reads it from ``header``.
+    name : str, default "miri"
+        Name of the dataset.
+    mask_quadrants : bool, default True
+        Whether to set the dead zones to NaN (:func:`quadrant_mask`).
+    min_throughput : float, default 0.30
+        Throughput below which a pixel is a dead zone.
+    header : mapping or None, default None
+        The frames' FITS header, kept in ``meta["header"]``.
+    kw : dict
+        More keywords for :func:`~klip_tpe.instruments.generic.load_cube`.
+
+    Returns
+    -------
+    ds : Dataset
+        The dataset, with the instrument, filter, masks, pixel scale, wavelength and diameter in its
+        ``meta``.
+
+    Raises
+    ------
+    ValueError
+        If there is no filter, or it is not a MIRI coronagraphic one.
     """
     from .generic import load_cube
     if filter is None:
