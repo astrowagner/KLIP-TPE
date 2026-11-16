@@ -42,8 +42,9 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--max-frames MAX_FRAMES] [--workers WORKERS]
                         [--pool {auto,processes,threads}]
                         [--threads-per-job THREADS_PER_JOB]
-                        [--gpu-share GPU_SHARE] [--gpu-workers GPU_WORKERS]
-                        [--gpu-device GPU_DEVICE]
+                        [--gpu-share GPU_SHARE]
+                        [--gpu-adapt-every GPU_ADAPT_EVERY]
+                        [--gpu-workers GPU_WORKERS] [--gpu-device GPU_DEVICE]
                         [--weighting {equal,sqrt_texp}] [--fast]
                         [--klip-gram {target,zone}] [--no-library]
                         [--no-clean-subtract] [--ladder-pair]
@@ -136,26 +137,33 @@ options:
                         partitions). A job expected to take long gets up to 4x
                         as many and a light one 1
   --gpu-share GPU_SHARE
-                        percentage of the search's injected draws reduced on
-                        the card (an NVIDIA GPU, through
-                        klip_tpe.gpu_reducer), the rest on the CPU workers.
-                        Each trial sends the card the share of its jobs with
-                        the lowest hash of the evaluation, the draw and the
-                        night, so a run and its resumes reproduce. 'auto' (the
-                        default for a new run): 12 where Linux shows a card
-                        and the module is there (30 before 2026-11-15), else
-                        0. A run keeps its share across resumes (card.json in
-                        the run directory)
+                        percentage of the search's injected draws each card
+                        reduces (an NVIDIA GPU, through klip_tpe.gpu_reducer),
+                        the rest on the CPU workers. Each trial sends a card
+                        its share of the trial's jobs, lowest hash of the
+                        evaluation, the draw and the night first. 'auto' (the
+                        default for a new run, where Linux shows a card and
+                        the module is there, else 0): start at 12 and re-
+                        balance every --gpu-adapt-every trials, from the job
+                        times measured on the cards and the CPU workers, so
+                        they finish together. A number, or one per card
+                        (12,8), stays as set. A run keeps its share, and each
+                        trial's, across resumes (card.json, the checkpoint)
+  --gpu-adapt-every GPU_ADAPT_EVERY
+                        trials between two re-balances of --gpu-share auto
+                        (default 25)
   --gpu-workers GPU_WORKERS
-                        card worker processes sharing the card (default 3). At
-                        large bins one leaves the card idle while it prepares
-                        the next job
+                        worker processes on each card, sharing it (default 3).
+                        At large bins one leaves the card idle while it
+                        prepares the next job
   --gpu-device GPU_DEVICE
                         the card the card workers use, as CUDA_VISIBLE_DEVICES
                         takes it: an index in CUDA's order or a UUID (nvidia-
-                        smi -L). Default: what the run has been using
-                        (card.json), else CUDA_VISIBLE_DEVICES, which is then
-                        recorded, so a resume keeps the card
+                        smi -L). Several, as 0,1, or 'all' use every card
+                        named, each with its own workers and share. Default:
+                        what the run has been using (card.json), else
+                        CUDA_VISIBLE_DEVICES, which is then recorded, so a
+                        resume keeps the card
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -650,9 +658,11 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--group-smooth GROUP_SMOOTH] [--max-frames MAX_FRAMES]
                      [--workers WORKERS] [--pool {auto,processes,threads}]
                      [--threads-per-job THREADS_PER_JOB]
-                     [--gpu-share GPU_SHARE] [--gpu-workers GPU_WORKERS]
-                     [--gpu-device GPU_DEVICE] [--weighting {equal,sqrt_texp}]
-                     [--fast] [--klip-gram {target,zone}] [--no-library]
+                     [--gpu-share GPU_SHARE]
+                     [--gpu-adapt-every GPU_ADAPT_EVERY]
+                     [--gpu-workers GPU_WORKERS] [--gpu-device GPU_DEVICE]
+                     [--weighting {equal,sqrt_texp}] [--fast]
+                     [--klip-gram {target,zone}] [--no-library]
                      [--no-clean-subtract] [--ladder-pair]
                      [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
                      [--bin-min N] [--bin-max N] [--known RHO PA]
@@ -739,26 +749,33 @@ options:
                         partitions). A job expected to take long gets up to 4x
                         as many and a light one 1
   --gpu-share GPU_SHARE
-                        percentage of the search's injected draws reduced on
-                        the card (an NVIDIA GPU, through
-                        klip_tpe.gpu_reducer), the rest on the CPU workers.
-                        Each trial sends the card the share of its jobs with
-                        the lowest hash of the evaluation, the draw and the
-                        night, so a run and its resumes reproduce. 'auto' (the
-                        default for a new run): 12 where Linux shows a card
-                        and the module is there (30 before 2026-11-15), else
-                        0. A run keeps its share across resumes (card.json in
-                        the run directory)
+                        percentage of the search's injected draws each card
+                        reduces (an NVIDIA GPU, through klip_tpe.gpu_reducer),
+                        the rest on the CPU workers. Each trial sends a card
+                        its share of the trial's jobs, lowest hash of the
+                        evaluation, the draw and the night first. 'auto' (the
+                        default for a new run, where Linux shows a card and
+                        the module is there, else 0): start at 12 and re-
+                        balance every --gpu-adapt-every trials, from the job
+                        times measured on the cards and the CPU workers, so
+                        they finish together. A number, or one per card
+                        (12,8), stays as set. A run keeps its share, and each
+                        trial's, across resumes (card.json, the checkpoint)
+  --gpu-adapt-every GPU_ADAPT_EVERY
+                        trials between two re-balances of --gpu-share auto
+                        (default 25)
   --gpu-workers GPU_WORKERS
-                        card worker processes sharing the card (default 3). At
-                        large bins one leaves the card idle while it prepares
-                        the next job
+                        worker processes on each card, sharing it (default 3).
+                        At large bins one leaves the card idle while it
+                        prepares the next job
   --gpu-device GPU_DEVICE
                         the card the card workers use, as CUDA_VISIBLE_DEVICES
                         takes it: an index in CUDA's order or a UUID (nvidia-
-                        smi -L). Default: what the run has been using
-                        (card.json), else CUDA_VISIBLE_DEVICES, which is then
-                        recorded, so a resume keeps the card
+                        smi -L). Several, as 0,1, or 'all' use every card
+                        named, each with its own workers and share. Default:
+                        what the run has been using (card.json), else
+                        CUDA_VISIBLE_DEVICES, which is then recorded, so a
+                        resume keeps the card
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -1253,8 +1270,9 @@ usage: klip-tpe resume [-h] [--instrument {near,nomic,generic,ales}]
                        [--group-smooth GROUP_SMOOTH] [--max-frames MAX_FRAMES]
                        [--workers WORKERS] [--pool {auto,processes,threads}]
                        [--threads-per-job THREADS_PER_JOB]
-                       [--gpu-share GPU_SHARE] [--gpu-workers GPU_WORKERS]
-                       [--gpu-device GPU_DEVICE]
+                       [--gpu-share GPU_SHARE]
+                       [--gpu-adapt-every GPU_ADAPT_EVERY]
+                       [--gpu-workers GPU_WORKERS] [--gpu-device GPU_DEVICE]
                        [--weighting {equal,sqrt_texp}] [--fast]
                        [--klip-gram {target,zone}] [--no-library]
                        [--no-clean-subtract] [--ladder-pair]
@@ -1310,26 +1328,33 @@ options:
                         partitions). A job expected to take long gets up to 4x
                         as many and a light one 1
   --gpu-share GPU_SHARE
-                        percentage of the search's injected draws reduced on
-                        the card (an NVIDIA GPU, through
-                        klip_tpe.gpu_reducer), the rest on the CPU workers.
-                        Each trial sends the card the share of its jobs with
-                        the lowest hash of the evaluation, the draw and the
-                        night, so a run and its resumes reproduce. 'auto' (the
-                        default for a new run): 12 where Linux shows a card
-                        and the module is there (30 before 2026-11-15), else
-                        0. A run keeps its share across resumes (card.json in
-                        the run directory)
+                        percentage of the search's injected draws each card
+                        reduces (an NVIDIA GPU, through klip_tpe.gpu_reducer),
+                        the rest on the CPU workers. Each trial sends a card
+                        its share of the trial's jobs, lowest hash of the
+                        evaluation, the draw and the night first. 'auto' (the
+                        default for a new run, where Linux shows a card and
+                        the module is there, else 0): start at 12 and re-
+                        balance every --gpu-adapt-every trials, from the job
+                        times measured on the cards and the CPU workers, so
+                        they finish together. A number, or one per card
+                        (12,8), stays as set. A run keeps its share, and each
+                        trial's, across resumes (card.json, the checkpoint)
+  --gpu-adapt-every GPU_ADAPT_EVERY
+                        trials between two re-balances of --gpu-share auto
+                        (default 25)
   --gpu-workers GPU_WORKERS
-                        card worker processes sharing the card (default 3). At
-                        large bins one leaves the card idle while it prepares
-                        the next job
+                        worker processes on each card, sharing it (default 3).
+                        At large bins one leaves the card idle while it
+                        prepares the next job
   --gpu-device GPU_DEVICE
                         the card the card workers use, as CUDA_VISIBLE_DEVICES
                         takes it: an index in CUDA's order or a UUID (nvidia-
-                        smi -L). Default: what the run has been using
-                        (card.json), else CUDA_VISIBLE_DEVICES, which is then
-                        recorded, so a resume keeps the card
+                        smi -L). Several, as 0,1, or 'all' use every card
+                        named, each with its own workers and share. Default:
+                        what the run has been using (card.json), else
+                        CUDA_VISIBLE_DEVICES, which is then recorded, so a
+                        resume keeps the card
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -1605,8 +1630,9 @@ usage: klip-tpe extend [-h] [--instrument {near,nomic,generic,ales}]
                        [--group-smooth GROUP_SMOOTH] [--max-frames MAX_FRAMES]
                        [--workers WORKERS] [--pool {auto,processes,threads}]
                        [--threads-per-job THREADS_PER_JOB]
-                       [--gpu-share GPU_SHARE] [--gpu-workers GPU_WORKERS]
-                       [--gpu-device GPU_DEVICE]
+                       [--gpu-share GPU_SHARE]
+                       [--gpu-adapt-every GPU_ADAPT_EVERY]
+                       [--gpu-workers GPU_WORKERS] [--gpu-device GPU_DEVICE]
                        [--weighting {equal,sqrt_texp}] [--fast]
                        [--klip-gram {target,zone}] [--no-library]
                        [--no-clean-subtract] [--ladder-pair]
@@ -1659,26 +1685,33 @@ options:
                         partitions). A job expected to take long gets up to 4x
                         as many and a light one 1
   --gpu-share GPU_SHARE
-                        percentage of the search's injected draws reduced on
-                        the card (an NVIDIA GPU, through
-                        klip_tpe.gpu_reducer), the rest on the CPU workers.
-                        Each trial sends the card the share of its jobs with
-                        the lowest hash of the evaluation, the draw and the
-                        night, so a run and its resumes reproduce. 'auto' (the
-                        default for a new run): 12 where Linux shows a card
-                        and the module is there (30 before 2026-11-15), else
-                        0. A run keeps its share across resumes (card.json in
-                        the run directory)
+                        percentage of the search's injected draws each card
+                        reduces (an NVIDIA GPU, through klip_tpe.gpu_reducer),
+                        the rest on the CPU workers. Each trial sends a card
+                        its share of the trial's jobs, lowest hash of the
+                        evaluation, the draw and the night first. 'auto' (the
+                        default for a new run, where Linux shows a card and
+                        the module is there, else 0): start at 12 and re-
+                        balance every --gpu-adapt-every trials, from the job
+                        times measured on the cards and the CPU workers, so
+                        they finish together. A number, or one per card
+                        (12,8), stays as set. A run keeps its share, and each
+                        trial's, across resumes (card.json, the checkpoint)
+  --gpu-adapt-every GPU_ADAPT_EVERY
+                        trials between two re-balances of --gpu-share auto
+                        (default 25)
   --gpu-workers GPU_WORKERS
-                        card worker processes sharing the card (default 3). At
-                        large bins one leaves the card idle while it prepares
-                        the next job
+                        worker processes on each card, sharing it (default 3).
+                        At large bins one leaves the card idle while it
+                        prepares the next job
   --gpu-device GPU_DEVICE
                         the card the card workers use, as CUDA_VISIBLE_DEVICES
                         takes it: an index in CUDA's order or a UUID (nvidia-
-                        smi -L). Default: what the run has been using
-                        (card.json), else CUDA_VISIBLE_DEVICES, which is then
-                        recorded, so a resume keeps the card
+                        smi -L). Several, as 0,1, or 'all' use every card
+                        named, each with its own workers and share. Default:
+                        what the run has been using (card.json), else
+                        CUDA_VISIBLE_DEVICES, which is then recorded, so a
+                        resume keeps the card
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -1951,7 +1984,9 @@ usage: klip-tpe fit-chain [-h] [--instrument {near,nomic,generic,ales}]
                           [--max-frames MAX_FRAMES] [--workers WORKERS]
                           [--pool {auto,processes,threads}]
                           [--threads-per-job THREADS_PER_JOB]
-                          [--gpu-share GPU_SHARE] [--gpu-workers GPU_WORKERS]
+                          [--gpu-share GPU_SHARE]
+                          [--gpu-adapt-every GPU_ADAPT_EVERY]
+                          [--gpu-workers GPU_WORKERS]
                           [--gpu-device GPU_DEVICE]
                           [--weighting {equal,sqrt_texp}] [--fast]
                           [--klip-gram {target,zone}] [--no-library]
@@ -2009,26 +2044,33 @@ options:
                         partitions). A job expected to take long gets up to 4x
                         as many and a light one 1
   --gpu-share GPU_SHARE
-                        percentage of the search's injected draws reduced on
-                        the card (an NVIDIA GPU, through
-                        klip_tpe.gpu_reducer), the rest on the CPU workers.
-                        Each trial sends the card the share of its jobs with
-                        the lowest hash of the evaluation, the draw and the
-                        night, so a run and its resumes reproduce. 'auto' (the
-                        default for a new run): 12 where Linux shows a card
-                        and the module is there (30 before 2026-11-15), else
-                        0. A run keeps its share across resumes (card.json in
-                        the run directory)
+                        percentage of the search's injected draws each card
+                        reduces (an NVIDIA GPU, through klip_tpe.gpu_reducer),
+                        the rest on the CPU workers. Each trial sends a card
+                        its share of the trial's jobs, lowest hash of the
+                        evaluation, the draw and the night first. 'auto' (the
+                        default for a new run, where Linux shows a card and
+                        the module is there, else 0): start at 12 and re-
+                        balance every --gpu-adapt-every trials, from the job
+                        times measured on the cards and the CPU workers, so
+                        they finish together. A number, or one per card
+                        (12,8), stays as set. A run keeps its share, and each
+                        trial's, across resumes (card.json, the checkpoint)
+  --gpu-adapt-every GPU_ADAPT_EVERY
+                        trials between two re-balances of --gpu-share auto
+                        (default 25)
   --gpu-workers GPU_WORKERS
-                        card worker processes sharing the card (default 3). At
-                        large bins one leaves the card idle while it prepares
-                        the next job
+                        worker processes on each card, sharing it (default 3).
+                        At large bins one leaves the card idle while it
+                        prepares the next job
   --gpu-device GPU_DEVICE
                         the card the card workers use, as CUDA_VISIBLE_DEVICES
                         takes it: an index in CUDA's order or a UUID (nvidia-
-                        smi -L). Default: what the run has been using
-                        (card.json), else CUDA_VISIBLE_DEVICES, which is then
-                        recorded, so a resume keeps the card
+                        smi -L). Several, as 0,1, or 'all' use every card
+                        named, each with its own workers and share. Default:
+                        what the run has been using (card.json), else
+                        CUDA_VISIBLE_DEVICES, which is then recorded, so a
+                        resume keeps the card
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -2326,8 +2368,9 @@ usage: klip-tpe rereduce [-h] [--instrument {near,nomic,generic,ales}]
                          [--max-frames MAX_FRAMES] [--workers WORKERS]
                          [--pool {auto,processes,threads}]
                          [--threads-per-job THREADS_PER_JOB]
-                         [--gpu-share GPU_SHARE] [--gpu-workers GPU_WORKERS]
-                         [--gpu-device GPU_DEVICE]
+                         [--gpu-share GPU_SHARE]
+                         [--gpu-adapt-every GPU_ADAPT_EVERY]
+                         [--gpu-workers GPU_WORKERS] [--gpu-device GPU_DEVICE]
                          [--weighting {equal,sqrt_texp}] [--fast]
                          [--klip-gram {target,zone}] [--no-library]
                          [--no-clean-subtract] [--ladder-pair]
@@ -2384,26 +2427,33 @@ options:
                         partitions). A job expected to take long gets up to 4x
                         as many and a light one 1
   --gpu-share GPU_SHARE
-                        percentage of the search's injected draws reduced on
-                        the card (an NVIDIA GPU, through
-                        klip_tpe.gpu_reducer), the rest on the CPU workers.
-                        Each trial sends the card the share of its jobs with
-                        the lowest hash of the evaluation, the draw and the
-                        night, so a run and its resumes reproduce. 'auto' (the
-                        default for a new run): 12 where Linux shows a card
-                        and the module is there (30 before 2026-11-15), else
-                        0. A run keeps its share across resumes (card.json in
-                        the run directory)
+                        percentage of the search's injected draws each card
+                        reduces (an NVIDIA GPU, through klip_tpe.gpu_reducer),
+                        the rest on the CPU workers. Each trial sends a card
+                        its share of the trial's jobs, lowest hash of the
+                        evaluation, the draw and the night first. 'auto' (the
+                        default for a new run, where Linux shows a card and
+                        the module is there, else 0): start at 12 and re-
+                        balance every --gpu-adapt-every trials, from the job
+                        times measured on the cards and the CPU workers, so
+                        they finish together. A number, or one per card
+                        (12,8), stays as set. A run keeps its share, and each
+                        trial's, across resumes (card.json, the checkpoint)
+  --gpu-adapt-every GPU_ADAPT_EVERY
+                        trials between two re-balances of --gpu-share auto
+                        (default 25)
   --gpu-workers GPU_WORKERS
-                        card worker processes sharing the card (default 3). At
-                        large bins one leaves the card idle while it prepares
-                        the next job
+                        worker processes on each card, sharing it (default 3).
+                        At large bins one leaves the card idle while it
+                        prepares the next job
   --gpu-device GPU_DEVICE
                         the card the card workers use, as CUDA_VISIBLE_DEVICES
                         takes it: an index in CUDA's order or a UUID (nvidia-
-                        smi -L). Default: what the run has been using
-                        (card.json), else CUDA_VISIBLE_DEVICES, which is then
-                        recorded, so a resume keeps the card
+                        smi -L). Several, as 0,1, or 'all' use every card
+                        named, each with its own workers and share. Default:
+                        what the run has been using (card.json), else
+                        CUDA_VISIBLE_DEVICES, which is then recorded, so a
+                        resume keeps the card
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -2710,8 +2760,9 @@ usage: klip-tpe rescore [-h] [--instrument {near,nomic,generic,ales}]
                         [--max-frames MAX_FRAMES] [--workers WORKERS]
                         [--pool {auto,processes,threads}]
                         [--threads-per-job THREADS_PER_JOB]
-                        [--gpu-share GPU_SHARE] [--gpu-workers GPU_WORKERS]
-                        [--gpu-device GPU_DEVICE]
+                        [--gpu-share GPU_SHARE]
+                        [--gpu-adapt-every GPU_ADAPT_EVERY]
+                        [--gpu-workers GPU_WORKERS] [--gpu-device GPU_DEVICE]
                         [--weighting {equal,sqrt_texp}] [--fast]
                         [--klip-gram {target,zone}] [--no-library]
                         [--no-clean-subtract] [--ladder-pair]
@@ -2772,26 +2823,33 @@ options:
                         partitions). A job expected to take long gets up to 4x
                         as many and a light one 1
   --gpu-share GPU_SHARE
-                        percentage of the search's injected draws reduced on
-                        the card (an NVIDIA GPU, through
-                        klip_tpe.gpu_reducer), the rest on the CPU workers.
-                        Each trial sends the card the share of its jobs with
-                        the lowest hash of the evaluation, the draw and the
-                        night, so a run and its resumes reproduce. 'auto' (the
-                        default for a new run): 12 where Linux shows a card
-                        and the module is there (30 before 2026-11-15), else
-                        0. A run keeps its share across resumes (card.json in
-                        the run directory)
+                        percentage of the search's injected draws each card
+                        reduces (an NVIDIA GPU, through klip_tpe.gpu_reducer),
+                        the rest on the CPU workers. Each trial sends a card
+                        its share of the trial's jobs, lowest hash of the
+                        evaluation, the draw and the night first. 'auto' (the
+                        default for a new run, where Linux shows a card and
+                        the module is there, else 0): start at 12 and re-
+                        balance every --gpu-adapt-every trials, from the job
+                        times measured on the cards and the CPU workers, so
+                        they finish together. A number, or one per card
+                        (12,8), stays as set. A run keeps its share, and each
+                        trial's, across resumes (card.json, the checkpoint)
+  --gpu-adapt-every GPU_ADAPT_EVERY
+                        trials between two re-balances of --gpu-share auto
+                        (default 25)
   --gpu-workers GPU_WORKERS
-                        card worker processes sharing the card (default 3). At
-                        large bins one leaves the card idle while it prepares
-                        the next job
+                        worker processes on each card, sharing it (default 3).
+                        At large bins one leaves the card idle while it
+                        prepares the next job
   --gpu-device GPU_DEVICE
                         the card the card workers use, as CUDA_VISIBLE_DEVICES
                         takes it: an index in CUDA's order or a UUID (nvidia-
-                        smi -L). Default: what the run has been using
-                        (card.json), else CUDA_VISIBLE_DEVICES, which is then
-                        recorded, so a resume keeps the card
+                        smi -L). Several, as 0,1, or 'all' use every card
+                        named, each with its own workers and share. Default:
+                        what the run has been using (card.json), else
+                        CUDA_VISIBLE_DEVICES, which is then recorded, so a
+                        resume keeps the card
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -3133,8 +3191,9 @@ usage: klip-tpe render [-h] [--instrument {near,nomic,generic,ales}]
                        [--group-smooth GROUP_SMOOTH] [--max-frames MAX_FRAMES]
                        [--workers WORKERS] [--pool {auto,processes,threads}]
                        [--threads-per-job THREADS_PER_JOB]
-                       [--gpu-share GPU_SHARE] [--gpu-workers GPU_WORKERS]
-                       [--gpu-device GPU_DEVICE]
+                       [--gpu-share GPU_SHARE]
+                       [--gpu-adapt-every GPU_ADAPT_EVERY]
+                       [--gpu-workers GPU_WORKERS] [--gpu-device GPU_DEVICE]
                        [--weighting {equal,sqrt_texp}] [--fast]
                        [--klip-gram {target,zone}] [--no-library]
                        [--no-clean-subtract] [--ladder-pair]
@@ -3189,26 +3248,33 @@ options:
                         partitions). A job expected to take long gets up to 4x
                         as many and a light one 1
   --gpu-share GPU_SHARE
-                        percentage of the search's injected draws reduced on
-                        the card (an NVIDIA GPU, through
-                        klip_tpe.gpu_reducer), the rest on the CPU workers.
-                        Each trial sends the card the share of its jobs with
-                        the lowest hash of the evaluation, the draw and the
-                        night, so a run and its resumes reproduce. 'auto' (the
-                        default for a new run): 12 where Linux shows a card
-                        and the module is there (30 before 2026-11-15), else
-                        0. A run keeps its share across resumes (card.json in
-                        the run directory)
+                        percentage of the search's injected draws each card
+                        reduces (an NVIDIA GPU, through klip_tpe.gpu_reducer),
+                        the rest on the CPU workers. Each trial sends a card
+                        its share of the trial's jobs, lowest hash of the
+                        evaluation, the draw and the night first. 'auto' (the
+                        default for a new run, where Linux shows a card and
+                        the module is there, else 0): start at 12 and re-
+                        balance every --gpu-adapt-every trials, from the job
+                        times measured on the cards and the CPU workers, so
+                        they finish together. A number, or one per card
+                        (12,8), stays as set. A run keeps its share, and each
+                        trial's, across resumes (card.json, the checkpoint)
+  --gpu-adapt-every GPU_ADAPT_EVERY
+                        trials between two re-balances of --gpu-share auto
+                        (default 25)
   --gpu-workers GPU_WORKERS
-                        card worker processes sharing the card (default 3). At
-                        large bins one leaves the card idle while it prepares
-                        the next job
+                        worker processes on each card, sharing it (default 3).
+                        At large bins one leaves the card idle while it
+                        prepares the next job
   --gpu-device GPU_DEVICE
                         the card the card workers use, as CUDA_VISIBLE_DEVICES
                         takes it: an index in CUDA's order or a UUID (nvidia-
-                        smi -L). Default: what the run has been using
-                        (card.json), else CUDA_VISIBLE_DEVICES, which is then
-                        recorded, so a resume keeps the card
+                        smi -L). Several, as 0,1, or 'all' use every card
+                        named, each with its own workers and share. Default:
+                        what the run has been using (card.json), else
+                        CUDA_VISIBLE_DEVICES, which is then recorded, so a
+                        resume keeps the card
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -3489,8 +3555,9 @@ usage: klip-tpe replay [-h] [--instrument {near,nomic,generic,ales}]
                        [--group-smooth GROUP_SMOOTH] [--max-frames MAX_FRAMES]
                        [--workers WORKERS] [--pool {auto,processes,threads}]
                        [--threads-per-job THREADS_PER_JOB]
-                       [--gpu-share GPU_SHARE] [--gpu-workers GPU_WORKERS]
-                       [--gpu-device GPU_DEVICE]
+                       [--gpu-share GPU_SHARE]
+                       [--gpu-adapt-every GPU_ADAPT_EVERY]
+                       [--gpu-workers GPU_WORKERS] [--gpu-device GPU_DEVICE]
                        [--weighting {equal,sqrt_texp}] [--fast]
                        [--klip-gram {target,zone}] [--no-library]
                        [--no-clean-subtract] [--ladder-pair]
@@ -3546,26 +3613,33 @@ options:
                         partitions). A job expected to take long gets up to 4x
                         as many and a light one 1
   --gpu-share GPU_SHARE
-                        percentage of the search's injected draws reduced on
-                        the card (an NVIDIA GPU, through
-                        klip_tpe.gpu_reducer), the rest on the CPU workers.
-                        Each trial sends the card the share of its jobs with
-                        the lowest hash of the evaluation, the draw and the
-                        night, so a run and its resumes reproduce. 'auto' (the
-                        default for a new run): 12 where Linux shows a card
-                        and the module is there (30 before 2026-11-15), else
-                        0. A run keeps its share across resumes (card.json in
-                        the run directory)
+                        percentage of the search's injected draws each card
+                        reduces (an NVIDIA GPU, through klip_tpe.gpu_reducer),
+                        the rest on the CPU workers. Each trial sends a card
+                        its share of the trial's jobs, lowest hash of the
+                        evaluation, the draw and the night first. 'auto' (the
+                        default for a new run, where Linux shows a card and
+                        the module is there, else 0): start at 12 and re-
+                        balance every --gpu-adapt-every trials, from the job
+                        times measured on the cards and the CPU workers, so
+                        they finish together. A number, or one per card
+                        (12,8), stays as set. A run keeps its share, and each
+                        trial's, across resumes (card.json, the checkpoint)
+  --gpu-adapt-every GPU_ADAPT_EVERY
+                        trials between two re-balances of --gpu-share auto
+                        (default 25)
   --gpu-workers GPU_WORKERS
-                        card worker processes sharing the card (default 3). At
-                        large bins one leaves the card idle while it prepares
-                        the next job
+                        worker processes on each card, sharing it (default 3).
+                        At large bins one leaves the card idle while it
+                        prepares the next job
   --gpu-device GPU_DEVICE
                         the card the card workers use, as CUDA_VISIBLE_DEVICES
                         takes it: an index in CUDA's order or a UUID (nvidia-
-                        smi -L). Default: what the run has been using
-                        (card.json), else CUDA_VISIBLE_DEVICES, which is then
-                        recorded, so a resume keeps the card
+                        smi -L). Several, as 0,1, or 'all' use every card
+                        named, each with its own workers and share. Default:
+                        what the run has been using (card.json), else
+                        CUDA_VISIBLE_DEVICES, which is then recorded, so a
+                        resume keeps the card
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}
@@ -3842,8 +3916,9 @@ usage: klip-tpe compare [-h] [--instrument {near,nomic,generic,ales}]
                         [--max-frames MAX_FRAMES] [--workers WORKERS]
                         [--pool {auto,processes,threads}]
                         [--threads-per-job THREADS_PER_JOB]
-                        [--gpu-share GPU_SHARE] [--gpu-workers GPU_WORKERS]
-                        [--gpu-device GPU_DEVICE]
+                        [--gpu-share GPU_SHARE]
+                        [--gpu-adapt-every GPU_ADAPT_EVERY]
+                        [--gpu-workers GPU_WORKERS] [--gpu-device GPU_DEVICE]
                         [--weighting {equal,sqrt_texp}] [--fast]
                         [--klip-gram {target,zone}] [--no-library]
                         [--no-clean-subtract] [--ladder-pair]
@@ -3904,26 +3979,33 @@ options:
                         partitions). A job expected to take long gets up to 4x
                         as many and a light one 1
   --gpu-share GPU_SHARE
-                        percentage of the search's injected draws reduced on
-                        the card (an NVIDIA GPU, through
-                        klip_tpe.gpu_reducer), the rest on the CPU workers.
-                        Each trial sends the card the share of its jobs with
-                        the lowest hash of the evaluation, the draw and the
-                        night, so a run and its resumes reproduce. 'auto' (the
-                        default for a new run): 12 where Linux shows a card
-                        and the module is there (30 before 2026-11-15), else
-                        0. A run keeps its share across resumes (card.json in
-                        the run directory)
+                        percentage of the search's injected draws each card
+                        reduces (an NVIDIA GPU, through klip_tpe.gpu_reducer),
+                        the rest on the CPU workers. Each trial sends a card
+                        its share of the trial's jobs, lowest hash of the
+                        evaluation, the draw and the night first. 'auto' (the
+                        default for a new run, where Linux shows a card and
+                        the module is there, else 0): start at 12 and re-
+                        balance every --gpu-adapt-every trials, from the job
+                        times measured on the cards and the CPU workers, so
+                        they finish together. A number, or one per card
+                        (12,8), stays as set. A run keeps its share, and each
+                        trial's, across resumes (card.json, the checkpoint)
+  --gpu-adapt-every GPU_ADAPT_EVERY
+                        trials between two re-balances of --gpu-share auto
+                        (default 25)
   --gpu-workers GPU_WORKERS
-                        card worker processes sharing the card (default 3). At
-                        large bins one leaves the card idle while it prepares
-                        the next job
+                        worker processes on each card, sharing it (default 3).
+                        At large bins one leaves the card idle while it
+                        prepares the next job
   --gpu-device GPU_DEVICE
                         the card the card workers use, as CUDA_VISIBLE_DEVICES
                         takes it: an index in CUDA's order or a UUID (nvidia-
-                        smi -L). Default: what the run has been using
-                        (card.json), else CUDA_VISIBLE_DEVICES, which is then
-                        recorded, so a resume keeps the card
+                        smi -L). Several, as 0,1, or 'all' use every card
+                        named, each with its own workers and share. Default:
+                        what the run has been using (card.json), else
+                        CUDA_VISIBLE_DEVICES, which is then recorded, so a
+                        resume keeps the card
   --weighting {equal,sqrt_texp}
   --fast                single-basis KLIP (angsep/anglemax not searched)
   --klip-gram {target,zone}

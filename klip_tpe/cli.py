@@ -782,14 +782,17 @@ def _klip_gram_for_run(a, record: bool = True) -> None:
 
 _CARD_FILE = "card.json"
 
-#: the card's share of ``--gpu-share auto``, in percent.  On NEAR2 (patrick, 2026-11-15, OpenCV
-#: rotation, 3 card workers) 12 never ran slower than 30 and halved the search's time at small
-#: bins.  It was 30 before then.
+#: where ``--gpu-share auto`` starts each card's share, in percent.  On NEAR2 (patrick, 2026-11-15,
+#: OpenCV rotation, 3 card workers) a fixed 12 never ran slower than 30 and halved the search's
+#: time at small bins.  It was a fixed 30 before then.
 AUTO_CARD_SHARE = 12.0
+
+#: trials between two re-balances of ``--gpu-share auto`` (``--gpu-adapt-every``)
+AUTO_CARD_EVERY = 25
 
 
 def _auto_card_share() -> float:
-    """Return the card's share of ``--gpu-share auto``.
+    """Return where each card's share of ``--gpu-share auto`` starts.
 
     Returns
     -------
@@ -808,36 +811,57 @@ def _auto_card_share() -> float:
 
 
 def _card_share_value(v):
-    """Parse ``--gpu-share`` as a percentage.
+    """Parse ``--gpu-share`` as ``auto``, a percentage, or a percentage per card.
 
     Parameters
     ----------
-    v : str, float or None
-        The option's value.
+    v : str, float, list or None
+        The option's value, or a value from ``card.json``.
 
     Returns
     -------
-    share : float or None
-        The percentage, None for ``auto`` or no value.
+    share : float or list of float or None
+        The percentage, one per card for a list such as ``12,8``, None for ``auto`` or no value.
 
     Raises
     ------
     SystemExit
-        If the value is not a number from 0 to 100 or ``auto``.
+        If a value is not a number from 0 to 100 or ``auto``.
     """
     if v is None or str(v).strip().lower() == "auto":
         return None
-    try:
-        f = float(v)
-    except ValueError:
-        raise SystemExit(f"--gpu-share {v!r}: a percentage from 0 to 100, or auto")
-    if not 0.0 <= f <= 100.0:
-        raise SystemExit(f"--gpu-share {v!r}: a percentage from 0 to 100, or auto")
-    return f
+    items = list(v) if isinstance(v, (list, tuple)) else str(v).split(",") if isinstance(v, str) else [v]
+    out = []
+    for x in items:
+        try:
+            f = float(x)
+        except (TypeError, ValueError):
+            raise SystemExit(f"--gpu-share {v!r}: a percentage from 0 to 100, one per card, or auto")
+        if not 0.0 <= f <= 100.0:
+            raise SystemExit(f"--gpu-share {v!r}: a percentage from 0 to 100, one per card, or auto")
+        out.append(f)
+    if not out:
+        raise SystemExit(f"--gpu-share {v!r}: a percentage from 0 to 100, one per card, or auto")
+    return out[0] if len(out) == 1 and not isinstance(v, (list, tuple)) else out
+
+
+def _card_count() -> int:
+    """Return the number of NVIDIA cards Linux shows, by their ``/dev/nvidiaN`` files.
+
+    Returns
+    -------
+    n : int
+        The number, 0 elsewhere than Linux.
+    """
+    import glob
+    import re
+    if not sys.platform.startswith("linux"):
+        return 0
+    return len([p for p in glob.glob("/dev/nvidia*") if re.fullmatch(r"/dev/nvidia\d+", p)])
 
 
 def _card_device_value(v):
-    """Parse ``--gpu-device`` as one card.
+    """Parse ``--gpu-device`` as one card, a list of cards, or ``all``.
 
     Parameters
     ----------
@@ -846,51 +870,82 @@ def _card_device_value(v):
 
     Returns
     -------
-    device : str or None
-        The card, as ``CUDA_VISIBLE_DEVICES`` takes it, None for no value.
+    device : str or list of str or None
+        The card, as ``CUDA_VISIBLE_DEVICES`` takes it, a list for several (``0,1``, or ``all``, every card
+        Linux shows, by index), None for no value.
 
     Raises
     ------
     SystemExit
-        If the value names more than one card or none.
+        If the value names no card, a card twice, or ``all`` on a machine that shows none.
     """
     if v is None:
         return None
     d = str(v).strip()
-    if not d or "," in d:
-        raise SystemExit(f"--gpu-device {v!r}: one card, as CUDA_VISIBLE_DEVICES takes it (an index in CUDA's "
-                         f"order, or a UUID from nvidia-smi -L)")
-    return d
+    if d.lower() == "all":
+        n = _card_count()
+        if n < 1:
+            raise SystemExit("--gpu-device all: this machine shows no NVIDIA card")
+        return [str(k) for k in range(n)] if n > 1 else "0"
+    parts = [x.strip() for x in d.split(",")]
+    if not d or any(not x for x in parts) or len(set(parts)) != len(parts):
+        raise SystemExit(f"--gpu-device {v!r}: a card, or cards separated by commas, as CUDA_VISIBLE_DEVICES "
+                         f"takes them (indices in CUDA's order, or UUIDs from nvidia-smi -L), or all")
+    return parts if len(parts) > 1 else parts[0]
+
+
+def _card_text(v) -> str:
+    """Return a share or a device, one or one per card, as the command line gives it.
+
+    Parameters
+    ----------
+    v : str, float, list or None
+        The value.
+
+    Returns
+    -------
+    text : str
+        The text, such as ``auto``, ``12``, ``12,8`` or ``0,1``.
+    """
+    if isinstance(v, (list, tuple)):
+        return ",".join(_card_text(x) for x in v)
+    return f"{v:g}" if isinstance(v, (int, float)) else str(v)
 
 
 def _card_for_run(a, record: bool = True) -> None:
-    """Settle the card's share, workers, rule and device for a command that searches a run directory.
+    """Settle the cards' share, workers, rule and devices for a command that searches a run directory.
 
-    Each of ``--gpu-share``, ``--gpu-workers`` and ``--gpu-device`` is what this command line says, else
-    what the run has been using (``<run>/card.json``), else ``auto``, 3 workers and the card
-    ``CUDA_VISIBLE_DEVICES`` names, if any.  The share and its rule decide which draws the card reduces,
-    and the card's images differ from the CPU's at about 1e-5 of the noise, so a run keeps them, and its
-    card, across resumes, however they are typed.  A command line that changes one writes the new values
-    there with the time.
+    Each of ``--gpu-share``, ``--gpu-adapt-every``, ``--gpu-workers`` and ``--gpu-device`` is what this
+    command line says, else what the run has been using (``<run>/card.json``), else ``auto``, 25 trials,
+    3 workers and the card ``CUDA_VISIBLE_DEVICES`` names, if any.  ``auto`` starts each card at
+    :data:`AUTO_CARD_SHARE` and re-balances every ``--gpu-adapt-every`` trials, and a number, or one per
+    card, stays as set.  The shares and their rule decide which draws the cards reduce, and a card's
+    images differ from the CPU's at about 1e-5 of the noise, so a run keeps them, and its cards, across
+    resumes, however they are typed.  A command line that changes one writes the new values there with
+    the time.
 
     Parameters
     ----------
     a : argparse.Namespace
-        The parsed command line, changed in place: ``gpu_share``, ``gpu_workers``, ``gpu_device``,
-        ``gpu_rule`` and ``gpu_moved``, whether this command line names the card.
+        The parsed command line, changed in place: ``gpu_share`` (where each card starts, a number or one
+        per card), ``gpu_adapt`` (trials between re-balances, 0 for a fixed share), ``gpu_workers``,
+        ``gpu_device`` (one card or a list), ``gpu_rule`` and ``gpu_moved``, whether this command line
+        names the cards.
     record : bool, default True
         Whether a change is written to ``card.json``.
 
     Raises
     ------
     SystemExit
-        If ``--gpu-share`` is not a percentage or ``--gpu-device`` not one card.
+        If ``--gpu-share`` is not ``auto`` or percentages, ``--gpu-device`` names no card, or the shares
+        given are not one per card.
 
     Notes
     -----
     The rule is ``"trial"`` for a new record and ``"job"`` for a record written before 2026-11-15, which
     has none, so such a run picks its card's jobs as it did.  A command line that names ``--gpu-share``
-    moves the run to ``"trial"``.
+    moves the run to ``"trial"``.  A record written before 2026-11-16 holds a number, so its run keeps a
+    fixed share.
     """
     import json
     import time
@@ -907,56 +962,78 @@ def _card_for_run(a, record: bool = True) -> None:
         rec = None
     given = _explicit_dests(getattr(a, "_argv", None))
     if "gpu_share" in given:
-        share = _card_share_value(a.gpu_share)
-        share = _auto_card_share() if share is None else share
+        raw = _card_share_value(a.gpu_share)
     elif rec is not None:
-        share = float(rec.get("gpu_share", 0.0) or 0.0)
+        raw = _card_share_value(rec.get("gpu_share", 0.0) if rec.get("gpu_share") is not None else 0.0)
     else:
-        share = _auto_card_share()
+        raw = None
+    auto = raw is None
     if "gpu_workers" in given and a.gpu_workers is not None:
         workers = max(int(a.gpu_workers), 1)
     else:
         workers = int((rec or {}).get("gpu_workers", 3) or 3)
+    if "gpu_adapt_every" in given and getattr(a, "gpu_adapt_every", None) is not None:
+        every = max(int(a.gpu_adapt_every), 1)
+    else:
+        every = int((rec or {}).get("adapt_every") or AUTO_CARD_EVERY)
     env = (os.environ.get("CUDA_VISIBLE_DEVICES") or "").strip() or None
     moved = "gpu_device" in given and getattr(a, "gpu_device", None) is not None
     if moved:
         device = _card_device_value(a.gpu_device)
     elif (rec or {}).get("gpu_device"):
-        device = str(rec["gpu_device"])
-        if env is not None and env != device:
+        device = rec["gpu_device"]
+        device = [str(x) for x in device] if isinstance(device, list) else str(device)
+        if env is not None and not isinstance(device, list) and env != device:
             print(f"  --gpu-device {device}, as the run has been using ({_CARD_FILE}), not CUDA_VISIBLE_DEVICES={env}")
     else:
         device = env
+    n_cards = len(device) if isinstance(device, list) else 1
+    if auto:
+        share = _auto_card_share()
+    else:
+        share = raw
+        if isinstance(share, list) and len(share) != n_cards:
+            raise SystemExit(f"--gpu-share {_card_text(share)}: {len(share)} shares for {n_cards} card(s) "
+                             f"(--gpu-device {_card_text(device)})")
     was = None
     if rec is not None:
-        was = {"gpu_share": float(rec.get("gpu_share", 0.0) or 0.0), "gpu_workers": int(rec.get("gpu_workers", 3) or 3),
-               "gpu_device": rec.get("gpu_device"), "rule": str(rec.get("rule", "job"))}
+        rs = rec.get("gpu_share", 0.0)
+        was = {"gpu_share": "auto" if str(rs).strip().lower() == "auto" else _card_share_value(rs or 0.0),
+               "gpu_workers": int(rec.get("gpu_workers", 3) or 3), "gpu_device": rec.get("gpu_device"),
+               "rule": str(rec.get("rule", "job")), "adapt_every": rec.get("adapt_every")}
     rule = "trial" if was is None or "gpu_share" in given else was["rule"]
-    a.gpu_share, a.gpu_workers, a.gpu_device, a.gpu_rule, a.gpu_moved = share, workers, device, rule, moved
-    now = {"gpu_share": share, "gpu_workers": workers, "gpu_device": device, "rule": rule}
+    a.gpu_share, a.gpu_adapt, a.gpu_workers, a.gpu_device, a.gpu_rule, a.gpu_moved = (
+        share, every if auto else 0, workers, device, rule, moved)
+    now = {"gpu_share": "auto" if auto else share, "gpu_workers": workers, "gpu_device": device, "rule": rule,
+           "adapt_every": every if auto else None}
 
     def opts(d):
-        return (f"--gpu-share {d['gpu_share']:g} --gpu-workers {d['gpu_workers']}"
-                + (f" --gpu-device {d['gpu_device']}" if d.get("gpu_device") else ""))
+        return (f"--gpu-share {_card_text(d['gpu_share'])}"
+                + (f" --gpu-adapt-every {d['adapt_every']}" if d.get("gpu_share") == "auto" and d.get("adapt_every")
+                   else "")
+                + f" --gpu-workers {d['gpu_workers']}"
+                + (f" --gpu-device {_card_text(d['gpu_device'])}" if d.get("gpu_device") else ""))
     job = ", each job picked by its own slot as before 2026-11-15" if rule == "job" else ""
-    if was is not None and all(now[k] == was[k] for k in ("gpu_share", "gpu_workers", "rule")) \
+    on = share if not isinstance(share, list) else max(share)
+    if was is not None and all(now[k] == was[k] for k in ("gpu_share", "gpu_workers", "rule", "adapt_every")) \
             and (device is None or device == was["gpu_device"]):
-        if share > 0:
+        if on > 0:
             print(f"  {opts(now)}, as the run has been using ({_CARD_FILE}){job}")
         return
-    if path is None or not record or (was is None and share <= 0 and "gpu_share" not in given):
+    if path is None or not record or (was is None and on <= 0 and "gpu_share" not in given):
         return
     hist = list((rec or {}).get("history") or [])
-    hist.append(dict(now, since=time.strftime("%Y-%m-%dT%H:%M:%S%z"), previous=was))
+    hist.append(dict({k: v for k, v in now.items() if v is not None}, since=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                     previous=was))
     out = {k: v for k, v in now.items() if v is not None}
-    for k in ("gpu_name",):                  # what the card said it is, kept by _card_came_up
+    for k in ("gpu_name",):                  # what the cards said they are, kept by _card_came_up
         if (rec or {}).get(k):
             out[k] = rec[k]
     out["history"] = hist
     os.makedirs(run_dir, exist_ok=True)
     with open(path, "w") as f:
         json.dump(out, f, indent=1)
-    if share > 0 or was is not None:
+    if on > 0 or was is not None:
         switch = ", each trial sending the card its share (it was job by job)" \
             if was is not None and was["rule"] != rule else job
         env_note = ", the card from CUDA_VISIBLE_DEVICES" \
@@ -965,21 +1042,23 @@ def _card_for_run(a, record: bool = True) -> None:
               + f", recorded in {os.path.join(os.path.basename(run_dir), _CARD_FILE)} for every later resume")
 
 
-def _card_came_up(path: str, moved: bool, info: dict):
-    """Record the card's name in ``card.json`` as it comes up, and say when it is not the run's.
+def _card_came_up(path: str, moved: bool, info: dict, n_cards: int = 1):
+    """Record a card's name in ``card.json`` as it comes up, and say when it is not the run's.
 
-    The pool calls it once, from its result thread, with what the first card worker reported at
-    ``warm()`` (``klip_tpe.parallel.CardSpec.on_ready``).
+    The pool calls it once a card, from its result thread, with what the card's first worker reported at
+    ``warm()`` and its ``card_index`` (``klip_tpe.parallel.CardSpec.on_ready``).
 
     Parameters
     ----------
     path : str
         The run's ``card.json``.
     moved : bool
-        Whether this command line names the card (``--gpu-device``), when another name than the record's
+        Whether this command line names the cards (``--gpu-device``), when another name than the record's
         is the one asked for.
     info : dict
-        The card's report, ``name`` among it.
+        The card's report, ``name`` and ``card_index`` among it.
+    n_cards : int, default 1
+        Number of the run's cards.
 
     Returns
     -------
@@ -988,12 +1067,14 @@ def _card_came_up(path: str, moved: bool, info: dict):
 
     Notes
     -----
-    It writes ``gpu_name`` into ``card.json`` the first time, and replaces it when ``moved``.  Two cards
-    of the same model have the same name, which the check cannot tell apart.
+    It writes ``gpu_name`` into ``card.json`` the first time, a list with a name per card for several, and
+    replaces a name when ``moved``.  Two cards of the same model have the same name, which the check cannot
+    tell apart.
     """
     import json
     import time
     name = str((info or {}).get("name") or "").strip()
+    k = int((info or {}).get("card_index") or 0)
     if not name or name == "numpy":
         return None
     try:
@@ -1003,30 +1084,43 @@ def _card_came_up(path: str, moved: bool, info: dict):
         return None
     if not isinstance(rec, dict):
         return None
-    old = rec.get("gpu_name")
+    names = rec.get("gpu_name")
+    if n_cards > 1:
+        names = list(names) if isinstance(names, list) else [names] if names else []
+        names = (names + [None] * n_cards)[:n_cards]
+        old = names[k] if k < n_cards else None
+    else:
+        old = names if isinstance(names, str) else None
+    who = "this" if n_cards == 1 else f"card {k}"
     if old == name:
         return None
     if old and not moved:
-        return (f"  card: this is {name}, but the run has been reducing on {old} ({_CARD_FILE}).  "
-                f"--gpu-device picks the card, or names this one for the rest of the run")
-    rec["gpu_name"] = name
+        return (f"  card{'' if n_cards == 1 else ' ' + str(k)}: {who} is {name}, but the run has been reducing on "
+                f"{old} ({_CARD_FILE}).  --gpu-device picks the card, or names this one for the rest of the run")
+    if n_cards > 1:
+        names[k] = name
+        rec["gpu_name"] = names
+    else:
+        rec["gpu_name"] = name
     if old:
         hist = list(rec.get("history") or [])
-        hist.append({"gpu_name": name, "since": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "previous": {"gpu_name": old}})
+        hist.append({"gpu_name": rec["gpu_name"], "since": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                     "previous": {"gpu_name": old, "card": k}})
         rec["history"] = hist
     try:
         with open(path, "w") as f:
             json.dump(rec, f, indent=1)
     except OSError:
         return None
-    return f"  card: now on {name} (it was {old}), recorded in {_CARD_FILE}" if old else None
+    return (f"  card{'' if n_cards == 1 else ' ' + str(k)}: now on {name} (it was {old}), recorded in {_CARD_FILE}"
+            if old else None)
 
 
 def _set_card(red, a) -> None:
-    """Set the card's share, workers, rule and device on a reducer, before its worker pool starts.
+    """Set the cards' shares, workers, rule, devices and re-balance on a reducer, before its pool starts.
 
     A command that did not settle them for a run (:func:`_card_for_run`) gets no card.  With a run
-    directory, the pool records the card's name in ``card.json`` as it comes up (:func:`_card_came_up`).
+    directory, the pool records each card's name in ``card.json`` as it comes up (:func:`_card_came_up`).
 
     Parameters
     ----------
@@ -1038,16 +1132,24 @@ def _set_card(red, a) -> None:
     if not hasattr(red, "card_share"):
         return
     share = getattr(a, "gpu_share", None)
-    red.card_share = float(share) if isinstance(share, (int, float)) else 0.0
+    if isinstance(share, (list, tuple)):
+        red.card_share = [float(v) for v in share]
+    else:
+        red.card_share = float(share) if isinstance(share, (int, float)) else 0.0
+    settled = isinstance(share, (int, float, list, tuple))
     red.card_workers = max(int(getattr(a, "gpu_workers", None) or 3), 1)
     red.card_rule = str(getattr(a, "gpu_rule", None) or "trial")
+    red.card_adapt_every = int(getattr(a, "gpu_adapt", 0) or 0) if settled else 0
     dev = getattr(a, "gpu_device", None)
-    red.card_device = None if dev is None or not isinstance(share, (int, float)) else str(dev)
+    red.card_device = None if dev is None or not settled else ([str(v) for v in dev] if isinstance(dev, (list, tuple))
+                                                             else str(dev))
     run_dir = getattr(a, "run_dir", None)
-    if red.card_share > 0 and run_dir and os.path.exists(os.path.join(run_dir, _CARD_FILE)):
+    on = max(red.card_share) if isinstance(red.card_share, list) else red.card_share
+    if on > 0 and run_dir and os.path.exists(os.path.join(run_dir, _CARD_FILE)):
         import functools
         red.card_on_ready = functools.partial(_card_came_up, os.path.join(run_dir, _CARD_FILE),
-                                              bool(getattr(a, "gpu_moved", False)))
+                                              bool(getattr(a, "gpu_moved", False)),
+                                              n_cards=len(dev) if isinstance(dev, (list, tuple)) else 1)
     else:
         red.card_on_ready = None
 
@@ -1456,18 +1558,23 @@ def _add_near_args(p):
                         "workers / threads-per-job processes, never fewer than min(workers, 2 x partitions). A job "
                         "expected to take long gets up to 4x as many and a light one 1")
     p.add_argument("--gpu-share", default=None,
-                   help="percentage of the search's injected draws reduced on the card (an NVIDIA GPU, through "
-                        "klip_tpe.gpu_reducer), the rest on the CPU workers. Each trial sends the card the share "
-                        "of its jobs with the lowest hash of the evaluation, the draw and the night, so a run and "
-                        "its resumes reproduce. 'auto' (the default for a new run): 12 where Linux shows a card "
-                        "and the module is there (30 before 2026-11-15), else 0. A run keeps its share across "
-                        "resumes (card.json in the run directory)")
+                   help="percentage of the search's injected draws each card reduces (an NVIDIA GPU, through "
+                        "klip_tpe.gpu_reducer), the rest on the CPU workers. Each trial sends a card its share "
+                        "of the trial's jobs, lowest hash of the evaluation, the draw and the night first. "
+                        "'auto' (the default for a new run, where Linux shows a card and the module is there, "
+                        "else 0): start at 12 and re-balance every --gpu-adapt-every trials, from the job "
+                        "times measured on the cards and the CPU workers, so they finish together. A number, "
+                        "or one per card (12,8), stays as set. A run keeps its share, and each trial's, across "
+                        "resumes (card.json, the checkpoint)")
+    p.add_argument("--gpu-adapt-every", type=int, default=None,
+                   help="trials between two re-balances of --gpu-share auto (default 25)")
     p.add_argument("--gpu-workers", type=int, default=None,
-                   help="card worker processes sharing the card (default 3). At large bins one leaves the card "
-                        "idle while it prepares the next job")
+                   help="worker processes on each card, sharing it (default 3). At large bins one leaves the "
+                        "card idle while it prepares the next job")
     p.add_argument("--gpu-device", default=None,
                    help="the card the card workers use, as CUDA_VISIBLE_DEVICES takes it: an index in CUDA's "
-                        "order or a UUID (nvidia-smi -L). Default: what the run has been using (card.json), "
+                        "order or a UUID (nvidia-smi -L). Several, as 0,1, or 'all' use every card named, each "
+                        "with its own workers and share. Default: what the run has been using (card.json), "
                         "else CUDA_VISIBLE_DEVICES, which is then recorded, so a resume keeps the card")
     p.add_argument("--weighting", default="equal", choices=["equal", "sqrt_texp"])
     p.add_argument("--fast", action="store_true", help="single-basis KLIP (angsep/anglemax not searched)")

@@ -668,6 +668,24 @@ class AnnulusResult:
         return _from_dict_filtered(cls, d)
 
 
+def _shares_text(shares: Optional[Sequence[float]]) -> str:
+    """Return the cards' shares for the log, such as "12 %" or "12 / 9.5 %".
+
+    Parameters
+    ----------
+    shares : sequence of float or None
+        One share a card, in percent.
+
+    Returns
+    -------
+    text : str
+        The text, "--" without shares.
+    """
+    if not shares:
+        return "--"
+    return " / ".join(f"{float(v):g}" for v in shares) + " %"
+
+
 def _json_default(o):
     if isinstance(o, (np.floating,)):
         return None if not np.isfinite(o) else float(o)
@@ -1114,6 +1132,10 @@ class Runner:
         self._draw_tally: Dict[int, Dict[str, Any]] = {}   # annulus -> search draws, failed draws, reasons
         self._card_mark: Optional[Dict[str, Any]] = None    # the card's counts as the search started
         self._card_annuli: Dict[int, Dict[str, Any]] = {}   # annulus -> its search's card numbers
+        self._card_shares: Optional[List[float]] = None     # the automatic share, one a card
+        self._card_trial_shares: Dict[str, List[float]] = {}   # trial tag -> the shares it went out with
+        self._card_win: Optional[Dict[str, Any]] = None     # the counts at the last re-balance
+        self._card_since = 0                                # search trials since then
         self._calib_images: Optional[Dict[str, Any]] = None
         self._k_default = int(self.cfg.defaults.get("k_klip", 10) or 10)
         self._resumed = False
@@ -1413,31 +1435,40 @@ class Runner:
         return n
 
     def _card_counts(self) -> Optional[Dict[str, Any]]:
-        """Return the card's running counts.
+        """Return the cards' and the CPU workers' running counts.
 
         Returns
         -------
         counts : dict or None
             ``marked``, ``jobs`` (reduced), ``refused`` (by reason), ``memory`` (out of memory), ``busy_s``,
-            ``workers``, ``share`` and ``t``, when they were read, None without card workers
-            (:meth:`klip_tpe.parallel.ProcessPool.card_summary`).
+            ``workers`` and ``share``, the cards together, ``cards`` (each card's ``jobs``, ``busy_s``,
+            ``workers`` and ``up``), ``cpu`` (the CPU workers' ``jobs``, ``busy_s`` and ``workers``),
+            ``eligible`` (the jobs a card could have taken) and ``t``, when they were read, None without
+            card workers (:meth:`klip_tpe.parallel.ProcessPool.card_summary`).
         """
         cs = getattr(self.reducer, "card_summary", lambda: None)()
         if not cs:
             return None
+        cards = [{"jobs": int(c.get("jobs") or 0), "busy_s": float(c.get("busy_s") or 0.0),
+                  "workers": max(int(c.get("workers") or 1), 1), "up": bool(c.get("up", True))}
+                 for c in (cs.get("cards") or [])]
+        cpu = cs.get("cpu") or {}
         return {"marked": int(cs.get("marked") or 0), "jobs": int(cs.get("jobs") or 0),
                 "refused": dict(cs.get("refused") or {}), "memory": int(cs.get("memory") or 0),
                 "busy_s": float(cs.get("busy_s") or 0.0), "workers": max(int(cs.get("workers") or 1), 1),
-                "share": cs.get("share"), "t": float(cs.get("t") or time.time())}
+                "share": cs.get("share"), "cards": cards,
+                "cpu": {"jobs": int(cpu.get("jobs") or 0), "busy_s": float(cpu.get("busy_s") or 0.0),
+                        "workers": max(int(cpu.get("workers") or 1), 1)},
+                "eligible": int(cs.get("eligible") or 0), "t": float(cs.get("t") or time.time())}
 
     def _card_note(self, ia: int) -> None:
-        """Log the card's numbers for an annulus' search, and keep them.
+        """Log the cards' numbers for an annulus' search, and keep them.
 
-        The lines give how many of the search's jobs were marked for the card, how many the card reduced,
-        how many its reducer turned away, by reason, and how busy its workers were, all since the search
-        started (:attr:`_card_mark`).  The numbers go into :attr:`_card_annuli`, from which the annulus'
-        ``annulus_done.json`` and the run's summary take them, and the mark is cleared.  An annulus without a
-        search has no mark and gets no line.
+        The lines give how many of the search's jobs were marked for the cards, how many the cards reduced,
+        how many their reducer turned away, by reason, and how busy each card's workers were, all since the
+        search started (:attr:`_card_mark`), with the automatic share where it ended.  The numbers go into
+        :attr:`_card_annuli`, from which the annulus' ``annulus_done.json`` and the run's summary take them,
+        and the mark is cleared.  An annulus without a search has no mark and gets no line.
 
         Parameters
         ----------
@@ -1457,19 +1488,38 @@ class Runner:
         span = max(now["t"] - mark["t"], 1e-9)
         busy = (now["busy_s"] - mark["busy_s"]) / (span * now["workers"])
         resumed = bool(mark.get("resumed"))
+        c0 = mark.get("cards") or []
+        each = [(c["busy_s"] - (c0[k]["busy_s"] if k < len(c0) else 0.0)) / (span * c["workers"])
+                for k, c in enumerate(now.get("cards") or [])]
+        shares = self._card_shares_now()
         self.log(f"  annulus {ia+1}: the card reduced {done} of the {marked} jobs marked for it"
                  + (f", and turned away {nref} ({why})" if nref else "")
                  + (f"; {back} went back to the CPU workers" if back > 0 else "")
                  + (f" ({oom} needed more than a worker's share of its memory)" if back > 0 and oom > 0 else ""))
-        self.log(f"  annulus {ia+1}: the card's {now['workers']} worker{'s' * (now['workers'] != 1)} were busy "
-                 f"{100 * busy:.0f} % of the search's {_dur(span)}" + (" since the resume" if resumed else ""))
-        self._card_annuli[ia] = {"annulus": ia + 1, "marked": marked, "jobs": done, "refused": nref, "memory": oom,
-                                 "busy_fraction": round(busy, 4), "search_s": round(span, 1),
-                                 "workers": now["workers"], "share": now["share"], "since_resume": resumed}
+        if len(each) > 1:
+            who = " and ".join(f"card {k}'s {c['workers']} worker{'s' * (c['workers'] != 1)}"
+                               + (" were busy " if k == 0 else " ") + f"{100 * b:.0f} %"
+                               for k, (c, b) in enumerate(zip(now["cards"], each)))
+            line = f"  annulus {ia+1}: {who} of the search's {_dur(span)}"
+        else:
+            line = (f"  annulus {ia+1}: the card's {now['workers']} worker{'s' * (now['workers'] != 1)} were busy "
+                    f"{100 * busy:.0f} % of the search's {_dur(span)}")
+        self.log(line + (" since the resume" if resumed else "")
+                 + (f", at a share of {_shares_text(shares)} at its end" if shares is not None else ""))
+        rec = {"annulus": ia + 1, "marked": marked, "jobs": done, "refused": nref, "memory": oom,
+               "busy_fraction": round(busy, 4), "search_s": round(span, 1), "workers": now["workers"],
+               "share": now["share"], "since_resume": resumed}
+        if len(each) > 1:
+            rec["cards_busy_fraction"] = [round(b, 4) for b in each]
+        if shares is not None:
+            rec["shares_end"] = list(shares)
+        self._card_annuli[ia] = rec
         self._card_mark = None
 
     def _mark_card(self, resumed: bool = False) -> None:
-        """Take the card's counts as an annulus' search starts, into :attr:`_card_mark`.
+        """Take the cards' counts as an annulus' search starts, into :attr:`_card_mark` and :attr:`_card_win`.
+
+        The automatic share's next re-balance (:meth:`_card_adapt`) then measures from here.
 
         Parameters
         ----------
@@ -1479,6 +1529,107 @@ class Runner:
         self._card_mark = self._card_counts()
         if self._card_mark is not None:
             self._card_mark["resumed"] = bool(resumed)
+        self._card_win = self._card_mark
+        self._card_since = 0
+
+    def _card_adaptive(self) -> int:
+        """Return the trials between two re-balances of the automatic share, 0 when the share stays as set.
+
+        Returns
+        -------
+        every : int
+            The reducer's ``card_adapt_every``, 0 without a partitioned reducer or a card share.
+        """
+        if not isinstance(self.reducer, PartitionedReducer):
+            return 0
+        n = int(getattr(self.reducer, "card_adapt_every", 0) or 0)
+        f = getattr(self.reducer, "card_shares_start", None)
+        return n if n > 0 and callable(f) and max(f() or [0.0]) > 0 else 0
+
+    def _card_shares_now(self) -> Optional[List[float]]:
+        """Return each card's share for the trials dispatched now, under the automatic share.
+
+        It starts at the reducer's ``card_share`` (:meth:`~klip_tpe.reducer.PartitionedReducer.card_shares_start`)
+        and changes at the re-balances (:meth:`_card_adapt`), and a resume takes it from the checkpoint.
+
+        Returns
+        -------
+        shares : list of float or None
+            One share a card, in percent, None when the share stays as set, which the pool then holds.
+        """
+        if not self._card_adaptive():
+            return None
+        start = list(self.reducer.card_shares_start())
+        if self._card_shares is not None and len(self._card_shares) != len(start):
+            self.log(f"  card: the run's automatic share was for {len(self._card_shares)} card(s) and this "
+                     f"process has {len(start)}, so it starts again at {_shares_text(start)}")
+            self._card_shares = None
+        if not getattr(self, "_card_said", False):
+            self._card_said = True
+            self.log("  card: share auto, " + (f"at {_shares_text(self._card_shares)} where the run left it"
+                                                if self._card_shares is not None else
+                                                f"starting at {_shares_text(start)}")
+                     + f", re-balanced every {self._card_adaptive()} trials")
+        if self._card_shares is None:
+            self._card_shares = start
+        return list(self._card_shares)
+
+    def _card_adapt(self, ia: int) -> None:
+        """Count a search trial in, and every ``card_adapt_every`` trials re-balance the automatic share.
+
+        The new shares are those at which the cards and the CPU workers, at the job rates they showed since
+        the last re-balance, would finish the trials' jobs together (:func:`klip_tpe.parallel.card_balance`).
+        Each change is logged and appended to ``card_shares.jsonl`` in the run directory.  A stretch that
+        measured too few jobs runs on until it has them.  The trials dispatched from then on carry the new
+        shares, and the checkpoint keeps them.
+
+        Parameters
+        ----------
+        ia : int
+            The annulus, counted from 0.
+        """
+        every = self._card_adaptive()
+        if not every:
+            return
+        self._card_since += 1
+        if self._card_since < every:
+            return
+        now = self._card_counts()
+        win = self._card_win
+        if now is None:
+            return
+        if win is None or len(win.get("cards") or []) != len(now["cards"]):
+            self._card_win, self._card_since = now, 0
+            return
+        from .parallel import card_balance
+        cur = self._card_shares_now()
+        cpu = (now["cpu"]["jobs"] - win["cpu"]["jobs"], now["cpu"]["busy_s"] - win["cpu"]["busy_s"],
+               now["cpu"]["workers"])
+        cards = [None if not c["up"] else (c["jobs"] - w["jobs"], c["busy_s"] - w["busy_s"], c["workers"])
+                 for c, w in zip(now["cards"], win["cards"])]
+        new, measured = card_balance(cpu, cards, now["eligible"] - win["eligible"], cur)
+        if new is None:
+            return                              # too few jobs measured: the stretch goes on
+        n_trials, self._card_win, self._card_since = self._card_since, now, 0
+        if new == cur:
+            return
+        self._card_shares = list(new)
+        rates = ", ".join(f"card {k} {60 * r:.0f}" if len(new) > 1 else f"card {60 * r:.0f}"
+                          for k, r in enumerate(measured["card_rates"]) if r is not None)
+        self.log(f"  card: share {_shares_text(cur)} -> {_shares_text(new)} over the last {n_trials} trials, "
+                 f"jobs a minute at full load {rates}, CPU workers {60 * measured['cpu_rate']:.0f}")
+        entry = {"annulus": ia + 1, "after_trials": 0 if self.history is None else len(self.history),
+                 "shares": list(new), "previous": list(cur), "trials": n_trials,
+                 "cpu": {"jobs": cpu[0], "busy_s": round(cpu[1], 3), "workers": cpu[2]},
+                 "cards": [None if c is None else {"jobs": c[0], "busy_s": round(c[1], 3), "workers": c[2]}
+                           for c in cards],
+                 "eligible": measured["eligible"], "balanced": measured["balanced"],
+                 "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+        try:
+            with open(os.path.join(self.run_dir, "card_shares.jsonl"), "a") as f:
+                f.write(json.dumps(entry, default=_json_default) + "\n")
+        except OSError as exc:                       # a record for the reader, never fatal
+            self.log(f"  card_shares.jsonl: {exc!r}")
 
     def _card_per_annulus(self, results: Sequence[AnnulusResult]) -> List[Dict[str, Any]]:
         """Return each finished annulus' card numbers, for the run's summary.
@@ -1840,7 +1991,8 @@ class Runner:
     def _reduce(self, cfg: Config, sources: Optional[Sequence[Source]], k_scan: bool = False,
                 tag: str = "", zone: Optional[Tuple[float, float]] = None,
                 fm_sources: Optional[Sequence[Source]] = None, extras: bool = False,
-                card: bool = False, card_group: Optional[Sequence[str]] = None) -> EvalImages:
+                card: bool = False, card_group: Optional[Sequence[str]] = None,
+                card_shares: Optional[Sequence[float]] = None) -> EvalImages:
         """Reduce one configuration at the current annulus' zone.
 
         The zone's edges shared with another annulus are padded, a forward-modeled metric gets the KLIP-FM
@@ -1866,8 +2018,10 @@ class Runner:
         card : bool, default False
             Whether the partition jobs may go to the card workers, as the search's injected draws may.
         card_group : sequence of str or None, default None
-            Tags of every marked reduction of the trial, for the card's ``"trial"`` rule
-            (:func:`klip_tpe.parallel.card_picks`).
+            Tags of every marked reduction of the trial, for the cards' ``"trial"`` rule
+            (:func:`klip_tpe.parallel.card_assign`).
+        card_shares : sequence of float or None, default None
+            Each card's share for the trial, under the automatic share.  None takes the pool's.
 
         Returns
         -------
@@ -1913,6 +2067,8 @@ class Runner:
             more = {"card": True} if card else {}
             if card and card_group:
                 more["card_group"] = list(card_group)
+            if card and card_shares:
+                more["card_shares"] = [float(v) for v in card_shares]
             return self.reducer.reduce_config(cfg2, sources, k_scan, tag, fm_sources=fm_sources, extras=extras,
                                               **more)
         res = self.reducer.reduce(ReductionRequest(cfg2.params, sources, k_scan, tag, fm_sources=fm_sources,
@@ -2617,10 +2773,44 @@ class Runner:
                      inj: EvalImages, sr, failed: bool, k_used: Any = None,
                      kinfo: Optional[Dict[str, Any]] = None, t0: Optional[float] = None,
                      t_reduced: Optional[float] = None, why: Optional[str] = None) -> EvalRecord:
-        """The :class:`EvalRecord` of one scored (or failed) evaluation.  ``t0``: when its
-        reductions were dispatched, ``t_reduced``: when the last of them was back.  A record
-        without a score says why in ``meta['why']``: ``why`` for a failed one (the error),
-        the objective's reason for a NaN score."""
+        """Return the record of one scored, or failed, evaluation.
+
+        A record without a score says why in ``meta['why']``, ``why`` for a failed one (the error) and the
+        objective's reason for a NaN score.  The partitions the cards reduced go into ``meta['card']``, and on
+        several cards each one's card into ``meta['card_index']``.
+
+        Parameters
+        ----------
+        cfg : Config
+            The configuration.
+        phase : str
+            The phase.
+        contrast : float
+            The contrast injected.
+        sources : sequence of Source
+            The sources injected.
+        inj : EvalImages
+            The injected images.
+        sr : object or None
+            The score's result, with ``score``, ``raw_score`` and ``per_source``, None for a failed one.
+        failed : bool
+            Whether the evaluation failed.
+        k_used : object or None, default None
+            The KL modes used, None to take them from the configuration.
+        kinfo : dict or None, default None
+            The k-scan's choice, ``kbest`` and ``kpn``.
+        t0 : float or None, default None
+            When its reductions were dispatched, None for now.
+        t_reduced : float or None, default None
+            When the last of them was back.
+        why : str or None, default None
+            Why a failed evaluation failed.
+
+        Returns
+        -------
+        record : EvalRecord
+            The record.
+        """
         kinfo = kinfo or {}
         t0 = time.time() if t0 is None else t0
         if k_used is None:
@@ -2639,11 +2829,16 @@ class Runner:
             meta["kbest"] = kinfo.get("kbest")
             if "kpn" in kinfo:
                 meta["kpn"] = kinfo["kpn"]
-        # the partitions the card workers reduced (PartitionedReducer.card_share)
+        # the partitions the card workers reduced (PartitionedReducer.card_share), and on several
+        # cards which card each went to
         on_card = [str(p) for p, m in (getattr(inj, "meta", None) or {}).items()
                    if isinstance(m, dict) and m.get("card")]
         if on_card:
             meta["card"] = on_card
+            which = {str(p): int(m.get("card_index") or 0) for p, m in (getattr(inj, "meta", None) or {}).items()
+                     if isinstance(m, dict) and m.get("card")}
+            if any(which.values()):
+                meta["card_index"] = which
         rec = EvalRecord(
             annulus=self.ia, index=-1, phase=phase, x=[float(v) for v in cfg.x], config=cfg.to_dict(),
             sources=[s.as_tuple() for s in sources],
@@ -2723,13 +2918,15 @@ class Runner:
             return run
         return [one(fn) for fn in calls]
 
-    def _trial_calls(self, cfg: Config, draws: Sequence[Sequence[Source]], tag: str) -> List[Callable[[], Any]]:
+    def _trial_calls(self, cfg: Config, draws: Sequence[Sequence[Source]], tag: str,
+                     shares: Optional[Sequence[float]] = None) -> List[Callable[[], Any]]:
         """Return the reductions of one trial, in the order :meth:`_trial_finish` reads them.
 
         They are the clean image, when the objective needs one, then each draw's injected image, tagged as
         the per-draw evaluations named them (a single draw as :meth:`evaluate` does).  The injected images
-        may go to the card, each carrying the trial's injected tags, over which the card's ``"trial"`` rule
-        counts its share.
+        may go to the cards, each carrying the trial's injected tags, over which the cards' ``"trial"`` rule
+        counts the shares, and under the automatic share the trial's shares, which :attr:`_card_trial_shares`
+        keeps for its record.
 
         Parameters
         ----------
@@ -2739,6 +2936,9 @@ class Runner:
             Each draw's sources.
         tag : str
             The trial's tag, such as ``"a1_e12"``.
+        shares : sequence of float or None, default None
+            Each card's share for the trial, as a resumed trial in flight recorded it.  None takes the
+            automatic share now (:meth:`_card_shares_now`).
 
         Returns
         -------
@@ -2752,25 +2952,61 @@ class Runner:
             calls.append(lambda: self._reduce(cfg, None, tag=ctag))
         # the injected draws' tags: the trial the card's share is counted over
         itags = [f"{tag}_inj"] if one else [f"{tag}_d{j + 1}_inj" for j in range(len(draws))]
+        # the automatic share goes out with the trial, which keeps it (the record, a resume)
+        shares = list(shares) if shares is not None else self._card_shares_now()
+        if shares is not None:
+            self._card_trial_shares[tag] = shares
         for d, itag in zip(draws, itags):
             srcs = [Source(s.rho, s.theta, self.contrast) for s in d]
-            calls.append(lambda srcs=srcs, itag=itag: self._reduce(cfg, srcs, tag=itag, card=True, card_group=itags))
+            calls.append(lambda srcs=srcs, itag=itag: self._reduce(cfg, srcs, tag=itag, card=True, card_group=itags,
+                                                                   card_shares=shares))
         return calls
 
     def _trial_finish(self, x: np.ndarray, cfg: Config, phase: str, tag: str,
                       draws: Sequence[Sequence[Source]], stream, on_draw, t0: float, combine: bool = True,
                       back: Optional[List[float]] = None
                       ) -> Tuple[EvalRecord, EvalImages, Optional[EvalImages]]:
-        """Score one trial from ``stream`` (:meth:`_run_ordered` over :meth:`_trial_calls`),
-        draw by draw, in order.  ``combine=False`` with a single draw returns that draw as
-        :meth:`evaluate` would (no ``draw_*`` entries in its record).
+        """Score one trial from the stream of its reductions, draw by draw, in order.
 
-        Failures behave as the per-draw schedule did.  A draw whose injected reduction
-        fails is a failed draw.  When the clean reduction fails, draw 1 fails with it and
-        the later draws reduce their own clean images, one draw at a time.  Either way the
-        trial takes exactly its own reductions off ``stream``, which a concurrent batch
-        shares between its proposals.  ``back``: when each of this trial's reductions came
-        back (:meth:`_timed`), for the record's ``reduce_s``."""
+        Failures behave as the per-draw schedule did.  A draw whose injected reduction fails is a failed
+        draw.  When the clean reduction fails, draw 1 fails with it and the later draws reduce their own
+        clean images, one draw at a time.  Either way the trial takes exactly its own reductions off
+        ``stream``, which a concurrent batch shares between its proposals.  The record carries the shares the
+        trial went out with, under the automatic share (``meta['card_shares']``).
+
+        Parameters
+        ----------
+        x : ndarray
+            The trial's vector.
+        cfg : Config
+            Its configuration.
+        phase : str
+            Its phase, such as "tpe".
+        tag : str
+            Its tag.
+        draws : sequence of sequence of Source
+            Each draw's sources.
+        stream : iterator
+            The results of :meth:`_run_ordered` over :meth:`_trial_calls`, ``(index, result)``.
+        on_draw : callable or None
+            Function ``on_draw(j, n, record, injected, clean)`` called for each draw.
+        t0 : float
+            When its reductions were dispatched.
+        combine : bool, default True
+            Whether to average the draws (:meth:`_combine_draws`).  False with a single draw returns that draw
+            as :meth:`evaluate` would, with no ``draw_*`` entries in its record.
+        back : list of float or None, default None
+            When each of the trial's reductions came back (:meth:`_timed`), for the record's ``reduce_s``.
+
+        Returns
+        -------
+        record : EvalRecord
+            The trial's record.
+        injected : EvalImages
+            The last draw's injected images.
+        clean : EvalImages or None
+            The clean images.
+        """
         n = len(draws)
         contrast = self.contrast
         recs: List[EvalRecord] = []
@@ -2829,12 +3065,17 @@ class Runner:
             _done(j, (self._eval_record(cfg, phase, contrast, srcs, inj, sr, failed, t0=t0, why=why), inj, clean))
         rec, inj, clean = last
         t_red = max(back) if back else None
+        shares = self._card_trial_shares.pop(tag, None)
         if not combine and n == 1:
             if t_red is not None:
                 rec.reduce_s = float(t_red - t0)
+            if shares is not None:
+                rec.meta["card_shares"] = list(shares)
             return rec, inj, clean
-        return self._combine_draws(recs, rec, wall=time.time() - t0,
-                                   reduce=None if t_red is None else t_red - t0), inj, clean
+        out = self._combine_draws(recs, rec, wall=time.time() - t0, reduce=None if t_red is None else t_red - t0)
+        if shares is not None:
+            out.meta["card_shares"] = list(shares)
+        return out, inj, clean
 
     #: share one clean reduction between the draws of an averaged trial (see
     #: :meth:`evaluate_mean`).  False restores the per-draw loop -- a switch for the test
@@ -2917,9 +3158,26 @@ class Runner:
     @staticmethod
     def _combine_draws(recs: List[EvalRecord], last: EvalRecord, wall: Optional[float] = None,
                        reduce: Optional[float] = None) -> EvalRecord:
-        """Average the draws' scores onto the last draw's record.  ``wall`` and ``reduce``:
-        the trial's elapsed and reduction times, when its draws overlapped (otherwise the
-        draws' sums)."""
+        """Average the draws' scores onto the last draw's record.
+
+        Every draw's injections, raw score and card partitions go into the record's ``draw_*`` entries.
+
+        Parameters
+        ----------
+        recs : list of EvalRecord
+            The draws' records.
+        last : EvalRecord
+            The last draw's record.
+        wall : float or None, default None
+            The trial's elapsed time, when its draws overlapped.  None takes the draws' sum.
+        reduce : float or None, default None
+            The trial's reduction time, when its draws overlapped.  None takes the draws' sum.
+
+        Returns
+        -------
+        record : EvalRecord
+            The trial's record.
+        """
         def _mean(vals):
             v = [float(s) for s in vals if s is not None and np.isfinite(s)]
             return float(np.mean(v)) if v else None
@@ -2939,6 +3197,8 @@ class Runner:
         # the partitions the card reduced, draw by draw (the last draw's list stays in "card")
         if any(r.meta.get("card") for r in recs):
             meta["draw_card"] = [list(r.meta.get("card") or []) for r in recs]
+        if any(r.meta.get("card_index") for r in recs):
+            meta["draw_card_index"] = [dict(r.meta.get("card_index") or {}) for r in recs]
         # the last draw's reason is not the trial's: the trial fails only when every draw does
         meta.pop("why", None)
         if meta["draw_failed"]:
@@ -3456,18 +3716,41 @@ class Runner:
 
     def _eval_bookkeeping(self, ia: int, n_iter: int, i: int, phase: str, rec: EvalRecord, inj: EvalImages,
                           clean: Optional[EvalImages], t_loop: float, checkpoint: bool = True) -> None:
-        """Everything after a trial enters the history at index ``i``: best images, its
-        files, the checkpoint, the running stitch, the display and the log line.
+        """Do everything after a trial enters the history.
 
-        The display comes last, so the trial is processed but for its own panel when the
-        display counts its time from the dispatch.  The log line then gives the same two
-        numbers: ``reduce`` from the dispatch until its last reduction was back, ``eval``
-        until now.  With several trials in flight neither the interval between two
-        evaluations nor ``wall_s`` is either of them (NEAR2 note, 2026-10-12).  ``t_loop``
-        is no longer used."""
+        That is the cards' log lines, a step of the automatic share (:meth:`_card_adapt`), which the trials
+        dispatched next carry, the best images, the trial's files, the checkpoint, the running stitch, the
+        display and the log line.  The display comes last, so the trial is processed but for its own panel when
+        the display counts its time from the dispatch.  The log line then gives the same two numbers,
+        ``reduce`` from the dispatch until its last reduction was back and ``eval`` until now.  With several
+        trials in flight neither the interval between two evaluations nor ``wall_s`` is either of them (NEAR2
+        note, 2026-10-12).
+
+        Parameters
+        ----------
+        ia : int
+            The annulus, counted from 0.
+        n_iter : int
+            The annulus' number of evaluations.
+        i : int
+            The trial's index in the history.
+        phase : str
+            Its phase.
+        rec : EvalRecord
+            Its record.
+        inj : EvalImages
+            Its injected images.
+        clean : EvalImages or None
+            Its clean images.
+        t_loop : float
+            No longer used.
+        checkpoint : bool, default True
+            Whether to take the checkpoint, False inside a batch, which is checkpointed after its last trial.
+        """
         c = self.cfg
         for line in getattr(self.reducer, "take_card_notes", lambda: [])():
             self.log(line)
+        self._card_adapt(ia)                       # the trials that go out next carry a new share
         bi, bs = self.history.best()
         if i == bi and inj.image is not None and inj.image.ndim == 2:
             self._set_best_images(rec, inj, clean)
@@ -3587,19 +3870,32 @@ class Runner:
                 and self.SHARE_CLEAN and not self._kscan_active())
 
     def _search_pipeline(self, ia: int, n_iter: int, opt) -> bool:
-        """The annulus search with ``batch`` trials always in flight.
+        """Search an annulus with ``batch`` trials always in flight.
 
-        The first ``batch`` proposals are asked together.  From then on, each time the
-        oldest trial is scored it enters the history, the next proposal is asked from that
-        history (the pending trials count toward the warm-up and the grid, but cannot train
-        the model), its positions are drawn and its reductions go out, and only then are the
-        finished trial's files, display, log line and checkpoint done.  Every generator call
-        happens on this thread in index order, so a seed gives one run whatever the machine
-        and however the reductions finish.  The checkpoint records the trials in flight, and
-        a resume reduces them again before it asks for anything new: the resumed run is the
-        run that never stopped.  A re-calibration drops the trials in flight and puts the
-        generator back where it was after the trial that triggered it.  Returns True when a
-        re-calibration restarted the annulus."""
+        The first ``batch`` proposals are asked together.  From then on, each time the oldest trial is scored
+        it enters the history, the next proposal is asked from that history (the pending trials count toward
+        the warm-up and the grid, but cannot train the model), its positions are drawn and its reductions go
+        out, and only then are the finished trial's files, display, log line and checkpoint done.  Every
+        generator call happens on this thread in index order, so a seed gives one run whatever the machine
+        and however the reductions finish.  The checkpoint records the trials in flight, with the shares each
+        went out with, and a resume reduces them again before it asks for anything new, so the resumed run is
+        the run that never stopped.  A re-calibration drops the trials in flight and puts the generator back
+        where it was after the trial that triggered it.
+
+        Parameters
+        ----------
+        ia : int
+            The annulus, counted from 0.
+        n_iter : int
+            The annulus' number of evaluations.
+        opt : Optimizer
+            The optimizer.
+
+        Returns
+        -------
+        restarted : bool
+            True when a re-calibration restarted the annulus.
+        """
         c = self.cfg
         b = int(c.batch)
         n = max(int(c.n_remeasure), 1)
@@ -3613,7 +3909,12 @@ class Runner:
 
         def dispatch(item):
             item["t0"], item["back"] = time.time(), []
-            calls = self._timed(self._trial_calls(item["cfg"], item["draws"], item["tag"]), item["back"])
+            # shares= only for a resumed trial that went out with some, so a _trial_calls of the old
+            # signature (a test's spy) still serves every other trial
+            kw = {"shares": item["card_shares"]} if item.get("card_shares") is not None else {}
+            calls = self._timed(self._trial_calls(item["cfg"], item["draws"], item["tag"], **kw), item["back"])
+            if item.get("card_shares") is None:
+                item["card_shares"] = self._card_trial_shares.get(item["tag"])
             for fn in self._scored_calls(calls, item["draws"]):
                 q.submit(fn)
             pend.append(item)
@@ -3673,17 +3974,34 @@ class Runner:
         return h
 
     def _pending_state(self) -> Optional[List[Dict[str, Any]]]:
-        """The trials in flight, as the checkpoint stores them (JSON)."""
+        """Return the trials in flight, as the checkpoint stores them.
+
+        Returns
+        -------
+        pending : list of dict or None
+            Each trial's ``phase``, ``x``, ``tag``, ``draws``, ``rng_after`` and, under the automatic share,
+            ``card_shares``, in JSON, None with none in flight.
+        """
         pend = getattr(self, "_inflight", None)
         if not pend:
             return None
         return [{"phase": it["phase"], "x": [float(v) for v in it["x"]], "tag": it["tag"],
                  "draws": [[list(s.as_tuple()) for s in d] for d in it["draws"]],
-                 "rng_after": it["rng_after"]} for it in pend]
+                 "rng_after": it["rng_after"],
+                 **({"card_shares": list(it["card_shares"])} if it.get("card_shares") is not None else {})}
+                for it in pend]
 
     def _take_resume_pending(self) -> List[Dict[str, Any]]:
-        """The trials a checkpoint had in flight, rebuilt for :meth:`_search_pipeline` (once).
-        They must continue this annulus' history: the first is its next evaluation."""
+        """Return the trials a checkpoint had in flight, rebuilt for :meth:`_search_pipeline`, once.
+
+        They must continue this annulus' history, the first being its next evaluation, else they are asked
+        again.  Each keeps the shares it went out with (``card_shares``), so its jobs go to the same cards.
+
+        Returns
+        -------
+        items : list of dict
+            Each trial's ``phase``, ``x``, ``cfg``, ``tag``, ``draws``, ``rng_after`` and ``card_shares``.
+        """
         raw, self._resume_pending = getattr(self, "_resume_pending", None), None
         nxt = f"a{self.ia + 1}_e{len(self.history) + 1}"
         if raw and raw[0].get("tag") != nxt:
@@ -3694,7 +4012,7 @@ class Runner:
             x = np.asarray(d["x"], float)
             items.append({"phase": d["phase"], "x": x, "cfg": self.space.decode(x), "tag": d["tag"],
                           "draws": [[Source(*s) for s in dr] for dr in d["draws"]],
-                          "rng_after": d["rng_after"]})
+                          "rng_after": d["rng_after"], "card_shares": d.get("card_shares")})
         return items
 
     #: a stage is worth a log line once it has run this many times the recent median
@@ -5398,6 +5716,9 @@ class Runner:
             card = dict(card)
             card.pop("t", None)
             card["annuli"] = self._card_per_annulus(results)
+            end = self._card_shares_now()
+            if end is not None:                    # the automatic share, where it ended
+                card["adapt_every"], card["shares_end"] = self._card_adaptive(), list(end)
             out["card"] = card
             self.log(f"  card: {card['jobs']} jobs, its workers busy {100 * card['busy_fraction']:.0f} % of the time "
                      f"since the pool started" + ("" if card["up"] else f" (left out: {card['why_down']})"))
@@ -5412,13 +5733,19 @@ class Runner:
                         f"{self.cfg.bench_tag} {os.path.basename(os.path.abspath(self.run_dir))}\n")
             if card:
                 # read for the next run's --gpu-share; '#' keeps it out of the rows
-                f.write(f"# card: share {card['share']:g} %, {card['workers']} workers, {card['jobs']} jobs, "
+                said = (f"auto, {_shares_text(card['shares_end'])} at the end" if card.get("shares_end")
+                        else _shares_text(card.get("shares") or [card["share"]]))
+                f.write(f"# card: share {said}, {card['workers']} workers, {card['jobs']} jobs, "
                         f"busy {100 * card['busy_fraction']:.0f} % of the time since the pool started"
                         + ("" if card["up"] else f", left out: {card['why_down']}") + "\n")
                 for c in card["annuli"]:
+                    each = c.get("cards_busy_fraction") or []
                     f.write(f"# card annulus {int(c['annulus']):d}: {int(c['jobs'])} jobs of {int(c['marked'])} "
                             f"marked, busy {100 * float(c['busy_fraction']):.0f} % of the search's "
                             f"{float(c['search_s']):.0f} s" + (" since the resume" if c.get("since_resume") else "")
+                            + (" (" + ", ".join(f"card {k} {100 * float(b):.0f} %" for k, b in enumerate(each)) + ")"
+                               if len(each) > 1 else "")
+                            + (f", share {_shares_text(c['shares_end'])} at its end" if c.get("shares_end") else "")
                             + "\n")
         # final-layer hooks (guarded)
         if results and stitched is not None:
@@ -6014,13 +6341,23 @@ class Runner:
         self._write_checkpoint(self._serialize_checkpoint(snap))
 
     def _checkpoint_snapshot(self, final_annulus: bool) -> Dict[str, Any]:
-        """The state between two evaluations, taken without serialising it.
+        """Return the state between two evaluations, taken without serializing it.
 
-        Scalars, the RNG state and the small lists are copied.  The history and the
-        finished annuli are kept by reference, with the history's length: until the next
-        save written at once, which drops a held snapshot, the history only grows and the
-        finished annuli stay as they are, so its first ``n_hist`` rows and those objects
-        are this moment's state when :meth:`_serialize_checkpoint` reads them.
+        Scalars, the RNG state, the automatic share and the small lists are copied.  The history and the
+        finished annuli are kept by reference, with the history's length.  Until the next save written at
+        once, which drops a held snapshot, the history only grows and the finished annuli stay as they are, so
+        its first ``n_hist`` rows and those objects are this moment's state when :meth:`_serialize_checkpoint`
+        reads them.
+
+        Parameters
+        ----------
+        final_annulus : bool
+            Whether the annulus is done.
+
+        Returns
+        -------
+        snapshot : dict
+            The state.
         """
         return {"config": self.cfg.to_dict(), "ia": self.ia, "contrast": self.contrast,
                 "k_default": getattr(self, "_k_default", None), "recal_done": self._recal_done,
@@ -6033,10 +6370,22 @@ class Runner:
                 # proposals asked and dispatched but not yet in the history (RunConfig.batch_mode
                 # "pipeline"): a resume reduces them again before it asks for anything new
                 "pending": self._pending_state(),
-                "extends": int(getattr(self, "_extends", 0))}
+                "extends": int(getattr(self, "_extends", 0)),
+                "card_shares": None if self._card_shares is None else list(self._card_shares)}
 
     def _serialize_checkpoint(self, snap: Dict[str, Any]) -> str:
-        """The JSON text of a snapshot from :meth:`_checkpoint_snapshot`."""
+        """Return the JSON text of a snapshot from :meth:`_checkpoint_snapshot`.
+
+        Parameters
+        ----------
+        snap : dict
+            The snapshot.
+
+        Returns
+        -------
+        text : str
+            The checkpoint, ``card_shares`` among it under the automatic share.
+        """
         h = snap["history"]
         st = {
             "version": self.CKPT_VERSION, "klip_tpe_version": __version__,
@@ -6049,6 +6398,8 @@ class Runner:
             "rng_state": snap["rng_state"], "wall_s": snap["wall_s"], "records_count": snap["records_count"],
             "hooks_done": snap["hooks_done"], "pending": snap["pending"], "extends": snap["extends"],
         }
+        if snap.get("card_shares") is not None:
+            st["card_shares"] = snap["card_shares"]
         return json.dumps(st, default=_json_default)
 
     def _write_checkpoint(self, text: str) -> None:
@@ -6166,14 +6517,27 @@ class Runner:
             pass
 
     def _apply_checkpoint(self, st: Dict[str, Any], project=None, same_frames: bool = True) -> None:
-        """Adopt a checkpoint's state -- and its configuration -- onto this runner.
+        """Adopt a checkpoint's state, and its configuration, onto this runner.
 
-        The search configuration and space come from the checkpoint rather than from
-        whatever the caller built, by design: the recorded history was produced under those
-        settings and would not be comparable with evaluations made under any others.  A
-        caller that wants different settings wants a new run directory.  ``same_frames=False``
-        skips the check that the reducer reduces the run's frames, for a runner that only
-        reads the run (:meth:`rereduce`).
+        The search configuration and space come from the checkpoint rather than from whatever the caller
+        built, by design: the recorded history was produced under those settings and would not be comparable
+        with evaluations made under any others.  A caller that wants different settings wants a new run
+        directory.  The automatic share goes on from where the checkpoint left it.
+
+        Parameters
+        ----------
+        st : dict
+            The checkpoint.
+        project : callable or None, default None
+            The projection of the space, None to keep the space's.
+        same_frames : bool, default True
+            Whether to check that the reducer reduces the run's frames, False for a runner that only reads
+            the run (:meth:`rereduce`).
+
+        Raises
+        ------
+        ValueError
+            If ``same_frames`` and the reducer's data edits are not the run's.
         """
         self.cfg = RunConfig.from_dict(st["config"])
         self._apply_sampler_config()
@@ -6188,6 +6552,8 @@ class Runner:
         self._recal_done = int(st.get("recal_done", 0))
         self.records_count = int(st.get("records_count", 0))
         self._extends = int(st.get("extends") or 0)
+        cs = st.get("card_shares")                 # the automatic share where the run left it
+        self._card_shares = [float(v) for v in cs] if isinstance(cs, list) and cs else None
         self.wall_prev = float(st.get("wall_s", 0.0))
         # A crash can leave half a line at the end of the logs, past every line a checkpoint
         # counted.  The next record would fuse with it, so it goes before anything appends.

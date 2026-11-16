@@ -352,10 +352,10 @@ good set, the best so far, the validation candidates), ties at 0 go by evaluatio
 do, since the IDL does not floor its scores.  A run saved before 2026-11-01 resumes without a
 floor.
 
-### The card (`--gpu-share`, `--gpu-workers`, `--gpu-device`)
+### The card (`--gpu-share`, `--gpu-adapt-every`, `--gpu-workers`, `--gpu-device`)
 
-A share of the search's injected draws can be reduced on an NVIDIA card beside the CPU
-workers.  The card's reducer is `klip_tpe.gpu_reducer`, the chain in `klip_tpe.klip_gpu` on
+A share of the search's injected draws can be reduced on an NVIDIA card, or on several, beside the
+CPU workers.  The card's reducer is `klip_tpe.gpu_reducer`, the chain in `klip_tpe.klip_gpu` on
 CuPy, so the run's environment needs CuPy for CUDA 12: `pip install -e ".[gpu]"` in the
 checkout, or `pip install "cupy-cuda12x[ctk]"`.  `--gpu-share 12` sends 12 % of those
 reductions to the card.  Each trial sends the card the share of its jobs (its draws times its
@@ -363,7 +363,7 @@ nights) with the lowest hash of their tags, and the tag names the evaluation, th
 night, so where a job runs does not depend on timing, and a run and its resumes reproduce to the
 bit.  The count is the share of the trial's jobs rounded down, plus one more when the remainder
 is above a number drawn from the trial's tags, so the card's long-run share is the share asked
-and no trial sends it more than the share rounded up (`parallel.card_picks`).  Until
+and no trial sends it more than the share rounded up (`parallel.card_assign`).  Until
 2026-11-15 each job went to the card when its own hash fell below the share, so the number of a
 trial's jobs on the card varied from trial to trial, and a trial that sent the card more jobs
 than it had workers waited on its second round.  A run started before then keeps that rule
@@ -372,18 +372,35 @@ validation, the verify and the products stay on the CPU.  The card's images diff
 CPU's by about 1e-5 of the image noise, so a run with a card gives other scores than the same
 run without one, by far less than the draw scatter.
 
-`--gpu-share auto`, the default for a new run, is 12 where Linux shows a card and CuPy is
-installed, else 0, so on a Mac no card worker starts.  It was 30 until 2026-11-15.  On NEAR2
-(patrick, OpenCV rotation, 3 card workers, run `run_20261114_232646`) a share of 12 never ran
-slower than 30 and halved the search's time at small bins, and the card's draws agreed with the
-CPU's (+0.3 +/- 0.2 %).  With scipy rotation the CPU workers are slower by about a third, and a
-somewhat larger share may balance them better.  A run keeps its share across resumes in
-`card.json` in the run directory, as it keeps `--klip-gram`, and a resume that names another
-share writes it there with the time.  `--gpu-workers` (3 by default) is how many worker
-processes share the card.  At large bins one leaves the card idle while it prepares the next
-job: on patrick, at bin 30, 2 workers gave 1.4x the throughput of one and 4 gave 1.75x, and at
-bins 5 to 9 more workers neither gained nor lost.  Each holds its own copy of the cubes on the
-card.
+`--gpu-share auto`, the default for a new run, starts each card at 12 % where Linux shows a card
+and CuPy is installed (else no card worker starts, as on a Mac) and re-balances it every 25
+trials (`--gpu-adapt-every`).  At each re-balance the run measures, over the trials since the
+last, the rate of the CPU workers and of each card: its workers over its mean job time, the jobs
+it would finish a second with every worker busy.  Of all the jobs, the clean ones included, which
+only the CPU workers reduce, a card should take its rate over the sum of the rates, and its share
+is that number of jobs over the jobs it could have taken.  Then the card and the CPU workers
+finish the trials' jobs together.  The share moves to that point by the square root of
+the ratio each time, at most a factor of 2, and stays where it is within 5 % of it.  It never
+drops below 2 %, so the card's speed stays measured, and all the cards together take at most
+95 %.  A stretch with too few jobs measured runs on until it has them.  Each change goes to the log,
+as `card: share 12 % -> 17 % over the last 25 trials, jobs a minute at full load card 41, CPU
+workers 380`, and to `card_shares.jsonl` in the run directory.  Each trial goes out with the
+shares of the moment and keeps them, in its record (`meta.card_shares`) and among the
+checkpoint's trials in flight, and the checkpoint keeps the share at that time, so a resume
+reduces every trial with the shares it went out with.  A run made again from scratch measures
+other times and so sends the card other jobs, which changes its scores by about 1e-5 of the
+noise.  A number, or one per card (`12,8`), stays as set and reproduces from scratch.  A run
+keeps `auto` or its numbers across resumes in `card.json`, as it keeps `--klip-gram`, and a
+resume that names another share writes it there with the time.  Until 2026-11-16 `auto` was a
+fixed share, 12 from 2026-11-15 and 30 before, and the runs started then keep their number.  On
+NEAR2 (patrick, OpenCV rotation, 3 card workers, run `run_20261114_232646`) a fixed 12 never
+ran slower than 30 and halved the search's time at small bins, and the card's draws agreed with
+the CPU's (+0.3 +/- 0.2 %).
+
+`--gpu-workers` (3 by default) is how many worker processes share each card.  At large bins one
+leaves the card idle while it prepares the next job: on patrick, at bin 30, 2 workers gave 1.4x
+the throughput of one and 4 gave 1.75x, and at bins 5 to 9 more workers neither gained nor lost.
+Each holds its own copy of the cubes on the card.
 
 `--gpu-device` names the card the card workers use, as `CUDA_VISIBLE_DEVICES` takes it: an
 index in CUDA's order or a UUID from `nvidia-smi -L`.  It is set in the card workers alone.
@@ -391,23 +408,32 @@ Without it, a run takes the card it has been using (`card.json`), else the card
 `CUDA_VISIBLE_DEVICES` names, which is then recorded, so a run started with
 `CUDA_VISIBLE_DEVICES=1` resumes on the same card without it, and over another value of it.
 CUDA counts its cards fastest first unless `CUDA_DEVICE_ORDER=PCI_BUS_ID`, which `nvidia-smi`
-follows, so a UUID is the surer name.  The first time the card comes up, its name goes into
-`card.json` (`gpu_name`).  At a resume on a card with another name the log says so, and the
-run goes on with it.  A resume with `--gpu-device` records the new card instead.  Two cards of
-one model have the same name, which this cannot tell apart.
+follows, so a UUID is the surer name.  The first time a card comes up, its name goes into
+`card.json` (`gpu_name`).  At a resume on a card with another name the log says so, and the run
+goes on with it.  A resume with `--gpu-device` records the new card instead.  Two cards of one
+model have the same name, which this cannot tell apart.
 
-The log says when the card is up, with its name and driver, and when it is left out.  If the
-card cannot start, a worker dies, or 3 jobs fail on it, its jobs go back to the CPU workers and
-the run goes on without it.  `final_results.json` and `bench_summary.txt` give the card's jobs
-and the fraction of the time its workers were busy, from which to set the next run's share.
-Each record in `results.jsonl` lists the nights the card reduced (`meta.card`, and
-`meta.draw_card` draw by draw).  After each annulus' search the log says how many of its jobs
-were marked for the card, how many the card reduced, how many its reducer turned away and why,
-such as `extras` or `KLIP-FM` (`GPUKLIPReducer.refusal`), and how busy the card's workers were
-over that search (the time since the resume, for a search that was resumed).  Each annulus'
-numbers go into its `annulus_done.json`, `final_results.json` (`card.annuli`) and a
-`# card annulus N:` line of `bench_summary.txt`.  `final_results.json` keeps the totals
-(`marked`, `refused`).
+Several cards are used only when asked: `--gpu-device 0,1` names them, and `--gpu-device all`
+takes every card Linux shows.  Each card gets its own workers (`--gpu-workers` each), its own
+queue and its own share, which `auto` re-balances card by card from each one's own rate.  A
+trial's jobs go in the order of their hash, the first card taking its share of them and the next
+card the next, so which card reduces a job does not depend on timing either.  That matters, since
+two models of card need not agree to the bit.  A card that cannot start or fails is left out on
+its own, its jobs going to the CPU workers.  `card.json` records every card and each one's name.
+
+The log says when each card is up, with its name and driver, and when it is left out.  If a card
+cannot start, a worker dies, or 3 jobs fail on it, its jobs go back to the CPU workers and the
+run goes on without it.  `final_results.json` and `bench_summary.txt` give the cards' jobs and
+the fraction of the time their workers were busy, from which to set the next run's share.  Each
+record in `results.jsonl` lists the nights the cards reduced (`meta.card`, and `meta.draw_card`
+draw by draw, with `meta.card_index` and `meta.draw_card_index` on several cards).  After each
+annulus' search the log says how many of its jobs were marked for the cards, how many the cards
+reduced, how many their reducer turned away and why, such as `extras` or `KLIP-FM`
+(`GPUKLIPReducer.refusal`), how busy each card's workers were over that search (the time since
+the resume, for a search that was resumed), and where the automatic share ended.  Each annulus'
+numbers go into its `annulus_done.json`, `final_results.json` (`card.annuli`) and a `# card
+annulus N:` line of `bench_summary.txt`.  `final_results.json` keeps the totals (`marked`,
+`refused`), each card's (`cards`) and the CPU workers' (`cpu`).
 
 The card workers share the card's memory.  Each holds its CuPy pool to 90 % of the card over
 the number of workers (`GPUKLIPReducer.limit_memory`), so one worker's arrays and cache cannot

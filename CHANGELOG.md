@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased — 2026-11-16 (the automatic card share, and several cards)
+
+- **`--gpu-share auto` re-balances the card's share** every `--gpu-adapt-every` trials (25 by
+  default), from 12 % per card.  At each re-balance the run measures each pool's rate over the
+  trials since the last, its workers over its mean job time, and moves each card's share toward
+  the point where the cards and the CPU workers would finish the trials' jobs together
+  (`parallel.card_balance`, `Runner._card_adapt`).  It moves by the square root of the ratio, at
+  most a factor of 2, stays within 5 % of the point, keeps each card at 2 % or more and the cards
+  together at 95 % or less.  Each change is logged and appended to `card_shares.jsonl`.  Each trial
+  goes out with the shares of the moment (`ReductionRequest.card_shares`) and keeps them in its
+  record (`meta.card_shares`) and among the checkpoint's trials in flight, and the checkpoint keeps
+  the share, so a resume reduces every trial with its own shares.  A number, or one per card
+  (`12,8`), stays as set.  `card.json` records `"auto"` and `adapt_every`, and a run started before
+  keeps its number.  Kevin Wagner's choice (2026-11-16): `auto` adapts, and a number is fixed.
+- **Several cards** (`--gpu-device 0,1`, or `all`), only when asked.  Each card gets its own
+  workers, queue, share and memory limit (`CardSpec.devices`, `CardSpec.shares`,
+  `PartitionedReducer.card_device` as a list).  A trial's jobs go in the order of their hash, the
+  first card taking its share and the next card the next (`parallel.card_assign`, which with one
+  card picks as `card_picks` did), so which card reduces a job does not depend on timing.  A card
+  that fails is left out on its own.  Each annulus' line gives each card's busy fraction, records
+  say which card reduced each night (`meta.card_index`, `meta.draw_card_index`), and `card.json`
+  keeps each card's name.
+- The pool times the CPU workers' jobs as well as the cards' (`card_summary()["cpu"]`), and counts
+  the jobs a card could have taken (`eligible`).  `final_results.json` keeps each card's numbers
+  (`cards`), the CPU workers' (`cpu`) and where the automatic share ended (`shares_end`).
+- Docs in `docs/RUNNING.md` and `docs/CLI.md`, and the docstrings of the touched functions brought
+  to the documentation rule.  Tests in `tests/test_card_worker.py` and `tests/test_card_counts.py`.
+
 ## Unreleased — 2026-11-15 (the card's share trial by trial, its card, its busy fraction and three display fixes)
 
 From the NEAR2 session's full run with the card (patrick, `run_20261114_232646`, OpenCV
