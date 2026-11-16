@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — 2026-11-16 (the stitch `klip-tpe elect` reads, and its winners for `rereduce`)
+
+From NEAR2's note of 2026-11-16 on `elect --plan` for s7.
+
+- **`klip-tpe elect` takes `--overlap-pads`, `--no-overlap-pads` and `--stitch-injections`** as
+  `rereduce` does (`final_grid.run_final_grid(overlap_pads=)`, `elect_products(overlap_pads=,
+  stitch_injections=)`).  The pads set the stitch the election, the curve and the products read,
+  and the injections the products' injected reductions.  s7 was saved with pads between its
+  overlapping annuli and its campaigns stitch without them, and `elect` read the padded stitch,
+  which leaves tiles 2 to 6 only 0.66 px of their 4.66 px unblended.  The plan, the log,
+  `election.txt` and `election.json` (`stitch`) name the pads read.
+- **`winners.txt`** in the stage's directory lists every annulus' winner as `--base-winners` reads
+  it, the run as a directory, so campaigns re-reduce the elected winners from the base run with
+  `rereduce --base-winners ... --verify-sources ...`.
+- `docs/RUNNING.md` says so, and that a cut by validated score (`--finalists`) can drop the stitch's
+  winner inside 1", as NEAR2's re-score of s7 found.
+
 ## Unreleased — 2026-11-16 (backends/spaceklip.py documented to the rule)
 
 - **`backends/spaceklip.py` follows the documentation rule**: the spaceKLIP and JWST loaders

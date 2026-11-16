@@ -2667,7 +2667,9 @@ def cmd_elect(a):
     Each annulus' finalists, the run's own and those of other runs of the same setup, are elected again
     on single injections measured on the run's stitch (:func:`klip_tpe.final_grid.run_final_grid`), and
     the elected winners' final products and curve go to ``--out`` (:func:`klip_tpe.final_grid.elect_products`).
-    The runs are only read, and the log also goes to ``elect.log`` in ``--out``.
+    ``--overlap-pads`` and ``--no-overlap-pads`` set the stitch the election, the curve and the products
+    read, and ``--stitch-injections`` the products' injected reductions, as ``rereduce`` takes them.  The
+    runs are only read, and the log also goes to ``elect.log`` in ``--out``.
 
     Parameters
     ----------
@@ -2713,11 +2715,13 @@ def cmd_elect(a):
             logf.flush()
 
     try:
+        pads = getattr(a, "overlap_pads", None)
         rec = run_final_grid(r, out, config=fc, entrant_runs=a.entrants_from or [],
                              weights=run_weights(r.run_dir, r.cfg.nann), window=a.window, plan=a.plan, card=a.card,
-                             log=log)
+                             overlap_pads=pads, log=log)
         if not a.plan and not a.no_products:
-            elect_products(r, rec, out, log=log)
+            elect_products(r, rec, out, log=log, overlap_pads=pads,
+                           stitch_injections=getattr(a, "stitch_injections", None))
     except (OSError, ValueError) as exc:
         raise SystemExit(f"elect: {exc}")
     finally:
@@ -3385,6 +3389,7 @@ def _build_parser():
     p.add_argument("--curve", default="grid", choices=["grid", "path_a", "off"],
                    help="how the curve is read: the contrast grid's S/N (grid, the default), the stitched "
                         "verify's (path_a), or no curve (off)")
+    _stitch_args(p, rerun=True)
     p.add_argument("--window", type=int, default=None,
                    help="reductions in flight (default: enough to fill the reducer's workers)")
     p.add_argument("--card", action="store_true",

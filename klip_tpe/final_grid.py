@@ -1768,13 +1768,15 @@ def collect_finalists(runner, entrant_runs: Sequence[str] = (), n_best: int = 0,
 def run_final_grid(runner, out_dir: str, *, config: Optional[FinalGridConfig] = None,
                    entrant_runs: Optional[Sequence[str]] = None, weights: Optional[Sequence[float]] = None,
                    window: Optional[int] = None, plan: bool = False, card: bool = False, in_run: bool = False,
-                   log: Callable[[str], None] = print, stage: Callable[[str], None] = lambda s: None) -> Dict[str, Any]:
+                   overlap_pads: Optional[bool] = None, log: Callable[[str], None] = print,
+                   stage: Callable[[str], None] = lambda s: None) -> Dict[str, Any]:
     """Run the final-image grid on a runner whose annuli are all done, and write its reports.
 
     It calibrates each tile's contrast, runs the election, reads each change on the curve's grid and
-    reads the curve, then writes ``election.json``, ``election.txt``, ``curve.json`` and ``curve.txt`` to
-    ``out_dir``, with its readings in ``out_dir/state``, from which a stage started again on the same
-    directory resumes.  The runs are only read.
+    reads the curve, then writes ``election.json``, ``election.txt``, ``winners.txt``, ``curve.json`` and
+    ``curve.txt`` to ``out_dir``, with its readings in ``out_dir/state``, from which a stage started
+    again on the same directory resumes.  ``winners.txt`` lists each annulus' winner as
+    ``rereduce --base-winners`` reads it.  The runs are only read.
 
     Parameters
     ----------
@@ -1799,6 +1801,9 @@ def run_final_grid(runner, out_dir: str, *, config: Optional[FinalGridConfig] = 
         Whether the injected reductions may go to the card workers.
     in_run : bool, default False
         Whether the stage runs inside the run, its directory then inside the run's.
+    overlap_pads : bool or None, default None
+        Whether overlapping annuli take pads between them in the stitch the stage reads, as
+        ``rereduce --overlap-pads`` sets it.  None keeps the run's (``RunConfig.stitch_overlap_pads``).
     log : callable, default print
         Function that takes each line of the log.
     stage : callable, default a no-op
@@ -1808,8 +1813,9 @@ def run_final_grid(runner, out_dir: str, *, config: Optional[FinalGridConfig] = 
     -------
     record : dict
         What ``election.json`` holds: ``annuli`` (per annulus counted from 1 its ``start`` and ``winner``
-        entrants, ``changed``, ``last_change`` and ``held_out``), ``calibration``, ``sweeps``, ``curve``,
-        ``plan``, the settings and the counts.  With ``plan``, ``plan`` and ``finalists`` alone.
+        entrants, ``changed``, ``last_change`` and ``held_out``), ``stitch`` (the tiles and pads read),
+        ``calibration``, ``sweeps``, ``curve``, ``plan``, the settings and the counts.  With ``plan``,
+        ``plan``, ``stitch`` and ``finalists`` alone.
 
     Raises
     ------
@@ -1827,7 +1833,8 @@ def run_final_grid(runner, out_dir: str, *, config: Optional[FinalGridConfig] = 
         for rd in [base] + runs_from:
             if out_dir == rd or out_dir.startswith(rd + os.sep):
                 raise ValueError(f"{out_dir} is inside {rd}: the stage writes beside the runs")
-    scorer = StitchScorer(runner, log=log, card=card)
+    scorer = StitchScorer(runner, overlap_pads=overlap_pads, log=log, card=card)
+    st = _stitch_record(scorer, runner)
     finalists, start = collect_finalists(runner, runs_from, int(fc.finalists), log)
     fg = FinalGrid(runner, scorer, fc, finalists, start, None if plan else os.path.join(out_dir, "state"), weights,
                    log, window, card, stage)
@@ -1839,7 +1846,9 @@ def run_final_grid(runner, out_dir: str, *, config: Optional[FinalGridConfig] = 
         f"{min(nf) if min(nf) == max(nf) else f'{min(nf)} to {max(nf)}'} finalists each from "
         f"{1 + len(runs_from)} run(s), {pl['points']} points ({nb[0] if len(nb) == 1 else f'{nb[0]} to {nb[-1]}'} "
         f"separations per tile x {int(fc.n_pa)} angles"
-        + (f", {pl['excluded']['elect']} left out for the known companions" if pl["excluded"]["elect"] else "") + ")")
+        + (f", {pl['excluded']['elect']} left out where the run's sampler places no source"
+           if pl["excluded"]["elect"] else "") + ")")
+    log(f"  the stitch read: {_pads_text(st)}")
     for a in fg.order:
         p = pl["annuli"][a]
         log(f"  annulus {a + 1}: {p['finalists']} finalists x {p['cover']} points within "
@@ -1848,7 +1857,8 @@ def run_final_grid(runner, out_dir: str, *, config: Optional[FinalGridConfig] = 
         f"of the calibration and {pl['curve_wave']} a wave of the curve; every annulus whose part of the stitch "
         f"lies within {fg.read_px / fg.fwhm:g} FWHM of a point reduced with its source")
     if plan:
-        return {"plan": pl, "finalists": {str(a + 1): [asdict(e) for e in v] for a, v in finalists.items()}}
+        return {"plan": pl, "stitch": st,
+                "finalists": {str(a + 1): [asdict(e) for e in v] for a, v in finalists.items()}}
     runner._start_workers()
     fg.open_state()
     try:
@@ -1860,14 +1870,71 @@ def run_final_grid(runner, out_dir: str, *, config: Optional[FinalGridConfig] = 
     finally:
         fg.close()
     rec = _record(fg, base, runs_from, pl, cv, time.time() - t0)
+    rec["stitch"] = st
     os.makedirs(out_dir, exist_ok=True)
     _write_reports(out_dir, rec)
     changed = [int(k) for k, v in rec["annuli"].items() if v["changed"]]
     what = ("no winner changed" if not changed else ("annulus " if len(changed) == 1 else "annuli ")
             + ", ".join(str(k) for k in changed) + " took another winner")
     log(f"  final grid: {what}, {fg.n_reductions} reductions in {(time.time() - t0) / 60:.1f} min; wrote "
-        f"{os.path.join(out_dir, 'election.txt')}, election.json, curve.txt and curve.json")
+        f"{os.path.join(out_dir, 'election.txt')}, election.json, winners.txt, curve.txt and curve.json")
     return rec
+
+
+def _stitch_record(scorer: StitchScorer, runner) -> Dict[str, Any]:
+    """Return the tiles and pads of the stitch the stage reads, for its reports.
+
+    Parameters
+    ----------
+    scorer : StitchScorer
+        The stitch.
+    runner : Runner
+        The run.
+
+    Returns
+    -------
+    stitch : dict
+        ``overlap_pads`` (whether overlapping annuli take pads between them here), ``run_overlap_pads``
+        (the run's own), ``overlapping`` (whether any two annuli overlap), ``edge_pads_px`` (the pad at each
+        edge between two tiles, in pixels), ``tiles_px`` and ``pads_px``.
+    """
+    z = scorer.zones
+    edges = [max(float(scorer.pads[k][1]), float(scorer.pads[k + 1][0])) for k in range(len(z) - 1)]
+    return {"overlap_pads": bool(scorer.overlap_pads),
+            "run_overlap_pads": bool(getattr(runner.cfg, "stitch_overlap_pads", True)),
+            "overlapping": any(float(z[k][1]) > float(z[k + 1][0]) + 1e-9 for k in range(len(z) - 1)),
+            "edge_pads_px": edges, "tiles_px": [[float(v) for v in t] for t in scorer.tiles],
+            "pads_px": [[float(v) for v in p] for p in scorer.pads]}
+
+
+def _pads_text(st: Dict[str, Any]) -> str:
+    """Describe the pads of the stitch the stage reads in words.
+
+    Parameters
+    ----------
+    st : dict
+        The stitch's record (:func:`_stitch_record`).
+
+    Returns
+    -------
+    text : str
+        Such as ``no pads between overlapping annuli, the tiles meeting sharply there (the run's own
+        stitch had 2 px pads)``.
+    """
+    pads = sorted({round(float(v), 3) for v in st.get("edge_pads_px") or []})
+    if not pads:
+        return "one tile, no edges between tiles"
+    width = "/".join(f"{v:g}" for v in pads)
+    if not st.get("overlapping"):
+        return (f"{width} px pads at the edges between tiles, the annuli meeting there" if max(pads) > 0 else
+                "the tiles meeting sharply, without pads")
+    if st.get("overlap_pads"):
+        text = f"{width} px pads at the edges between overlapping annuli"
+    else:
+        text = "no pads between overlapping annuli, the tiles meeting sharply there"
+    if bool(st.get("overlap_pads")) != bool(st.get("run_overlap_pads")):
+        text += " (the run's own stitch " + ("had pads there" if st.get("run_overlap_pads") else "had none") + ")"
+    return text
 
 
 def _record(fg: FinalGrid, base: str, runs_from: Sequence[str], pl: Dict[str, Any], cv: Optional[Dict[str, Any]],
@@ -1926,8 +1993,41 @@ def _atomic_text(path: str, text: str) -> None:
     os.replace(path + ".tmp", path)
 
 
+def _write_winners(out_dir: str, rec: Dict[str, Any], now: str) -> None:
+    """Write ``winners.txt``, each annulus' winner as ``rereduce --base-winners`` reads it.
+
+    One line per annulus gives the annulus (from 1), the winner's run as a directory where the stage
+    knows it, else its name, and its evaluation (from 0).  Every annulus is listed, so a composite made
+    from the file does not depend on the winners the base run itself took.
+
+    Parameters
+    ----------
+    out_dir : str
+        Directory of the stage.
+    rec : dict
+        The record (:func:`_record`).
+    now : str
+        The time written in the header.
+    """
+    import shlex
+    dirs = {os.path.basename(os.path.abspath(r).rstrip(os.sep)): os.path.abspath(r) for r in rec.get("runs") or []}
+    L = [f"# klip_tpe final-image grid winners -- {now}", f"# run: {rec['run']}",
+         "# one line per annulus, for rereduce --base-winners and rescore --base-winners, giving the annulus (from 1), "
+         "the run and the evaluation (from 0, as election.json counts)",
+         f"# the stitch read: {_pads_text(rec.get('stitch') or {})}"]
+    for k, v in rec["annuli"].items():
+        w = v["winner"]
+        what = f"{w['run']} {w['kind']}" + (", changed" if v["changed"] else ", the validation's winner")
+        if w.get("eval_index") is None:
+            L.append(f"# annulus {k}: {what}, no evaluation to name it by")
+            continue
+        run = dirs.get(str(w["run"]), str(w["run"]))
+        L.append(f"{int(k):<3d} {shlex.quote(run)}  {int(w['eval_index'])}    # {what}")
+    _atomic_text(os.path.join(out_dir, "winners.txt"), "\n".join(L) + "\n")
+
+
 def _write_reports(out_dir: str, rec: Dict[str, Any]) -> None:
-    """Write the stage's ``election.json``, ``election.txt``, ``curve.json`` and ``curve.txt``.
+    """Write the stage's ``election.json``, ``election.txt``, ``winners.txt``, ``curve.json`` and ``curve.txt``.
 
     Parameters
     ----------
@@ -1946,6 +2046,7 @@ def _write_reports(out_dir: str, rec: Dict[str, Any]) -> None:
          f"# grid: an odd number of separations per tile, at least 3, at the middles of equal bands no wider than "
          f"{o['sep_step_fwhm']:g} FWHM, {o['n_pa']} position angles each, turned by the golden fraction of the step "
          f"from one separation to the next; the curve's grid turned by half a step",
+         f"# the stitch read: {_pads_text(rec.get('stitch') or {})}",
          f"# each point one injected source; every annulus whose part of the stitch lies within {rec['read_fwhm']:g} "
          f"FWHM of it reduced with it, the others clean; each source measured on the stitch as the stitched verify "
          f"measures it (Path A)",
@@ -1985,6 +2086,7 @@ def _write_reports(out_dir: str, rec: Dict[str, Any]) -> None:
                  f"{_f(ho.get('gain'), '{:+.2f}')} +/- {_f(ho.get('se'))} on {ho.get('n')} points of the curve's grid")
     L += ["", f"# {rec['reductions']} reductions in {rec['wall_s'] / 3600:.2f} h"]
     _atomic_text(os.path.join(out_dir, "election.txt"), "\n".join(L) + "\n")
+    _write_winners(out_dir, rec, now)
     if not cv:
         return
     _atomic_text(os.path.join(out_dir, "curve.json"), json.dumps(cv, indent=1, default=float))
@@ -2030,7 +2132,8 @@ def run_weights(run_dir: str, nann: int) -> Optional[List[float]]:
     return [float(v) for v in wl] if wl is not None and len(wl) == int(nann) else None
 
 
-def elect_products(runner, rec: Dict[str, Any], out_dir: str, log: Callable[[str], None] = print) -> Dict[str, Any]:
+def elect_products(runner, rec: Dict[str, Any], out_dir: str, log: Callable[[str], None] = print,
+                   overlap_pads: Optional[bool] = None, stitch_injections: Optional[str] = None) -> Dict[str, Any]:
     """Write a finished run's final products with the final-image grid's winners to the stage's directory.
 
     Each annulus whose winner changed reduces that winner in place of the validation's, and the others
@@ -2048,6 +2151,10 @@ def elect_products(runner, rec: Dict[str, Any], out_dir: str, log: Callable[[str
         Directory of the stage, beside the run.
     log : callable, default print
         Function that takes each line of the log.
+    overlap_pads : bool or None, default None
+        Whether overlapping annuli take pads between them, as the stage read them.  None keeps the run's.
+    stitch_injections : {"all", "own"} or None, default None
+        Which validation sources each annulus' injected reduction holds.  None keeps the run's.
 
     Returns
     -------
@@ -2063,7 +2170,8 @@ def elect_products(runner, rec: Dict[str, Any], out_dir: str, log: Callable[[str
         # the stage starts from the validation's winners, and the products take them where it changed none
         for r in results:
             r.final_grid = None
-        out = runner.rereduce(out_dir, winners=winners, log=log)
+        out = runner.rereduce(out_dir, winners=winners, log=log, overlap_pads=overlap_pads,
+                              stitch_injections=stitch_injections)
     finally:
         for r, fg in keep:
             r.final_grid = fg

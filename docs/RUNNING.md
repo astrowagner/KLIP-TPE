@@ -852,17 +852,42 @@ already made.  The log gives the counts before the stage starts.
 other runs of the same frames, annuli and search space, their winners and their validations'
 entrants, each configuration once.  It writes to `--out` (default `<run>_elect`), and started
 again on that directory it resumes.  After the election it reduces the elected winners with the
-run's verify injections, weights, tiles and pads, as `rereduce` reduces a composite, and writes
-the stitch, its S/N maps, the stitched verify and a `contrast_curve.txt` with the stage's curve
-to `--out`.  The runs are only read.
+run's verify injections, weights and tiles, as `rereduce` reduces a composite, and writes the
+stitch, its S/N maps, the stitched verify and a `contrast_curve.txt` with the stage's curve to
+`--out`.  The runs are only read.
 
 ```
-klip-tpe elect --run-dir s7 --entrants-from s7b s7c s7d s7e s7f --finalists 5 --plan
-klip-tpe elect --run-dir s7 --entrants-from s7b s7c s7d s7e s7f --finalists 5
+klip-tpe elect --run-dir s7 --entrants-from s7b s7c s7d s7e s7f --no-overlap-pads \
+    --stitch-injections all --z 3 --plan
+klip-tpe elect --run-dir s7 --entrants-from s7b s7c s7d s7e s7f --no-overlap-pads \
+    --stitch-injections all --z 3
 ```
 
-* `--finalists N` keeps each run's winner and its N - 1 best by validated score, per annulus.
-  Six runs of 25 entrants each give an annulus about 150 finalists, six times the cost of one run.
+* **The stitch read.**  `--overlap-pads` and `--no-overlap-pads` set the pads between overlapping
+  annuli for the election, the curve and the products, as `rereduce` takes them, and the run's
+  own pads are the default.  A run saved with pads and whose campaigns stitch without them, such
+  as s7, takes `--no-overlap-pads`, or the election chooses winners for a stitch the paper does not
+  use.  On s7 the pads leave tiles 2 to 6 only 0.66 px of their 4.66 px unblended.  The plan, the
+  log and `election.txt` name the pads read.  `--stitch-injections` sets which validation sources
+  the products' injected reductions hold.  The election and the curve put each point's source in
+  every annulus that reads it, whatever it says.
+* **`winners.txt`** lists every annulus' winner, one line each, the annulus, the run's directory
+  and the evaluation, as `--base-winners` reads them.  Campaigns re-reduce the elected winners from
+  the base run with it, and their own verify sources:
+
+  ```
+  klip-tpe rereduce --run-dir s7 --base-winners s7_elect/winners.txt --no-overlap-pads \
+      --stitch-injections all --verify-sources FILE --out s7_elect_campaign
+  ```
+
+  The elect directory holds no run, so `rereduce --run-dir s7_elect` cannot resume it.  Every
+  annulus is listed, so the composite does not depend on the winners the base run itself took.
+* `--finalists N` keeps each run's winner and its N - 1 best by validated score, per annulus.  Six
+  runs of 25 entrants each give an annulus about 150 finalists, six times the cost of one run.  The
+  validated score is a poor guide to the stitch inside 1".  In NEAR2's six-run re-score of s7 the
+  best candidates of annulus 1 ranked 17th and 24th of 25 in their runs' validations, so a cut by
+  it can drop the winner.  Where the time allows, all finalists and a stricter `--z` are the safer
+  choice.
 * `--no-products` stops after the election and the curve.  `--card` lets the injected reductions
   go to the card workers.
 
