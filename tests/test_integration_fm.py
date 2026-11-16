@@ -122,7 +122,8 @@ def test_fm_preview_and_display(fm_run):
     # the display rendered every step with the FM thumbnail and the annulus-done frame
     steps = sorted(f for f in os.listdir(os.path.join(d, "steps")) if f.startswith("step"))
     vc = runner.cfg.validation
-    assert len(steps) == runner.cfg.n_iter + vc.n_top * vc.n_valid + 1   # evals + validation trials + annulus end
+    # evals + validation trials + annulus end + the run's final stitch
+    assert len(steps) == runner.cfg.n_iter + vc.n_top * vc.n_valid + 2
     assert os.path.getsize(os.path.join(d, "steps", steps[-1])) > 30_000
 
 

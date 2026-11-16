@@ -17,11 +17,12 @@ from __future__ import annotations
 import atexit
 import concurrent.futures as cf
 import contextlib
+import math
 import os
 import sys
 import threading
 import time
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -525,8 +526,9 @@ def card_slot(tag: str) -> int:
     """Return a job's place in 0 to 99 for the card's share, from its tag.
 
     The tag names the evaluation, the draw and the partition, and the place comes from SHA-1, not
-    Python's ``hash()``, which changes from one process to the next.  A job goes to the card when its
-    slot is below the share, so a run and its resumes send the same jobs there.
+    Python's ``hash()``, which changes from one process to the next.  Under the card's ``"job"`` rule a
+    job goes to the card when its slot is below the share, so a run and its resumes send the same jobs
+    there.
 
     Parameters
     ----------
@@ -538,8 +540,67 @@ def card_slot(tag: str) -> int:
     slot : int
         The place.
     """
+    return _sha1_int(tag) % 100
+
+
+def _sha1_int(text: str) -> int:
+    """Return the first 4 bytes of a text's SHA-1 as an integer.
+
+    Parameters
+    ----------
+    text : str
+        The text.
+
+    Returns
+    -------
+    value : int
+        The integer, from 0 to 2**32 - 1.
+    """
     import hashlib
-    return int.from_bytes(hashlib.sha1(str(tag).encode("utf-8")).digest()[:4], "big") % 100
+    return int.from_bytes(hashlib.sha1(str(text).encode("utf-8")).digest()[:4], "big")
+
+
+#: how the card's share picks jobs (``CardSpec.rule``): ``"trial"``, the lowest-hash jobs of each
+#: trial up to the share, or ``"job"``, each job by its own :func:`card_slot`, as runs did before
+#: 2026-11-15
+CARD_RULES = ("trial", "job")
+
+
+def card_picks(tags: Sequence[str], share: float) -> set:
+    """Return the jobs of one trial the card takes under the ``"trial"`` rule.
+
+    The count is ``share`` percent of the jobs, rounded down, plus one more when the remainder is above a
+    number drawn from the trial's tags, so the card's long-run share is the share asked and no trial sends
+    it more than its share rounded up.  The jobs taken are those with the lowest hash of their tag.  Both
+    come from SHA-1, so a run and its resumes pick the same jobs.
+
+    Parameters
+    ----------
+    tags : sequence of str
+        Tags of the trial's jobs the card could take, each draw's partitions.
+    share : float
+        Percentage of the jobs the card takes.
+
+    Returns
+    -------
+    picked : set of str
+        Tags of the jobs the card takes.
+
+    Notes
+    -----
+    Under the ``"job"`` rule each job goes to the card when its own slot is below the share, so the number
+    of a trial's jobs on the card is binomial.  With 18 jobs a trial (NEAR2's six nights, three draws) at
+    12 %, about one trial in six then sends the card 4 or more jobs for its 3 workers, and the whole trial
+    waits on the card's second round, the tail the NEAR2 session found (2026-11-15).
+    """
+    tags = sorted({str(t) for t in tags})
+    if not tags or share <= 0:
+        return set()
+    q = min(max(float(share), 0.0), 100.0) * len(tags) / 100.0
+    k = math.floor(q)
+    if q - k > _sha1_int("\n".join(tags)) / 2.0 ** 32:
+        k += 1
+    return set(sorted(tags, key=lambda t: (_sha1_int(t), t))[:k])
 
 
 def card_present() -> bool:
@@ -578,8 +639,11 @@ def describe_card(summary: Optional[dict]) -> str:
     n = int(summary.get("workers") or 0)
     who = f"{k} of {n} workers" if k != n else f"{n} worker{'s' * (n != 1)}"
     cap = info.get("memory_cap_gb")
-    return (f"{who} on {name}" + (f" (driver {drv})" if drv else "")
+    dev = summary.get("device")
+    return (f"{who} on {name}" + (f" (CUDA_VISIBLE_DEVICES={dev})" if dev else "")
+            + (f" (driver {drv})" if drv else "")
             + f", {summary.get('share', 0):g} % of the search's injected draws"
+            + (", each job picked by its own slot" if summary.get("rule") == "job" else "")
             + (f", each worker held to {cap:g} GB of its memory" if cap else ""))
 
 
@@ -593,16 +657,37 @@ class CardSpec:
         Each worker calls their ``warm()`` after the fork, then ``reduce(req)``, and the parent asks
         ``supports(req)``.
     share : float
-        Percentage of the eligible jobs (``ReductionRequest.card``) the card takes, by :func:`card_slot`.
+        Percentage of the eligible jobs (``ReductionRequest.card``) the card takes.
     workers : int, default 3
         Number of card processes sharing one queue, at least 1.  At large bins a job leaves the card
         idle while the host prepares the next, so several keep it busy.
+    rule : {"trial", "job"}, default "trial"
+        How the share picks the jobs.  ``"trial"`` takes the lowest-hash jobs of each trial up to the share
+        (:func:`card_picks`, from the request's ``card_group``), and ``"job"`` each job whose own
+        :func:`card_slot` is below the share, as runs did before 2026-11-15.
+    device : str or None, default None
+        The card, as ``CUDA_VISIBLE_DEVICES`` takes it (an index in CUDA's order or a UUID), set in the card
+        workers alone before they warm up.  None leaves the environment's.
+    on_ready : callable or None, default None
+        Function ``on_ready(info) -> str or None`` called once, with what the first card worker reported at
+        ``warm()``, as the card comes up.  A line it returns goes to the log.
+
+    Raises
+    ------
+    ValueError
+        If ``rule`` is not one of :data:`CARD_RULES`.
     """
 
-    def __init__(self, reducers: dict, share: float, workers: int = 3):
+    def __init__(self, reducers: dict, share: float, workers: int = 3, rule: str = "trial",
+                 device: Optional[str] = None, on_ready=None):
         self.reducers = dict(reducers)
         self.share = float(share)
         self.workers = max(int(workers), 1)
+        if rule not in CARD_RULES:
+            raise ValueError(f"card rule {rule!r}: one of {', '.join(CARD_RULES)}")
+        self.rule = rule
+        self.device = None if device is None or str(device).strip() == "" else str(device).strip()
+        self.on_ready = on_ready
 
 
 #: card job failures after which the card is left out for the rest of the run.  A job that
@@ -662,15 +747,16 @@ def _is_out_of_memory(exc: BaseException) -> bool:
                                             and "memory" in str(exc).lower())
 
 
-def _card_worker_main(reducers, inq, outq, ppid: Optional[int] = None, index: int = 0, workers: int = 1):
+def _card_worker_main(reducers, inq, outq, ppid: Optional[int] = None, index: int = 0, workers: int = 1,
+                      device: Optional[str] = None):
     """Run a card worker's loop.
 
-    The worker calls every reducer's ``warm()``, holds its memory pool to its share of the card
-    (``limit_memory(workers)``), and reports ``("card-ready", index, info)`` or
-    ``("card-failed", index, why)``.  It then turns each ``(job_id, pid, request)`` into
-    ``("card", job_id, result or exception, seconds)``.  After every job the reducer's ``after_job()``
-    gives the pool's cache back, and a job that runs out of memory comes back as a
-    :class:`CardMemoryError` naming its tag.
+    The worker sets ``CUDA_VISIBLE_DEVICES`` to ``device`` when one is given, calls every reducer's
+    ``warm()``, holds its memory pool to its share of the card (``limit_memory(workers)``), and reports
+    ``("card-ready", index, info)`` or ``("card-failed", index, why)``.  It then turns each
+    ``(job_id, pid, request)`` into ``("card", job_id, result or exception, seconds)``.  After every job
+    the reducer's ``after_job()`` gives the pool's cache back, and a job that runs out of memory comes
+    back as a :class:`CardMemoryError` naming its tag.
 
     Parameters
     ----------
@@ -686,6 +772,8 @@ def _card_worker_main(reducers, inq, outq, ppid: Optional[int] = None, index: in
         The worker's index.
     workers : int, default 1
         Number of card workers sharing the card's memory.
+    device : str or None, default None
+        The card, as ``CUDA_VISIBLE_DEVICES`` takes it.  None leaves the environment's.
     """
     pin_blas()
     try:
@@ -695,6 +783,9 @@ def _card_worker_main(reducers, inq, outq, ppid: Optional[int] = None, index: in
         pass
     if ppid:
         _watch_parent(ppid)
+    if device is not None:
+        # this process only, before CUDA is loaded: the parent and the CPU workers never load it
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
     try:
         info = {}
         for pid, r in reducers.items():
@@ -752,9 +843,9 @@ class ProcessPool:
     pickled, and only the requests and the small results cross the pipes.
 
     A :class:`CardSpec` adds card workers with a queue of their own.  A job goes to them when its
-    request is marked ``card``, the card reducer ``supports`` it, and its :func:`card_slot` is below the
-    share, so where a job runs does not depend on timing.  When the card cannot start, a worker dies,
-    or :data:`CARD_MAX_ERRORS` jobs fail on it, the jobs it holds go back to the CPU workers and the
+    request is marked ``card``, it is in the card's share (:meth:`_in_share`), and the card reducer
+    ``supports`` it, so where a job runs does not depend on timing.  When the card cannot start, a worker
+    dies, or :data:`CARD_MAX_ERRORS` jobs fail on it, the jobs it holds go back to the CPU workers and the
     pool goes on without it.
 
     Parameters
@@ -843,7 +934,7 @@ class ProcessPool:
             self.card_inq = ctx.Queue()
             self.card_procs = [ctx.Process(target=_card_worker_main,
                                            args=(self.card.reducers, self.card_inq, self.outq, me, i,
-                                                 self.card.workers),
+                                                 self.card.workers, getattr(self.card, "device", None)),
                                            name=f"klip-card-{i}", daemon=True) for i in range(self.card.workers)]
         for p in self.procs + self.card_procs:
             p.start()
@@ -917,11 +1008,38 @@ class ProcessPool:
         return all(p.is_alive() for p in self.procs)
 
     # -- the card ----------------------------------------------------------------------
+    def _in_share(self, pid, req) -> bool:
+        """Tell whether a job marked for the card is in its share, by the card's rule.
+
+        Under the ``"trial"`` rule, a request with a ``card_group`` is in the share when :func:`card_picks`
+        takes its tag from the group's jobs on partitions the card can reduce.  Otherwise, and under the
+        ``"job"`` rule, it is in the share when its :func:`card_slot` is below the share.
+
+        Parameters
+        ----------
+        pid : object
+            The job's partition.
+        req : ReductionRequest
+            The job's request.
+
+        Returns
+        -------
+        in_share : bool
+            True when the job is in the share.
+        """
+        tag = str(getattr(req, "tag", ""))
+        group = getattr(req, "card_group", None)
+        if getattr(self.card, "rule", "trial") == "trial" and group:
+            tags = [str(t) for t, p in group if p in self.card.reducers]
+            return tag in card_picks(tags, self.card.share)
+        return card_slot(tag) < self.card.share
+
     def _to_card(self, pid, req) -> bool:
         """Tell whether a job goes to the card, with the lock held.
 
-        A job marked for it and in its share counts in ``card_marked``, and one its reducer turns away in
-        ``card_refused``, under the reason (``refusal(req)`` where the reducer has it, else ``supports``).
+        A job marked for it and in its share (:meth:`_in_share`) counts in ``card_marked``, and one its
+        reducer turns away in ``card_refused``, under the reason (``refusal(req)`` where the reducer has it,
+        else ``supports``).
 
         Parameters
         ----------
@@ -937,7 +1055,7 @@ class ProcessPool:
         """
         if not self._card_ok or not getattr(req, "card", False) or pid not in self.card.reducers:
             return False
-        if card_slot(getattr(req, "tag", "")) >= self.card.share:
+        if not self._in_share(pid, req):
             return False
         self.card_marked += 1
         red = self.card.reducers[pid]
@@ -1010,18 +1128,22 @@ class ProcessPool:
         Returns
         -------
         summary : dict or None
-            ``share``, ``workers``, ``up``, ``ready``, ``why_down``, ``info``, ``jobs``, ``busy_s``,
-            ``busy_fraction`` (of the time since the pool started), ``marked``, ``refused`` and ``memory``,
-            None without a card.
+            ``share``, ``workers``, ``rule``, ``device``, ``up``, ``ready``, ``why_down``, ``info``, ``jobs``,
+            ``busy_s``, ``busy_fraction`` (of the time since the pool started), ``marked``, ``refused``,
+            ``memory`` and ``t`` (the time of the summary, for a fraction over a stretch of the run), None
+            without a card.
         """
         if self.card is None:
             return None
-        wall = max(time.time() - self._card_t0, 1e-9)
-        return {"share": self.card.share, "workers": self.card.workers, "up": bool(self._card_ok),
+        now = time.time()
+        wall = max(now - self._card_t0, 1e-9)
+        return {"share": self.card.share, "workers": self.card.workers, "rule": getattr(self.card, "rule", "trial"),
+                "device": getattr(self.card, "device", None), "up": bool(self._card_ok),
                 "ready": self._card_ready, "why_down": self.card_why, "info": self.card_info,
                 "jobs": self.card_jobs, "busy_s": round(self.card_busy, 3),
                 "busy_fraction": round(self.card_busy / (wall * self.card.workers), 4),
-                "marked": self.card_marked, "refused": dict(self.card_refused), "memory": self.card_memory}
+                "marked": self.card_marked, "refused": dict(self.card_refused), "memory": self.card_memory,
+                "t": now}
 
     def _card_result(self, item) -> None:
         """Take a card worker's message, in the collector's thread.
@@ -1043,6 +1165,14 @@ class ProcessPool:
                     self._card_ready += 1
                     if self.card_info is None:
                         self.card_info = dict(next(iter(item[2].values()), {}) or {}) if item[2] else {}
+                        cb = getattr(self.card, "on_ready", None)
+                        if callable(cb):
+                            try:
+                                line = cb(dict(self.card_info))
+                            except Exception as exc:  # noqa: BLE001 - a record for the log, never fatal
+                                line = f"  card: on_ready failed ({exc!r})"
+                            if line:
+                                self._notes.append(str(line))
                 else:
                     # a worker that cannot warm up never takes a job, so the others serve the
                     # card's queue alone; with none left the card is out

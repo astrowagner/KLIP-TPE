@@ -159,3 +159,78 @@ def test_a_picture_of_the_search_trial_keeps_its_scores():
 def test_another_trial_without_a_name_still_gives_its_circled_values():
     t = _best_snr_title(best_sources=T_VALID, best_labels=[10.0, 10.5])
     assert t == "Best mean S/N = 10.25", t
+
+
+# ------------------------------------------------------------------ the image cells' titles and stretch
+
+def _titles(images, i=2):
+    """Every cell title of a step panel, and the image row's colorbar label."""
+    import matplotlib
+    matplotlib.use("Agg")
+    from matplotlib.figure import Figure
+    seen = []
+    orig = D.draw_image
+
+    def spy(ax, img, ad_, title, cmap="inferno", **k):
+        seen.append((title, img, k.get("vrange")))
+        return orig(ax, img, ad_, title, cmap, **k)
+
+    D.draw_image = spy
+    fig = Figure(figsize=(8, 5))
+    try:
+        D.render_step(_ad(), i, images, None, None, fig=fig)
+    finally:
+        D.draw_image = orig
+    labels = [ax.get_ylabel() for ax in fig.axes if "stretch" in ax.get_ylabel()]
+    return seen, labels
+
+
+def test_the_best_image_cell_names_the_validation_trial():
+    """NEAR2 (2026-11-15): the "Best (eval N)" image was drawn with the validation draw's sources
+    and its title did not say so."""
+    img = np.random.default_rng(2).normal(size=(81, 81))
+    base = dict(cur_inj=img, cur_clean=img, best_inj=img, best_clean=img, best_index=1)
+    seen, _ = _titles(D.StepImages(best_sources=T_VALID, best_labels=[10.0, 10.5], best_trial="validation trial",
+                                   **base))
+    assert "Best (eval 2, validation trial)" in [t for t, _, _ in seen], seen
+    seen, _ = _titles(D.StepImages(best_sources=list(reversed(T_SEARCH)), best_labels=[12.24, 12.0],
+                                   best_trial="validation trial", **base))
+    assert "Best (eval 2)" in [t for t, _, _ in seen], "the search trial's own picture keeps its name"
+
+
+def test_each_tile_of_a_stitch_is_stretched_by_its_own_sigma():
+    """NEAR2 (2026-11-15): one sigma for the whole stitch showed the inner tiles, 2.5 times noisier,
+    with speckles at 4 to 5 sigma.  Each tile now goes by its own sigma."""
+    rng = np.random.default_rng(3)
+    img = rng.normal(size=(81, 81))
+    cx, cy = D.star_center(img.shape)
+    yy, xx = np.indices(img.shape)
+    rr = np.hypot(xx - cx, yy - cy)
+    img[rr < 20] *= 2.5
+    out = D._per_tile_sigma(img, [8.0, 20.0, 30.0])
+    for m in (rr < 20, rr >= 20):
+        assert D._robust_sigma(out[m]) == pytest.approx(1.0, rel=1e-6)
+    assert D._per_tile_sigma(img, None) is img and D._per_tile_sigma(None, [1.0, 2.0]) is None
+    stitch = dict(stitch_clean=img, stitch_inj=img, stitch_sources=[], stitch_edges=[8.0, 20.0, 30.0],
+                  stitch_label="Final stitch")
+    seen, labels = _titles(D.StepImages(cur_inj=img, cur_clean=img, best_inj=img, best_clean=img, best_index=1,
+                                        **stitch))
+    by = {t: (im, vr) for t, im, vr in seen}
+    for t in ("Final stitch (no inj)", "Final stitch (with inj)"):
+        im, vr = by[t]
+        assert vr == (-1.0, 5.0) and np.allclose(im, out, equal_nan=True), t
+    assert "Final stitch SNR (no inj)" in by and "Final stitch SNR (with inj)" in by
+    assert labels == ["KLIP image stretch (each annulus' sigma)"], labels
+    # without the tiles' edges (annulus 1, the best images) the cells keep one sigma
+    seen, labels = _titles(D.StepImages(cur_inj=img, cur_clean=img, best_inj=img, best_clean=img, best_index=1))
+    by = {t: (im, vr) for t, im, vr in seen}
+    assert by["Stitched best (no inj)"][1] is None and labels == ["KLIP image stretch (sigma)"]
+    assert "Stitched SNR (no inj)" in by
+
+
+def test_a_stitch_header_gives_its_tiles(tmp_path):
+    p = str(tmp_path / "s.fits")
+    _write_fits(p, np.zeros((8, 8)), {"EDGES": "8.0,20.0,32.0"})
+    assert D._header_edges(p) == [8.0, 20.0, 32.0]
+    _write_fits(p, np.zeros((8, 8)), {"RUNNING": 1})
+    assert D._header_edges(p) is None and D._header_edges(str(tmp_path / "none.fits")) is None

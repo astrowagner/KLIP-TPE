@@ -44,7 +44,7 @@ def test_live_display_products(live_run):
     # the annulus books came from their own process, reported once written (klip_tpe.books)
     assert [l for l in logs if "annulus 1 books: 10 of 10 written" in l], logs
     steps = sorted(f for f in os.listdir(os.path.join(d, "steps")) if f.startswith("step"))
-    assert len(steps) == 19                       # 14 evaluations + 2x2 validation trials + the annulus-done frame
+    assert len(steps) == 20       # 14 evaluations + 2x2 validation trials + the annulus-done frame + the final stitch's
     assert all(_size(os.path.join(d, "steps", f)) > 30_000 for f in steps)
     assert _size(os.path.join(d, "steps", "intro.png")) > 5_000
     ad = os.path.join(d, "annulus01")
@@ -98,8 +98,9 @@ def test_post_hoc_books_and_steps(live_run):
     assert _size(figs["calibration_ann01"]) > 20_000
     sd = os.path.join(d, "steps_rebuilt")
     paths = render_steps(d, every=4, dpi=60, out_dir=sd, movie=False)
-    assert len(paths) == 5 and all(_size(p) > 20_000 for p in paths)     # evals 1, 5, 9, 13 and the last (14)
-    assert paths[-1].endswith("step0004.png")
+    # evals 1, 5, 9, 13, the last (14) and the run's final stitch
+    assert len(paths) == 6 and all(_size(p) > 20_000 for p in paths)
+    assert paths[-1].endswith("step0005.png")
 
 
 def test_klip_tpe_render_draws_every_panel_beside_the_live_ones(live_run, tmp_path):
@@ -118,7 +119,8 @@ def test_klip_tpe_render_draws_every_panel_beside_the_live_ones(live_run, tmp_pa
     cli.main(["render", "--run-dir", d, "--every", "4", "--dpi", "60"])
     out = os.path.join(d, "steps_rebuilt")
     rebuilt = sorted(f for f in os.listdir(out) if f.startswith("step"))
-    assert rebuilt == [f"step{i:04d}.png" for i in range(5)], rebuilt     # evals 1, 5, 9, 13 and the last (14)
+    # evals 1, 5, 9, 13, the last (14) and the run's final stitch
+    assert rebuilt == [f"step{i:04d}.png" for i in range(6)], rebuilt
     assert all(_size(os.path.join(out, f)) > 20_000 for f in rebuilt)
     assert _size(os.path.join(out, "opt_steps.gif")) > 10_000
     assert {f: os.path.getmtime(os.path.join(live, f)) for f in os.listdir(live)} == before, "live frames touched"

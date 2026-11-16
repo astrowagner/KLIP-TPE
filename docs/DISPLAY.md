@@ -38,8 +38,15 @@ so the evaluation loop never waits for it.
 |---|---|
 | Ann *i*/*n* Eval *e*/*N* | this evaluation's reduction *with* the injected companions (the "test") |
 | Test (no inj) | the same configuration on the clean cube |
-| Best (eval *b*) | the incumbent's injected reduction |
-| Stitched best (no inj) / (with inj) | the running stitch over annuli done so far + the incumbent |
+| Best (eval *b*) | the incumbent's injected reduction.  On an annulus' last frame, the winner's validation trial, its fresh injections circled, titled `Best (eval b, validation trial)` |
+| Stitched best (no inj) / (with inj) | the running stitch over annuli done so far + the incumbent, each annulus' tile stretched by its own σ.  On the run's last frame, the final stitch, `Final stitch (no inj)` / `(with inj)` |
+
+Each cell is stretched from −1 to 5 σ of its own image, the robust σ (1.4826 × the median
+absolute deviation).  The stitched cells take each annulus' tile at its own σ, since a stitch
+puts together annuli whose noise differs severalfold.  On NEAR2 (2026-11-15) the inner tiles
+were 2.5 times noisier than the outer, and with one σ for the whole stitch a speckle there read
+4.6 σ on the stretch and 1.7 on the S/N map.  The color bar then reads `each annulus' sigma`.
+The tiles' edges come from the stitch's `EDGES` header.
 
 A known companion is circled on the images, and its S/N is printed on the two clean ones.  It
 is measured as the search measures, with the run's matched filter, despike, radial band and
@@ -92,7 +99,11 @@ fit, for 2 to 20 and more partitions and 2 to 9 corner parameters.  The partitio
 their tick labels to their widths.  Only the first image cell of each row carries the y axis.
 
 The green header line announces phase changes: `NEW BEST`, `VALIDATION cand c/n trial t/n
-median so far …`, `annulus done — VALIDATED winner`.  During validation the Test cells show
+median so far …`, `annulus done — VALIDATED winner`, and on the run's last frame `run complete
+-- final stitch`.  That frame is the last annulus-done frame with the final stitch
+(`klip_stitched.fits`, `klip_stitched_inj.fits`) in its stitched cells.  The running stitch the
+annulus-done frame shows is an equal-weight stitch without the seam patches, and on NEAR2 it
+differed from the final stitch by up to 0.5 σ beyond 1.44".  During validation the Test cells show
 the validation trials.  A trial gets a panel when the render thread is free and goes without
 one at once when it is busy, so validation never waits for the display.  Before the search,
 the calibration trials are shown
@@ -169,7 +180,9 @@ cells and the BEST block show the validated winner, its committed image circled 
 sources.  The stitched cells show the running stitch of the finished annuli, the KLIP-FM and
 injected-PSF squares the winner's injections, and "Elapsed" the run's time at the annulus' end.
 At each annulus' end a run keeps that stitch (`annulusNN/klip_stitched_running*.fits`), the
-injected-PSF model (`best_inj_model.fits`) and the time (`annulus_done.json`).  A run made
+injected-PSF model (`best_inj_model.fits`) and the time (`annulus_done.json`).  A finished run's
+redrawn frames end, as the live ones do, on the final stitch's frame, its "Elapsed" from
+`heartbeat.json`.  A run made
 before 2026-11-10 gets the stitch from its own running stitch for the last annulus and makes it
 again from the winners' products for the others.  The time is estimated from `heartbeat.json`.
 The injected-PSF model needs the run's frames, which `--with-data` loads as `rereduce` does, and

@@ -14,6 +14,9 @@ frame showed the run's 14 h 42 m.  What must hold, on a synthetic run of three a
   running stitch (the last annulus) or made again from the winners' products, the elapsed time
   from the heartbeat, and the injected PSF from the frames when the caller can load them.
 * The live annulus-done frame circles only the winners' sources in the stitch.
+* The run's last frame shows the final stitch, each tile at its own sigma, and so does the
+  redrawn one (NEAR2, 2026-11-15: the last annulus-done frame's running stitch differed from
+  the final stitch by up to 0.5 sigma beyond 1.44").
 """
 from __future__ import annotations
 
@@ -53,7 +56,7 @@ def _same(a, b, float32=False):
 
 
 @pytest.fixture(scope="module")
-def live(tmp_path_factory):
+def live_frames(tmp_path_factory):
     d = str(tmp_path_factory.mktemp("final") / "run")
     mp = pytest.MonkeyPatch()
     cap = _Captured()
@@ -66,12 +69,18 @@ def live(tmp_path_factory):
     disp = LiveDisplay(d, every=1, pdf_every=0, movie=False, show=False, dpi=60)
     results = Runner(red, space, obj, samp, cfg, d, log=QUIET, callbacks=[disp]).run()
     mp.undo()
-    done = {f["annulus"]: f for f in cap.frames if str(f["label"]).startswith("annulus done")}
+    return d, results, cap.frames
+
+
+@pytest.fixture(scope="module")
+def live(live_frames):
+    d, results, frames = live_frames
+    done = {f["annulus"]: f for f in frames if str(f["label"]).startswith("annulus done")}
     assert sorted(done) == [0, 1, 2]
     return d, results, done
 
 
-def _redraw(d, tmp_path, **kw):
+def _redraw(d, tmp_path, frames=None, **kw):
     cap = _Captured()
     mp = pytest.MonkeyPatch()
     mp.setattr(D, "render_step", cap)
@@ -79,10 +88,14 @@ def _redraw(d, tmp_path, **kw):
         render_steps(d, every=1000, out_dir=str(tmp_path / "rebuilt"), movie=False, **kw)
     finally:
         mp.undo()
+    if frames is not None:
+        frames.extend(cap.frames)
+    # each annulus' last frame (the run's final-stitch frame comes after the last one's)
+    each = [f for f in cap.frames if not str(f["label"]).startswith("run complete")]
     n = {}
-    for f in cap.frames:
+    for f in each:
         n[f["annulus"]] = max(n.get(f["annulus"], -1), f["i"])
-    return {f["annulus"]: f for f in cap.frames if f["i"] == n[f["annulus"]]}
+    return {f["annulus"]: f for f in each if f["i"] == n[f["annulus"]]}
 
 
 def _check(redrawn, live_done, results, keys=("stitch", "inj_model", "elapsed"), float32=False):
@@ -216,3 +229,42 @@ def test_render_with_data_takes_the_runs_instrument_or_refuses(tmp_path, capsys)
     a = types.SimpleNamespace(instrument="near", run_dir=str(d), _argv=["resume", "--run-dir", str(d)])
     with pytest.raises(SystemExit, match="--instrument ales"):
         cli._constants_for_run(a)
+
+
+def test_the_runs_last_frame_shows_the_final_stitch(live_frames, tmp_path):
+    """The live display's last frame is the last annulus-done frame with the final stitch in its
+    stitched cells, under that name and with its tiles' edges, and ``klip-tpe render`` draws it again."""
+    from klip_tpe.stitch import read_fits
+    d, results, frames = live_frames
+    last = frames[-1]
+    assert last["label"] == "run complete -- final stitch", [f["label"] for f in frames[-3:]]
+    done = [f for f in frames if str(f["label"]).startswith("annulus done")][-1]
+    a, b = last["images"], done["images"]
+    assert a.stitch_label == "Final stitch" and b.stitch_label == "Stitched best"
+    assert _same(a.stitch_clean, read_fits(os.path.join(d, "klip_stitched.fits")))
+    assert _same(a.stitch_inj, read_fits(os.path.join(d, "klip_stitched_inj.fits")))
+    assert a.stitch_sources == D._header_sources(os.path.join(d, "klip_stitched_inj.fits"))
+    assert _same_sources_list(a.stitch_sources, [tuple(t) for r in results for t in r.winner_sources])
+    assert a.stitch_edges == D._header_edges(os.path.join(d, "klip_stitched.fits")) and len(a.stitch_edges) == 4
+    assert b.stitch_edges == D._header_edges(os.path.join(d, "annulus03", "klip_stitched_running.fits"))
+    # everything else is the annulus-done frame's
+    assert a.best_index == b.best_index and a.best_sources == b.best_sources and _same(a.best_inj, b.best_inj)
+    assert last["annulus"] == done["annulus"] and last["i"] == done["i"] and last["curves"] == done["curves"]
+    assert last["elapsed"] >= done["elapsed"]
+    # klip-tpe render draws it again, after the last annulus' frame
+    got = []
+    _redraw(d, tmp_path, frames=got)
+    assert got[-1]["label"] == "run complete -- final stitch (rebuilt from log)"
+    c = got[-1]["images"]
+    assert _same(c.stitch_clean, a.stitch_clean) and _same(c.stitch_inj, a.stitch_inj)
+    assert c.stitch_sources == a.stitch_sources and c.stitch_edges == a.stitch_edges
+    assert c.stitch_label == "Final stitch" and c.best_index == a.best_index
+    assert got[-1]["elapsed"] == pytest.approx(last["elapsed"], abs=5.0)
+    # one annulus drawn alone, not the last, gets no final frame
+    got = []
+    _redraw(d, tmp_path, frames=got, annuli=[1])
+    assert not any(str(f["label"]).startswith("run complete") for f in got)
+
+
+def _same_sources_list(a, b):
+    return D._same_sources(a, b)
