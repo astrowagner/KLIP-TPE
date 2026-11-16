@@ -40,6 +40,7 @@ DONE = [
     "klip_tpe/cli.py",
     "klip_tpe/companion.py",
     "klip_tpe/contrast_grid.py",
+    "klip_tpe/final_grid.py",
     "klip_tpe/fmmf.py",
     "klip_tpe/injection.py",
     "klip_tpe/instruments/ales.py",

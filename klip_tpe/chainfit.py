@@ -620,7 +620,7 @@ def fit_chain(runner, nodes: Dict[str, Sequence[Source]], labels: Optional[Seque
             src = list(nodes[n])
             for r, _ in items:
                 runner.ia = r.annulus
-                cfg = runner._config_from_dict(r.winner_config)
+                cfg = runner._config_from_dict(r.final_config)
                 ev = runner._reduce(cfg, None, tag=f"chainfit_{n}_a{r.annulus + 1}", fm_sources=src)
                 if ev.fm_image is None:
                     raise ValueError(f"annulus {r.annulus + 1}: the reduction returned no KLIP-FM image")
@@ -809,7 +809,7 @@ def fit_per_night(runner, chain: Sequence[Source], *, line_pa: Optional[float] =
     try:
         for r, _ in items:
             runner.ia = r.annulus
-            ev = runner._reduce(runner._config_from_dict(r.winner_config), None,
+            ev = runner._reduce(runner._config_from_dict(r.final_config), None,
                                 tag=f"pernight_a{r.annulus + 1}", fm_sources=list(chain))
             if ev.fm_stack is None or not ev.partitions:
                 raise ValueError("the reducer gives no per-partition KLIP-FM images (one partition only?)")

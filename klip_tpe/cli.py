@@ -1854,6 +1854,41 @@ def _contrast_grid_config(a):
                               sidelobe_fwhm=float(getattr(a, "cg_sidelobe_fwhm", 2.0)))
 
 
+def _final_grid_config(a):
+    """Return ``RunConfig.final_grid`` from the ``--final-grid`` and ``--fg-*`` options.
+
+    Without ``--final-grid`` the mode is :class:`~klip_tpe.final_grid.FinalGridConfig`'s default, on.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+
+    Returns
+    -------
+    config : FinalGridConfig
+        The configuration.
+
+    Raises
+    ------
+    SystemExit
+        If a setting is out of range.
+    """
+    from .final_grid import FinalGridConfig
+    mode = getattr(a, "final_grid", None)
+    fc = FinalGridConfig(**({"mode": mode} if mode else {}), n_pa=int(getattr(a, "fg_pa", 12)),
+                         sep_step_fwhm=float(getattr(a, "fg_step", 1.0)),
+                         cover_fwhm=float(getattr(a, "fg_cover", 0.5)), z=float(getattr(a, "fg_z", 1.0)),
+                         sweeps=int(getattr(a, "fg_sweeps", 2)), finalists=int(getattr(a, "fg_finalists", 0)),
+                         entrants_from=[os.path.abspath(p) for p in getattr(a, "fg_entrants_from", None) or []],
+                         curve_snr=getattr(a, "fg_curve", "grid") or "grid")
+    try:
+        fc.check()
+    except ValueError as exc:
+        raise SystemExit(f"--final-grid: {exc}") from None
+    return fc
+
+
 def _ann_extra(a) -> list:
     """Return ``--ann-extra IN:OUT ...`` as ``[[inner, outer], ...]``, in pixels.
 
@@ -1930,7 +1965,8 @@ def _protocol_config(a) -> dict:
     rmin = _min_r_fwhm(a)
     extra = _ann_extra(a)
     sf = getattr(a, "score_floor", None)
-    return dict(contrast_grid=_contrast_grid_config(a), opt_width=a.opt_width, width_range=tuple(a.width_range), r_cap=a.r_cap, k_mode=a.k_mode,
+    return dict(contrast_grid=_contrast_grid_config(a), final_grid=_final_grid_config(a), opt_width=a.opt_width,
+                width_range=tuple(a.width_range), r_cap=a.r_cap, k_mode=a.k_mode,
                 k_scan_max=a.k_scan_max, stitch_every=a.stitch_every, verify=a.verify, verify_n_boot=a.verify_n_boot,
                 param_verify=a.param_verify, n_pv=a.n_pv, pv_divmin=a.pv_divmin, candidates=a.candidates,
                 n_remeasure=max(int(getattr(a, "n_remeasure", 1) or 1), 1),
@@ -2625,6 +2661,70 @@ def cmd_rescore(a):
             logf.close()
 
 
+def cmd_elect(a):
+    """Run ``klip-tpe elect``, the final-image grid on a finished run.
+
+    Each annulus' finalists, the run's own and those of other runs of the same setup, are elected again
+    on single injections measured on the run's stitch (:func:`klip_tpe.final_grid.run_final_grid`), and
+    the elected winners' final products and curve go to ``--out`` (:func:`klip_tpe.final_grid.elect_products`).
+    The runs are only read, and the log also goes to ``elect.log`` in ``--out``.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+
+    Raises
+    ------
+    SystemExit
+        If a setting is out of range or the stage fails.
+    """
+    from .final_grid import FinalGridConfig, elect_products, run_final_grid, run_weights
+    from .runner import Runner
+    try:
+        _fill_from_registry(a, getattr(a, "_argv", None))
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"  (could not read the run record: {exc!r}; carrying on with what was given)")
+    _resolve_run_dir(a)
+    _klip_gram_for_run(a, record=False)    # the run directory is only read
+    _data_edits_for_rereduce(a)
+    _constants_for_run(a)
+    out = os.path.abspath(a.out or (os.path.abspath(a.run_dir).rstrip(os.sep) + "_elect"))
+    fc = FinalGridConfig(mode="on", n_pa=a.pa, sep_step_fwhm=a.step, cover_fwhm=a.cover, z=a.z, sweeps=a.sweeps,
+                         finalists=a.finalists, target=(float(a.target[0]), float(a.target[1])), n_cal=a.n_cal,
+                         curve_snr=a.curve)
+    try:
+        fc.check()
+    except ValueError as exc:
+        raise SystemExit(f"elect: {exc}") from None
+    red, objective, sampler, guard, thr = _near_objects(a)
+    r = Runner.resume(a.run_dir, red, objective, sampler, project=guard, throughput_fn=thr, same_frames=False)
+    logf = None
+    if not a.plan:
+        os.makedirs(out, exist_ok=True)
+        logf = open(os.path.join(out, "elect.log"), "a")
+
+    def log(msg: str) -> None:
+        print(msg, flush=True)
+        if logf is not None:
+            logf.write(msg + "\n")
+            logf.flush()
+
+    try:
+        rec = run_final_grid(r, out, config=fc, entrant_runs=a.entrants_from or [],
+                             weights=run_weights(r.run_dir, r.cfg.nann), window=a.window, plan=a.plan, card=a.card,
+                             log=log)
+        if not a.plan and not a.no_products:
+            elect_products(r, rec, out, log=log)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"elect: {exc}")
+    finally:
+        if logf is not None:
+            logf.close()
+
+
 def cmd_replay(a):
     """Run ``klip-tpe replay``, which reduces again a sample of the evaluations in the IDL predecessor's log.
 
@@ -2939,7 +3039,8 @@ def _add_run_args(p):
                         "validated medians are scored on --n-final-draws common draws, the same injections for "
                         "each, and the largest median there is elected. On common draws the candidates' scores "
                         "move together, so their medians' differences scatter far less than on draws of their "
-                        "own. The run's own random draws are untouched")
+                        "own. The run's own random draws are untouched. A run with the final-image grid on "
+                        "(--final-grid, the default) leaves it to that stage, whose election replaces it")
     p.add_argument("--n-final-draws", type=int, default=200, metavar="M",
                    help="common draws of the final round (default 200)")
     p.add_argument("--contrast-grid", default=None, choices=["grid", "random", "off"],
@@ -2965,6 +3066,34 @@ def _add_run_args(p):
                         "never under --cg-sidelobe-fwhm of arc, and fixed that width alone")
     p.add_argument("--cg-sidelobe-fwhm", type=float, default=2.0, metavar="FWHM",
                    help="the sidelobes' least half-width, in FWHM of arc (default 2)")
+    p.add_argument("--final-grid", default=None, choices=["on", "off"],
+                   help="the final-image grid after the searches (default on). Each annulus' finalists, the "
+                        "configurations its validation scored, are elected again on single injections measured "
+                        "on the stitch with the other annuli at their current winners, and the elected winners' "
+                        "curve on a second grid becomes the run's contrast_curve.txt. It replaces --n-final")
+    p.add_argument("--fg-pa", type=int, default=12, metavar="N",
+                   help="position angles per separation of the final grid (default 12)")
+    p.add_argument("--fg-step", type=float, default=1.0, metavar="FWHM",
+                   help="the widest radial band of a tile per separation of the final grid, in FWHM (default 1). "
+                        "Each tile has an odd number of separations, at least 3")
+    p.add_argument("--fg-cover", type=float, default=0.5, metavar="FWHM",
+                   help="how far beyond an annulus' part of the stitch a point still counts toward its election, "
+                        "in FWHM (default 0.5)")
+    p.add_argument("--fg-z", type=float, default=1.0, metavar="Z",
+                   help="how many standard errors a finalist's mean paired gain must exceed to replace the "
+                        "winner (default 1)")
+    p.add_argument("--fg-sweeps", type=int, default=2, metavar="N",
+                   help="sweeps of the election at most, inner to outer and back (default 2)")
+    p.add_argument("--fg-finalists", type=int, default=0, metavar="N",
+                   help="each run's finalists per annulus, its winner and its best by validated score (default 0, "
+                        "every configuration its validation scored)")
+    p.add_argument("--fg-entrants-from", nargs="*", default=[], metavar="RUN",
+                   help="other finished runs of the same frames, annuli and search space whose finalists enter the "
+                        "final grid too")
+    p.add_argument("--fg-curve", default="grid", choices=["grid", "path_a", "off"],
+                   help="how the final grid's curve is read: the contrast grid's S/N (grid, the default, the IDL "
+                        "predecessor's aperture photometry unless --cg-snr says otherwise), the stitched verify's "
+                        "(path_a), or no curve (off)")
     p.add_argument("--sidelobes", default=None, choices=["farthest", "clean", "off"],
                    help="the noise rings of the search, calibration, validation, verify and candidates. off (the "
                         "default) skips the apertures within 1.5 FWHM of each injected source and known companion, "
@@ -3224,6 +3353,48 @@ def _build_parser():
                         "the CPU workers, as rereduce)")
     p.add_argument("--plan", action="store_true", help="count the candidates and the reductions, reduce nothing")
     p.set_defaults(func=cmd_rescore)
+
+    p = sub.add_parser("elect", help="the final-image grid on a finished run: each annulus' finalists, its own "
+                                     "and other runs', elected again on single injections measured on its stitch, "
+                                     "and the elected winners' contrast curve")
+    _add_near_args(p)
+    p.add_argument("--run-dir", default="last", help="the finished run (default: the newest on record)")
+    p.add_argument("--entrants-from", nargs="*", default=[], metavar="RUN",
+                   help="other finished runs of the same frames, annuli and search space, whose finalists enter "
+                        "too (the run's own always do)")
+    p.add_argument("--out", default=None, metavar="DIR",
+                   help="output directory (default <run>_elect beside the run).  An election started again on the "
+                        "same directory resumes")
+    p.add_argument("--pa", type=int, default=12, metavar="N", help="position angles per separation (default 12)")
+    p.add_argument("--step", type=float, default=1.0, metavar="FWHM",
+                   help="the widest radial band of a tile per separation, in FWHM (default 1)")
+    p.add_argument("--cover", type=float, default=0.5, metavar="FWHM",
+                   help="how far beyond an annulus' part of the stitch a point still counts toward its election, "
+                        "in FWHM (default 0.5)")
+    p.add_argument("--z", type=float, default=1.0,
+                   help="how many standard errors a finalist's mean paired gain must exceed to replace the "
+                        "winner (default 1)")
+    p.add_argument("--sweeps", type=int, default=2, help="sweeps of the election at most (default 2)")
+    p.add_argument("--finalists", type=int, default=0, metavar="N",
+                   help="each run's finalists per annulus, its winner and its best by validated score (default 0, "
+                        "every configuration its validation scored)")
+    p.add_argument("--target", type=float, nargs=2, default=[5.0, 8.0], metavar=("LO", "HI"),
+                   help="the median S/N the starting winners should read on each tile's calibration points "
+                        "(default 5 8)")
+    p.add_argument("--n-cal", type=int, default=12, help="points of each tile's calibration (default 12)")
+    p.add_argument("--curve", default="grid", choices=["grid", "path_a", "off"],
+                   help="how the curve is read: the contrast grid's S/N (grid, the default), the stitched "
+                        "verify's (path_a), or no curve (off)")
+    p.add_argument("--window", type=int, default=None,
+                   help="reductions in flight (default: enough to fill the reducer's workers)")
+    p.add_argument("--card", action="store_true",
+                   help="the injected reductions may go to the card workers, as the search's draws do (default: "
+                        "the CPU workers)")
+    p.add_argument("--no-products", action="store_true",
+                   help="the election and the curve alone, without the elected winners' stitch, verify and "
+                        "contrast_curve.txt")
+    p.add_argument("--plan", action="store_true", help="count the finalists, points and reductions, reduce nothing")
+    p.set_defaults(func=cmd_elect)
 
     p = sub.add_parser("replay", help="re-score configurations from an IDL optimize_tpe_results.txt")
     _add_near_args(p)

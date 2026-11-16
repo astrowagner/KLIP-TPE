@@ -96,6 +96,10 @@ def _never_skip_panels():
     # The injection-recovery grid is on by default and costs a hundred reductions or more an
     # annulus, which the suite's many short runs do not need.  A test of it asks for it.
     mp.setitem(contrast_grid._DEFAULT, "mode", "off")
+    # So is the final-image grid, which elects the winners again on the stitch and reads its curve
+    # there, a few hundred reductions a run.  tests/test_final_grid.py asks for it.
+    from klip_tpe import final_grid
+    mp.setitem(final_grid._DEFAULT, "mode", "off")
     # The suite's runs keep the rings their expectations were written for ("off", the
     # library's default too since 2026-11-01), and the tests of the sidelobe rings ask for the
     # rule (tests/test_sidelobe_rings.py).  KLIP_TPE_TEST_SIDELOBES runs the suite with another

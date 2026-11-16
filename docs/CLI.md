@@ -1,9 +1,10 @@
 # Command-line reference
 
 Generated from `klip-tpe <command> --help` (`python scripts/gen_cli_doc.py`).  `near` and
-`generic` share the same search / protocol arguments; `--instrument near | nomic | generic`
+`generic` share the same search and protocol arguments, and `--instrument near | nomic | generic`
 selects the data adapter (`klip-tpe generic` is `near --instrument generic`).  `resume`,
-`extend`, `fit-chain`, `rereduce` and `rescore` take the same data arguments as the run they read.
+`extend`, `fit-chain`, `rereduce`, `rescore` and `elect` take the same data arguments as the run
+they read.
 
 
 ## `klip-tpe generic`
@@ -71,7 +72,11 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--cg-samples N] [--cg-step FWHM] [--cg-target SNR]
                         [--cg-precision F] [--cg-snr {aperture,matched}]
                         [--cg-sidelobe {off,rotation,fixed}]
-                        [--cg-sidelobe-fwhm FWHM]
+                        [--cg-sidelobe-fwhm FWHM] [--final-grid {on,off}]
+                        [--fg-pa N] [--fg-step FWHM] [--fg-cover FWHM]
+                        [--fg-z Z] [--fg-sweeps N] [--fg-finalists N]
+                        [--fg-entrants-from [RUN ...]]
+                        [--fg-curve {grid,path_a,off}]
                         [--sidelobes {farthest,clean,off}] [--global-block]
                         [--no-framesel] [--no-selection] [--max-drop MAX_DROP]
                         [--tag TAG] [--from-idl-setup RUN_SETUP_TXT]
@@ -306,7 +311,9 @@ options:
                         elected. On common draws the candidates' scores move
                         together, so their medians' differences scatter far
                         less than on draws of their own. The run's own random
-                        draws are untouched
+                        draws are untouched. A run with the final-image grid
+                        on (--final-grid, the default) leaves it to that
+                        stage, whose election replaces it
   --n-final-draws M     common draws of the final round (default 200)
   --contrast-grid {grid,random,off}
                         the contrast curve after validation (default grid).
@@ -338,6 +345,37 @@ options:
   --cg-sidelobe-fwhm FWHM
                         the sidelobes' least half-width, in FWHM of arc
                         (default 2)
+  --final-grid {on,off}
+                        the final-image grid after the searches (default on).
+                        Each annulus' finalists, the configurations its
+                        validation scored, are elected again on single
+                        injections measured on the stitch with the other
+                        annuli at their current winners, and the elected
+                        winners' curve on a second grid becomes the run's
+                        contrast_curve.txt. It replaces --n-final
+  --fg-pa N             position angles per separation of the final grid
+                        (default 12)
+  --fg-step FWHM        the widest radial band of a tile per separation of the
+                        final grid, in FWHM (default 1). Each tile has an odd
+                        number of separations, at least 3
+  --fg-cover FWHM       how far beyond an annulus' part of the stitch a point
+                        still counts toward its election, in FWHM (default
+                        0.5)
+  --fg-z Z              how many standard errors a finalist's mean paired gain
+                        must exceed to replace the winner (default 1)
+  --fg-sweeps N         sweeps of the election at most, inner to outer and
+                        back (default 2)
+  --fg-finalists N      each run's finalists per annulus, its winner and its
+                        best by validated score (default 0, every
+                        configuration its validation scored)
+  --fg-entrants-from [RUN ...]
+                        other finished runs of the same frames, annuli and
+                        search space whose finalists enter the final grid too
+  --fg-curve {grid,path_a,off}
+                        how the final grid's curve is read: the contrast
+                        grid's S/N (grid, the default, the IDL predecessor's
+                        aperture photometry unless --cg-snr says otherwise),
+                        the stitched verify's (path_a), or no curve (off)
   --sidelobes {farthest,clean,off}
                         the noise rings of the search, calibration,
                         validation, verify and candidates. off (the default)
@@ -685,7 +723,11 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--cg-target SNR] [--cg-precision F]
                      [--cg-snr {aperture,matched}]
                      [--cg-sidelobe {off,rotation,fixed}]
-                     [--cg-sidelobe-fwhm FWHM]
+                     [--cg-sidelobe-fwhm FWHM] [--final-grid {on,off}]
+                     [--fg-pa N] [--fg-step FWHM] [--fg-cover FWHM] [--fg-z Z]
+                     [--fg-sweeps N] [--fg-finalists N]
+                     [--fg-entrants-from [RUN ...]]
+                     [--fg-curve {grid,path_a,off}]
                      [--sidelobes {farthest,clean,off}] [--global-block]
                      [--no-framesel] [--no-selection] [--max-drop MAX_DROP]
                      [--tag TAG] [--from-idl-setup RUN_SETUP_TXT]
@@ -918,7 +960,9 @@ options:
                         elected. On common draws the candidates' scores move
                         together, so their medians' differences scatter far
                         less than on draws of their own. The run's own random
-                        draws are untouched
+                        draws are untouched. A run with the final-image grid
+                        on (--final-grid, the default) leaves it to that
+                        stage, whose election replaces it
   --n-final-draws M     common draws of the final round (default 200)
   --contrast-grid {grid,random,off}
                         the contrast curve after validation (default grid).
@@ -950,6 +994,37 @@ options:
   --cg-sidelobe-fwhm FWHM
                         the sidelobes' least half-width, in FWHM of arc
                         (default 2)
+  --final-grid {on,off}
+                        the final-image grid after the searches (default on).
+                        Each annulus' finalists, the configurations its
+                        validation scored, are elected again on single
+                        injections measured on the stitch with the other
+                        annuli at their current winners, and the elected
+                        winners' curve on a second grid becomes the run's
+                        contrast_curve.txt. It replaces --n-final
+  --fg-pa N             position angles per separation of the final grid
+                        (default 12)
+  --fg-step FWHM        the widest radial band of a tile per separation of the
+                        final grid, in FWHM (default 1). Each tile has an odd
+                        number of separations, at least 3
+  --fg-cover FWHM       how far beyond an annulus' part of the stitch a point
+                        still counts toward its election, in FWHM (default
+                        0.5)
+  --fg-z Z              how many standard errors a finalist's mean paired gain
+                        must exceed to replace the winner (default 1)
+  --fg-sweeps N         sweeps of the election at most, inner to outer and
+                        back (default 2)
+  --fg-finalists N      each run's finalists per annulus, its winner and its
+                        best by validated score (default 0, every
+                        configuration its validation scored)
+  --fg-entrants-from [RUN ...]
+                        other finished runs of the same frames, annuli and
+                        search space whose finalists enter the final grid too
+  --fg-curve {grid,path_a,off}
+                        how the final grid's curve is read: the contrast
+                        grid's S/N (grid, the default, the IDL predecessor's
+                        aperture photometry unless --cg-snr says otherwise),
+                        the stitched verify's (path_a), or no curve (off)
   --sidelobes {farthest,clean,off}
                         the noise rings of the search, calibration,
                         validation, verify and candidates. off (the default)
@@ -3005,6 +3080,393 @@ options:
                         the search's draws do (default: the CPU workers, as
                         rereduce)
   --plan                count the candidates and the reductions, reduce
+                        nothing
+
+generic cubes (--instrument generic / klip-tpe generic):
+  --cube CUBE [CUBE ...]
+                        registered cube(s), (n, ny, nx) FITS; one per
+                        partition
+  --angles ANGLES [ANGLES ...]
+                        derotation angles FITS (one per cube; CCW to North-up)
+  --psf PSF [PSF ...]   generic: off-axis PSF template FITS (one, or one per
+                        cube); nomic: airy (default) | frame | gaussian
+  --ref-cube REF_CUBE [REF_CUBE ...]
+                        PSF-reference cube(s) for RDI/ARDI (one per cube)
+  --names NAMES [NAMES ...]
+                        partition names (default: cube file stems)
+  --star-flux STAR_FLUX [STAR_FLUX ...]
+                        star flux per cube, in the science frames' own units
+                        and in the template's normalisation aperture; omit it
+                        and the contrast axis is in template units
+  --pxscale PXSCALE     arcsec / px. generic: the cubes' scale. near: the
+                        plate scale the pixel constants follow (lambda/D, the
+                        FWHM). A new run takes 0.0445, the scale of the 2026
+                        astrometry. A run keeps the scale it was made with
+                        (run_setup.json), and one made before 2026-11-01,
+                        which did not record it, 0.0456
+  --lam LAM             wavelength (m)
+  --diam DIAM           aperture diameter (m) for lambda/D
+  --angle-sign ANGLE_SIGN
+                        -1 flips the derotation-angle sign
+  --crop-half CROP_HALF
+                        crop to 2h+1 px around --center (generic default: full
+                        frame; nomic default: 75)
+  --center CENTER CENTER
+                        star pixel (x y); default: array centre
+  --wv-index WV_INDEX   channel of a 4-d IFS cube
+  --no-tags             no data-derived frame-quality tags (no frame
+                        selection)
+  --forbidden-pa PA HALFWIDTH
+                        near / generic / ales: no injection within HALFWIDTH
+                        deg of position angle PA (a known companion's azimuth,
+                        a disk, a line through the star); may repeat
+  --mask-line PA HALFWIDTH
+                        near / generic / ales: leave the pixels within
+                        HALFWIDTH px of the line through the star at position
+                        angle PA (both sides) out of the noise apertures; may
+                        repeat. Pair it with --forbidden-pa on the same PA and
+                        PA+180, so injections stay off it too
+
+LBTI/ALES (--instrument ales):
+  --ales-dataset NAME   a public ALES data set in the release layout,
+                        downloaded once into $KLIP_TPE_DATA
+                        (klip_tpe.datasets: lbti_ales_mwc758), one partition
+                        per night and wavelength group, in place of --root
+  --ales-nights NIGHT [NIGHT ...]
+                        with --ales-dataset: the nights to load, as dates
+                        (20191114) or labels (n1), all by default
+  --ales-target NAME    prefix of the product files under --root
+                        (NAME_cube_cen_clean.fits ...; default WISPIT2)
+  --ales-ref NAME       reference star whose products sit beside the target's
+                        (HIP91748): its group means become each group's RDI
+                        library (default: none, RDI off)
+  --ales-reflib         search the reference star as a library: nkeep_psfref,
+                        the reference means most correlated with each target
+                        frame, searched from 0 (plain ADI, to the bit) to the
+                        whole pool, on top of the ADI references (needs
+                        --ales-ref)
+  --ales-ref-bin N      the reference star's frames in consecutive means of N
+                        before anything else (default 5; 1 = every frame)
+  --ales-reflib-science {all,searched}
+                        the science pool of the searched library: every frame
+                        the ADI rule admits (default) or a searched count too,
+                        nkeep_altroll, whose 0 is pure RDI
+  --ales-sdi            ADI, SDI and RDI in one KLIP step: the other groups'
+                        frames, rescaled to each group's wavelength, join its
+                        library as a pool; nkeep_sdi (the rows most correlated
+                        with each target frame among those the displacement
+                        rule admits) is searched from 0 (no SDI) to --ales-
+                        sdi-cap. A reference star given (--ales-ref) is the
+                        library's third pool, searched. nkeep_sdi =
+                        nkeep_psfref = 0 is plain ADI, to the bit
+  --ales-sdi-cap N      most-correlated SDI rows a target frame may take, the
+                        top of nkeep_sdi (default 100; the per-target cost
+                        grows with the square of the basis)
+  --ales-sdi-lenders {all,selected}
+                        which groups lend SDI rows: every group, excluded ones
+                        too (default), or only the groups the configuration
+                        includes
+  --ales-groups N       wavelength groups over the usable channels, equally
+                        spaced in ln(lambda) (default 20; 15 = one R = 40
+                        resolution element each)
+  --ales-channels C0 C1
+                        first and last usable channel, inclusive (default 6
+                        88)
+  --ales-only gNN [gNN ...]
+                        load these groups only (checks and short runs)
+  --ales-max-excluded N
+                        the group flags may switch off at most N groups; a
+                        proposal past that has groups switched back on,
+                        nearest --ales-prefer-um first (default 10; -1 = no
+                        bound)
+  --ales-prefer-um UM   wavelength the group bound restores groups towards
+                        (default 3.7)
+  --ales-representative gNN
+                        the group whose FWHM and matched filter stand for the
+                        combined image (default: the group at the mean
+                        wavelength)
+  --ales-angle-offset DEG
+                        added to LBT_PARA once: the derotation is CCW by
+                        LBT_PARA + this (default 180)
+  --ales-tag-r-in PX    inner radius of the frame-quality tags' annulus
+                        (default 2 spaxels: the star's core and halo; 6, the
+                        generic default, is background-dominated here)
+  --ales-cache DIR      directory for the group cubes as .npy, written once
+                        and read back after (a group mean reads the whole
+                        cube, which may sit on a slow volume)
+  --ales-selection {binary,two_slot}
+                        group flags: one 0/1 dimension per group (default) or
+                        --max-drop drop slots
+
+pyNOMIC (--instrument nomic):
+  --obj OBJ [OBJ ...]   pyNOMIC object name(s) (the <obj>_NOMIC_*.npz prefix)
+  --frames FRAMES       frame directory under the working dir (masked |
+                        aligned)
+  --binned              use pyNOMIC's <obj>_NOMIC_binned_evaluated.npz frames
+  --pre-bin PRE_BIN     mean-bin every N frames at load time (memory)
+  --parang-sign PARANG_SIGN
+                        -1 flips the parallactic-angle sign
+  --truenorth TRUENORTH
+  --fwhm-px FWHM_PX     override the FWHM (default: Airy fit / 1.028 l/D)
+  --name NAME           partition-name prefix (default: --obj)
+  --r-ee R_EE           core radius (px) for the frame PSF normalisation (1.5
+                        l/D)
+  --groups GROUPS [GROUPS ...]
+                        image groups as partitions: 'auto' (pyNOMIC's star-
+                        position split), JD split times, or @file with one
+                        integer label per frame; default: no grouping
+                        (partitions = chop states)
+  --group-min-frames GROUP_MIN_FRAMES
+                        groups with fewer frames are left out
+  --group-smooth GROUP_SMOOTH
+                        smoothing kernel (frames) of the auto split
+```
+
+## `klip-tpe elect`
+
+```
+usage: klip-tpe elect [-h] [--instrument {near,nomic,generic,ales}]
+                      [--root ROOT [ROOT ...]] [--cube CUBE [CUBE ...]]
+                      [--angles ANGLES [ANGLES ...]] [--psf PSF [PSF ...]]
+                      [--ref-cube REF_CUBE [REF_CUBE ...]]
+                      [--names NAMES [NAMES ...]]
+                      [--star-flux STAR_FLUX [STAR_FLUX ...]]
+                      [--pxscale PXSCALE] [--lam LAM] [--diam DIAM]
+                      [--angle-sign ANGLE_SIGN] [--crop-half CROP_HALF]
+                      [--center CENTER CENTER] [--wv-index WV_INDEX]
+                      [--no-tags] [--forbidden-pa PA HALFWIDTH]
+                      [--mask-line PA HALFWIDTH] [--ales-dataset NAME]
+                      [--ales-nights NIGHT [NIGHT ...]] [--ales-target NAME]
+                      [--ales-ref NAME] [--ales-reflib] [--ales-ref-bin N]
+                      [--ales-reflib-science {all,searched}] [--ales-sdi]
+                      [--ales-sdi-cap N] [--ales-sdi-lenders {all,selected}]
+                      [--ales-groups N] [--ales-channels C0 C1]
+                      [--ales-only gNN [gNN ...]] [--ales-max-excluded N]
+                      [--ales-prefer-um UM] [--ales-representative gNN]
+                      [--ales-angle-offset DEG] [--ales-tag-r-in PX]
+                      [--ales-cache DIR] [--ales-selection {binary,two_slot}]
+                      [--nights NIGHTS [NIGHTS ...]]
+                      [--backend {klip,pyklip,vip}]
+                      [--rotate {auto,scipy,opencv}] [--obj OBJ [OBJ ...]]
+                      [--frames FRAMES] [--binned] [--pre-bin PRE_BIN]
+                      [--parang-sign PARANG_SIGN] [--truenorth TRUENORTH]
+                      [--fwhm-px FWHM_PX] [--name NAME] [--r-ee R_EE]
+                      [--groups GROUPS [GROUPS ...]]
+                      [--group-min-frames GROUP_MIN_FRAMES]
+                      [--group-smooth GROUP_SMOOTH] [--max-frames MAX_FRAMES]
+                      [--workers WORKERS] [--pool {auto,processes,threads}]
+                      [--threads-per-job THREADS_PER_JOB]
+                      [--gpu-share GPU_SHARE]
+                      [--gpu-adapt-every GPU_ADAPT_EVERY]
+                      [--gpu-workers GPU_WORKERS] [--gpu-device GPU_DEVICE]
+                      [--weighting {equal,sqrt_texp}] [--fast]
+                      [--klip-gram {target,zone}] [--no-library]
+                      [--no-clean-subtract] [--ladder-pair]
+                      [--n-min-ref N_MIN_REF] [--ref-frac REF_FRAC]
+                      [--bin-min N] [--bin-max N] [--known RHO PA]
+                      [--psflib DIR] [--north {files,constant}]
+                      [--cube-name NAME]
+                      [--drop-frames NIGHT:INDEX[,INDEX...]]
+                      [--subtract-sources FILE] [--subtract-line FILE]
+                      [--inject-sources FILE] [--metric {mawet,fmmf}]
+                      [--run-dir RUN_DIR] [--entrants-from [RUN ...]]
+                      [--out DIR] [--pa N] [--step FWHM] [--cover FWHM]
+                      [--z Z] [--sweeps SWEEPS] [--finalists N]
+                      [--target LO HI] [--n-cal N_CAL]
+                      [--curve {grid,path_a,off}] [--window WINDOW] [--card]
+                      [--no-products] [--plan]
+
+options:
+  -h, --help            show this help message and exit
+  --instrument {near,nomic,generic,ales}
+                        near: NEAR campaign tree under --root; nomic: pyNOMIC
+                        working directory under --root; generic: any
+                        registered cube (--cube/--angles/--psf ...); ales: an
+                        LBTI/ALES reduction's products under --root,
+                        wavelength groups as partitions
+  --root ROOT [ROOT ...]
+                        NEAR: data root. nomic: pyNOMIC working directory (one
+                        per --obj, or one for all). generic: optional base
+                        directory for the run directory. ales: the reduction's
+                        products directory, read only (the run goes to --run-
+                        dir), or --ales-dataset
+  --nights NIGHTS [NIGHTS ...]
+  --backend {klip,pyklip,vip}
+                        PSF-subtraction engine: built-in annular KLIP
+                        (default), pyKLIP or VIP (must be installed)
+  --rotate {auto,scipy,opencv}
+                        the library a new run rotates its frames with: auto
+                        (default, or KLIP_TPE_ROTATE): OpenCV 5 when
+                        installed, about 5x faster, else scipy. A resumed run
+                        keeps the one it recorded
+  --max-frames MAX_FRAMES
+                        use only the first N frames per night (tests)
+  --workers WORKERS     worker budget, the threads the jobs running together
+                        may use: 'auto' (default) = one per physical core,
+                        'all' = every logical CPU (hardware threads included;
+                        'auto' before 2026-10-27), an integer pins it, -k =
+                        'auto' less k
+  --pool {auto,processes,threads}
+                        how the budget is spent: forked worker processes
+                        (default; the IDL bridges) or threads
+  --threads-per-job THREADS_PER_JOB
+                        threads per partition job on average (default 2, 4
+                        before 2026-10-27). The pool gets workers / threads-
+                        per-job processes, never fewer than min(workers, 2 x
+                        partitions). A job expected to take long gets up to 4x
+                        as many and a light one 1
+  --gpu-share GPU_SHARE
+                        percentage of the search's injected draws each card
+                        reduces (an NVIDIA GPU, through klip_tpe.gpu_reducer),
+                        the rest on the CPU workers. Each trial sends a card
+                        its share of the trial's jobs, lowest hash of the
+                        evaluation, the draw and the night first. 'auto' (the
+                        default for a new run, where Linux shows a card and
+                        the module is there, else 0): start at 12 and re-
+                        balance every --gpu-adapt-every trials, from the job
+                        times measured on the cards and the CPU workers, so
+                        they finish together. A number, or one per card
+                        (12,8), stays as set. A run keeps its share, and each
+                        trial's, across resumes (card.json, the checkpoint)
+  --gpu-adapt-every GPU_ADAPT_EVERY
+                        trials between two re-balances of --gpu-share auto
+                        (default 25)
+  --gpu-workers GPU_WORKERS
+                        worker processes on each card, sharing it (default 3).
+                        At large bins one leaves the card idle while it
+                        prepares the next job
+  --gpu-device GPU_DEVICE
+                        the card the card workers use, as CUDA_VISIBLE_DEVICES
+                        takes it: an index in CUDA's order or a UUID (nvidia-
+                        smi -L). Several, as 0,1, or 'all' use every card
+                        named, each with its own workers and share. Default:
+                        what the run has been using (card.json), else
+                        CUDA_VISIBLE_DEVICES, which is then recorded, so a
+                        resume keeps the card
+  --weighting {equal,sqrt_texp}
+  --fast                single-basis KLIP (angsep/anglemax not searched)
+  --klip-gram {target,zone}
+                        how the per-target KLIP forms each target's reference
+                        covariance. 'target' (default) works from its
+                        references' pixels and forms all modes. 'zone' reads
+                        it off one Gram matrix per zone and projects the
+                        target without forming the modes, the same KLIP to
+                        float64 rounding but not to the bit, and about twice
+                        as fast per target at small bins. A run keeps the mode
+                        it was started or last resumed with (its
+                        klip_gram.json) unless this is given
+  --no-library
+  --no-clean-subtract
+  --ladder-pair         two-source annulus: use the pre-2026-09-05 two-rung
+                        radial ladder instead of both sources at the annulus'
+                        area-weighted mid radius (only to reproduce older IDL
+                        runs)
+  --n-min-ref N_MIN_REF
+  --ref-frac REF_FRAC
+  --bin-min N           generic / ales: floor of the temporal bin, as a
+                        projection (MinBinGuard): a draw below it is evaluated
+                        at N frames per bin. Cost, not correctness: on a long
+                        sequence bin 1 costs tens of times more than bin 5
+                        (default 1 = no floor)
+  --bin-max N           generic / ales: top of the searched temporal-bin
+                        range, frames per bin (default: ales 30, generic
+                        nframes / 8). A winner sitting on it
+                        (distance_to_bounds bin = 0) wants it higher
+  --known RHO PA
+  --psflib DIR          near: the PSF library's directory (default
+                        ROOT/psflib), e.g. psflib_v2. Recorded in
+                        run_setup.json and kept on resume, extend and rereduce
+                        when not typed
+  --north {files,constant}
+                        near: each frame's true north at derotation and in the
+                        injection azimuth. files (a new run's default): each
+                        night's AB_truenorth_clean.txt, one number per frame,
+                        where there is one, else 36.5 deg. constant: 36.5 deg
+                        for every frame. Recorded in run_setup.json with each
+                        file's SHA-1. resume, extend and rereduce keep the
+                        run's own and refuse a recorded file that is gone or
+                        has changed. A run made before 2026-11-01 used 36.5
+  --cube-name NAME      near: the cube read in each night's directory (default
+                        AB_cube_skysub_cen_clean.fits, or AB_cube_crop150.fits
+                        where only that is there), e.g. a reduction's
+                        AB_cube_skysub_cen_clean_abline.fits. Recorded in the
+                        run's checkpoint, and kept on resume and extend when
+                        not typed
+  --drop-frames NIGHT:INDEX[,INDEX...]
+                        near: frames left out of a night at load, before the
+                        frame tags, the frame cut, binning and the injections
+                        see them: the night (n4 or 4), a colon and the frames'
+                        indices in the night's cube, counted from 0, e.g.
+                        n4:551. It may repeat, and 'none' drops nothing (on
+                        rereduce, in place of the run's list). Recorded in the
+                        run's checkpoint, and kept on resume and extend when
+                        not typed
+  --subtract-sources FILE
+                        point sources taken out of every frame once, at load:
+                        one per line, rho (arcsec), PA (deg) and contrast,
+                        each injected with the negative of its contrast by the
+                        injection code, so placement, true north, centre, flux
+                        unit and throughput are a draw's. Every reduction sees
+                        the edited frames, the KLIP-FM model cube does not.
+                        Recorded in the run's checkpoint, and kept on resume
+                        and extend when not typed
+  --subtract-line FILE  a line through the star taken out of every frame once,
+                        at load, from a node file: 'pa', 'step' (px) and
+                        optional 'rho_max' lines, then |s| (arcsec) with the
+                        ridge's peak contrast on each half-line. The chain is
+                        a source every step px from the first node to rho_max
+                        (default the crop edge), each at a(s) step / L, with L
+                        the injection PSF's line integral; as --subtract-
+                        sources otherwise (klip-tpe fit-chain --line-nodes
+                        writes such a file)
+  --inject-sources FILE
+                        point sources added to every frame once, at load,
+                        after any subtraction: one per line, rho (arcsec), PA
+                        (deg) and contrast, by the code a draw's injection
+                        uses, e.g. planets put on a line to see what its
+                        subtraction does to them. Every reduction sees them,
+                        the KLIP-FM model cube does not. Recorded in the run's
+                        checkpoint, and kept on resume and extend when not
+                        typed
+  --metric {mawet,fmmf}
+                        detection metric: 'mawet' (default) filters with the
+                        injection PSF; 'fmmf' forward-models that PSF through
+                        each configuration's own subtraction and filters with
+                        the result (klip_tpe.fmmf)
+  --run-dir RUN_DIR     the finished run (default: the newest on record)
+  --entrants-from [RUN ...]
+                        other finished runs of the same frames, annuli and
+                        search space, whose finalists enter too (the run's own
+                        always do)
+  --out DIR             output directory (default <run>_elect beside the run).
+                        An election started again on the same directory
+                        resumes
+  --pa N                position angles per separation (default 12)
+  --step FWHM           the widest radial band of a tile per separation, in
+                        FWHM (default 1)
+  --cover FWHM          how far beyond an annulus' part of the stitch a point
+                        still counts toward its election, in FWHM (default
+                        0.5)
+  --z Z                 how many standard errors a finalist's mean paired gain
+                        must exceed to replace the winner (default 1)
+  --sweeps SWEEPS       sweeps of the election at most (default 2)
+  --finalists N         each run's finalists per annulus, its winner and its
+                        best by validated score (default 0, every
+                        configuration its validation scored)
+  --target LO HI        the median S/N the starting winners should read on
+                        each tile's calibration points (default 5 8)
+  --n-cal N_CAL         points of each tile's calibration (default 12)
+  --curve {grid,path_a,off}
+                        how the curve is read: the contrast grid's S/N (grid,
+                        the default), the stitched verify's (path_a), or no
+                        curve (off)
+  --window WINDOW       reductions in flight (default: enough to fill the
+                        reducer's workers)
+  --card                the injected reductions may go to the card workers, as
+                        the search's draws do (default: the CPU workers)
+  --no-products         the election and the curve alone, without the elected
+                        winners' stitch, verify and contrast_curve.txt
+  --plan                count the finalists, points and reductions, reduce
                         nothing
 
 generic cubes (--instrument generic / klip-tpe generic):
