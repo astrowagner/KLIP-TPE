@@ -17,7 +17,10 @@ What must hold:
   re-score and the finalists of other runs take.
 * A stage started again on its directory reads its readings back instead of reducing again.
 * On finished runs (``klip-tpe elect``) the finalists of other runs of the same setup enter, the runs
-  are only read, and the elected winners' products go to the stage's directory.
+  are only read, and the elected winners' products go to the stage's directory.  The election, the
+  curve and the products read the stitch asked for, with or without pads between overlapping annuli,
+  the reports name it, and ``winners.txt`` gives every annulus' winner as ``rereduce --base-winners``
+  reads it (NEAR2, 2026-11-16).
 """
 from __future__ import annotations
 
@@ -199,6 +202,10 @@ def test_the_command_line_takes_the_options():
                        "--no-products", "--plan", "--curve", "off"])
     assert e.func.__name__ == "cmd_elect" and e.entrants_from == ["b", "c"] and e.pa == 16 and e.plan
     assert e.no_products and e.curve == "off" and e.z == 2.0
+    assert e.overlap_pads is None and e.stitch_injections is None
+    e = ap.parse_args(["elect", "--no-overlap-pads", "--stitch-injections", "all"])
+    assert e.overlap_pads is False and e.stitch_injections == "all"
+    assert ap.parse_args(["elect", "--overlap-pads"]).overlap_pads is True
 
 
 def test_the_contrast_curve_takes_the_final_curve(tmp_path):
@@ -388,6 +395,58 @@ def test_elect_on_finished_runs_takes_other_runs_finalists_and_writes_the_produc
     assert set(rr["composite"] or {}) == changed
     assert open(os.path.join(out, "contrast_curve.txt")).read().startswith("# Final-image")
     assert {d: _snapshot(d) for d in (a, b)} == before, "the runs are only read"
+
+
+@pytest.fixture(scope="module")
+def padded_run(tmp_path_factory):
+    """A finished run of overlapping annuli saved with pads between them, as s7 was."""
+    d = str(tmp_path_factory.mktemp("final_grid_pads") / "run_p")
+    red, space, obj, samp, cfg = build_synthetic_run(
+        ann_edges=[8, 20, 32], ann_extra=[[14, 26]], n_iter=[5], n_init=3, seed=7, param_verify=False,
+        stitch_every=0, verify=False, write_setup_files=False, fm_curve=False, stitch_overlap_pads=True,
+        stitch_injections="own", validation=ValidationConfig(n_top=2, n_valid=1),
+        calibration=CalibrationConfig(forced=[2e-3, 2e-3, 2e-3]))
+    Runner(red, space, obj, samp, cfg, d, log=QUIET).run()
+    return d
+
+
+@pytest.mark.slow
+def test_elect_reads_the_stitch_asked_and_lists_its_winners_for_rereduce(padded_run, tmp_path):
+    from klip_tpe.refine import read_picks, resolve_picks
+    run = padded_run
+    before = _snapshot(run)
+    lines_pad, lines_sharp = [], []
+    fc = FinalGridConfig(mode="on", n_pa=2, curve_snr="off", finalists=2)
+    pl_pad = run_final_grid(_resume(run, same_frames=False), str(tmp_path / "p0"), config=fc, plan=True,
+                            log=lines_pad.append)
+    pl_sharp = run_final_grid(_resume(run, same_frames=False), str(tmp_path / "p1"), config=fc, plan=True,
+                              overlap_pads=False, log=lines_sharp.append)
+    # the run's own stitch has 2 px pads between its overlapping annuli, and --no-overlap-pads none
+    assert pl_pad["stitch"]["overlap_pads"] and pl_pad["stitch"]["run_overlap_pads"] and pl_pad["stitch"]["overlapping"]
+    assert pl_pad["stitch"]["edge_pads_px"] == [2.0, 2.0] and pl_sharp["stitch"]["edge_pads_px"] == [0.0, 0.0]
+    assert pl_pad["stitch"]["tiles_px"] == pl_sharp["stitch"]["tiles_px"]
+    assert any("the stitch read: 2 px pads at the edges between overlapping annuli" in ln for ln in lines_pad)
+    assert any("no pads between overlapping annuli, the tiles meeting sharply there (the run's own stitch had pads"
+               in ln for ln in lines_sharp)
+    cov_pad = sum(v["cover"] for v in pl_pad["plan"]["annuli"].values())
+    cov_sharp = sum(v["cover"] for v in pl_sharp["plan"]["annuli"].values())
+    assert cov_pad > cov_sharp, "the pads widen the part of the stitch an annulus reaches"
+    # the stage without pads: its record, its report and its winners
+    out = str(tmp_path / "el")
+    r = _resume(run, same_frames=False)
+    rec = run_final_grid(r, out, config=fc, overlap_pads=False, log=QUIET)
+    assert rec["stitch"]["overlap_pads"] is False and rec["stitch"]["pads_px"] == pl_sharp["stitch"]["pads_px"]
+    assert json.load(open(os.path.join(out, "election.json")))["stitch"]["overlap_pads"] is False
+    assert "# the stitch read: no pads between overlapping annuli" in open(os.path.join(out, "election.txt")).read()
+    picks = read_picks(os.path.join(out, "winners.txt"), run, one_per_annulus=True, nann=3)
+    assert sorted(p.annulus for p in picks) == [0, 1, 2]
+    got = {p.annulus: e.key for p, e in resolve_picks(run, picks)}
+    assert got == {int(k) - 1: config_key(v["winner"]["config"]) for k, v in rec["annuli"].items()}
+    # the products take the same stitch and the injections asked for
+    elect_products(r, rec, out, log=QUIET, overlap_pads=False, stitch_injections="all")
+    rr = json.load(open(os.path.join(out, "rereduce.json")))
+    assert rr["overlap_pads"] is False and rr["stitch_injections"] == "all"
+    assert _snapshot(run) == before, "the run is only read"
 
 
 @pytest.mark.slow

@@ -3273,7 +3273,9 @@ usage: klip-tpe elect [-h] [--instrument {near,nomic,generic,ales}]
                       [--out DIR] [--pa N] [--step FWHM] [--cover FWHM]
                       [--z Z] [--sweeps SWEEPS] [--finalists N]
                       [--target LO HI] [--n-cal N_CAL]
-                      [--curve {grid,path_a,off}] [--window WINDOW] [--card]
+                      [--curve {grid,path_a,off}]
+                      [--stitch-injections {all,own}] [--overlap-pads |
+                      --no-overlap-pads] [--window WINDOW] [--card]
                       [--no-products] [--plan]
 
 options:
@@ -3460,6 +3462,21 @@ options:
                         how the curve is read: the contrast grid's S/N (grid,
                         the default), the stitched verify's (path_a), or no
                         curve (off)
+  --stitch-injections {all,own}
+                        what the final stitch's injected images hold. all:
+                        each annulus' winner reduced once more with every
+                        annulus' validation sources, so the final verify
+                        measures each source on the injected twin of the
+                        stitch, whichever tiles its footprint takes. own: each
+                        annulus' validated image, with its own sources only
+                        (default: the run's, all for a run made since
+                        2026-11-03 and own before)
+  --overlap-pads        pad the stitch's tile edges between overlapping annuli
+                        (--ann-extra), as runs saved before 2026-11-03 did
+                        (default: the run's pads)
+  --no-overlap-pads     no pads between overlapping annuli, the default for a
+                        new run. For a run that had them, the stitch is then
+                        not the run's
   --window WINDOW       reductions in flight (default: enough to fill the
                         reducer's workers)
   --card                the injected reductions may go to the card workers, as
