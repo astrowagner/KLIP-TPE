@@ -72,8 +72,11 @@ class ReductionRequest:
         picks.
     card_group : tuple of tuple or None, default None
         Every job of the trial this job belongs to, as ``(tag, partition)``, each draw's partitions,
-        for the card's ``"trial"`` rule (:func:`klip_tpe.parallel.card_picks`).  None picks the job
+        for the cards' ``"trial"`` rule (:func:`klip_tpe.parallel.card_assign`).  None picks the job
         by its own slot.
+    card_shares : tuple of float or None, default None
+        Each card's share for this job's trial, in percent, which the automatic share sets trial by
+        trial.  None takes the pool's.
     """
     params: Dict[str, Any]
     injections: Optional[Sequence[Source]] = None
@@ -92,9 +95,11 @@ class ReductionRequest:
     #: the job may go to the card workers (:class:`klip_tpe.parallel.CardSpec`): the runner
     #: marks the search's injected draws, and the pool sends the share of them its rule picks
     card: bool = False
-    #: every job of this job's trial, ``((tag, partition), ...)``, for the card's ``"trial"``
+    #: every job of this job's trial, ``((tag, partition), ...)``, for the cards' ``"trial"``
     #: rule; None picks the job by its own slot
     card_group: Optional[Tuple[Tuple[str, Any], ...]] = None
+    #: each card's share for this job's trial (the automatic share), None for the pool's
+    card_shares: Optional[Tuple[float, ...]] = None
 
 
 @dataclass
@@ -2719,19 +2724,23 @@ class PartitionedReducer(Reducer):
     injection_scale : dict or None
         Factor on each partition's injected contrasts (:meth:`set_injection_spectrum`), or None for
         the contrast given in every partition.
-    card_share : float or None
-        Percent of the search's injected draws the card workers take
-        (:class:`klip_tpe.parallel.CardSpec`), set before the pool starts.  None or 0 uses no card.
+    card_share : float or list of float or None
+        Percent of the search's injected draws each card takes (:class:`klip_tpe.parallel.CardSpec`),
+        one number for every card or one per card, set before the pool starts.  None or 0 uses no card.
+        Under the automatic share it is where the share starts.
     card_workers : int
-        Number of card worker processes, sharing the card's queue.
+        Number of worker processes on each card, sharing the card's queue.
     card_rule : {"trial", "job"}
-        How the share picks the card's jobs (:class:`klip_tpe.parallel.CardSpec`), the lowest-hash jobs
-        of each trial up to the share by default.
-    card_device : str or None
-        The card the card workers use, as ``CUDA_VISIBLE_DEVICES`` takes it.  None leaves the
-        environment's.
+        How the shares pick the cards' jobs (:class:`klip_tpe.parallel.CardSpec`), the lowest-hash jobs
+        of each trial up to the shares by default.
+    card_device : str or list of str or None
+        The card the card workers use, or one per card, as ``CUDA_VISIBLE_DEVICES`` takes it.  None
+        leaves the environment's, one card.
+    card_adapt_every : int
+        Trials between two re-balances of the automatic share (:meth:`klip_tpe.runner.Runner._card_adapt`),
+        0 for a share that stays as set.
     card_on_ready : callable or None
-        Function ``on_ready(info) -> str or None`` the pool calls once as the card comes up, which the
+        Function ``on_ready(info) -> str or None`` the pool calls once a card as it comes up, which the
         command line uses to record the card's name in ``card.json``.
     card_factory : callable or None
         Function ``cpu_reducer -> card reducer or None``.  None takes ``GPUKLIPReducer.from_cpu`` for
@@ -2781,17 +2790,19 @@ class PartitionedReducer(Reducer):
     #: given in every partition, a source with the star's spectrum
     injection_scale: Optional[Dict[Any, float]] = None
     injection_spectrum_info: Optional[Dict[str, Any]] = None
-    #: the percentage of the search's injected draws the card workers reduce
-    #: (:class:`klip_tpe.parallel.CardSpec`), set before the pool starts; None or 0: no card
-    card_share: Optional[float] = None
+    #: the percentage of the search's injected draws each card reduces, one number or one per
+    #: card (:class:`klip_tpe.parallel.CardSpec`), set before the pool starts, None or 0 for no card
+    card_share: Any = None
     #: card worker processes, sharing the card's queue
     card_workers: int = 3
     #: how the share picks the card's jobs: ``"trial"``, the lowest-hash jobs of each trial up to
     #: the share, or ``"job"``, each job by its own slot, as runs did before 2026-11-15
     card_rule: str = "trial"
-    #: the card, as ``CUDA_VISIBLE_DEVICES`` takes it (set in the card workers alone); None
-    #: leaves the environment's
-    card_device: Optional[str] = None
+    #: the card, or one per card, as ``CUDA_VISIBLE_DEVICES`` takes it (set in the card workers
+    #: alone), None for the environment's, one card
+    card_device: Any = None
+    #: trials between two re-balances of the automatic share, 0 to keep the share as set
+    card_adapt_every: int = 0
     #: ``on_ready(info) -> line or None``, called once as the card comes up
     card_on_ready: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None
     #: ``factory(cpu_reducer) -> card reducer or None``; None: ``GPUKLIPReducer.from_cpu`` for
@@ -3208,7 +3219,8 @@ class PartitionedReducer(Reducer):
             The specification, or None without a share, a card reducer or a partition the card can
             reduce.
         """
-        share = float(self.card_share or 0)
+        shares = self.card_shares_start()
+        share = max(shares) if shares else 0.0
         if share <= 0:
             return None
         factory = self.card_factory or _gpu_card_factory()
@@ -3228,8 +3240,43 @@ class PartitionedReducer(Reducer):
             self._log("  card: no partition the card can reduce: CPU only")
             return None
         from .parallel import CardSpec
-        return CardSpec(reds, share, self.card_workers, rule=self.card_rule, device=self.card_device,
-                        on_ready=self.card_on_ready)
+        devs = self.card_devices()
+        return CardSpec(reds, shares, self.card_workers, rule=self.card_rule,
+                        device=devs if len(devs) > 1 else devs[0], on_ready=self.card_on_ready)
+
+    def card_devices(self) -> List[Optional[str]]:
+        """Return each card's device, as ``CUDA_VISIBLE_DEVICES`` takes it.
+
+        Returns
+        -------
+        devices : list of str or None
+            One entry a card, ``[None]`` for one card with the environment's device.
+        """
+        d = self.card_device
+        if isinstance(d, (list, tuple)):
+            return [None if v is None else str(v) for v in d] or [None]
+        return [None if d is None else str(d)]
+
+    def card_shares_start(self) -> List[float]:
+        """Return each card's share as set, where the automatic share starts.
+
+        Returns
+        -------
+        shares : list of float
+            One share a card, in percent, 0 for no card.
+
+        Raises
+        ------
+        ValueError
+            If ``card_share`` lists another number of shares than ``card_device`` cards.
+        """
+        n = len(self.card_devices())
+        v = self.card_share
+        if isinstance(v, (list, tuple)):
+            if len(v) != n:
+                raise ValueError(f"card_share gives {len(v)} shares for {n} card(s)")
+            return [float(x or 0) for x in v]
+        return [float(v or 0)] * n
 
     def take_card_notes(self) -> List[str]:
         """Return the card's log lines since the last call, for the caller to write from its own thread.
@@ -3454,7 +3501,8 @@ class PartitionedReducer(Reducer):
     def reduce_config(self, config: Config, injections: Optional[Sequence[Source]] = None,
                       k_scan: bool = False, tag: str = "", selected: Optional[Sequence[Any]] = None,
                       fm_sources: Optional[Sequence[Source]] = None, extras: bool = False,
-                      card: bool = False, card_group: Optional[Sequence[str]] = None) -> EvalImages:
+                      card: bool = False, card_group: Optional[Sequence[str]] = None,
+                      card_shares: Optional[Sequence[float]] = None) -> EvalImages:
         """Reduce every selected partition with its own parameters and combine the images.
 
         Each partition injects the sources at its own point of their spectrum (:meth:`scaled_sources`).
@@ -3480,9 +3528,11 @@ class PartitionedReducer(Reducer):
         card : bool, default False
             Whether the partition jobs may go to the card workers (``card_share``).
         card_group : sequence of str or None, default None
-            Tags of every reduction of the trial this one belongs to, ``tag`` among them, for the card's
+            Tags of every reduction of the trial this one belongs to, ``tag`` among them, for the cards'
             ``"trial"`` rule.  Each partition job carries the trial's jobs, every tag with every selected
             partition.  None picks each job by its own slot.
+        card_shares : sequence of float or None, default None
+            Each card's share for the trial, which every partition job carries.  None takes the pool's.
 
         Returns
         -------
@@ -3501,7 +3551,9 @@ class PartitionedReducer(Reducer):
                                                       k_scan, f"{tag}_{pid}",
                                                       fm_sources=self.scaled_sources(fm_sources, pid), extras=extras,
                                                       threads=per, siblings=siblings, card=bool(card),
-                                                      card_group=group))
+                                                      card_group=group,
+                                                      card_shares=tuple(float(v) for v in card_shares)
+                                                      if card and card_shares else None))
                 for pid in sel]
         keys = None
         plan = self._plan(jobs, per) if kind == "processes" else None
@@ -3619,11 +3671,15 @@ class PartitionedReducer(Reducer):
             d["data_edits"] = dict(self.data_edits)
         if self.sdi_lender_ids(list(self.reducers)) is not None:
             d["sdi_lenders"] = str(self.sdi_lenders)
-        if float(self.card_share or 0) > 0:
-            d["card"] = {"share": float(self.card_share), "workers": int(self.card_workers),
+        shares = self.card_shares_start()
+        if shares and max(shares) > 0:
+            devs = self.card_devices()
+            d["card"] = {"share": shares[0] if len(shares) == 1 else shares, "workers": int(self.card_workers),
                          "rule": str(self.card_rule)}
-            if self.card_device is not None:
-                d["card"]["device"] = str(self.card_device)
+            if any(v is not None for v in devs):
+                d["card"]["device"] = devs[0] if len(devs) == 1 else devs
+            if int(self.card_adapt_every or 0) > 0:
+                d["card"]["adapt_every"] = int(self.card_adapt_every)
         return d
 
 

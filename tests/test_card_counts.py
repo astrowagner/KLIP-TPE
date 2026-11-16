@@ -36,7 +36,7 @@ def test_the_annulus_line_counts_the_jobs_since_the_search_started():
     logs = []
     counts = {"marked": 10, "jobs": 7, "refused": {"extras": 1}, "busy_s": 100.0, "workers": 3, "t": 1000.0}
     red = types.SimpleNamespace(card_summary=lambda: dict(counts))
-    stub = types.SimpleNamespace(reducer=red, log=logs.append, _card_annuli={})
+    stub = types.SimpleNamespace(reducer=red, log=logs.append, _card_annuli={}, _card_shares_now=lambda: None)
     stub._card_counts = lambda: Runner._card_counts(stub)
     Runner._mark_card(stub)
     counts.update(marked=40, jobs=32, refused={"extras": 1, "KLIP-FM": 3, "fast": 2}, busy_s=1000.0, t=1600.0)
