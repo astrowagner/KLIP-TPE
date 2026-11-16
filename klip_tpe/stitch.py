@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+from collections import Counter
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -747,7 +748,8 @@ def write_contrast_curve(path: str, curves: Sequence[Optional[Dict[str, Any]]], 
                          fwhm: float, pxscale: float, legacy: bool = False,
                          contrasts: Optional[Sequence[float]] = None,
                          fm_curves: Optional[Sequence[Optional[Dict[str, Any]]]] = None,
-                         grid_curves: Optional[Sequence[Optional[Dict[str, Any]]]] = None) -> Dict[str, np.ndarray]:
+                         grid_curves: Optional[Sequence[Optional[Dict[str, Any]]]] = None,
+                         final_curve: Optional[Dict[str, Any]] = None) -> Dict[str, np.ndarray]:
     """Write the run's ``contrast_curve.txt``, the annuli's curves joined at the seams, then their per-sample points.
 
     Each annulus' curve is trimmed at the seams by ``trim = max(round(fwhm / 3), 1) * pxscale``:
@@ -755,7 +757,8 @@ def write_contrast_curve(path: str, curves: Sequence[Optional[Dict[str, Any]]], 
     ``ia < nann - 1``.  The curves are joined and sorted by separation, followed by the per-sample
     ``5 * contrast / SNR`` points.  With ``fm_curves`` a ``# KLIP-FM`` cross-check section follows
     (A §6.4), two comment lines then ``sep_arcsec  contrast_5sig`` rows over all annuli, sorted by
-    separation and not trimmed, since the test radii lie inside the zones.
+    separation and not trimmed, since the test radii lie inside the zones.  With ``final_curve`` the
+    main section is the final-image grid's curve, untrimmed, followed by its seam lines.
 
     Parameters
     ----------
@@ -780,6 +783,10 @@ def write_contrast_curve(path: str, curves: Sequence[Optional[Dict[str, Any]]], 
         Each annulus' ``AnnulusResult.grid_curve`` (one injection per reduction), which takes the main
         section's place annulus by annulus where present.  When only some annuli have one, the header
         names the annuli of each method.
+    final_curve : dict or None, default None
+        The final-image grid's curve (:meth:`klip_tpe.final_grid.FinalGrid.curve`), measured on the
+        stitch and so not trimmed, which takes the main section's place for every annulus, with a seam
+        line per annulus after it.
 
     Returns
     -------
@@ -789,7 +796,8 @@ def write_contrast_curve(path: str, curves: Sequence[Optional[Dict[str, Any]]], 
     """
     nann = len(curves)
     trim = 0.0 if legacy else seam_trim(fwhm, pxscale)
-    grid = list(grid_curves or [])
+    fin = final_curve if final_curve and final_curve.get("r_as") and final_curve.get("curve") else None
+    grid = [] if fin else list(grid_curves or [])
     use_grid = any(g for g in grid)
     R, C, SR, SC, SA = [], [], [], [], []
     by_method: Dict[str, List[int]] = {"grid": [], "validation": []}
@@ -811,9 +819,23 @@ def write_contrast_curve(path: str, curves: Sequence[Optional[Dict[str, Any]]], 
         if ia < nann - 1 and ia + 1 < len(edges_px):
             keep &= r <= edges_px[ia + 1] * pxscale - trim
         R.extend(r[keep]); C.extend(c[keep])
+    if fin:
+        r = np.array([np.nan if v is None else float(v) for v in fin["r_as"]])
+        c = np.array([np.nan if v is None else float(v) for v in fin["curve"]])
+        keep = np.isfinite(r) & np.isfinite(c)
+        R, C = list(r[keep]), list(c[keep])
     R, C = np.asarray(R, float), np.asarray(C, float)
     o = np.argsort(R, kind="stable")
-    if use_grid and by_method["validation"]:
+    if fin:
+        nsep = Counter(int(a) for a in fin.get("annulus") or [])
+        per = sorted(set(nsep.values()))
+        head = (f"# Final-image injection-recovery SNR={float(fin.get('target_snr', 5.0)):g} contrast curve (one "
+                f"injection per reduction on the stitch of the elected winners, the final-image grid's, "
+                f"{per[0] if len(per) == 1 else f'{per[0]}-{per[-1]}' if per else 0} separations per annulus, "
+                f"median over position angle, read with "
+                + ("the contrast grid's S/N" if fin.get("read_with", "grid") == "grid" else "the stitched verify's S/N")
+                + ")")
+    elif use_grid and by_method["validation"]:
         head = ("# SNR=5 contrast curve from two methods.  Injection grid (one injection per reduction at the winner "
                 f"config, median over position angle): annuli {_spans(by_method['grid'])}.  Validation injections "
                 f"(no grid curve): annuli {_spans(by_method['validation'])}")
@@ -822,15 +844,22 @@ def write_contrast_curve(path: str, curves: Sequence[Optional[Dict[str, Any]]], 
                 "median over position angle)")
     else:
         head = "# Injection-calibrated SNR=5 contrast curve (validated winners per annulus)"
+    trim_txt = ("the curve is measured on the stitch, so not trimmed at the seams" if fin else
+                f"seam trim = {trim:.4f} arcsec ({'legacy_stitch: no trim' if legacy else 'max(round(fwhm/3),1) px'})")
     L = [head,
          f"# klip_tpe {__version__} -- {_dt.datetime.now().isoformat(timespec='seconds')}",
-         f"# seam trim = {trim:.4f} arcsec ({'legacy_stitch: no trim' if legacy else 'max(round(fwhm/3),1) px'});"
-         f" annulus edges (px) = {', '.join(f'{e:.1f}' for e in edges_px)}"]
+         f"# {trim_txt}; annulus edges (px) = {', '.join(f'{e:.1f}' for e in edges_px)}"]
     if contrasts:
         L.append("# injection contrast per annulus = " + ", ".join(f"{c:.3E}" for c in contrasts))
     L.append("# separation_arcsec   contrast_snr5")
     for i in o:
         L.append(f"{R[i]:10.3f}   {C[i]:12.4E}")
+    for sm in (fin or {}).get("seams") or []:
+        def _r(v, kind):
+            return (("-" if v is None else f"{float(v):.2f}")
+                    + (" (seam)" if kind == "seam" else " (edge of the stitch)"))
+        L.append(f"# seam, annulus {sm['annulus']}: inner {_r(sm.get('inner'), sm.get('inner_edge'))}, outer "
+                 f"{_r(sm.get('outer'), sm.get('outer_edge'))}, the curve near each tile edge over its middle")
     if SR:
         L.append("# per-sample 5*contrast/SNR points (validation injections):")
         L.append("#   sep(\")    5sig_contrast_sample   annulus")

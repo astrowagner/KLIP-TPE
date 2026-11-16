@@ -194,8 +194,9 @@ def _read_json(path: str) -> Any:
 def run_entrants(run_dir: str, annulus: int, top: int = 0) -> List[Entrant]:
     """Return the candidates a finished run offers for an annulus.
 
-    They are the configurations its validation scored, the elected one marked ``"winner"``, and with
-    ``top`` the ``top`` best of its history that are not among them.  They are read from
+    They are the configurations its validation scored, the run's winner marked ``"winner"``, and with
+    ``top`` the ``top`` best of its history that are not among them.  The winner is the final-image
+    grid's where it changed the validation's, and it may come from another run.  They are read from
     ``final_results.json`` and ``results.jsonl``, and a configuration offered twice comes once.
 
     Parameters
@@ -234,11 +235,16 @@ def run_entrants(run_dir: str, annulus: int, top: int = 0) -> List[Entrant]:
         if row.get("config"):
             add(Entrant(name, "validation", row.get("eval_index"), row["config"], row.get("search_score"),
                         row.get("validated_score")))
-    win = ann.get("winner_config")
+    # the run's final winner: the final-image grid's where it changed the validation's
+    fg = ann.get("final_grid") or {}
+    win = fg.get("config") if fg.get("changed") and fg.get("config") else ann.get("winner_config")
     if win:
         e = seen.get(config_key(win))
         if e is not None:
             e.kind = "winner"
+        elif fg.get("changed"):
+            add(Entrant(fg.get("run") or name, "winner", fg.get("eval_index"), win, fg.get("search_score"),
+                        fg.get("validated_score")))
         else:
             add(Entrant(name, "winner", ann.get("winner_index"), win, None, ann.get("winner_score")))
     if top > 0:
@@ -633,7 +639,8 @@ class StitchScorer:
         The tiles the stitched images are made over, the innermost and the outermost reaching the
         whole KLIP zones of their annuli.
     base_cfg : dict of int to Config
-        Each annulus' base winner.
+        Each annulus' base winner, the run's final configuration (``AnnulusResult.final_config``) unless
+        :meth:`use_winners` replaced it.
     base_from : dict of int to Entrant
         The annuli whose base winner is another configuration than the run's (:meth:`use_winners`).
     known : list of tuple
@@ -680,7 +687,7 @@ class StitchScorer:
         finally:
             runner.cfg.stitch_overlap_pads = keep
         self.itiles = runner._image_tiles(self.tiles)
-        self.base_cfg = {a: runner._config_from_dict(self.results[a].winner_config) for a in self.order}
+        self.base_cfg = {a: runner._config_from_dict(self.results[a].final_config) for a in self.order}
         #: the annuli whose base winner is another configuration than the run's (:meth:`use_winners`)
         self.base_from: Dict[int, Entrant] = {}
         self.known = [tuple(k) for k in (getattr(runner.sampler, "known", ()) or ())]
@@ -1921,7 +1928,7 @@ def rescore(runner, entrant_runs: Sequence[str], out_dir: str, *, annuli: Sequen
             for e in picked.get(k, []):
                 add(e)
         ents[k] = lst
-    base_key = {k: (bw[k].key if k in bw else config_key(scorer.results[k].winner_config)) for k in annuli}
+    base_key = {k: (bw[k].key if k in bw else config_key(scorer.results[k].final_config)) for k in annuli}
     # the draws per annulus
     nd: Dict[int, int] = {}
     for k in annuli:

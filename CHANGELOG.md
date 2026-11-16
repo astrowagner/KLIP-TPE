@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased — 2026-11-16 (the final-image grid)
+
+From NEAR2's note of 2026-11-16, "one final-image grid, for the election and the contrast curve".
+
+- **The final-image grid** (`klip_tpe/final_grid.py`, `RunConfig.final_grid`, `--final-grid`, on
+  by default).  After the searches each annulus' finalists, the configurations its validation
+  scored, are elected again on single injections measured on the stitch as the stitched verify
+  measures them, the other annuli at their current winners.  Each tile has an odd number of
+  separations, at least 3, at the middles of equal bands (`--fg-step`), with `--fg-pa` position
+  angles each, the same grid for every run of a setup.  Every annulus whose part of the stitch
+  lies within 1 FWHM of a point is reduced with its source (`final_grid.READ_FWHM`), and the
+  reductions an annulus' finalists share are made once.  Each tile's contrast is set once on the
+  validation's winners.  A finalist replaces the winner when its mean paired gain over the points
+  within `--fg-cover` FWHM of its annulus' part of the stitch exceeds `--fg-z` standard errors.  Two
+  sweeps go inner to outer and back (`--fg-sweeps`), or fewer once a sweep changes nothing.  Each
+  change is read again on the curve's grid, the held-out gain.
+- **The run's curve is the stage's.**  The elected winners are read on a second grid, the
+  election's turned by half a step, each point's contrast stepped to S/N 5 as the contrast grid
+  steps it and read with its S/N (`--fg-curve`).  The curve takes the main section of
+  `contrast_curve.txt` (`stitch.write_contrast_curve(final_curve=)`), with several separations per
+  annulus and a seam line per annulus, the curve near each tile edge over its middle.
+- **The final products take the elected winners.**  An annulus whose winner changed records it in
+  `AnnulusResult.final_grid` (in `final_results.json` and the checkpoint), and
+  `AnnulusResult.final_config` gives the configuration the final image takes.  The final stitch,
+  its seam patches, `klip_stitched_params.txt`, `rereduce`, `fit-chain`, the re-score's base
+  winners and `refine.run_entrants` take it, and `Runner._annulus_images` reads that winner's
+  images from `final_grid/annulusNN_best_*.fits`.  The annulus directory keeps the validation's
+  winner and its products.
+- **The validation's final round** (`--n-final`) is left to the stage when it is on, as Kevin
+  Wagner chose (2026-11-16).
+- **`klip-tpe elect`** runs the stage on a finished run, with the finalists of other runs of the
+  same setup (`--entrants-from`, `--finalists`), into `<run>_elect`, and writes the elected
+  winners' stitch, verify and curve there (`final_grid.elect_products`).  The runs are only read,
+  and a stage started again on its directory reads its readings back from
+  `state/readings.jsonl` instead of reducing again.
+- The stage measures a source alone with the stitched verify's Path A S/N
+  (`FinalGrid.path_a`), the S/N `verify_injections` gives without that function's maps and
+  tables, about 70 times faster on a 300 px image.
+- Docs in `docs/RUNNING.md` and `docs/CLI.md`, and the touched runner methods' docstrings brought
+  to the documentation rule.  Tests in `tests/test_final_grid.py`.
+
 ## Unreleased — 2026-11-16 (the automatic card share, and several cards)
 
 - **`--gpu-share auto` re-balances the card's share** every `--gpu-adapt-every` trials (25 by

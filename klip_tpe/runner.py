@@ -56,6 +56,7 @@ from .liveness import liveness_mode
 from .metrics import (Objective, Source, mawet_peak_snr, nanmedian_even, radprof, source_xy,
                       star_center)
 from .contrast_grid import ContrastGridConfig
+from .final_grid import FinalGridConfig
 from .optimizers import GridSearch, History, Optimizer, RandomSearch, TPE
 from .positions import PositionSampler, n_sources_rule
 from .reducer import EvalImages, PartitionedReducer, Reducer, ReductionRequest
@@ -283,6 +284,13 @@ class RunConfig:
         ``AnnulusResult.grid_curve``, ``annulusNN/contrast_grid.json`` and ``.txt``, and the
         main curve of the run-level ``contrast_curve.txt``.  A run saved before it existed
         resumes without it.
+    final_grid
+        the final-image grid after the searches (:mod:`klip_tpe.final_grid`), which elects each
+        annulus' winner again among its finalists on single injections measured on the stitch,
+        the other annuli at their current winners, and makes the elected winners' curve on a
+        second grid the main curve of the run-level ``contrast_curve.txt``.  It replaces the
+        validation's final round.  On by default, off for a run saved before it existed and for
+        ``opt_width`` and k-scan runs.
     """
 
     ann_edges: List[float] = field(default_factory=lambda: [11.0, 44.0])   # px
@@ -426,6 +434,7 @@ class RunConfig:
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     contrast_grid: ContrastGridConfig = field(default_factory=ContrastGridConfig)
+    final_grid: FinalGridConfig = field(default_factory=FinalGridConfig)
     kfit_order: int = 2
     save_fits: bool = True
     save_eval_images: bool = True         # per-eval injected/clean crops (annulusNN/evals/, IDL evalNNNN_score_inj)
@@ -564,6 +573,10 @@ class RunConfig:
         cg = d.get("contrast_grid")
         d["contrast_grid"] = (_from_dict_filtered(ContrastGridConfig, cg) if isinstance(cg, dict)
                               else ContrastGridConfig(mode="off"))
+        # and one saved before the final-image grid existed (2026-11-16) elects no winner again
+        fg = d.get("final_grid")
+        d["final_grid"] = (_from_dict_filtered(FinalGridConfig, fg) if isinstance(fg, dict)
+                           else FinalGridConfig(mode="off"))
         # a run saved before the noise rings left the sidelobes out keeps its rings
         d.setdefault("sidelobes", "off")
         # and one saved before 2026-11-01 its negative scores, and its verify
@@ -659,6 +672,25 @@ class AnnulusResult:
     #: ``candidate``, ``eval_index``, first-round ``validated_score``, ``final_score`` and
     #: ``trials``, with ``winner_candidate``.  ``validation_final.json`` adds the draws.
     final_round: Optional[Dict[str, Any]] = None
+    #: the final-image grid's record (``RunConfig.final_grid``), whether its election ``changed``
+    #: the winner, the winner's ``run``, ``kind``, ``eval_index`` and scores, with ``config`` where
+    #: it changed, ``change`` (the sweep and the paired gain of the last change) and ``held_out``
+    #: (the gain on the curve's grid).  None without the stage
+    final_grid: Optional[Dict[str, Any]] = None
+
+    @property
+    def final_config(self) -> Dict[str, Any]:
+        """The configuration the run's final image takes, the final-image grid's winner, else the validation's.
+        """
+        fg = self.final_grid or {}
+        return dict(fg["config"]) if fg.get("changed") and fg.get("config") else self.winner_config
+
+    @property
+    def final_partitions(self) -> List[str]:
+        """The partitions the final configuration selects, those of the validation's winner where it names none.
+        """
+        sel = self.final_config.get("selected") if (self.final_grid or {}).get("changed") else None
+        return [str(p) for p in (sel or self.partitions)]
 
     def to_dict(self) -> Dict[str, Any]:
         return json.loads(json.dumps(asdict(self), default=_json_default))
@@ -666,6 +698,27 @@ class AnnulusResult:
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "AnnulusResult":
         return _from_dict_filtered(cls, d)
+
+
+def _final_score(r: "AnnulusResult") -> float:
+    """Return the validated score of an annulus' final configuration.
+
+    Parameters
+    ----------
+    r : AnnulusResult
+        The annulus' result.
+
+    Returns
+    -------
+    score : float
+        The final-image grid winner's validated score where it changed the winner, NaN where that
+        winner has none, else the validation winner's score.
+    """
+    fg = r.final_grid or {}
+    if not fg.get("changed"):
+        return float(r.winner_score)
+    v = fg.get("validated_score")
+    return float("nan") if v is None else float(v)
 
 
 def _shares_text(shares: Optional[Sequence[float]]) -> str:
@@ -4057,11 +4110,30 @@ class Runner:
 
     # ------------------------------------------------------------- validation
     def validate(self, ia: int) -> Tuple[List[Dict[str, Any]], int, Dict[str, Any]]:
-        """Re-score the top ``n_top`` distinct configs on ``n_valid`` fresh injection
-        sets with the RAW metric, elect the winner on the validated median, then score the
-        winner on ``n_rescore`` fresh draws for its reported median (:meth:`_rescore_winner`)
-        when two or more candidates had one.  Distinct means distinct reductions
-        (:meth:`_validation_candidates`)."""
+        """Validate an annulus' best configurations on fresh draws and elect its winner.
+
+        The ``n_top`` best distinct configurations of the search (:meth:`_validation_candidates`, distinct
+        reductions) are scored with the raw metric on ``n_valid`` fresh draws each, and the largest median
+        is elected.  With ``ValidationConfig.n_final`` the best medians go to a final round on common draws
+        (:meth:`_final_round`), which a run with the final-image grid on leaves to that stage.  When two or
+        more candidates had a median, the winner is scored again on ``n_rescore`` fresh draws for its
+        reported median (:meth:`_rescore_winner`).  An interrupted validation resumes candidate by
+        candidate.
+
+        Parameters
+        ----------
+        ia : int
+            The annulus, counted from 0.
+
+        Returns
+        -------
+        table : list of dict
+            One row per candidate, as ``validation.json`` holds them.
+        vwin : int
+            The winner's index among the candidates, -1 without one.
+        winner : dict
+            The winner's images, sources, score and configuration.
+        """
         vc = self.cfg.validation
         self.hb.stage(f"annulus {ia + 1} validation", annulus=ia)
         # The search's state, written now rather than held by the routine throttle: the
@@ -4210,7 +4282,11 @@ class Runner:
             except OSError:
                 pass
         if len(entrants) > 1 and int(vc.n_final_draws or 0) > 0:
-            winner, vwin = self._final_round(ia, entrants, int(vc.n_final_draws), winner, vwin)
+            if self._final_grid_on():
+                self.log(f"  validation final round: left to the final-image grid, which elects among these "
+                         f"{len(cands)} candidates on the stitch (RunConfig.final_grid)")
+            else:
+                winner, vwin = self._final_round(ia, entrants, int(vc.n_final_draws), winner, vwin)
         # An election among two or more medians picks the largest, so the winner is scored again
         # on fresh draws.  A lone candidate's median was not selected on: its draws are fresh.
         n_re = vc.n_valid if vc.n_rescore is None else int(vc.n_rescore)
@@ -5139,19 +5215,37 @@ class Runner:
         return res
 
     def _annulus_images(self, ia: int) -> Optional[Dict[str, Any]]:
-        """Winner images of a completed annulus: memory cache, else the FITS products on disk."""
+        """Return the images of a completed annulus' winner, from memory, else from its FITS products.
+
+        An annulus whose winner the final-image grid changed reads that winner's images in
+        ``final_grid/``, the others the validation winner's in their annulus directory.
+
+        Parameters
+        ----------
+        ia : int
+            The annulus, counted from 0.
+
+        Returns
+        -------
+        images : dict or None
+            ``clean``, ``inj``, ``zone``, ``clean_stack``, ``inj_stack``, ``parts``, ``sources``,
+            ``contrast`` and ``weights``, None without a clean image.
+        """
         d = self._ann_images.get(ia)
         if d is not None and d.get("clean") is not None:
             return d
         from .stitch import read_fits
-        ad = os.path.join(self.run_dir, f"annulus{ia+1:02d}")
-        clean = read_fits(os.path.join(ad, "best_clean.fits"))
+        res = self.results[ia] if ia < len(self.results) else None
+        if res is not None and (res.final_grid or {}).get("changed"):
+            ad, pre = os.path.join(self.run_dir, "final_grid"), f"annulus{ia+1:02d}_"
+        else:
+            ad, pre = os.path.join(self.run_dir, f"annulus{ia+1:02d}"), ""
+        clean = read_fits(os.path.join(ad, pre + "best_clean.fits"))
         if clean is None:
             return None
-        res = self.results[ia] if ia < len(self.results) else None
         parts, sources, zone, contrast = [], [], None, None
         if res is not None:
-            parts = list(res.partitions) or [str(s) for s in res.winner_config.get("selected", [])]
+            parts = list(res.final_partitions) or [str(s) for s in res.final_config.get("selected", [])]
             sources = list(res.winner_sources)
             zone = (res.inrad, res.outrad)
             contrast = res.contrast
@@ -5164,9 +5258,9 @@ class Runner:
                 contrast = w.get("contrast")
             except Exception:
                 zone = self._annulus(ia)
-        d = {"clean": clean, "inj": read_fits(os.path.join(ad, "best_inj.fits")), "zone": zone,
-             "clean_stack": read_fits(os.path.join(ad, "best_clean_partitions.fits")),
-             "inj_stack": read_fits(os.path.join(ad, "best_inj_partitions.fits")),
+        d = {"clean": clean, "inj": read_fits(os.path.join(ad, pre + "best_inj.fits")), "zone": zone,
+             "clean_stack": read_fits(os.path.join(ad, pre + "best_clean_partitions.fits")),
+             "inj_stack": read_fits(os.path.join(ad, pre + "best_inj_partitions.fits")),
              "parts": [str(p) for p in parts], "sources": sources, "contrast": contrast, "weights": None}
         self._ann_images[ia] = d
         return d
@@ -5672,14 +5766,24 @@ class Runner:
     def finish(self) -> None:
         """Write the run's final products.
 
-        They are the sensitivity-weighted stitch with its seam patches, the injected, per-partition and S/N
-        stitches, ``klip_stitched_params.txt``, the run's ``contrast_curve.txt``, ``final_results.json`` with
-        the card's totals and each annulus' numbers, the rows of ``bench_summary.txt``, and the final
-        verification and candidate hooks.  The display's ``on_finish`` comes last.
+        The final-image grid comes first (:meth:`_final_grid`, ``RunConfig.final_grid``) and elects the
+        winners the products take.  They are the sensitivity-weighted stitch with its seam patches, the
+        injected, per-partition and S/N stitches, ``klip_stitched_params.txt``, the run's
+        ``contrast_curve.txt``, ``final_results.json`` with the card's totals and each annulus' numbers, the
+        rows of ``bench_summary.txt``, and the final verification and candidate hooks.  The display's
+        ``on_finish`` comes last.
         """
         self.hb.stall_after(None)                 # final products take as long as they take
-        self.hb.stage("final products")
         results = [r for r in self.results if r is not None]
+        # the final-image grid elects the winners the products below take (on failure the
+        # validation's winners stand, and the run says so)
+        fcurve = None
+        if results and self._final_grid_on():
+            self.hb.stage("final grid")
+            fcurve = self._guard("final grid", self._final_grid, results)
+            # its records reach the checkpoint, from which a resume, rereduce and the re-score take the winners
+            self.checkpoint(final_annulus=self._last_final)
+        self.hb.stage("final products")
         out = {"annuli": [r.to_dict() for r in results], "seed": self.cfg.seed, "bench_tag": self.cfg.bench_tag}
         stitched = None
         if results and self.cfg.save_fits:
@@ -5704,7 +5808,7 @@ class Runner:
                         [r.contrast_curve for r in results], edges, self.fwhm, self.pxscale,
                         legacy=self.cfg.legacy_stitch, contrasts=[r.contrast for r in results],
                         fm_curves=[r.fm_curve for r in results],
-                        grid_curves=[getattr(r, "grid_curve", None) for r in results])
+                        grid_curves=[getattr(r, "grid_curve", None) for r in results], final_curve=fcurve)
             self._durable_later(os.path.join(self.run_dir, "contrast_curve.txt"))
         # final_results.json says the run is finished (bench, klip-tpe runs): the products
         # above reach the disk first, and it is never left empty by a crash
@@ -5758,12 +5862,156 @@ class Runner:
         self.log(f"run complete: {len(results)} annuli, {self.records_count} evaluations")
         self._emit("on_finish")
 
+    def _final_grid_on(self) -> bool:
+        """Tell whether the run elects its winners again on the final-image grid (``RunConfig.final_grid``).
+
+        Returns
+        -------
+        on : bool
+            True when the stage is on and the run neither searches the widths of its annuli nor scans k.
+        """
+        fc = getattr(self.cfg, "final_grid", None)
+        return bool(fc is not None and fc.enabled and not self.cfg.opt_width and self.cfg.k_mode not in SCAN_MODES)
+
+    def _final_grid(self, results: Sequence[AnnulusResult]) -> Optional[Dict[str, Any]]:
+        """Run the final-image grid and take its winners for the final products.
+
+        The stage starts from the validation's winners (:func:`klip_tpe.final_grid.run_final_grid`, in
+        ``final_grid/``).  Each annulus' record goes to ``AnnulusResult.final_grid``, and each annulus
+        whose winner changed gets the winner's images, clean and with the annulus' own sources, in
+        ``final_grid/annulusNN_best_*.fits`` and in the images the final stitch takes.  The records and
+        images are set only once all are made, so a failure leaves the validation's winners.
+
+        Parameters
+        ----------
+        results : sequence of AnnulusResult
+            The annuli's results, every annulus done.
+
+        Returns
+        -------
+        curve : dict or None
+            The stage's curve (:meth:`klip_tpe.final_grid.FinalGrid.curve`), None without one.
+        """
+        from .final_grid import run_final_grid
+        for r in results:
+            if (r.final_grid or {}).get("changed"):
+                self._ann_images.pop(r.annulus, None)      # the validation's winner's images again
+            r.final_grid = None
+        out_dir = os.path.join(self.run_dir, "final_grid")
+        rec = run_final_grid(self, out_dir, in_run=True, log=self.log,
+                             stage=lambda s_: self.hb.stage(f"final grid: {s_}", write=False))
+        recs: Dict[int, Dict[str, Any]] = {}
+        for r in results:
+            a = rec["annuli"].get(str(r.annulus + 1))
+            if a is None:
+                continue
+            w = a["winner"]
+            recs[r.annulus] = {"changed": bool(a["changed"]), "run": w["run"], "kind": w["kind"],
+                               "eval_index": w["eval_index"], "search_score": w.get("search_score"),
+                               "validated_score": w.get("validated_score"),
+                               "config": dict(w["config"]) if a["changed"] else None,
+                               "change": a.get("last_change"), "held_out": a.get("held_out")}
+        imgs = {}
+        for r in results:
+            if recs.get(r.annulus, {}).get("changed"):
+                imgs[r.annulus] = self._final_grid_images(r, recs[r.annulus], out_dir)
+        for r in results:
+            r.final_grid = recs.get(r.annulus)
+        self._ann_images.update(imgs)
+        return rec.get("curve")
+
+    def _final_grid_images(self, r: AnnulusResult, rec: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
+        """Reduce an annulus' final-image grid winner clean and with the annulus' own sources.
+
+        With ``save_fits`` the images and their per-partition stacks go to ``out_dir`` as
+        ``annulusNN_best_clean.fits``, ``annulusNN_best_inj.fits`` and their ``_partitions`` twins, which
+        :meth:`_annulus_images` reads back.
+
+        Parameters
+        ----------
+        r : AnnulusResult
+            The annulus' result.
+        rec : dict
+            The annulus' record of the stage, with the winner's ``config``.
+        out_dir : str
+            Directory of the stage.
+
+        Returns
+        -------
+        images : dict
+            The annulus' images as :meth:`_annulus_images` returns them.
+
+        Raises
+        ------
+        ValueError
+            If a reduction returns no image.
+        """
+        ia = r.annulus
+        cfg = self._config_from_dict(rec["config"])
+        srcs = [Source(*(float(v) for v in s)) for s in r.winner_sources]
+        zone = self._zone(ia, cfg)
+        calls = [lambda: self._reduce(cfg, None, tag=f"a{ia + 1}_fg_clean", zone=zone, fm_sources=[])]
+        if srcs:
+            calls.append(lambda: self._reduce(cfg, srcs, tag=f"a{ia + 1}_fg_inj", zone=zone, fm_sources=[]))
+        evs = []
+        with contextlib.closing(self._run_ordered(calls, self._reduction_window(len(cfg.selected)))) as stream:
+            for _, res in stream:
+                if isinstance(res, BaseException):
+                    raise res
+                if res.image is None:
+                    raise ValueError(f"annulus {ia + 1}: the final grid winner's reduction returned no image")
+                evs.append(res)
+        ev_c, ev_i = evs[0], (evs[1] if len(evs) > 1 else None)
+        if self.cfg.save_fits:
+            os.makedirs(out_dir, exist_ok=True)
+            sc = rec.get("validated_score")
+            score = float("nan") if sc is None else float(sc)
+            more = {"FGRID": 1, "FGFROM": f"{rec['run']} {rec['kind']} eval "
+                                          f"{'-' if rec['eval_index'] is None else int(rec['eval_index']) + 1}"[:68]}
+            pre = os.path.join(out_dir, f"annulus{ia + 1:02d}_")
+            for key, ev, src in (("clean", ev_c, ()), ("inj", ev_i, srcs)):
+                if ev is None:
+                    continue
+                h = dict(self._fits_header(ia, cfg, score, True, "final grid", src, zone=zone), **more)
+                _write_fits(pre + f"best_{key}.fits", ev.image, h)
+                if getattr(ev, "stack", None) is not None:
+                    h2 = dict(h)
+                    for j, pid in enumerate(ev.partitions or []):
+                        h2[f"NIGHT{j+1}"] = str(pid)
+                    _write_fits(pre + f"best_{key}_partitions.fits", ev.stack, h2)
+            self._durable_later(*[pre + f"best_{k}{t}.fits" for k in ("clean", "inj") for t in ("", "_partitions")
+                                  if os.path.exists(pre + f"best_{k}{t}.fits")])
+        self.log(f"  final grid: annulus {ia + 1}'s winner reduced clean"
+                 + (" and with its own sources" if srcs else "") + " for the final stitch")
+        return {"clean": ev_c.image, "inj": None if ev_i is None else ev_i.image, "zone": zone,
+                "clean_stack": getattr(ev_c, "stack", None), "inj_stack": None if ev_i is None else ev_i.stack,
+                "parts": [str(p) for p in (ev_c.partitions or cfg.selected)],
+                "sources": [s.as_tuple() for s in srcs], "contrast": r.contrast,
+                "weights": getattr(ev_c, "weights", None)}
+
     def _final_inj_images(self, results: Sequence[AnnulusResult]) -> Optional[Dict[int, Dict[str, Any]]]:
-        """:attr:`RunConfig.stitch_injections` ``"all"``: each annulus' winner reduced once more
-        with every annulus' validation sources, its injected image and per-partition images in
-        place of the validated ones, for the final stitch.  None under ``"own"``, and when each
-        annulus' own injected image already holds them all (a single annulus).  The annuli'
-        ``best_inj.fits`` are left as they are."""
+        """Reduce each annulus' final configuration again with every annulus' validation sources, for the final stitch.
+
+        Under ``RunConfig.stitch_injections`` "all" each annulus' injected image and per-partition images
+        take the place of the validated ones.  The annuli's ``best_inj.fits`` are left as they are.
+
+        Parameters
+        ----------
+        results : sequence of AnnulusResult
+            The annuli's results.
+
+        Returns
+        -------
+        images : dict of int to dict or None
+            Each annulus' images (:meth:`_annulus_images`) with ``inj``, ``inj_stack`` and ``inj_sources``
+            replaced, by 0-based annulus.  None under "own", and when each annulus' own injected image
+            already holds every source (a single annulus).
+
+        Raises
+        ------
+        ValueError
+            If a reduction returns no image.
+        """
         if str(getattr(self.cfg, "stitch_injections", "own")).lower() != "all":
             return None
         items = [(r, self._annulus_images(r.annulus)) for r in results]
@@ -5780,7 +6028,7 @@ class Runner:
             for r, d in items:
                 t1 = time.time()
                 self.ia = r.annulus
-                cfg = self._config_from_dict(r.winner_config)
+                cfg = self._config_from_dict(r.final_config)
                 # no KLIP-FM pass: the stitch takes the image alone
                 ev = self._reduce(cfg, srcs, tag=f"a{r.annulus + 1}_final_inj", fm_sources=[])
                 if ev.image is None:
@@ -5822,14 +6070,32 @@ class Runner:
     def _final_stitch(self, results: Sequence[AnnulusResult], weights: Optional[Sequence[float]] = None,
                       extra_header: Optional[Dict[str, Any]] = None,
                       images: Optional[Dict[int, Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
-        """The final stitch of the annuli' winner images.  ``weights`` replaces the
-        sensitivity weights (:meth:`rereduce` keeps the run's), and ``extra_header`` goes into
-        every FITS header.  ``images`` replaces :meth:`_annulus_images` for the annuli it holds
-        (:meth:`_final_inj_images`).  Each annulus' ``inj_sources`` says which sources its
-        injected image holds (its own when not given).  Besides the stitches and their S/N
-        maps, writes the tile-wise S/N maps: on each tile, the S/N map of the stitch with that
-        tile's annulus image put in (:func:`~klip_tpe.stitch.put_tile_in`), put together by tiles
-        (:func:`~klip_tpe.stitch.stitch_by_tiles`)."""
+        """Build the final stitch of the annuli's final images and write its products.
+
+        ``images`` replaces :meth:`_annulus_images` for the annuli it holds (:meth:`_final_inj_images`), and
+        each annulus' ``inj_sources`` says which sources its injected image holds, its own when not given.
+        Besides the stitches and their S/N maps it writes the tile-wise S/N maps: on each tile, the S/N map
+        of the stitch with that tile's annulus image put in (:func:`~klip_tpe.stitch.put_tile_in`), put
+        together by tiles (:func:`~klip_tpe.stitch.stitch_by_tiles`).
+
+        Parameters
+        ----------
+        results : sequence of AnnulusResult
+            The annuli's results.
+        weights : sequence of float or None, default None
+            The stitch weights in place of the sensitivity weights, as :meth:`rereduce` keeps the run's.
+        extra_header : dict or None, default None
+            Cards that go into every FITS header.
+        images : dict of int to dict or None, default None
+            Annuli's images in place of :meth:`_annulus_images`'s, by 0-based annulus.
+
+        Returns
+        -------
+        stitched : dict or None
+            The stitches (``clean``, ``snr``, ``inj``, the per-partition cubes and the tile-wise maps),
+            ``weights``, ``zones``, ``tiles``, ``annuli`` (each as the stitch took it) and ``files``.  None
+            without any annulus' clean image.
+        """
         from .stitch import (put_tile_in, seam_pixels, stitch_by_tiles, stitch_stacks, stitch_tiles, tile_index,
                              tile_of, write_params_table)
         images = images or {}
@@ -5863,7 +6129,7 @@ class Runner:
                     continue
                 try:
                     self.ia = r.annulus
-                    cfg = self._config_from_dict(r.winner_config)
+                    cfg = self._config_from_dict(r.final_config)
                     pin, pout = self._pad_edges(*zones[j])
                     zone = (max(zones[j][0] - (3.0 if pin else 0.0), 0.0),
                             min(zones[j][1] + (3.0 if pout else 0.0), self.cfg.r_cap))
@@ -5884,13 +6150,14 @@ class Runner:
         st_f = self._maybe_flatten(st)
         hist = ["per-annulus best (edges px | k bin nang filt angsep anglemax | SNR | partitions):"]
         for r, d in items:
-            p = r.winner_config.get("params", {})
+            p = r.final_config.get("params", {})
             ptxt = " ".join(f"{ab}{p[k]}" for k, ab in (("k_klip", "k"), ("bin", "b"), ("n_ang", "na"), ("filter", "f"),
                                                        ("angsep", "as"), ("anglemax", "am")) if p.get(k) is not None)
             t = tiles[[rr.annulus for rr, _ in items].index(r.annulus)]
             ttxt = "" if tuple(t) == (float(r.inrad), float(r.outrad)) else f" tile [{t[0]:5.2f}-{t[1]:5.2f}]"
             hist.append(f"  a{r.annulus+1} [{r.inrad:5.1f}-{r.outrad:5.1f}]{ttxt} {ptxt} "
-                        f"SNR{r.winner_score:6.2f} c{r.contrast:.2E} n={','.join(r.partitions) or 'all'}")
+                        f"SNR{_final_score(r):6.2f} c{r.contrast:.2E} n={','.join(r.final_partitions) or 'all'}"
+                        + (" (final grid)" if (r.final_grid or {}).get("changed") else ""))
         overlap = any(tuple(t) != tuple(z) for t, z in zip(tiles, zones))
         hdr = {"NANN": len(items), "PHASE": "final", "IMGTYPE": f"radially-optimized stitch{self._flat_tag}",
                "LEGACY": int(self.cfg.legacy_stitch), "NSEAM": int(seam.sum()), "NPATCH": npatch,
@@ -5999,8 +6266,8 @@ class Runner:
         rows = []
         for (r, d), t in zip(items, tiles):
             rows.append({"ann": r.annulus + 1, "inner_px": r.inrad, "outer_px": r.outrad,
-                         "params": r.winner_config.get("params", {}), "best_SNR": r.winner_score,
-                         "partitions": r.partitions, "per_partition": r.winner_config.get("per_partition", {}),
+                         "params": r.final_config.get("params", {}), "best_SNR": _final_score(r),
+                         "partitions": r.final_partitions, "per_partition": r.final_config.get("per_partition", {}),
                          "validated": r.validated, "contrast": r.contrast,
                          **({"tile_in_px": float(t[0]), "tile_out_px": float(t[1])} if overlap else {})})
         files["params"] = os.path.join(self.run_dir, "klip_stitched_params.txt")
@@ -6117,33 +6384,63 @@ class Runner:
     def rereduce(self, out_dir: str, *, verify_sources: Optional[Sequence[Any]] = None, verify: bool = True,
                  log: Optional[Callable[[str], None]] = None, stitch_injections: Optional[str] = None,
                  overlap_pads: Optional[bool] = None, winners: Optional[Dict[int, Any]] = None) -> Dict[str, Any]:
-        """A finished run's winners reduced again, on this runner's reducer, with the final
-        stitch, its S/N map and the final verify written to ``out_dir``.  The run directory is
-        only read.
+        """Reduce a finished run's winners again on this runner's reducer, and write the final products to a directory.
 
-        The point is other frames: a line subtracted, planets added (the reducer's
-        ``data_edits``), without a new search.  Build the runner with :meth:`resume` and
-        ``same_frames=False``.  Each annulus' winning configuration is reduced clean, and with
-        the injections of the verify's calibration block: the winners' validation sources, or
-        ``verify_sources`` (``(rho_arcsec, pa_deg, contrast)``, each listed under the annulus
-        whose tile holds it), all of them in every annulus' injected reduction.  Without a
-        list, a run with :attr:`RunConfig.stitch_injections` ``"own"`` (saved before
-        2026-11-03) puts each annulus' own sources in its reduction alone, as it did, and
-        ``stitch_injections`` (``"all"`` / ``"own"``) overrides the run's.  The tiles are
-        stitched with the run's weights (``final_results.json``, else worked out from its
-        winner images as the run did), its pads (``overlap_pads`` overrides
-        :attr:`RunConfig.stitch_overlap_pads`) and its seam patching, so on the run's own
-        frames the products are the run's.
+        The point is other frames, a line subtracted or planets added (the reducer's ``data_edits``),
+        without a new search.  Build the runner with :meth:`resume` and ``same_frames=False``.  Each
+        annulus' final configuration (``AnnulusResult.final_config``, the final-image grid's winner where it
+        changed the validation's) is reduced clean and with the injections of the verify's calibration
+        block, the winners' validation sources or ``verify_sources``, all of them in every annulus'
+        injected reduction.  Without a list, a run with ``RunConfig.stitch_injections`` "own" (saved
+        before 2026-11-03) puts each annulus' own sources in its reduction alone, as it did.  The tiles
+        are stitched with the run's weights (``final_results.json``, else worked out from its winner images
+        as the run did), its pads and its seam patching, so on the run's own frames the products are the
+        run's.  The run directory is only read.
 
-        Writes ``klip_stitched.fits``, ``klip_stitched_snr.fits``, the injected and
-        per-partition stitches, the tile-wise S/N maps, ``klip_stitched_params.txt``,
-        ``stitched_verify_report.txt`` and ``tile_verify_report.txt`` (unless ``verify`` is
-        False) and ``rereduce.json``.  Returns that record.
+        Parameters
+        ----------
+        out_dir : str
+            Directory of the products, beside the run.
+        verify_sources : sequence or None, default None
+            Sources of the verify's calibration block, ``(rho_arcsec, pa_deg, contrast)`` or
+            :class:`~klip_tpe.metrics.Source`, each listed under the annulus whose tile holds it.  None
+            takes the winners' validation sources.
+        verify : bool, default True
+            Whether to run the final verify.
+        log : callable or None, default None
+            Function that takes each line of the log.  None takes the runner's.
+        stitch_injections : {"all", "own"} or None, default None
+            Which sources each annulus' injected reduction holds, in place of the run's.
+        overlap_pads : bool or None, default None
+            Whether overlapping annuli take pads between them, in place of
+            ``RunConfig.stitch_overlap_pads``.
+        winners : dict of int to Entrant or None, default None
+            A composite, a candidate (from :func:`~klip_tpe.refine.resolve_picks`) per 0-based annulus whose
+            configuration is reduced in place of the annulus' final configuration.  The run's verify
+            injections, weights, tiles and pads stay, so the composite's verify pairs with the run's.
 
-        ``winners``: a composite, annulus (0-based) -> candidate
-        (:class:`~klip_tpe.refine.Entrant`, from :func:`~klip_tpe.refine.resolve_picks`) whose
-        configuration is reduced in place of the run's winner.  The run's verify injections,
-        weights, tiles and pads stay, so the composite's verify pairs with the run's."""
+        Returns
+        -------
+        record : dict
+            What ``rereduce.json`` holds: the frames, weights, injections, pads, composite, each annulus'
+            reductions, the files and reports written and the time taken.
+
+        Raises
+        ------
+        ValueError
+            If an annulus of ``winners`` is not the run's, ``stitch_injections`` is neither "all" nor
+            "own", ``verify_sources`` comes with "own", the run has not finished or kept no FITS
+            products, ``out_dir`` lies inside the run, the run's tiles are not those its zones give now, or
+            a source lies outside the annuli.
+
+        Notes
+        -----
+        It writes ``klip_stitched.fits``, ``klip_stitched_snr.fits``, the injected and per-partition
+        stitches, the tile-wise S/N maps, ``klip_stitched_params.txt``, ``stitched_verify_report.txt`` and
+        ``tile_verify_report.txt`` (unless ``verify`` is False) and ``rereduce.json``.  Since 2026-11-16 an
+        annulus without a composite candidate reduces its final configuration, the validation's winner
+        before.
+        """
         log = log or self.log
         t0 = time.time()
         winners = dict(winners or {})
@@ -6233,7 +6530,8 @@ class Runner:
                 t1 = time.time()
                 self.ia = r.annulus
                 w = winners.get(r.annulus)
-                cfg = self._config_from_dict(r.winner_config if w is None else w.config)
+                fg = r.final_grid if (r.final_grid or {}).get("changed") else None
+                cfg = self._config_from_dict(r.final_config if w is None else w.config)
                 ev_c = self._reduce(cfg, None, tag=f"rereduce_a{r.annulus + 1}_clean")
                 src = put_in[r.annulus]
                 # no KLIP-FM pass: the stitch and the verify take the image alone
@@ -6243,18 +6541,23 @@ class Runner:
                 new[r.annulus] = {
                     "clean": ev_c.image, "inj": None if ev_i is None else ev_i.image, "zone": z,
                     "clean_stack": ev_c.stack, "inj_stack": None if ev_i is None else ev_i.stack,
-                    "parts": [str(p) for p in (ev_c.partitions or r.partitions or cfg.selected)],
+                    "parts": [str(p) for p in (ev_c.partitions or r.final_partitions or cfg.selected)],
                     "sources": [s.as_tuple() for s in listed[r.annulus]], "contrast": d.get("contrast"),
                     "inj_sources": [s.as_tuple() for s in src], "weights": ev_c.weights}
                 per_ann.append({"annulus": r.annulus + 1, "zone_px": list(z),
                                 **({"tile_px": list(tiles[len(per_ann)])} if self.cfg.ann_extra else {}),
-                                "winner_eval": int(r.winner_index) + 1 if w is None else None,
+                                "winner_eval": int(r.winner_index) + 1 if w is None and fg is None else None,
                                 **({} if w is None else {"winner_from": {"run": w.run, "kind": w.kind,
                                                                          "eval_index": w.eval_index}}),
+                                **({} if fg is None or w is not None else
+                                   {"final_grid": {"run": fg["run"], "kind": fg["kind"],
+                                                   "eval_index": fg["eval_index"]}}),
                                 "injected": len(src), "listed": len(listed[r.annulus]),
                                 "seconds": round(time.time() - t1, 1)})
-                who = (f"the winner (eval {r.winner_index + 1})" if w is None else
-                       f"{w.run} {w.kind} eval {w.eval_index}")
+                who = (f"{w.run} {w.kind} eval {w.eval_index}" if w is not None else
+                       f"the final grid's winner ({fg['run']} {fg['kind']} eval "
+                       f"{'-' if fg['eval_index'] is None else int(fg['eval_index']) + 1})" if fg is not None else
+                       f"the winner (eval {r.winner_index + 1})")
                 log(f"  annulus {r.annulus + 1}: {who} reduced clean"
                     + (f" and with {len(src)} injection(s)" if src else "") + f" ({time.time() - t1:.1f} s)")
         finally:

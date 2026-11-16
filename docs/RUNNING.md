@@ -98,7 +98,8 @@ in order:
   fill the pool, and reports the trials in order.  The candidates' clean images come first, a
   batch at a time, so a copy of an earlier candidate is skipped before its trials go out.  The
   final round's trials (`--n-final`) and the elected winner's fresh draws go out together after
-  the first round.
+  the first round.  A run with the final-image grid on (below) leaves the final round to that
+  stage.
 * Every noise ring of the search, calibration and validation skips the apertures within 1.5
   FWHM of an injected source or known companion (`--sidelobes off`, the default again since
   2026-11-01), as every run before 2026-10-31 and the IDL did.  `--sidelobes farthest` or
@@ -783,6 +784,87 @@ klip-tpe rescore --run-dir runA --draws-from runA_apart --base-winners picks.txt
     --out runA_composite_rescore
 klip-tpe rereduce --run-dir runA --base-winners picks.txt --no-overlap-pads
 ```
+
+## The final-image grid (`--final-grid`, `klip-tpe elect`)
+
+A search scores each annulus on its own image, and the validation elects each winner there.  The
+paper measures the stitch.  The final-image grid, a stage after the searches that is on by
+default, elects each annulus' winner again on single injections measured on the stitch, and reads
+the run's contrast curve there (NEAR2's note of 2026-11-16).
+
+* **The grid** is the same for every run of a setup.  Each tile has an odd number of separations,
+  at least 3, at the middles of equal radial bands no wider than `--fg-step` FWHM (default 1), so
+  one lies near each edge and one at the middle.  Each separation has `--fg-pa` position angles
+  (default 12), turned from one separation to the next by the golden fraction of the step.  No
+  point lies in a known companion's keep-out or where the run's sampler places no source, such as
+  a forbidden sector or its mask.
+* **Each point holds one source.**  Every annulus whose part of the stitch lies within 1 FWHM of
+  the point is reduced with it, and the others take their clean images.  The matched filter
+  weighs 1/16 of its peak at that distance, so an annulus farther away cannot move the reading.
+  The stitch is built as the final stitch builds it, and the source is measured as the stitched
+  verify measures it (Path A).
+* **Each tile's contrast** is set once, so that the validation's winners read a median S/N of 5
+  to 8 on 12 of its points.  It starts from the run's contrast scaled by its winner's S/N.
+* **The election.**  For annulus k each finalist, a configuration its validation scored, goes
+  into slot k with the other annuli at their current winners.  It is read on the points within
+  `--fg-cover` FWHM (default 0.5) of annulus k's part of the stitch, tile k's points and the
+  nearest of its neighbors'.  The other annuli's reductions are made once and shared by the
+  finalists.  A finalist replaces the winner when its mean paired gain over the winner exceeds
+  `--fg-z` (default 1) times its standard error.  The first sweep goes inner to outer and the
+  second back, and the election stops sooner once a sweep changes nothing (`--fg-sweeps`).
+* **The held-out check.**  Each changed annulus' new and old winners are read again on the
+  curve's grid at the same contrasts, the other annuli at their elected winners.  The election
+  picks the largest of several noisy means, so its own gain runs high, and the gain on points it
+  did not read is the honest one.
+* **The curve.**  The elected winners are read on the curve's grid, the election's turned by half
+  a position angle step, each point's contrast stepped to S/N 5 as the contrast grid steps it.
+  It is read with the contrast grid's S/N, the IDL predecessor's aperture photometry by default,
+  and `--fg-curve path_a` reads it with the stitched verify's.  The curve has several separations
+  per annulus and becomes the main section of the run's `contrast_curve.txt`, in place of the
+  per-annulus grids.
+* **The seam line.**  Each annulus gets the curve near each tile edge over its middle, in the
+  log, in `final_grid/curve.txt` and in `contrast_curve.txt`.  A ratio above 1 at a seam is a
+  curve shallower at the edge than at the middle.
+* **The products take the elected winners.**  An annulus whose winner changed gets that winner's
+  images in `final_grid/annulusNN_best_*.fits`, its parameters in `klip_stitched_params.txt` and
+  its record in `final_results.json` (`final_grid`, with the configuration).  Its annulus
+  directory keeps the validation's winner and its products.  A later resume, `rereduce`,
+  `fit-chain`, the re-score and other runs' finalists take the elected winner.
+* **It replaces the validation's final round.**  A run with the stage on leaves `--n-final` to
+  it, and the log says so.
+* **Its reports** are `final_grid/election.txt` (each sweep's finalists with their mean S/N and
+  paired gain, and the winners), `election.json`, `curve.txt` and `curve.json`.  Its readings go to
+  `final_grid/state/readings.jsonl`, so a run resumed during the stage, or finished again after an
+  `extend`, reads them back instead of reducing again.
+* `--final-grid off` skips it.  A run saved before it existed resumes without it, and so do
+  `--opt-width` and k-scan runs.
+
+The election costs each annulus' finalists times its points, plus the shared reductions.  For
+s7's tiles, 4.7 px wide against a FWHM of 6.4 px, an annulus between two others reads 84 points
+without pads between overlapping annuli and 108 with them, so 25 finalists cost about 2,300 to
+3,100 reductions an annulus a sweep.  A wave of the curve costs 1,200 to 1,400, and the curve
+takes 4 to 8 waves.  An annulus whose neighbors did not change is elected again from the readings
+already made.  The log gives the counts before the stage starts.
+
+### On finished runs (`klip-tpe elect`)
+
+`klip-tpe elect` runs the stage on a finished run.  `--entrants-from` adds the finalists of
+other runs of the same frames, annuli and search space, their winners and their validations'
+entrants, each configuration once.  It writes to `--out` (default `<run>_elect`), and started
+again on that directory it resumes.  After the election it reduces the elected winners with the
+run's verify injections, weights, tiles and pads, as `rereduce` reduces a composite, and writes
+the stitch, its S/N maps, the stitched verify and a `contrast_curve.txt` with the stage's curve
+to `--out`.  The runs are only read.
+
+```
+klip-tpe elect --run-dir s7 --entrants-from s7b s7c s7d s7e s7f --finalists 5 --plan
+klip-tpe elect --run-dir s7 --entrants-from s7b s7c s7d s7e s7f --finalists 5
+```
+
+* `--finalists N` keeps each run's winner and its N - 1 best by validated score, per annulus.
+  Six runs of 25 entrants each give an annulus about 150 finalists, six times the cost of one run.
+* `--no-products` stops after the election and the curve.  `--card` lets the injected reductions
+  go to the card workers.
 
 ## Frame rotation: scipy or OpenCV
 

@@ -218,7 +218,9 @@ Python with the reducer the script built: `render_steps(run_dir, reducer=red, ou
   on draws of its own and scatters by a few tenths of S/N, about as far as the top candidates
   lie apart.  On common draws a hard draw is hard for every candidate, so the differences
   scatter far less.  `winner.json: final_round` and `validation_final.json` keep the round.
-  The winner's validated score is still its median on fresh draws.
+  The winner's validated score is still its median on fresh draws.  A run with the final-image
+  grid on (`--final-grid`, the default) leaves the round to that stage, which elects on the
+  stitch (`docs/RUNNING.md`), so its panels show no diamonds.
 * **contrast curve** — the injection grid (`--contrast-grid`, on by default): after
   validation, one injected source per reduction at the winner's configuration, at 12 position
   angles (`--cg-pa`) on separations a FWHM apart (`--cg-step`), each iterated on its contrast
