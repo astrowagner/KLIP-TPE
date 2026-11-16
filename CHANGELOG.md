@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — 2026-11-16 (backends/spaceklip.py documented to the rule)
+
+- **`backends/spaceklip.py` follows the documentation rule**: the spaceKLIP and JWST loaders
+  (`load_spaceklip`, `read_jwst_files`, `load_calints`), the frame repairs (`blank_sky`,
+  `static_hot_pixels`, `destripe_detector`, `fill_dq_neighbours`, `sigma_clip_repair`,
+  `shift_keeping_gaps`), the frames' record and signature, and `make_reducer`.  The module is
+  klip-tpe's own, a loader and reducer around spaceKLIP's products with none of spaceKLIP's code in
+  it, so only its functions are documented.  The measurements behind the repairs moved under
+  Notes, and the comments take US spelling.  Only docstrings and comments changed.
+
 ## Unreleased — 2026-11-16 (the final-image grid)
 
 From NEAR2's note of 2026-11-16, "one final-image grid, for the election and the contrast curve".

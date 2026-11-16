@@ -1,25 +1,27 @@
-"""spaceKLIP / JWST backend (https://spaceklip.readthedocs.io).
+"""spaceKLIP and JWST backend, from spaceKLIP's products or the stage-2 files to the optimizer.
 
-spaceKLIP's own PSF-subtraction step hands the stage-2 / ImageTools products to pyKLIP
-(``pyklip.instruments.JWST.JWSTData`` -> ``klip_dataset``).  This module does the same
-hand-over into the optimizer: the science rolls become partitions, the reference-star
-exposures become the RDI library, and :class:`~klip_tpe.backends.pyklip.PyKLIPReducer`
-(mode ``'ADI+RDI'`` by default, as in spaceKLIP) does the subtraction, so the parameters
-the optimizer searches (``numbasis``, ``subsections``, ``movement``/``angsep``, annulus,
-frame selection, binning, high-pass) are exactly the knobs of a spaceKLIP reduction.
+spaceKLIP's own PSF-subtraction step hands its stage-2 and ImageTools products to pyKLIP
+(``pyklip.instruments.JWST.JWSTData``, then ``klip_dataset``).  This module makes the same hand-over
+to the optimizer.  The science rolls become partitions, the reference-star exposures become the RDI
+library, and :class:`~klip_tpe.backends.pyklip.PyKLIPReducer` subtracts, in mode ``"ADI+RDI"`` by
+default as in spaceKLIP.  So the parameters the optimizer searches (``numbasis``, ``subsections``,
+``movement`` or ``angsep``, the annulus, the frame selection, the binning and the high-pass) are the
+knobs of a spaceKLIP reduction.
 
-Entry points
-------------
-:func:`load_spaceklip`
-    from a ``spaceKLIP.Database`` (or its ``obs`` table dict) and a concatenation key, or
-    directly from lists of science / reference FITS files.  Uses pyKLIP's ``JWSTData``
-    when importable (needs pyklip + astroquery); otherwise reads the files with the same
-    header arithmetic (``STARCENX/Y`` or ``CRPIX``, ``PA = ROLL_REF - V3I_YANG*VPARITY``).
-:func:`make_reducer`
-    ``PyKLIPReducer`` per roll with a JWST PSF template for injection: pass a webbpsf /
-    ``webbpsf_ext`` offset PSF (2-D array or FITS path, e.g. spaceKLIP's
-    ``analysistools.get_offsetpsf`` output or a ``JWST_PSF`` model) as ``psf_template``,
-    else a Gaussian of the filter's ``1.028 lambda/D`` is used (calibrate contrasts!).
+:func:`load_spaceklip` reads a ``spaceKLIP.Database``, or its ``obs`` table dict, with a
+concatenation key, or lists of science and reference FITS files.  It uses pyKLIP's ``JWSTData`` when
+that imports (it needs pyKLIP and astroquery), else :func:`read_jwst_files`, which does the same
+header arithmetic (``STARCENX``/``STARCENY`` or ``CRPIX``, and ``PA = ROLL_REF - V3I_YANG * VPARITY``).
+
+:func:`load_calints` reads stage-2 ``*_calints.fits`` files without spaceKLIP, with the background
+subtraction, static hot pixels, destriping, bad-pixel repair, registration and crop a coronagraphic
+JWST data set needs.
+
+:func:`make_reducer` builds a :class:`~klip_tpe.backends.pyklip.PyKLIPReducer` per roll, or the
+built-in annular KLIP, with a JWST PSF for injection.  The PSF is an STPSF model of the mask, a
+webbpsf or ``webbpsf_ext`` offset PSF given as ``psf_template`` (a 2-D array or a FITS path, such as
+spaceKLIP's ``analysistools.get_offsetpsf`` output or a ``JWST_PSF`` model), else a Gaussian of the
+filter's ``1.028 lambda/D``, whose contrasts then need calibrating.
 """
 from __future__ import annotations
 
@@ -40,7 +42,18 @@ JWST_DIAM = 6.5   # m (effective; lambda/D for the angsep unit and the default F
 
 
 def _background_done(*headers) -> bool:
-    """Has Image2's background step already run on this exposure? (``S_BKDSUB='COMPLETE'``)"""
+    """Tell whether Image2's background step has run on an exposure (``S_BKDSUB = 'COMPLETE'``).
+
+    Parameters
+    ----------
+    headers : FITS header or dict
+        The exposure's headers, any of which may carry the keyword.
+
+    Returns
+    -------
+    done : bool
+        True when one of them says ``COMPLETE``.
+    """
     for h in headers:
         v = h.get("S_BKDSUB") if hasattr(h, "get") else None
         if v is not None and str(v).strip().upper() == "COMPLETE":
@@ -49,16 +62,23 @@ def _background_done(*headers) -> bool:
 
 
 def blank_sky(files: Sequence[str]) -> np.ndarray:
-    """Median blank-sky frame from dedicated background pointings, for subtraction.
+    """Return the median blank-sky frame of dedicated background pointings, for subtraction.
 
-    ``calints`` are in MJy/sr -- a surface brightness, already divided by the integration
-    time -- so exposures of different length combine and subtract directly, with no scaling.
-    The median runs over every integration of every file so that cosmic rays in the
-    background do not print themselves onto the science frames.
+    ``calints`` are in MJy/sr, a surface brightness already divided by the integration time, so
+    exposures of different lengths combine and subtract as they are.  The median runs over every
+    integration of every file, so the background's cosmic rays do not print onto the science frames.
+    DQ ``DO_NOT_USE`` pixels are left out.
 
-    Pixels no background frame has (the unilluminated border of a MIRI coronagraphic
-    subarray) come back NaN, which is what they already are in the frames this is subtracted
-    from, so the subtraction does not widen the gaps.
+    Parameters
+    ----------
+    files : sequence of str
+        Paths of the background ``calints`` files.
+
+    Returns
+    -------
+    sky : ndarray, shape (ny, nx)
+        The median frame.  Pixels no background frame has, such as the unilluminated border of a MIRI
+        coronagraphic subarray, are NaN, as they already are in the frames it is subtracted from.
     """
     from astropy.io import fits
     ims = []
@@ -76,25 +96,39 @@ def blank_sky(files: Sequence[str]) -> np.ndarray:
 
 def static_hot_pixels(sky: np.ndarray, nsig: float = 10.0, min_excess: float = 5.0,
                       window: int = 7) -> np.ndarray:
-    """Pixels a blank-sky frame shows as hot (or dead) that the DQ array did not flag.
+    """Find the pixels a blank-sky frame shows as hot or dead that the DQ array did not flag.
 
-    ``sky`` is :func:`blank_sky`'s median of the dedicated background pointings: no star in
-    it, so anything sharp in it is the detector.  A pixel is hot when it stands above the
-    median of its finite ``window`` row-neighbours AND above the median of its finite
-    ``window`` column-neighbours (itself excluded) by more than ``nsig`` robust sigmas of that
-    excess and by more than ``min_excess`` (image units, MJy/sr on JWST; 5 is a quarter of
-    the F1140C sky).  The AND is what keeps the 4QPM glow sticks out: a pixel on one of them
-    is level with its neighbours along the stick.  Dead pixels (the same amount below) are
-    flagged too.  A pixel with fewer than four finite neighbours on either line (the
-    unilluminated border) is never flagged.  Returns a boolean mask, True where hot.
+    ``sky`` holds no star, so anything sharp in it is the detector.  A pixel is hot when it stands above
+    the median of its finite ``window`` row neighbors and above that of its finite ``window`` column
+    neighbors, itself left out, by more than ``nsig`` robust sigmas of that excess and by more than
+    ``min_excess``.  Asking for both lines keeps the 4QPM glow sticks out, since a pixel on a stick is
+    level with its neighbors along it.  A pixel the same amount below both is dead, and a pixel with
+    fewer than 4 finite neighbors on either line, on the unilluminated border, is never flagged.
 
-    Why this exists: ERS 1386 F1140C has an unflagged hot pixel five pixels from the star
-    (detector x, y = 125, 111; 52 MJy/sr above its neighbours on the blank sky, 80 in the
-    reference frames), which the pipeline's background subtraction only partly removes
-    (+12-15 MJy/sr left in the science frames, +25-30 in the references).  KLIP cannot fit a
-    fixed detector feature that the library carries at a different level, so it survived
-    every reduction as a bright spot 0.6" north of the star, where Carter et al. (2023),
-    who replaced "~30 static hot pixels" by hand, show none.
+    Parameters
+    ----------
+    sky : ndarray, shape (ny, nx)
+        The blank-sky median (:func:`blank_sky`).
+    nsig : float, default 10.0
+        Least excess, in robust sigmas of the excesses.
+    min_excess : float, default 5.0
+        Least excess, in image units (MJy/sr on JWST, where 5 is a quarter of the F1140C sky).
+    window : int, default 7
+        Length of each line of neighbors, in pixels, the pixel at its middle.
+
+    Returns
+    -------
+    hot : ndarray of bool, shape (ny, nx)
+        True at each hot or dead pixel.
+
+    Notes
+    -----
+    ERS 1386 F1140C has an unflagged hot pixel 5 pixels from the star (detector x, y = 125, 111), 52
+    MJy/sr above its neighbors on the blank sky and 80 in the reference frames.  The pipeline's
+    background subtraction removes it only in part, leaving +12 to 15 MJy/sr in the science frames and
+    +25 to 30 in the references.  KLIP cannot fit a fixed detector feature that the library carries at
+    another level, so it survived every reduction as a bright spot 0.6" north of the star, where Carter
+    et al. (2023), who replaced "~30 static hot pixels" by hand, show none.
     """
     b = np.asarray(sky, float)
     fin = np.isfinite(b)
@@ -104,8 +138,8 @@ def static_hot_pixels(sky: np.ndarray, nsig: float = 10.0, min_excess: float = 5
     ny, nx = b.shape
 
     def line_median(axis):
-        """Median of the finite neighbours within ``h`` along ``axis``, the pixel excluded, and
-        how many there were."""
+        """Return the median of the finite neighbors within ``h`` along ``axis``, the pixel left out,
+        and their count."""
         stack, count = [], np.zeros(b.shape, int)
         for k in range(-h, h + 1):
             if k == 0:
@@ -138,8 +172,18 @@ def static_hot_pixels(sky: np.ndarray, nsig: float = 10.0, min_excess: float = 5
 
 
 def frames_provenance(reducer) -> Optional[Dict[str, Any]]:
-    """The loader's record of the frames a reducer holds (``load_calints``' provenance, in
-    each Dataset's ``meta``), from its first partition that has one; None otherwise."""
+    """Return the loader's record of the frames a reducer holds, from its first partition with one.
+
+    Parameters
+    ----------
+    reducer : Reducer
+        The reducer, a :class:`~klip_tpe.reducer.PartitionedReducer` or a single partition's.
+
+    Returns
+    -------
+    provenance : dict or None
+        :func:`load_calints`'s provenance from a ``Dataset.meta``, None without one.
+    """
     subs = list(getattr(reducer, "reducers", {}).values()) or [reducer]
     for r in subs:
         rec = (getattr(getattr(r, "data", None), "meta", None) or {}).get("provenance")
@@ -149,11 +193,23 @@ def frames_provenance(reducer) -> Optional[Dict[str, Any]]:
 
 
 def frames_signature(provenance: Optional[Dict[str, Any]]) -> str:
-    """A short, stable name for a frame treatment: the products (file names, pipeline
-    version, CRDS context, pixel scale) and what the loader did to them (hot pixels,
-    background, destriping, repair).  Two loads with the same signature hand the reducer the
-    same frames, so anything cached from one (a companion fit, a default image) holds for the
-    other; a different signature means it does not.  ``"none"`` without a record."""
+    """Return a short, stable name for a frame treatment.
+
+    The name covers the products (file names, pipeline version, CRDS context, pixel scale) and what the
+    loader did to them (hot pixels, background, destriping, repair).  Two loads with the same name hand
+    the reducer the same frames, so anything cached from one, such as a companion fit or a default
+    image, holds for the other.
+
+    Parameters
+    ----------
+    provenance : dict or None
+        The loader's record (:func:`frames_provenance`).
+
+    Returns
+    -------
+    signature : str
+        The first 10 hexadecimal digits of SHA-1 of the record's key fields, ``"none"`` without a record.
+    """
     if not provenance:
         return "none"
     import hashlib
@@ -169,22 +225,36 @@ def frames_signature(provenance: Optional[Dict[str, Any]]) -> str:
 
 
 def shift_keeping_gaps(im: np.ndarray, shift, order: int = 3) -> np.ndarray:
-    """``ndimage.shift`` that one NaN cannot take the whole array from.
+    """Shift an image as ``scipy.ndimage.shift`` does, without one NaN taking the whole image.
 
-    At ``order >= 2`` ``ndimage.shift`` prefilters with a *recursive* (IIR) spline filter, so
-    a single non-finite pixel propagates to every pixel of the output -- not to a
-    neighbourhood, to all of it.  Measured on a MIRI MASK1140 ``calints`` frame, whose
-    unilluminated border is legitimately 13% NaN after bad-pixel repair: ``order=3`` returns
-    **99.2%** NaN, ``order=1`` returns 13.3%.  That took the whole HIP 65426 F1140C cube to
-    100% NaN inside ``load_calints``, and the failure surfaced two steps downstream as "every
-    frame was dropped as empty" in the reducer.
+    At ``order`` 2 or more ``ndimage.shift`` prefilters with a recursive spline filter, so a single
+    non-finite pixel reaches every pixel of the output.  Here the gaps are zero-filled for the
+    interpolation and the same interpolator runs over the mask of finite pixels, a partition of unity.
+    It comes back at 1 wherever the spline's support lay in good data, and the pixels where it does not,
+    which would carry invented values, come back NaN.  The mask is extended with ``mode="nearest"``, so
+    the frame's border, a boundary condition and not a gap, is not flagged.
 
-    Here the gaps are zero-filled for the interpolation and the same interpolator is run over
-    the finite-ness mask, which is a partition of unity: it comes back at exactly 1 wherever
-    the spline's support lay entirely in good data, and away from 1 exactly where the output
-    would be carrying invented values.  Those come back NaN.  The mask is extended with
-    ``mode='nearest'`` so the *frame border* -- which is a boundary condition, not a gap --
-    is not flagged, and a frame with no gaps at all returns ``ndimage.shift`` unchanged.
+    Parameters
+    ----------
+    im : ndarray, shape (ny, nx)
+        The image.
+    shift : float or sequence of 2 floats
+        The shift, ``(dy, dx)`` in pixels as ``ndimage.shift`` takes it.
+    order : int, default 3
+        Order of the spline interpolation.
+
+    Returns
+    -------
+    shifted : ndarray, shape (ny, nx)
+        The shifted image, NaN where the interpolation reached a gap.  An image without gaps comes back
+        as ``ndimage.shift`` gives it.
+
+    Notes
+    -----
+    On a MIRI MASK1140 ``calints`` frame, whose unilluminated border is 13 % NaN after the bad-pixel
+    repair, ``order=3`` returned 99.2 % NaN and ``order=1`` 13.3 %.  That took the whole HIP 65426
+    F1140C cube to NaN inside :func:`load_calints`, and the failure surfaced two steps downstream as
+    "every frame was dropped as empty" in the reducer.
     """
     from scipy import ndimage
     im = np.asarray(im, float)
@@ -198,16 +268,26 @@ def shift_keeping_gaps(im: np.ndarray, shift, order: int = 3) -> np.ndarray:
 
 
 def _clip_sky(m: np.ndarray, clip: float) -> np.ndarray:
-    """Sigma-clip ``m`` about its global median, so a bright feature cannot drag a line's
-    offset with it.
+    """Sigma-clip an image about its global median, so a bright feature cannot drag a line's offset with it.
 
-    A line whose pixels are ALL rejected gets no offset and is left alone, deliberately.
-    The tempting repair -- fall back to that line's unclipped median -- was measured and is
-    much worse than the disease: on a real F1140C integration a global median of 21 and MAD
-    of 3.1 rejects 31 rows and **91 columns** outright, because those lines run through the
-    PSF wings rather than through sky, and their unclipped medians are 240-470 MJy/sr.
-    Subtracting those took the stellar peak from 627 to 256.  A line with no sky in it has
-    no sky offset to measure, and the honest answer is to leave it.
+    Parameters
+    ----------
+    m : ndarray, shape (ny, nx)
+        The image, masked pixels NaN.
+    clip : float
+        Clip, in robust sigmas.  0 or less clips nothing.
+
+    Returns
+    -------
+    clipped : ndarray, shape (ny, nx)
+        The image, NaN beyond the clip.
+
+    Notes
+    -----
+    A line whose pixels are all rejected gets no offset and is left alone.  Its unclipped median would
+    be worse.  On a real F1140C integration a global median of 21 and a MAD of 3.1 reject 31 rows and 91
+    columns outright, since those lines run through the PSF wings and not the sky, and their unclipped
+    medians are 240 to 470 MJy/sr.  Subtracting those took the stellar peak from 627 to 256.
     """
     if clip <= 0:
         return m
@@ -223,35 +303,57 @@ def destripe_detector(cube: np.ndarray, center: Optional[Tuple[float, float]] = 
                       star_radius_px: float = 45.0, boundary_px: float = 12.0,
                       clip: float = 4.0, columns: bool = True,
                       min_line_px: int = 30) -> Tuple[np.ndarray, Dict[str, float]]:
-    """Remove each frame's per-row (then per-column) offset, measured on masked sky.
+    """Remove each frame's offset per row, then per column, measured on masked sky.
 
-    Run in the DETECTOR frame on the FULL subarray, before any crop.  That is not a
-    stylistic choice: the offset has to be estimated somewhere the astrophysical signal
-    is not, and on MIRI's 288x224 MASK1140 subarray a row is mostly sky, while on the
-    81x81 crop the reducer works with, every row passes through the coronagraphic PSF
-    and the row median IS the PSF.  Destriping the crop would subtract the target.
+    It runs in the detector frame on the full subarray, before any crop.  The offset has to be measured
+    where the astrophysical signal is not, and on MIRI's 288 x 224 MASK1140 subarray a row is mostly
+    sky, while on the 81 x 81 crop the reducer takes every row passes through the coronagraphic PSF.
+    Destriping the crop would subtract the target.  The mask takes out ``star_radius_px`` around
+    ``center`` (the PSF and its halo) and ``boundary_px`` about the 4QPM boundaries and the glow sticks
+    along them, which the row offsets would otherwise take in, and ``clip`` sigma-clips the rest.  Each
+    offset is subtracted from the whole line, masked pixels included.  A line that the mask leaves
+    thinner than ``min_line_px`` pixels falls back to the star's mask alone, and a line with no unmasked
+    finite pixel gets no offset.
 
-    Two numbers, and it matters which one is quoted.  On a RAW F1140C integration the
-    per-row offset has a scatter of 3.1-3.7 MJy/sr against a pixel-to-pixel scatter of
-    3.0-3.7 -- the striping is as large as the read noise -- and destriping drops the sky
-    scatter by 1.63-1.77x.  But in the pipeline this runs AFTER the blank-sky background
-    subtraction, and the gain measured there is **1.28x** (per-row sigma 1.05, per-column
-    0.327, frame scatter 1.27 -> 0.991, on HIP 65426 F1140C).
+    Parameters
+    ----------
+    cube : ndarray, shape (n, ny, nx)
+        The frames, in the detector frame.
+    center : tuple of 2 floats or None, default None
+        The star, ``(x, y)`` in 0-based pixels.  None masks nothing but the clip.
+    star_radius_px : float, default 45.0
+        Radius of the star's mask, in pixels.
+    boundary_px : float, default 12.0
+        Half-width of the mask along each axis through the star, the 4QPM boundaries, in pixels.
+    clip : float, default 4.0
+        Clip of the sky, in robust sigmas (:func:`_clip_sky`).
+    columns : bool, default True
+        Whether to remove the columns' offsets after the rows'.
+    min_line_px : int, default 30
+        Fewest unmasked pixels a line keeps before it falls back to the star's mask alone.
 
-    The two are consistent, and the reconciliation is the thing worth knowing about this
-    artefact: the row pattern correlates at **+0.997** between integrations of one exposure,
-    so it is a STATIC detector pattern, not random 1/f per frame.  Being static makes it
-    largely common-mode, so the blank-sky median already carries most of it away and what
-    is left here is the part that differs between the science and background pointings.
-    Being static is also why that remainder survives into the KLIP residual as a fixed
-    shape which derotation smears round the field instead of cancelling.
+    Returns
+    -------
+    cube : ndarray, shape (n, ny, nx)
+        The destriped frames.
+    stats : dict
+        ``row_sigma`` and ``col_sigma``, the mean over frames of the offsets' scatter.
 
-    The mask is what makes it safe: ``star_radius_px`` around ``center`` takes out the
-    PSF and its halo, ``boundary_px`` takes out the 4QPM boundaries and the glow sticks
-    that run along them (horizontal ones would otherwise be absorbed into the row
-    offsets, which is exactly the signal a background subtraction is trying to remove),
-    and ``clip`` sigma-clips whatever is left.  The offset is subtracted from the WHOLE
-    row, masked pixels included; a row with no unmasked finite pixel gets nothing.
+    Notes
+    -----
+    On a raw F1140C integration the per-row offset scatters by 3.1 to 3.7 MJy/sr against a
+    pixel-to-pixel scatter of 3.0 to 3.7, and destriping lowers the sky's scatter by 1.63 to 1.77
+    times.  In the pipeline it runs after the blank-sky subtraction, where the gain is 1.28 times
+    (per-row sigma 1.05, per-column 0.327, frame scatter 1.27 to 0.991, on HIP 65426 F1140C).  The row
+    pattern correlates at +0.997 between the integrations of an exposure, so it is a static detector
+    pattern and not random 1/f noise.  Being static, it is largely common to the science and background
+    pointings, which is why the blank-sky median takes most of it, and why the rest survives KLIP as a
+    fixed shape that derotation smears around the field.
+
+    Before the fallback, the star's disk and the boundary band crossed at the star and emptied rows
+    101 to 124 and columns 108 to 131 of MASK1140, straight through the target.  Those lines kept their
+    offsets while every other line lost its own, which made the line-to-line steps inside the 81 x 81
+    crop go from 1.87 raw to 4.05 destriped along rows.  With the fallback they go to 1.46.
     """
     cube = np.asarray(cube, float)
     if cube.ndim != 3 or cube.shape[0] == 0:
@@ -271,7 +373,7 @@ def destripe_detector(cube: np.ndarray, center: Optional[Tuple[float, float]] = 
     # every other line loses its offset while this one keeps it, which turns a smooth
     # gradient into a step.  The star disc and the boundary band cross at the star, so on
     # MASK1140 the two together covered rows 101-124 and columns 108-131 outright -- 24 of
-    # each, straight through the target, and the crop is centred on exactly that.  Measured
+    # each, straight through the target, and the crop is centered on exactly that.  Measured
     # on a real F1140C integration, line-to-line steps inside the 81x81 crop went from 1.87
     # raw to 4.05 destriped along rows; with the fallback below they go to 1.46.  The global
     # sky scatter never noticed (1.826 vs 1.827), because the damage was confined to the one
@@ -315,17 +417,27 @@ def destripe_detector(cube: np.ndarray, center: Optional[Tuple[float, float]] = 
 
 
 def fill_dq_neighbours(im: np.ndarray, maxit: int = 20) -> Tuple[np.ndarray, int]:
-    """Replace every non-finite pixel by the median of its finite orthogonal and diagonal
-    neighbours -- spaceKLIP's bad-pixel treatment (Carter et al. 2023, section 2.2) -- and
-    nothing else.  Clusters are closed from their rims inward, ``maxit`` passes at most.
-    Returns ``(filled image, number of pixels filled)``.
+    """Replace each non-finite pixel by the median of its finite orthogonal and diagonal neighbors.
 
-    This touches ONLY the pixels the pipeline flagged (DQ ``DO_NOT_USE``, which
-    :func:`load_calints` has already turned into NaN).  A coronagraphic PSF is *supposed*
-    to be full of sharp, isolated blobs -- the six-lobed Lyot-stop pattern and, for a
-    companion behind MASK335R, a "hamburger" core of three bars -- and any filter that
-    decides from the pixel values what is an outlier will eat those.  See
-    :func:`sigma_clip_repair` for the one that did.
+    It is spaceKLIP's bad-pixel treatment (Carter et al. 2023, section 2.2), and it touches only the
+    pixels the pipeline flagged, DQ ``DO_NOT_USE``, which :func:`load_calints` has turned into NaN.
+    Clusters close from their rims inward.  A coronagraphic PSF is full of sharp, isolated blobs, the
+    six-lobed Lyot-stop pattern and, for a companion behind MASK335R, a core of three bars, and a filter
+    that decides from the values what an outlier is eats those (:func:`sigma_clip_repair`).
+
+    Parameters
+    ----------
+    im : ndarray, shape (ny, nx)
+        The image, flagged pixels NaN.
+    maxit : int, default 20
+        Number of passes at most.
+
+    Returns
+    -------
+    filled : ndarray, shape (ny, nx)
+        The image, NaN where a gap was too wide to close.
+    n_flagged : int
+        Number of non-finite pixels in ``im``, those it set out to fill.
     """
     out = np.array(im, float)
     n0 = int((~np.isfinite(out)).sum())
@@ -347,18 +459,39 @@ def fill_dq_neighbours(im: np.ndarray, maxit: int = 20) -> Tuple[np.ndarray, int
 
 
 def sigma_clip_repair(im: np.ndarray, size: int = 5, nsig: float = 7.0) -> Tuple[np.ndarray, int, int]:
-    """The pre-1.1 ``load_calints`` repair: a ``size x size`` median filter, and every pixel
-    that differs from it by more than ``nsig`` times the *frame-wide* robust scatter of that
-    difference is replaced by the median.  Returns ``(image, n_rewritten, n_of_those_flagged)``.
+    """Repair an image by a median filter, the outlier repair of ``load_calints`` before version 1.1.
 
-    **Do not use this on coronagraphic frames.**  The scatter is set by the empty sky, so
-    the threshold is a few counts, and every pixel of the structured PSF -- star and
-    companion alike -- exceeds it: on ERS 1386 F444W it rewrites ~4,500-5,500 pixels per
-    320x320 frame, of which only ~1,560 are DQ-flagged; the rest is the PSF, median-filtered.
-    That blurred HIP 65426 b from Carter et al. (2023)'s three-bar core into one blob at
-    39% of its peak, and because the set of rewritten pixels differs from frame to frame it
-    left a roll-dependent residual that was mistaken for a speckle.  Kept only so that runs
-    made before the fix can be reproduced (``repair='sigma'``).
+    Each pixel that differs from the ``size x size`` median filter by more than ``nsig`` times the
+    frame-wide robust scatter of that difference is replaced by the median.  Do not use it on
+    coronagraphic frames.  The scatter is set by the empty sky, so the threshold is a few counts, and
+    every pixel of the structured PSF, star and companion alike, exceeds it.  It is kept so that runs
+    made before the fix can be reproduced (``repair="sigma"``).
+
+    Parameters
+    ----------
+    im : ndarray, shape (ny, nx)
+        The image, flagged pixels NaN.
+    size : int, default 5
+        Width of the median filter, in pixels.
+    nsig : float, default 7.0
+        Threshold, in robust sigmas of the difference from the filter.
+
+    Returns
+    -------
+    repaired : ndarray, shape (ny, nx)
+        The image.
+    n_rewritten : int
+        Number of pixels replaced.
+    n_flagged : int
+        Number of those that were non-finite.
+
+    Notes
+    -----
+    On ERS 1386 F444W it rewrote about 4,500 to 5,500 pixels of each 320 x 320 frame, of which only
+    about 1,560 were DQ-flagged.  The rest was the PSF, median-filtered.  That blurred HIP 65426 b from
+    the three-bar core of Carter et al. (2023) into one blob at 39 % of its peak, and since the pixels
+    rewritten differ from frame to frame it left a residual that depends on the roll, which was taken
+    for a speckle.
     """
     from scipy import ndimage
     im = np.asarray(im, float)
@@ -371,6 +504,25 @@ def sigma_clip_repair(im: np.ndarray, size: int = 5, nsig: float = 7.0) -> Tuple
 
 
 def _files_from_database(database, key: str) -> Tuple[List[str], List[str], Dict[str, Any]]:
+    """Return a spaceKLIP concatenation's science and reference files and its observation details.
+
+    Parameters
+    ----------
+    database : spaceKLIP.Database or dict
+        The database, or its ``obs`` dict of tables.
+    key : str
+        The concatenation.
+
+    Returns
+    -------
+    sci : list of str
+        The science files (``TYPE`` "SCI").
+    ref : list of str
+        The reference files (``TYPE`` "REF").
+    info : dict
+        The first row's ``FILTER``, ``CWAVEL``, ``PIXSCALE``, ``TELESCOP``, ``INSTRUME`` and
+        ``APERNAME``, where the table has them.
+    """
     obs = database.obs if hasattr(database, "obs") else database
     tab = obs[key]
     sci = [str(f) for t, f in zip(tab["TYPE"], tab["FITSFILE"]) if t == "SCI"]
@@ -384,8 +536,26 @@ def _files_from_database(database, key: str) -> Tuple[List[str], List[str], Dict
 
 def read_jwst_files(filepaths: Sequence[str], center_keywords: Tuple[str, str] = ("STARCENX", "STARCENY")
                     ) -> Dict[str, np.ndarray]:
-    """Minimal reader for spaceKLIP stage-2 / ImageTools ``*_calints.fits`` products
-    (what ``pyklip.instruments.JWST.JWSTData.readdata`` does, without the SVO lookup)."""
+    """Read spaceKLIP's stage-2 or ImageTools ``*_calints.fits`` products into arrays.
+
+    It does what ``pyklip.instruments.JWST.JWSTData.readdata`` does, without the SVO lookup.  The star is
+    at ``center_keywords``, else at ``CRPIX``, moved by the dither offset ``XOFFSET``/``YOFFSET``, and
+    the position angle is ``ROLL_REF - V3I_YANG * VPARITY``.
+
+    Parameters
+    ----------
+    filepaths : sequence of str
+        Paths of the files.
+    center_keywords : tuple of 2 str, default ("STARCENX", "STARCENY")
+        The ``SCI`` header's keywords of the star's x and y, in 1-based pixels.
+
+    Returns
+    -------
+    data : dict
+        ``input`` (the integrations, shape ``(n, ny, nx)`` for ``n`` integrations), ``centers``
+        (shape ``(n, 2)``, 0-based), ``PAs``, ``filenums``, ``filenames``, ``wvs`` (the wavelength, in
+        m) and ``pxscale`` (the median plate scale, in arcsec per pixel).
+    """
     from astropy.io import fits
     imgs, centers, pas, nums, names, wvs, pxs = [], [], [], [], [], [], []
     for i, f in enumerate(filepaths):
@@ -415,8 +585,19 @@ def read_jwst_files(filepaths: Sequence[str], center_keywords: Tuple[str, str] =
 
 
 def _wavelength_m(ph) -> float:
-    """Filter central wavelength (m) from the primary header: ``CWAVEL`` (micron) when
-    present, else pyKLIP's JWST filter tables (NIRCam PUPIL/FILTER, NIRISS, MIRI)."""
+    """Return a filter's central wavelength from a primary header.
+
+    Parameters
+    ----------
+    ph : FITS header
+        The primary header.
+
+    Returns
+    -------
+    wavelength : float
+        The wavelength, in m, from ``CWAVEL`` (in microns) when present, else from pyKLIP's JWST
+        filter tables (NIRCam ``PUPIL`` or ``FILTER``, NIRISS, MIRI).  NaN without either.
+    """
     if "CWAVEL" in ph:
         return 1e-6 * float(ph["CWAVEL"])
     try:
@@ -426,7 +607,7 @@ def _wavelength_m(ph) -> float:
         import ast, inspect, re                    # the offline tables live as literals in __init__
         src = inspect.getsource(JWSTData.__init__)
         ms = re.findall(r"self\." + tabs.get(inst, "x") + r" = (\{[^\n]*\})", src)
-        lit = [m for m in ms if len(m) > 2]              # skip the empty '{}' initialisers
+        lit = [m for m in ms if len(m) > 2]              # skip the empty '{}' initializers
         if lit:
             table = ast.literal_eval(lit[0])
             key = ph.get("PUPIL") if inst == "NIRCAM" and ph.get("PUPIL") in table else ph.get("FILTER")
@@ -438,7 +619,16 @@ def _wavelength_m(ph) -> float:
 
 
 class _ArrData:
-    """Duck-typed stand-in for a pyKLIP Data object (what :func:`dataset_from_pyklip` needs)."""
+    """Stand-in for a pyKLIP data object, what :func:`~klip_tpe.backends.pyklip.dataset_from_pyklip` reads.
+
+    Parameters
+    ----------
+    d : dict
+        The arrays (:func:`read_jwst_files`), ``input``, ``centers``, ``PAs``, ``filenums``,
+        ``filenames`` and ``wvs``.
+    psflib : _ArrLib or None, default None
+        The reference library.
+    """
 
     def __init__(self, d: Dict[str, np.ndarray], psflib=None):
         self.input, self.centers, self.PAs = d["input"], d["centers"], d["PAs"]
@@ -447,6 +637,15 @@ class _ArrData:
 
 
 class _ArrLib:
+    """Stand-in for pyKLIP's reference library, its frames shifted to one center.
+
+    Parameters
+    ----------
+    master_library : ndarray, shape (n, ny, nx)
+        The ``n`` reference frames.
+    aligned_center : tuple of 2 floats
+        The center they share, ``(x, y)`` in 0-based pixels.
+    """
     def __init__(self, master_library: np.ndarray, aligned_center: Tuple[float, float]):
         self.master_library, self.aligned_center = master_library, aligned_center
 
@@ -455,14 +654,47 @@ def load_spaceklip(database=None, key: Optional[str] = None, sci_files: Optional
                    ref_files: Optional[Sequence[str]] = None, crop_half: Optional[int] = None,
                    partition_by: Optional[str] = "roll", name: Optional[str] = None,
                    use_pyklip_reader: bool = True, log: Callable[[str], None] = print) -> Dict[str, Dataset]:
-    """Datasets (one per science roll by default) + RDI reference cube from a spaceKLIP
-    database concatenation or explicit file lists.  ``Dataset.meta`` carries
-    ``pxscale`` and ``wavelength_m`` when the headers provide them.
+    """Load JWST frames into datasets, one per science roll by default, with the RDI reference cube.
 
-    ``partition_by='roll'`` (default) groups the integrations by position angle, which is
-    what you want for JWST: every exposure of a roll is a separate ``filenum``, so
-    ``'filenums'`` would give one partition per exposure (often a single frame).
-    ``None`` puts everything in one dataset."""
+    The frames come from a spaceKLIP database's concatenation or from lists of files.  pyKLIP's
+    ``JWSTData`` reads them where it imports, else :func:`read_jwst_files`, the reference frames shifted
+    to one center.
+
+    Parameters
+    ----------
+    database : spaceKLIP.Database or dict or None, default None
+        The database, or its ``obs`` dict of tables.  None takes ``sci_files`` and ``ref_files``.
+    key : str or None, default None
+        The concatenation.  None takes the database's one concatenation.
+    sci_files : sequence of str or None, default None
+        The science files, without a database.
+    ref_files : sequence of str or None, default None
+        The reference files, without a database.
+    crop_half : int or None, default None
+        Half-width of the crop about the star, in pixels.  None keeps the frames whole.
+    partition_by : {"roll", "filenums"} or None, default "roll"
+        How the integrations split into datasets, by position angle, by exposure, or all in one.  Each
+        exposure of a JWST roll is a ``filenum`` of its own, so "filenums" gives one dataset per
+        exposure, often of a single frame.
+    name : str or None, default None
+        Prefix of the datasets' names.  None takes the concatenation, else ``"jwst"``.
+    use_pyklip_reader : bool, default True
+        Whether to read with pyKLIP's ``JWSTData`` where it imports.
+    log : callable, default print
+        Function that takes each line of the log.
+
+    Returns
+    -------
+    datasets : dict of str to Dataset
+        The datasets by name, each ``meta`` with ``source``, ``pxscale`` (arcsec per pixel),
+        ``wavelength_m`` and ``filter`` where the headers give them.
+
+    Raises
+    ------
+    ValueError
+        If a database holds several concatenations and no ``key`` is given, or there are no science
+        files.
+    """
     if database is not None:
         if key is None:
             keys = list((database.obs if hasattr(database, "obs") else database).keys())
@@ -489,7 +721,7 @@ def load_spaceklip(database=None, key: Optional[str] = None, sci_files: Optional
         psflib = None
         if ref_files:
             r = read_jwst_files(ref_files)
-            # each reference frame is first shifted to one common centre; dataset_from_pyklip
+            # each reference frame is first shifted to one common center; dataset_from_pyklip
             # then treats the library like pyKLIP's (single aligned_center)
             target = tuple(np.median(r["centers"], axis=0))
             psflib = _ArrLib(_recentre_stack(r["input"], r["centers"], target), target)
@@ -523,82 +755,117 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
                  ref_targets: Optional[Union[str, Sequence[str]]] = None,
                  hot_pixels: Optional[bool] = None,
                  log: Callable[[str], None] = print) -> Tuple[Dict[str, Dataset], Dict[str, Any]]:
-    """Stage-2 ``*_calints.fits`` straight into ``{name: Dataset}``, without spaceKLIP.
+    """Load stage-2 ``*_calints.fits`` files into datasets, without spaceKLIP.
 
-    ``hot_pixels`` (default ``None`` = when there are background pointings to find them in):
-    static hot or dead pixels the DQ array misses, found on the blank-sky median by
-    :func:`static_hot_pixels`, are flagged in EVERY frame (science and reference) and
-    repaired like DQ pixels.  ``False`` leaves them; ``True`` insists and raises without a
-    background pointing.  ``info['hot_pixels']`` lists them as ``(x, y)`` detector pixels.
+    The files split into science (``TARGPROP`` starting with ``science_target``), dedicated background
+    pointings (``BKG`` or ``BACKGROUND``) and the PSF references, everything else or the stars of
+    ``ref_targets``.  A file named as a PSF reference stays a reference even when its name starts with
+    the target's.  The frames then go through these steps:
 
-    ``background`` (default ``None`` = as needed): subtract the dedicated blank-sky pointings
-    from whichever science / reference frames the pipeline did not already do it for.  The two
-    are told apart by ``S_BKDSUB='COMPLETE'``, which a programme's science targets carry and
-    its pure PSF reference stars usually do not -- so an archive download of one programme is
-    routinely a MIXTURE, and stacking it untreated puts a sky pedestal and the 4QPM glow
-    sticks into some frames of a KLIP library and not others.  A mixture with no background
-    pointing to fix it with raises rather than proceeding; ``False`` stacks it anyway.
+    * The background pointings' blank-sky median (:func:`blank_sky`) is subtracted from the frames the
+      pipeline did not subtract it from, told apart by ``S_BKDSUB = 'COMPLETE'`` (``background``).
+    * Static hot and dead pixels the DQ array misses, found on that median (:func:`static_hot_pixels`),
+      are flagged in every frame (``hot_pixels``).
+    * Each frame's row and column offsets are removed on the full subarray (:func:`destripe_detector`,
+      ``destripe``).
+    * DQ ``DO_NOT_USE`` pixels are filled from their neighbors (:func:`fill_dq_neighbours`, ``repair``),
+      and nothing else is touched.
+    * The frames are registered to the median science frame by cross-correlation (``align``).  A frame
+      whose offset cannot be measured, with its peak outside a +/-6 px box or not a maximum, stays
+      where it is.
+    * The frames are cropped about the star to ``2 * half_px + 1`` pixels, an odd width, so the star
+      lies at ``((nx - 1) / 2, (ny - 1) / 2)`` (:func:`klip_tpe.metrics.star_center`).
 
-    ``partition='roll'`` (default): one partition per unique roll angle, the other target's
-    exposures as the RDI library of each.  ``partition='all'``: ONE partition holding every
-    science frame with its own PA, plus the library.  **The choice decides what pyKLIP's
-    ``mode`` can mean.**  A partition is reduced on its own, so with one per roll every frame
-    in it has the same PA: ADI has no reference frames at all (pyKLIP returns NaN) and
-    ADI+RDI is RDI -- the other roll is never in the basis, because it is in the other
-    partition.  Only with ``'all'`` does ADI subtract the other roll, and only then is a
-    searched ``mode`` a real choice (on ERS 1386 F444W at k = 10: injected S/N 6.2 ADI,
-    6.9 RDI, 7.2 ADI+RDI; companion peak 1.7 / 2.9 / 2.6 MJy/sr).  The price of ``'all'``
-    is one ``k_klip`` block for both rolls instead of one per roll.
-    ``PA = ROLL_REF - V3I_YANG * VPARITY``; DQ ``DO_NOT_USE`` pixels are replaced by the
-    median of their neighbours (:func:`fill_dq_neighbours`, spaceKLIP's treatment) and
-    **nothing else is touched**; frames are registered to the median science frame by
-    cross-correlation and cropped about the star to ``2*half_px + 1`` pixels.
+    The position angle is ``ROLL_REF - V3I_YANG * VPARITY``.
 
-    ``repair``: ``True`` / ``'dq'`` (default) fills the flagged pixels only; ``False`` leaves
-    them NaN (the built-in reducers cope, pyKLIP's RDI library does not); ``'sigma'`` is the
-    pre-1.1 behaviour, :func:`sigma_clip_repair`, which median-filters the whole PSF and is
-    kept only to reproduce old runs -- it is logged loudly when used.  The per-frame
-    ``n_repaired`` in ``info['frames']`` says how many pixels were rewritten either way.
+    Parameters
+    ----------
+    files : sequence of str
+        Paths of the files, science, references and background pointings together.
+    science_target : str or None, default None
+        Prefix of the science target's ``TARGPROP``, dashes and underscores ignored.  None takes the
+        first file's.
+    half_px : int, default 55
+        Half-width of the crop, in pixels.
+    align : bool, default True
+        Whether to register the frames by cross-correlation.
+    repair : bool or {"dq", "sigma", "none"}, default True
+        How flagged pixels are repaired.  True or "dq" fills them from their neighbors, False or "none"
+        leaves them NaN, which pyKLIP's RDI library cannot take, and "sigma" is the median filter before
+        version 1.1 (:func:`sigma_clip_repair`), kept to reproduce old runs.
+    star_center : tuple of 2 floats or None, default None
+        The star, ``(x, y)`` in 0-based detector pixels, the point the crop is centered on.  None takes
+        ``CRPIX``, the aperture's reference point, which is no measured star position.
+    keep_frames : bool, default False
+        Whether ``info`` keeps the image stacks too, about 18 MB for ERS 1386.
+    partition : {"roll", "all"}, default "roll"
+        One dataset per roll angle, or one holding every science frame.
+    filter : str or None, default None
+        The filter to load.  None asks for the files to hold one filter.
+    background : bool or None, default None
+        Whether to subtract the blank sky.  None subtracts it where needed, and refuses a mixture of
+        frames with and without it when there is no background pointing to fix it with.  False stacks
+        them as they are.
+    destripe : bool or None, default None
+        Whether to destripe.  None destripes MIRI frames.
+    ref_targets : str or sequence of str or None, default None
+        Prefixes of the ``TARGPROP`` of the stars the RDI library may hold.  None takes every file that
+        is neither science nor background.
+    hot_pixels : bool or None, default None
+        Whether to flag the static hot pixels.  None flags them where there are background pointings to
+        find them in, and True insists.
+    log : callable, default print
+        Function that takes each line of the log.
 
-    That crop is **odd on purpose**.  :func:`klip_tpe.metrics.star_center` puts the star at
-    ``((nx-1)/2, (ny-1)/2)``, so an even crop with the star on an integer pixel leaves it
-    half a pixel off in each axis -- 0.7 px radially, which at HIP 65426 b's 13 px
-    separation is a 3 degree error in position angle and a throughput mismatch between the
-    companion and the fakes injected to calibrate it.
+    Returns
+    -------
+    datasets : dict of str to Dataset
+        ``roll1``, ``roll2`` ... (or ``sci`` with ``partition="all"``), each with the RDI library as its
+        reference cube and ``meta`` with ``pxscale``, ``wavelength_m``, ``header``, ``pixar_sr``,
+        ``bunit`` and ``provenance``.
+    info : dict
+        The ``meta`` keys with ``n_sci``, ``n_ref``, ``crop_px``, ``frames`` (one record per integration),
+        ``repair``, ``partition``, ``filter``, ``star_center``, ``crpix``, ``rolls``, ``hot_pixels`` (as
+        ``(x, y)`` detector pixels) and the fractions of pixels repaired and left non-finite.  With
+        ``keep_frames`` also ``raw_sci``, ``raw_ref``, ``aligned_sci``, ``aligned_ref``, ``crop_sci`` and
+        ``crop_ref``.
 
-    ``ref_targets`` names the star(s) the RDI library may be built from, by ``TARGPROP``
-    prefix.  The default takes everything that is neither the science target nor a
-    background, which is right for one programme's download and wrong for a directory
-    holding several: HIP 65426's MIRI directory also holds HD 141569A and its own reference
-    HD 140986, so F1140C's "16 reference files" were 90 frames of phi Cen, 20 of HD 140986
-    and **12 of HD 141569A -- a resolved disk, in the KL basis of a bare star**.  Whatever
-    is passed or not, the library's composition is now logged by name and count.
+    Raises
+    ------
+    ValueError
+        If there are no files, an exposure occurs twice, the files span several filters and none is
+        asked for, the filter asked for is not among them, ``ref_targets`` matches no reference, there are
+        no science files, ``repair`` or ``partition`` is not one of their values, or the frames mix
+        background-subtracted and untreated ones with no background pointing among the files.  Also if
+        ``background`` or ``hot_pixels`` is True without a background pointing.
 
-    ``star_center`` (0-based detector pixels) overrides ``CRPIX`` as the point the crop is
-    centred on.  **Use it.**  ``CRPIX`` is the aperture reference point, not a measured star
-    position -- it is identical in every file of a programme, dithers included -- and on
-    ERS 1386 it misses HIP 65426 by about 0.8 px, which throws the companion 0.8 px inside
-    its own separation and mismatches its KLIP throughput against the fakes injected to
-    calibrate it.  The right source is spaceKLIP's star-centring step (``STARCENX/Y``);
-    failing that, ``scripts/check_hip65426_contrast.py`` shows how to solve for it from the
-    companion's position in each roll.
+    Notes
+    -----
+    ``partition`` decides what pyKLIP's ``mode`` can mean.  A partition is reduced on its own, so with
+    one per roll every frame in it has the same position angle.  ADI then has no reference frames
+    (pyKLIP returns NaN), and ADI+RDI is RDI, the other roll never in the basis.  Only with "all" does
+    ADI subtract the other roll, and only then is a searched ``mode`` a real choice (on ERS 1386 F444W at
+    k = 10, an injected S/N of 6.2 with ADI, 6.9 with RDI and 7.2 with ADI+RDI).  The price of "all" is
+    one ``k_klip`` block for both rolls.
 
-    ``info`` carries ``pxscale`` (arcsec/px from ``PIXAR_A2``), ``pixar_sr``, ``bunit``,
-    ``filter``, ``star_center`` and the first science ``SCI`` header, which is what the flux
-    calibration in :mod:`klip_tpe.stpsf_psf` needs.  It also carries ``frames``: one dict per
-    individual integration with the archive file it came from, its integration index, role,
-    position angle, commanded dither offset, how many pixels the DQ and the outlier repair
-    touched, the shift the registration measured and removed, and the integration's own
-    clock -- ``effinttm`` (its exposure time, the JWST analogue of a DIT), ``int_mid_mjd``
-    from ``INT_TIMES``, and the ``readpatt``/``ngroups``/``nframes``/``groupgap``/``tframe``
-    that build it.  There is nothing below an integration to recover: the ``nframes`` frames
-    of each group are averaged on the detector, and the ``ngroups`` groups are cumulative
-    samples of one charge ramp, already collapsed to a slope in a calints file.
+    An archive download of one program routinely mixes background-subtracted and untreated frames,
+    since a program's science targets carry ``S_BKDSUB = 'COMPLETE'`` and its PSF reference stars usually
+    do not.  On ERS 1386 F1140C, 14 of 16 reference frames arrived with a sky pedestal of about 19 MJy/sr
+    and the 4QPM glow sticks, beside science frames without them.  The library's dominant common mode was
+    then the background, and the reducer's high-pass, which hides a smooth pedestal, gave the optimizer a
+    reason to prefer a hard high-pass.
 
-    ``keep_frames=True``
-    additionally attaches the image stacks themselves (``raw_sci``/``raw_ref``,
-    ``aligned_sci``/``aligned_ref``, ``crop_sci``/``crop_ref``) -- about 18 MB for this
-    programme, which is why it is off by default.
+    ``CRPIX`` is the same in every file of a program, dithers included, and on ERS 1386 it misses HIP
+    65426 by about 0.8 px, which moves the companion inside its own separation and mismatches its KLIP
+    throughput against the fakes.  spaceKLIP's star-centering step (``STARCENX``/``STARCENY``) is the
+    right source, and ``scripts/check_hip65426_contrast.py`` solves for it from the companion in each
+    roll.  An even crop would leave the star half a pixel off in each axis, 0.7 px radially, a 3 degree
+    error in position angle at HIP 65426 b's 13 px.
+
+    Without ``ref_targets``, the MIRI directory of HIP 65426, which also holds HD 141569A and its
+    reference HD 140986, gave F1140C a library of 90 frames of phi Cen, 20 of HD 140986 and 12 of HD
+    141569A, a resolved disk in the KL basis of a bare star.  The library's stars are now logged by name
+    and count.
     """
     from astropy.io import fits
 
@@ -629,7 +896,7 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
     # One filter, always.  The wavelength and the pixel scale were taken from the FIRST
     # file and applied to every frame, so a directory holding more than one filter was
     # stacked into a single dataset at a single lambda -- different masks, different
-    # lambda/D, no error.  A whole programme downloaded at once is exactly that: the ERS
+    # lambda/D, no error.  A whole program downloaded at once is exactly that: the ERS
     # (GO 1386) has HIP 65426 in F1140C and F1550C and HD 141569A in all three, together.
     def _filt(f):
         return str(fits.getheader(f).get("FILTER", "")).strip().upper()
@@ -651,28 +918,28 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
         return str(fits.getheader(f).get("TARGPROP", "")).replace("-", "").replace("_", "").upper()
 
     def is_background(f):
-        """A dedicated background pointing, by TARGPROP.
+        """Tell whether a file is a dedicated background pointing, by its ``TARGPROP``.
 
-        These are offset exposures of blank sky -- essential for MIRI, where the thermal
-        background is strong and structured, but they are not PSF references.  The split
-        below is "science, and everything else is the library", so without this they end
-        up IN the RDI basis: empty-sky frames used to model the star's diffraction.  They
-        contribute nothing to subtract with, they dilute the frames that do, and on MIRI
-        programme 11225 they outnumber the real references.
+        These offset exposures of blank sky are essential for MIRI, whose thermal background is
+        strong and structured, but they are no PSF references.  The split below takes the
+        science and puts everything else in the library, so without this they would end up in
+        the RDI basis, empty sky modeling the star's diffraction.  They give nothing to subtract
+        with and dilute the frames that do, and on MIRI program 11225 they outnumber the real
+        references.
         """
         t = str(fits.getheader(f).get("TARGPROP", "")).upper()
         return "BKG" in t or "BACKGROUND" in t
 
     def is_reference(f):
-        """A pointing the programme named as a PSF reference.
+        """Tell whether the program named a file's pointing as a PSF reference.
 
-        The science match is ``startswith``, so that "HIP65426" finds "HIP-65426".  But a
-        programme that names its reference after its target defeats it: AU Mic's is
-        ``AU_Mic_psf_reference``, which normalises to AUMICPSFREFERENCE and starts with
-        AUMIC -- so the reference was classified as SCIENCE, its frames derotated and
-        stacked with the target's, and the RDI library came out empty.  Silently: the
-        loader would report more science frames than the programme has, which is not an
-        obvious enough number to catch.  An explicit name wins over a prefix match.
+        The science match is ``startswith``, so that "HIP65426" finds "HIP-65426".  A program
+        that names its reference after its target defeats it.  AU Mic's is
+        ``AU_Mic_psf_reference``, which normalizes to AUMICPSFREFERENCE and starts with AUMIC,
+        so the reference was taken for science, its frames derotated and stacked with the
+        target's, and the RDI library came out empty.  Nothing said so, since more science
+        frames than the program has is not an obvious enough number to catch.  An explicit name
+        wins over a prefix match.
         """
         t = str(fits.getheader(f).get("TARGPROP", "")).upper()
         return ("PSF_REFERENCE" in t or "PSFREF" in t or "PSF-REF" in t
@@ -688,7 +955,7 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
     sci = [f for f in rest if f not in named_ref and targ(f).startswith(want)]
     ref = [f for f in rest if f not in sci]
     # "Science, and everything else is the library" is right for a download of one
-    # programme and wrong for a directory holding several.  HIP 65426's MIRI directory also
+    # program and wrong for a directory holding several.  HIP 65426's MIRI directory also
     # holds HD 141569A and its reference HD 140986, so the F1140C library came out at 122
     # frames of which only 90 were phi Cen -- and 12 were HD 141569A, a resolved DISK,
     # putting disk structure into the KL basis of a bare star.  Nothing in the numbers said
@@ -801,20 +1068,20 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
         return out
 
     def _xs(im, ref_, search=6):
-        """Sub-pixel offset of ``im`` from ``ref_``, as ``(dx, dy, ok)``.
+        """Return the sub-pixel offset of ``im`` from ``ref_`` as ``(dx, dy, ok)``.
 
-        ``ok=False`` means *no offset was measured* and the caller must not shift.  Two ways
-        this used to return a confident wrong number instead:
+        ``ok`` False means no offset was measured, and the caller must not shift.  It used to
+        return a confident wrong number in two ways:
 
-        * ``np.fft.rfft2`` of an array holding one NaN is entirely NaN and ``np.argmax`` of an
-          all-NaN array returns 0, so every frame of a MIRI cube came back as a clean
-          ``(-search, -search)`` -- a six-pixel shift measured from nothing.  Fixed by
-          removing the median and zero-filling the gaps, which then contribute no correlation.
-        * when the correlation has no peak inside the box, ``argmax`` still returns something,
-          and it is whichever corner is highest.  On HIP 65426 F1140C the peak sits 100+ px
-          away and zero lag is a *minimum*: the 41 integrations of one exposure have nothing
-          to register against each other, and the answer was six pixels in a corner.  A real
-          peak is interior and positive, so anything else is now reported as unmeasured.
+        * ``np.fft.rfft2`` of an array holding one NaN is all NaN, and ``np.argmax`` of an
+          all-NaN array returns 0, so every frame of a MIRI cube came back as
+          ``(-search, -search)``, a six-pixel shift measured from nothing.  The median is now
+          removed and the gaps zero-filled, so they add no correlation.
+        * Where the correlation has no peak inside the box, ``argmax`` still returns its highest
+          corner.  On HIP 65426 F1140C the peak sits more than 100 px away and zero lag is a
+          minimum, since the 41 integrations of one exposure have nothing to register against
+          each other, and the answer was six pixels in a corner.  A real peak is interior and
+          positive, so anything else is now reported as unmeasured.
         """
         a = np.nan_to_num(np.asarray(im, float) - np.nanmedian(im))
         b = np.nan_to_num(np.asarray(ref_, float) - np.nanmedian(ref_))
@@ -843,7 +1110,7 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
     # flagged; counting that against the 81x81 stamp around the star reports 27% where the
     # stamp's own figure is under one per cent, which is alarm about the wrong pixels.
     # ---- the dedicated background, and the mixture an archive download hides -------------
-    # A programme's SCIENCE targets get dedicated background pointings and Image2 subtracts
+    # A program's SCIENCE targets get dedicated background pointings and Image2 subtracts
     # them (S_BKDSUB='COMPLETE'); its pure PSF REFERENCE stars usually do not get one, so the
     # step never runs on them.  ERS 1386 at F1140C: both HIP-65426 rolls and both HD-141569A
     # exposures are subtracted, while HIP-68245 (9 files) and HD-140986 (5) are not -- so 14
@@ -1088,6 +1355,22 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
 
 
 def _recentre_stack(imgs: np.ndarray, centers: np.ndarray, target: Tuple[float, float]) -> np.ndarray:
+    """Shift each frame of a stack so its star lies at one center, its gaps zero-filled.
+
+    Parameters
+    ----------
+    imgs : ndarray, shape (n, ny, nx)
+        The frames.
+    centers : ndarray, shape (n, 2)
+        Each frame's star, ``(x, y)`` in 0-based pixels.
+    target : tuple of 2 floats
+        The center, ``(x, y)`` in 0-based pixels.
+
+    Returns
+    -------
+    shifted : ndarray of float32, shape (n, ny, nx)
+        The frames, shifted by linear interpolation, 0 outside.
+    """
     from scipy import ndimage
     out = np.empty_like(imgs, dtype=np.float32)
     for i, (cx, cy) in enumerate(centers):
@@ -1106,26 +1389,75 @@ def make_reducer(datasets: Dict[str, Dataset], pxscale: Optional[float] = None, 
                  fwhm_px: Optional[float] = None, outrad_cap: Optional[float] = None,
                  stpsf_kw: Optional[Dict[str, Any]] = None, backend: str = "pyklip",
                  log: Callable[[str], None] = print, **kw) -> PartitionedReducer:
-    """``PyKLIPReducer`` per roll (``backend='klip'``: the built-in annular KLIP instead).
+    """Build a reducer of one partition per dataset, pyKLIP's or the built-in KLIP, with a JWST injection PSF.
 
-    The reference library is searched in each engine's own terms: ``backend='klip'`` applies
-    ``set_reference_library`` (``nkeep_altroll`` / ``nkeep_psfref``, one count per pool),
-    which pyKLIP refuses; pyKLIP instead searches its own selection through
-    ``set_native_library`` (``mode`` + ``maxnumbasis``).  ``mode`` maps onto the built-in
-    engine as ADI -> no reference cube, RDI -> ``rdi_mode='rdi'``, ADI+RDI -> ``'ardi'``.
+    The reference library is searched in each engine's own terms.  The built-in engine (``backend="klip"``)
+    takes ``set_reference_library`` (``nkeep_altroll`` and ``nkeep_psfref``, one count per pool), which
+    pyKLIP refuses, and pyKLIP searches its own selection through ``set_native_library`` (``mode`` and
+    ``maxnumbasis``).  ``mode`` maps onto the built-in engine as ADI to no reference cube, RDI to
+    ``rdi_mode="rdi"`` and ADI+RDI to ``"ardi"``, and a dataset without a reference cube is reduced ADI.
 
-    The injection model, in order of precedence: an ``injection_model`` you built
-    yourself; ``psf='stpsf'``, which computes the **off-axis coronagraphic PSF of the
-    actual mask** with STPSF (:func:`klip_tpe.stpsf_psf.model_for_datasets`) -- separation
-    dependent, with the mask throughput, and the right template to forward-model for
-    :class:`klip_tpe.fmmf.FMMFSNR`; a ``psf_template`` webbpsf(_ext) offset PSF (array or
-    FITS path) in the same pixel scale; else a Gaussian of ``1.028 lambda/D``.
-    ``star_flux`` puts the template on the data's flux scale (if None the template's own
-    flux is the unit, i.e. contrast is relative to the template).
+    The injection model is, in order, ``injection_model``, then with ``psf="stpsf"`` the off-axis
+    coronagraphic PSF of the actual mask from STPSF (:func:`klip_tpe.stpsf_psf.model_for_datasets`),
+    which depends on separation and carries the mask's throughput, then ``psf_template``, else a
+    Gaussian of ``1.028 lambda/D``.
 
-    ``pool='threads'`` (default) maps the partitions onto threads rather than forked
-    worker processes: pyKLIP starts its own process pool inside ``klip_parallelized``, and
-    a forked (daemonic) worker may not have children.
+    Parameters
+    ----------
+    datasets : dict of str to Dataset
+        The datasets, by partition.
+    pxscale : float or None, default None
+        Plate scale, in arcsec per pixel.  None takes each dataset's ``meta``.
+    wavelength_m : float or None, default None
+        Wavelength, in m.  None takes each dataset's ``meta``.
+    diam_m : float, default JWST_DIAM
+        Telescope diameter for lambda/D, in m.
+    psf : {"auto", "stpsf"}, default "auto"
+        Whether to model the injection PSF with STPSF.  "auto" takes ``psf_template`` or the Gaussian.
+    psf_template : str or ndarray or None, default None
+        An offset PSF at the data's plate scale, a 2-D array or a FITS path, such as webbpsf's or
+        ``webbpsf_ext``'s.
+    psf_center : tuple of 2 floats or None, default None
+        The template's center, ``(x, y)`` in pixels.  None takes its middle.
+    star_flux : float or None, default None
+        The star's flux, which puts the template on the data's flux scale.  None takes the template's
+        own flux as the unit, so contrasts are relative to it.
+    injection_model : InjectionModel or None, default None
+        A model built already, which takes precedence.
+    mode : {"ADI", "RDI", "ADI+RDI"}, default "ADI+RDI"
+        The reduction's mode.
+    weighting : {"equal", "sqrt_texp"}, default "equal"
+        Weights of the partitions' combination (:class:`~klip_tpe.reducer.PartitionedReducer`).
+    max_workers : int or str, default 1
+        Number of partitions reduced at once.
+    pool : {"threads", "processes", "auto"}, default "threads"
+        Workers of the partitions.  pyKLIP starts its own process pool inside ``klip_parallelized``, and
+        a forked worker, being daemonic, may not have children.
+    n_min_ref : int, default 10
+        Fewest reference frames a reduction takes.
+    fwhm_px : float or None, default None
+        FWHM of the PSF, in pixels.  None takes ``1.028 lambda/D``.
+    outrad_cap : float or None, default None
+        Largest outer radius of a zone, in pixels.  None takes half the frame less 2.
+    stpsf_kw : dict or None, default None
+        More keywords for :func:`klip_tpe.stpsf_psf.model_for_datasets`.
+    backend : {"pyklip", "klip"}, default "pyklip"
+        The engine, pyKLIP's or the built-in annular KLIP.
+    log : callable, default print
+        Function that takes each line of the log.
+    kw : dict
+        More defaults of every partition's reducer.
+
+    Returns
+    -------
+    reducer : PartitionedReducer
+        The reducer, named ``"spaceklip"``.
+
+    Raises
+    ------
+    ValueError
+        If a dataset's plate scale or wavelength is unknown, or ``backend`` is neither "pyklip" nor
+        "klip".
     """
     if injection_model is None and str(psf).lower() == "stpsf":
         from ..stpsf_psf import model_for_datasets
