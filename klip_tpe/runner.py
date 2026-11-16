@@ -51,7 +51,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tupl
 import numpy as np
 
 from . import __version__, durable
-from .heartbeat import Heartbeat
+from .heartbeat import Heartbeat, _dur
 from .liveness import liveness_mode
 from .metrics import (Objective, Source, mawet_peak_snr, nanmedian_even, radprof, source_xy,
                       star_center)
@@ -1112,6 +1112,8 @@ class Runner:
         self._nsrc_warned: Dict[int, int] = {}     # annulus -> count already reported
         self._nsrc_cache: Dict[int, int] = {}      # annulus -> resolved count (the probe is not free)
         self._draw_tally: Dict[int, Dict[str, Any]] = {}   # annulus -> search draws, failed draws, reasons
+        self._card_mark: Optional[Dict[str, Any]] = None    # the card's counts as the search started
+        self._card_annuli: Dict[int, Dict[str, Any]] = {}   # annulus -> its search's card numbers
         self._calib_images: Optional[Dict[str, Any]] = None
         self._k_default = int(self.cfg.defaults.get("k_klip", 10) or 10)
         self._resumed = False
@@ -1410,35 +1412,100 @@ class Runner:
         self._nsrc_cache[ia] = n
         return n
 
-    def _card_counts(self) -> Optional[Tuple[int, int, Dict[str, int], int]]:
-        """The card's running counts, ``(marked, reduced, refused by reason, out of memory)``, or
-        None without card workers (:meth:`klip_tpe.parallel.ProcessPool.card_summary`)."""
+    def _card_counts(self) -> Optional[Dict[str, Any]]:
+        """Return the card's running counts.
+
+        Returns
+        -------
+        counts : dict or None
+            ``marked``, ``jobs`` (reduced), ``refused`` (by reason), ``memory`` (out of memory), ``busy_s``,
+            ``workers``, ``share`` and ``t``, when they were read, None without card workers
+            (:meth:`klip_tpe.parallel.ProcessPool.card_summary`).
+        """
         cs = getattr(self.reducer, "card_summary", lambda: None)()
         if not cs:
             return None
-        return (int(cs.get("marked") or 0), int(cs.get("jobs") or 0), dict(cs.get("refused") or {}),
-                int(cs.get("memory") or 0))
+        return {"marked": int(cs.get("marked") or 0), "jobs": int(cs.get("jobs") or 0),
+                "refused": dict(cs.get("refused") or {}), "memory": int(cs.get("memory") or 0),
+                "busy_s": float(cs.get("busy_s") or 0.0), "workers": max(int(cs.get("workers") or 1), 1),
+                "share": cs.get("share"), "t": float(cs.get("t") or time.time())}
 
     def _card_note(self, ia: int) -> None:
-        """After an annulus' search: how many of its draws' jobs were marked for the card, how
-        many the card reduced, and how many its reducer turned away, by reason.  The counts
-        since the search started (:attr:`_card_mark`, set as the annulus starts)."""
+        """Log the card's numbers for an annulus' search, and keep them.
+
+        The lines give how many of the search's jobs were marked for the card, how many the card reduced,
+        how many its reducer turned away, by reason, and how busy its workers were, all since the search
+        started (:attr:`_card_mark`).  The numbers go into :attr:`_card_annuli`, from which the annulus'
+        ``annulus_done.json`` and the run's summary take them, and the mark is cleared.  An annulus without a
+        search has no mark and gets no line.
+
+        Parameters
+        ----------
+        ia : int
+            The annulus, counted from 0.
+        """
         now = self._card_counts()
-        if now is None:
+        mark = getattr(self, "_card_mark", None)
+        if now is None or not isinstance(mark, dict):
             return
-        mark = tuple(getattr(self, "_card_mark", None) or (0, 0, {}, 0))
-        m0, j0, r0 = mark[0], mark[1], mark[2]
-        o0 = mark[3] if len(mark) > 3 else 0
-        marked, done, oom = now[0] - m0, now[1] - j0, now[3] - o0
-        refused = {k: v - r0.get(k, 0) for k, v in now[2].items() if v - r0.get(k, 0) > 0}
+        marked, done, oom = now["marked"] - mark["marked"], now["jobs"] - mark["jobs"], now["memory"] - mark["memory"]
+        r0 = mark["refused"]
+        refused = {k: v - r0.get(k, 0) for k, v in now["refused"].items() if v - r0.get(k, 0) > 0}
         nref = sum(refused.values())
         why = ", ".join(f"{k} {v}" for k, v in sorted(refused.items(), key=lambda kv: -kv[1]))
         back = marked - nref - done
+        span = max(now["t"] - mark["t"], 1e-9)
+        busy = (now["busy_s"] - mark["busy_s"]) / (span * now["workers"])
+        resumed = bool(mark.get("resumed"))
         self.log(f"  annulus {ia+1}: the card reduced {done} of the {marked} jobs marked for it"
                  + (f", and turned away {nref} ({why})" if nref else "")
                  + (f"; {back} went back to the CPU workers" if back > 0 else "")
                  + (f" ({oom} needed more than a worker's share of its memory)" if back > 0 and oom > 0 else ""))
-        self._card_mark = now
+        self.log(f"  annulus {ia+1}: the card's {now['workers']} worker{'s' * (now['workers'] != 1)} were busy "
+                 f"{100 * busy:.0f} % of the search's {_dur(span)}" + (" since the resume" if resumed else ""))
+        self._card_annuli[ia] = {"annulus": ia + 1, "marked": marked, "jobs": done, "refused": nref, "memory": oom,
+                                 "busy_fraction": round(busy, 4), "search_s": round(span, 1),
+                                 "workers": now["workers"], "share": now["share"], "since_resume": resumed}
+        self._card_mark = None
+
+    def _mark_card(self, resumed: bool = False) -> None:
+        """Take the card's counts as an annulus' search starts, into :attr:`_card_mark`.
+
+        Parameters
+        ----------
+        resumed : bool, default False
+            Whether the search goes on from a checkpoint, when its numbers cover the time since.
+        """
+        self._card_mark = self._card_counts()
+        if self._card_mark is not None:
+            self._card_mark["resumed"] = bool(resumed)
+
+    def _card_per_annulus(self, results: Sequence[AnnulusResult]) -> List[Dict[str, Any]]:
+        """Return each finished annulus' card numbers, for the run's summary.
+
+        Parameters
+        ----------
+        results : sequence of AnnulusResult
+            The finished annuli.
+
+        Returns
+        -------
+        numbers : list of dict
+            Each annulus' numbers (:meth:`_card_note`), from this process or, for an annulus finished before
+            a resume, from its ``annulus_done.json``, an annulus without them left out.
+        """
+        out = []
+        for r in results:
+            rec = self._card_annuli.get(int(r.annulus))
+            if rec is None:
+                try:
+                    with open(os.path.join(self._ann_dir(int(r.annulus)), "annulus_done.json")) as f:
+                        rec = json.load(f).get("card")
+                except (OSError, ValueError, AttributeError):
+                    rec = None
+            if rec:
+                out.append(dict(rec))
+        return out
 
     def _apply_sampler_config(self) -> None:
         """``RunConfig.min_r_fwhm`` onto the run's sampler (the base of a replay), so the run
@@ -1773,11 +1840,40 @@ class Runner:
     def _reduce(self, cfg: Config, sources: Optional[Sequence[Source]], k_scan: bool = False,
                 tag: str = "", zone: Optional[Tuple[float, float]] = None,
                 fm_sources: Optional[Sequence[Source]] = None, extras: bool = False,
-                card: bool = False) -> EvalImages:
-        """One reduction of ``cfg`` at the current annulus' zone.  ``fm_sources`` requests
-        the KLIP-FM pass (``EvalImages.fm_image``), ``extras`` the nosub / cadi reference
-        images; both are forwarded to partitioned and plain reducers alike.  ``card``: its
-        partition jobs may go to the card workers (the search's injected draws)."""
+                card: bool = False, card_group: Optional[Sequence[str]] = None) -> EvalImages:
+        """Reduce one configuration at the current annulus' zone.
+
+        The zone's edges shared with another annulus are padded, a forward-modeled metric gets the KLIP-FM
+        pass of the sources it scores, and the known sources taken out of the frames
+        (``RunConfig.subtract_known``) go in as negative injections the caller never sees.
+
+        Parameters
+        ----------
+        cfg : Config
+            The configuration.
+        sources : sequence of Source or None
+            Sources to inject, None for the clean reduction.
+        k_scan : bool, default False
+            Whether to return the images for every number of KL modes.
+        tag : str, default ""
+            Label of the reduction.
+        zone : tuple of 2 floats or None, default None
+            Zone ``(inrad, outrad)``, in pixels, in place of the annulus', as the seam patches use it.
+        fm_sources : sequence of Source or None, default None
+            KLIP-FM test sources, for ``EvalImages.fm_image``.
+        extras : bool, default False
+            Whether to also make the ``nosub`` and ``cadi`` reference images.
+        card : bool, default False
+            Whether the partition jobs may go to the card workers, as the search's injected draws may.
+        card_group : sequence of str or None, default None
+            Tags of every marked reduction of the trial, for the card's ``"trial"`` rule
+            (:func:`klip_tpe.parallel.card_picks`).
+
+        Returns
+        -------
+        ev : EvalImages
+            The images.
+        """
         ia_over = self._zone_overrides(self.ia, cfg) if zone is None else {"inrad": zone[0], "outrad": zone[1]}
         # zone geometry is a run property, not a searched parameter (unless searched)
         params = dict(cfg.params)
@@ -1815,6 +1911,8 @@ class Runner:
             # card= only when it is set, so a reduce_config of the old signature (a wrapper, a
             # test's spy) still serves every other reduction
             more = {"card": True} if card else {}
+            if card and card_group:
+                more["card_group"] = list(card_group)
             return self.reducer.reduce_config(cfg2, sources, k_scan, tag, fm_sources=fm_sources, extras=extras,
                                               **more)
         res = self.reducer.reduce(ReductionRequest(cfg2.params, sources, k_scan, tag, fm_sources=fm_sources,
@@ -2626,18 +2724,37 @@ class Runner:
         return [one(fn) for fn in calls]
 
     def _trial_calls(self, cfg: Config, draws: Sequence[Sequence[Source]], tag: str) -> List[Callable[[], Any]]:
-        """The reductions of one trial, in the order :meth:`_trial_finish` reads them: the
-        clean image (when the objective needs one), then each draw's injected image.  Tags
-        as the per-draw evaluations named them (a single draw as :meth:`evaluate` does)."""
+        """Return the reductions of one trial, in the order :meth:`_trial_finish` reads them.
+
+        They are the clean image, when the objective needs one, then each draw's injected image, tagged as
+        the per-draw evaluations named them (a single draw as :meth:`evaluate` does).  The injected images
+        may go to the card, each carrying the trial's injected tags, over which the card's ``"trial"`` rule
+        counts its share.
+
+        Parameters
+        ----------
+        cfg : Config
+            The trial's configuration.
+        draws : sequence of sequence of Source
+            Each draw's sources.
+        tag : str
+            The trial's tag, such as ``"a1_e12"``.
+
+        Returns
+        -------
+        calls : list of callable
+            One function per reduction, each returning its :class:`EvalImages`.
+        """
         one = len(draws) == 1
         calls: List[Callable[[], Any]] = []
         if self._needs_clean():
             ctag = f"{tag}_clean" if one else f"{tag}_d1_clean"
             calls.append(lambda: self._reduce(cfg, None, tag=ctag))
-        for j, d in enumerate(draws):
+        # the injected draws' tags: the trial the card's share is counted over
+        itags = [f"{tag}_inj"] if one else [f"{tag}_d{j + 1}_inj" for j in range(len(draws))]
+        for d, itag in zip(draws, itags):
             srcs = [Source(s.rho, s.theta, self.contrast) for s in d]
-            itag = f"{tag}_inj" if one else f"{tag}_d{j + 1}_inj"
-            calls.append(lambda srcs=srcs, itag=itag: self._reduce(cfg, srcs, tag=itag, card=True))
+            calls.append(lambda srcs=srcs, itag=itag: self._reduce(cfg, srcs, tag=itag, card=True, card_group=itags))
         return calls
 
     def _trial_finish(self, x: np.ndarray, cfg: Config, phase: str, tag: str,
@@ -4211,15 +4328,28 @@ class Runner:
 
     def run_annulus(self, ia: int, resume_index: Optional[int] = None,
                     extend: Optional[Dict[str, Any]] = None) -> AnnulusResult:
-        """Calibrate, search, validate and write the products of annulus ``ia``.
+        """Calibrate, search, validate and write the products of an annulus.
 
-        ``resume_index`` continues an interrupted search from the checkpointed history;
-        ``extend`` (used by :meth:`extend`) is ``{'mode': 'validate' | 'continue',
-        'history': History, 'contrast': float, 'k_default': int}``: the spliced history
-        replaces calibration, the contrast is frozen, and in ``continue`` mode the prior
-        best is re-scored first before the search continues to the (new) ``n_iter``."""
+        Parameters
+        ----------
+        ia : int
+            The annulus, counted from 0.
+        resume_index : int or None, default None
+            Evaluation from which an interrupted search goes on, with the checkpointed history.  None starts
+            the annulus.
+        extend : dict or None, default None
+            ``{"mode": "validate" or "continue", "history": History, "contrast": float, "k_default": int}``
+            from :meth:`extend`.  The history given replaces the calibration and the contrast is frozen.  In
+            ``"continue"`` mode the prior best is scored again first and the search goes on to the new
+            ``n_iter``.
+
+        Returns
+        -------
+        result : AnnulusResult
+            The annulus' result.
+        """
         self.ia = ia
-        self._card_mark = self._card_counts()   # the card's counts at the start, for the annulus' line
+        self._card_mark = None                  # set as the search starts (_mark_card), for the annulus' line
         if resume_index is None:
             self._hooks_done.pop(ia, None)      # a fresh or extended pass re-runs its post-annulus hooks
         if resume_index is None or extend is not None:
@@ -4253,6 +4383,7 @@ class Runner:
                     self.checkpoint(routine=True)
                     self._save_eval_images(rec, inj, clean)
                     self._emit("on_eval", rec, inj, clean, True)
+                self._mark_card()
                 self._search_annulus(ia, len(self.history))
             else:
                 self.log(f"=== annulus {ia+1}: RE-VALIDATE {len(self.history)} existing evals in place "
@@ -4275,12 +4406,14 @@ class Runner:
                 json.dump(cinfo, f, indent=1, default=_json_default)
             self._durable_later(cpath)
             self._emit("on_calibration", cinfo, self._calib_images)
+            self._mark_card()                   # the search's seed trial, in _reset_history, counts too
             self._reset_history(ia)
             self._search_annulus(ia, len(self.history))
         else:
             self._draw_tally[ia] = {"n": 0, "failed": 0, "why": collections.Counter(), "warned": False,
                                     "since_resume": True}
             self._restore_best_images(ia)
+            self._mark_card(resumed=resume_index > 0)
             self._search_annulus(ia, resume_index)
         return self._finish_annulus(ia)
 
@@ -4317,8 +4450,27 @@ class Runner:
             self.rng.bit_generator.state = st
 
     def _finish_annulus(self, ia: int) -> AnnulusResult:
-        """Validation, products, edge commit (opt_width), checkpoint and the
-        verification hooks of annulus ``ia`` (search already complete)."""
+        """Validate an annulus whose search is done, and write its products.
+
+        Then the winning edge is committed (``opt_width``), the checkpoint is taken, the verification hooks
+        run, and ``annulus_done.json`` records the run's time at the annulus' end, its winner and its card
+        numbers (:meth:`_card_note`).
+
+        Parameters
+        ----------
+        ia : int
+            The annulus, counted from 0.
+
+        Returns
+        -------
+        result : AnnulusResult
+            The annulus' result.
+
+        Raises
+        ------
+        RuntimeError
+            If every evaluation of the annulus failed.
+        """
         bi, bs = self.history.best()
         # A search in which EVERY evaluation failed still reached this point quietly: the
         # winner index came back -1, no best_*.fits were written, and the first thing to
@@ -4404,9 +4556,10 @@ class Runner:
         # ``klip-tpe render`` draws again
         self.done_wall_s = time.time() - self.wall0 + self.wall_prev
         try:
-            _atomic_write(os.path.join(self._ann_dir(ia), "annulus_done.json"),
-                          json.dumps({"annulus": ia + 1, "elapsed_s": float(self.done_wall_s),
-                                      "winner_index": int(res.winner_index)}, indent=1))
+            done = {"annulus": ia + 1, "elapsed_s": float(self.done_wall_s), "winner_index": int(res.winner_index)}
+            if self._card_annuli.get(ia):
+                done["card"] = self._card_annuli[ia]     # the run's summary reads it after a resume
+            _atomic_write(os.path.join(self._ann_dir(ia), "annulus_done.json"), json.dumps(done, indent=1))
         except OSError as exc:                       # a record for the display, never fatal
             self.log(f"  annulus_done.json: {exc!r}")
         self._emit("on_annulus_done", res, winner)
@@ -5199,10 +5352,13 @@ class Runner:
         return [r for r in self.results if r is not None]
 
     def finish(self) -> None:
-        """Final products: sensitivity-weighted stitch with seam patching, injected /
-        per-partition / S/N stitches, ``klip_stitched_params.txt``, run-level
-        ``contrast_curve.txt``, ``final_results.json``, the bench summary row and the
-        final verification / candidate hooks."""
+        """Write the run's final products.
+
+        They are the sensitivity-weighted stitch with its seam patches, the injected, per-partition and S/N
+        stitches, ``klip_stitched_params.txt``, the run's ``contrast_curve.txt``, ``final_results.json`` with
+        the card's totals and each annulus' numbers, the rows of ``bench_summary.txt``, and the final
+        verification and candidate hooks.  The display's ``on_finish`` comes last.
+        """
         self.hb.stall_after(None)                 # final products take as long as they take
         self.hb.stage("final products")
         results = [r for r in self.results if r is not None]
@@ -5239,6 +5395,9 @@ class Runner:
         self._sync_files()
         card = getattr(self.reducer, "card_summary", lambda: None)()
         if card:
+            card = dict(card)
+            card.pop("t", None)
+            card["annuli"] = self._card_per_annulus(results)
             out["card"] = card
             self.log(f"  card: {card['jobs']} jobs, its workers busy {100 * card['busy_fraction']:.0f} % of the time "
                      f"since the pool started" + ("" if card["up"] else f" (left out: {card['why_down']})"))
@@ -5256,6 +5415,11 @@ class Runner:
                 f.write(f"# card: share {card['share']:g} %, {card['workers']} workers, {card['jobs']} jobs, "
                         f"busy {100 * card['busy_fraction']:.0f} % of the time since the pool started"
                         + ("" if card["up"] else f", left out: {card['why_down']}") + "\n")
+                for c in card["annuli"]:
+                    f.write(f"# card annulus {int(c['annulus']):d}: {int(c['jobs'])} jobs of {int(c['marked'])} "
+                            f"marked, busy {100 * float(c['busy_fraction']):.0f} % of the search's "
+                            f"{float(c['search_s']):.0f} s" + (" since the resume" if c.get("since_resume") else "")
+                            + "\n")
         # final-layer hooks (guarded)
         if results and stitched is not None:
             if self.do_param_verify:
@@ -6131,14 +6295,27 @@ class Runner:
 
     @classmethod
     def annulus_end_stitch(cls, run_dir: str, ia: int) -> Optional[Dict[str, Any]]:
-        """The running stitch at the end of annulus ``ia`` (0-based), which its annulus-done frame
-        shows: ``{"clean", "inj", "sources", "how"}`` or None.  Reads only.
+        """Return the running stitch at the end of an annulus, which its annulus-done frame shows.
 
         Runs since 2026-11-10 keep it in the annulus' directory.  Otherwise the run's
-        ``klip_stitched_running*.fits`` are it when their header says so (``ANNULUS`` and
-        ``PHASE final``: the last annulus of a finished run).  Otherwise it is made again from
-        the winners' products of annuli 1 to ``ia + 1`` (:meth:`_running_stitch_images`), with
-        the run's tiles, pads and flattening as the code draws them now."""
+        ``klip_stitched_running*.fits`` are it when their header says so (``ANNULUS`` and ``PHASE final``, the
+        last annulus of a finished run).  Otherwise it is made again from the winners' products of the
+        annuli up to this one (:meth:`_running_stitch_images`), with the run's tiles, pads and flattening as
+        the code draws them now.  It reads only.
+
+        Parameters
+        ----------
+        run_dir : str
+            The run directory.
+        ia : int
+            The annulus, counted from 0.
+
+        Returns
+        -------
+        stitch : dict or None
+            ``clean``, ``inj``, ``sources``, ``edges`` (the radii of its tiles' edges in pixels, None when the
+            file does not give them) and ``how``, None when it cannot be had.
+        """
         from types import SimpleNamespace
         from .stitch import read_fits
         res = None
@@ -6151,11 +6328,23 @@ class Runner:
         for r in (res or [])[:ia + 1]:
             if r is not None:
                 src.extend(tuple(t) for t in (r.winner_sources or []))
+        def edges(hd):
+            try:
+                e = [float(v) for v in str(hd.get("EDGES", "") or "").split(",") if v.strip()]
+            except ValueError:
+                return None
+            return e if len(e) >= 2 else None
+
         d = os.path.join(run_dir, f"annulus{ia + 1:02d}")
         own = read_fits(os.path.join(d, "klip_stitched_running.fits"))
         if own is not None:
+            try:
+                from astropy.io import fits
+                e_own = edges(fits.getheader(os.path.join(d, "klip_stitched_running.fits")))
+            except Exception:
+                e_own = None
             return {"clean": own, "inj": read_fits(os.path.join(d, "klip_stitched_running_inj.fits")),
-                    "sources": src or None, "how": "kept at the annulus' end"}
+                    "sources": src or None, "edges": e_own, "how": "kept at the annulus' end"}
         try:
             from astropy.io import fits
             with fits.open(os.path.join(run_dir, "klip_stitched_running.fits")) as h:
@@ -6163,7 +6352,8 @@ class Runner:
                 if int(hd.get("ANNULUS", 0)) == ia + 1 and str(hd.get("PHASE", "")) == "final":
                     return {"clean": np.asarray(h[0].data, float),
                             "inj": read_fits(os.path.join(run_dir, "klip_stitched_running_inj.fits")),
-                            "sources": src or None, "how": "the run's running stitch, of this annulus' end"}
+                            "sources": src or None, "edges": edges(hd),
+                            "how": "the run's running stitch, of this annulus' end"}
         except Exception:
             pass
         if st is None or not res or ia >= len(res) or res[ia] is None:
@@ -6185,7 +6375,9 @@ class Runner:
             return None
         if im is None:
             return None
+        tl = im["tiles"]
         return {"clean": im["clean"], "inj": im["inj"], "sources": [tuple(t) for t in im["sources"]] or None,
+                "edges": [float(t[0]) for t in tl] + [float(tl[-1][1])] if tl else None,
                 "how": "made again from the winners' products"}
 
     @classmethod

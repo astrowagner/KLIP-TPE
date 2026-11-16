@@ -31,23 +31,35 @@ def test_the_card_reducer_says_why_it_turns_a_job_away():
 
 
 def test_the_annulus_line_counts_the_jobs_since_the_search_started():
+    """The counts and the card's busy fraction since the search started (``Runner._mark_card``),
+    and no line for an annulus without a search (NEAR2's note of 2026-11-15, the busy fraction)."""
     logs = []
-    counts = {"marked": 10, "jobs": 7, "refused": {"extras": 1}}
+    counts = {"marked": 10, "jobs": 7, "refused": {"extras": 1}, "busy_s": 100.0, "workers": 3, "t": 1000.0}
     red = types.SimpleNamespace(card_summary=lambda: dict(counts))
-    stub = types.SimpleNamespace(reducer=red, log=logs.append)
+    stub = types.SimpleNamespace(reducer=red, log=logs.append, _card_annuli={})
     stub._card_counts = lambda: Runner._card_counts(stub)
-    stub._card_mark = Runner._card_counts(stub)
-    counts.update(marked=40, jobs=32, refused={"extras": 1, "KLIP-FM": 3, "fast": 2})
+    Runner._mark_card(stub)
+    counts.update(marked=40, jobs=32, refused={"extras": 1, "KLIP-FM": 3, "fast": 2}, busy_s=1000.0, t=1600.0)
     Runner._card_note(stub, 1)
-    assert logs[-1] == ("  annulus 2: the card reduced 25 of the 30 jobs marked for it, and turned away 5 "
-                        "(KLIP-FM 3, fast 2)"), logs
-    counts.update(marked=50, jobs=40, refused={"extras": 1, "KLIP-FM": 3, "fast": 2})
+    assert logs[-2:] == ["  annulus 2: the card reduced 25 of the 30 jobs marked for it, and turned away 5 "
+                         "(KLIP-FM 3, fast 2)",
+                         "  annulus 2: the card's 3 workers were busy 50 % of the search's 10m"], logs
+    assert stub._card_annuli[1] == {"annulus": 2, "marked": 30, "jobs": 25, "refused": 5, "memory": 0,
+                                    "busy_fraction": 0.5, "search_s": 600.0, "workers": 3, "share": None,
+                                    "since_resume": False}
+    assert stub._card_mark is None
+    n = len(logs)
     Runner._card_note(stub, 2)
-    assert logs[-1] == ("  annulus 3: the card reduced 8 of the 10 jobs marked for it; 2 went back to the "
-                        "CPU workers"), logs
+    assert len(logs) == n, "no search since the last line, no line"
+    Runner._mark_card(stub, resumed=True)
+    counts.update(marked=50, jobs=40, busy_s=1360.0, t=1900.0)
+    Runner._card_note(stub, 2)
+    assert logs[-2:] == ["  annulus 3: the card reduced 8 of the 10 jobs marked for it; 2 went back to the "
+                         "CPU workers",
+                         "  annulus 3: the card's 3 workers were busy 40 % of the search's 5m since the resume"], logs
     logs.clear()
     Runner._card_note(types.SimpleNamespace(reducer=types.SimpleNamespace(), log=logs.append,
-                                            _card_counts=lambda: None), 0)
+                                            _card_counts=lambda: None, _card_mark=None), 0)
     assert logs == [], "no card workers, no line"
 
 

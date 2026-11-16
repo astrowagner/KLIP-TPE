@@ -1,5 +1,48 @@
 # Changelog
 
+## Unreleased — 2026-11-15 (the card's share trial by trial, its card, its busy fraction and three display fixes)
+
+From the NEAR2 session's full run with the card (patrick, `run_20261114_232646`, OpenCV
+rotation, 3 card workers, 2026-11-15).
+
+- **`--gpu-share auto` is 12** where Linux shows a card and CuPy is installed
+  (`cli.AUTO_CARD_SHARE`), 30 before.  On NEAR2, 12 never ran slower than 30 and halved the
+  search's time at small bins.  A run keeps the share in its `card.json`.
+- **Each trial sends the card the share of its jobs with the lowest hash** (`parallel.card_picks`,
+  `CardSpec.rule`, `PartitionedReducer.card_rule`).  The count is the share of the trial's jobs
+  rounded down, plus one more when the remainder is above a number drawn from the trial's tags,
+  so the card's long-run share is the share asked and no trial sends it more than the share
+  rounded up.  Each job went by its own slot before, and a trial that sent the card more jobs
+  than it had workers waited on the card's second round.  The runner gives each injected draw
+  its trial's tags (`ReductionRequest.card_group`, `reduce_config(card_group=)`).  A run whose
+  `card.json` predates the rule keeps the old one (`"rule": "job"`) until a resume names
+  `--gpu-share`.  A script that sets `card_share` on such a run sets `card_rule = "job"` to keep its
+  picks.
+- **`--gpu-device`** names the card the card workers use, as `CUDA_VISIBLE_DEVICES` takes it, set
+  in the card workers alone (`CardSpec.device`, `PartitionedReducer.card_device`).  The run
+  records it in `card.json`.  Without the option a run takes the recorded card, else the one
+  `CUDA_VISIBLE_DEVICES` names, which it records, so a resume no longer moves to the other card
+  when the variable is left out.  The card's name goes into `card.json` as the card comes up
+  (`gpu_name`, `CardSpec.on_ready`), and a resume on a card of another name says so.
+- **The log gives the card's busy fraction per annulus.**  After each annulus' search it says how
+  busy the card's workers were over that search, and `annulus_done.json`, `final_results.json`
+  (`card.annuli`) and `bench_summary.txt` (`# card annulus N:`) keep it.
+- **The stitched cells stretch each annulus' tile by its own sigma** (`display._per_tile_sigma`,
+  from the stitch's `EDGES` header).  With one sigma for the whole stitch, NEAR2's inner tiles,
+  2.5 times noisier than the outer, showed speckles at 4 to 5 sigma, one at 4.6 sigma that read
+  1.7 on the S/N map.
+- **The best image cell names the trial it shows.**  An annulus' last frame draws the winner's
+  validation trial, with its fresh injections, as `Best (eval b, validation trial)`, in both
+  layouts.
+- **The run's last frame shows the final stitch** (`Final stitch (no inj)`, `(with inj)`), live
+  (`LiveDisplay.on_finish`) and redrawn (`render_steps`).  The last annulus-done frame's running
+  stitch, an equal-weight stitch without the seam patches, differed from the final stitch by up
+  to 0.5 sigma beyond 1.44" on NEAR2.
+- Docs in `docs/RUNNING.md`, `docs/DISPLAY.md` and `docs/CLI.md`, and the docstrings of the
+  runner's and the display's functions touched here brought to the documentation rule.  Tests
+  in `tests/test_card_worker.py`, `tests/test_display_stitch_circles.py` and
+  `tests/test_render_final_frame.py`.
+
 ## Unreleased — 2026-11-13 (OpenCV rotation measured on NEAR2)
 
 - **`docs/RUNNING.md` records OpenCV's rotation on NEAR2** (the NEAR2 processing session,

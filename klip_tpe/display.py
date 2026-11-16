@@ -888,6 +888,68 @@ def _robust_sigma(img: np.ndarray) -> float:
     return float(s)
 
 
+def _per_tile_sigma(img: Optional[np.ndarray], edges: Optional[Sequence[float]]) -> Optional[np.ndarray]:
+    """Return a stitched image in units of each tile's own robust sigma, for the stitched cells.
+
+    A stitch puts together annuli whose noise differs severalfold, so one sigma for the whole image
+    shows the noisier tiles' speckles as detections.  On NEAR2 (2026-11-15) the inner tiles were 2.5
+    times noisier than the outer, and a speckle read 4.6 sigma on the stretch and 1.7 on the S/N map.
+    Each tile here is divided by its own sigma, as an annulus' cell is by its image's.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx) or None
+        The stitched image.
+    edges : sequence of float or None
+        Radii of the tiles' edges, in pixels, from the innermost tile's inner edge to the outermost's
+        outer edge (a stitch's ``EDGES`` header).  Pixels inside the first edge go with the first tile,
+        and pixels past the last edge with the last.
+
+    Returns
+    -------
+    scaled : ndarray, shape (ny, nx) or None
+        The image over each tile's sigma, the image itself without two edges, None without an image.
+    """
+    if img is None or edges is None or len(edges) < 2 or np.ndim(img) != 2:
+        return img
+    im = np.asarray(img, float)
+    e = np.asarray(sorted(float(v) for v in edges), float)
+    cx, cy = star_center(im.shape)
+    yy, xx = np.indices(im.shape)
+    rr = np.hypot(xx - cx, yy - cy)
+    tile = np.clip(np.searchsorted(e, rr, side="right") - 1, 0, len(e) - 2)
+    whole = _robust_sigma(im)
+    out = np.full(im.shape, np.nan)
+    for k in range(len(e) - 1):
+        m = tile == k
+        v = im[m]
+        s = _robust_sigma(v) if np.isfinite(v).sum() >= 10 else whole
+        out[m] = v / s
+    return out
+
+
+def _header_edges(path: str) -> Optional[List[float]]:
+    """Return the tiles' edges a stitch's FITS header lists (``EDGES``), in pixels.
+
+    Parameters
+    ----------
+    path : str
+        The stitch's FITS file.
+
+    Returns
+    -------
+    edges : list of float or None
+        The edges, None when the file or the card is missing or unreadable.
+    """
+    try:
+        from astropy.io import fits
+        txt = str(fits.getheader(path).get("EDGES", "") or "")
+        edges = [float(v) for v in txt.split(",") if v.strip()]
+    except Exception:
+        return None
+    return edges if len(edges) >= 2 else None
+
+
 def _crop_extent(img: np.ndarray, pxscale: float, rmax_px: float) -> Tuple[np.ndarray, List[float]]:
     ny, nx = img.shape
     cx, cy = star_center(img.shape)
@@ -2401,6 +2463,61 @@ def render_intro(setup: Dict[str, Any], out: str, size=(16.0, 10.0), dpi: int = 
 # ----------------------------------------------------------------------------
 @dataclass
 class StepImages:
+    """Images and labels of one step panel.
+
+    Attributes
+    ----------
+    cur_clean : ndarray or None, default None
+        The current evaluation's clean reduction.
+    cur_inj : ndarray or None, default None
+        The current evaluation's injected reduction.
+    best_inj : ndarray or None, default None
+        The best evaluation's injected reduction, or on an annulus' last frame the winner's committed
+        trial.
+    best_clean : ndarray or None, default None
+        The best evaluation's clean reduction.
+    best_index : int, default -1
+        Index of the best evaluation, -1 for the history's best.
+    best_sources : list of tuple of 3 floats or None, default None
+        Sources injected into ``best_inj``, ``(rho, theta, contrast)``, when they are not the ones the
+        history holds at ``best_index``, such as the validation trial's fresh draw.
+    best_labels : list or None, default None
+        Values of ``best_sources``, each circle's label.
+    best_trial : str or None, default None
+        Name of the trial ``best_inj`` shows when ``best_sources`` are not the history's, such as
+        "validation trial", which the best cells' titles then carry.
+    note : str or None, default None
+        Note written in every image cell.
+    fm_image : ndarray or None, default None
+        The KLIP-FM response, the preview at the best or the winner's cross-check.
+    fm_unavailable : str or None, default None
+        Why ``fm_image`` stays empty for the whole run, such as a backend without KLIP-FM.
+    fm_sources : list of tuple of 3 floats or None, default None
+        Sources of ``fm_image``.
+    fm_label : str, default "KLIP-FM response"
+        Title of the KLIP-FM cell.
+    cur_label : str or None, default None
+        Title of the current cells in place of "Ann i/n  Eval e/N".
+    stitch_clean : ndarray or None, default None
+        The stitch in the stitched cells, the running stitch over more than one annulus.  None shows the
+        best images, as annulus 1 does.
+    stitch_inj : ndarray or None, default None
+        The injected stitch.
+    stitch_sources : list of tuple of 3 floats or None, default None
+        Sources of ``stitch_inj``.
+    stitch_edges : list of float or None, default None
+        Radii of the stitch's tile edges, in pixels (its ``EDGES`` header), by which each tile is
+        stretched by its own sigma (:func:`_per_tile_sigma`).  None stretches by one sigma.
+    stitch_label : str, default "Stitched best"
+        Name of the stitched cells, "Final stitch" on the run's last frame.
+    inj_model : ndarray or None, default None
+        The injected-PSF model of the best evaluation's sources, the IDL predecessor's ``disp_injmdl``.
+    inj_model_note : str or None, default None
+        What the injected-PSF cell says without a model.
+    cur_override : dict or None, default None
+        ``sources``, ``per_source``, ``raw_per_source``, ``clean_per_source``, ``score`` and ``raw`` of a
+        validation trial shown in the current cells.
+    """
     cur_clean: Optional[np.ndarray] = None
     cur_inj: Optional[np.ndarray] = None
     best_inj: Optional[np.ndarray] = None
@@ -2435,6 +2552,12 @@ class StepImages:
     stitch_clean: Optional[np.ndarray] = None      # running stitch (multi-annulus); None = the best images (annulus 1)
     stitch_inj: Optional[np.ndarray] = None
     stitch_sources: Optional[List[Tuple[float, float, float]]] = None
+    #: radii of the stitch's tile edges (px, its ``EDGES`` header): the stitched cells show each
+    #: tile at its own robust sigma (:func:`_per_tile_sigma`); None stretches by one sigma
+    stitch_edges: Optional[List[float]] = None
+    #: what the stitched cells are called: "Stitched best" (the running stitch, the IDL
+    #: predecessor's name) or "Final stitch" (the run's last frame, :meth:`LiveDisplay.on_finish`)
+    stitch_label: str = "Stitched best"
     inj_model: Optional[np.ndarray] = None         # injected-PSF model image of the best eval (IDL disp_injmdl)
     inj_model_note: Optional[str] = None           # what the injected-PSF cell says without one
     cur_override: Optional[Dict[str, Any]] = None  # validation trials: sources / per_source / raw_per_source /
@@ -2510,11 +2633,45 @@ def render_step_classic(ad: AnnulusData, i: int, images: StepImages, out_png: Op
                 elapsed_s: float = np.nan, eta_s: float = np.nan, cmap: str = "inferno", dpi: int = 110,
                 fig: Optional[Figure] = None, step_label: str = "", contrast_note: Optional[str] = None,
                 timing: Optional[Dict[str, Any]] = None) -> Figure:
-    """The original klip-tpe live panel (grid of package-style panels); kept as
-    ``style="classic"`` of :func:`render_step`.  ``contrast_note``
-    is shown in the contrast panel when no curve can be drawn (why the preview is
-    missing); ``images.cur_label`` renames the current-eval cells (e.g. ``last eval N``
-    on the annulus-done frame)."""
+    """Draw the earlier klip-tpe live panel, ``style="classic"`` of :func:`render_step`.
+
+    Parameters
+    ----------
+    ad : AnnulusData
+        The annulus.
+    i : int
+        Index of the current evaluation.
+    images : StepImages
+        The images and labels.  ``cur_label`` renames the current cells, such as "last eval N" on the
+        annulus-done frame.
+    out_png : str or None, default None
+        PNG to write.
+    out_pdf : str or None, default None
+        PDF to write.
+    curves : sequence of tuple, default ()
+        Contrast curves, as ``(label, curve, plot keywords)``.
+    elapsed_s : float, default nan
+        The run's elapsed time, in seconds.
+    eta_s : float, default nan
+        Time left for this annulus, in seconds.
+    cmap : str, default "inferno"
+        Color map of the images.
+    dpi : int, default 110
+        Resolution.
+    fig : Figure or None, default None
+        Figure to draw into.  None makes one.
+    step_label : str, default ""
+        The header line.
+    contrast_note : str or None, default None
+        What the contrast panel says when no curve can be drawn, such as why the preview is missing.
+    timing : dict or None, default None
+        ``avg``, ``last``, ``every`` and ``flight`` from the live display.
+
+    Returns
+    -------
+    fig : Figure
+        The figure.
+    """
     with _rc():
         if fig is None:
             fig = Figure(figsize=(17.0, 10.5), dpi=dpi)
@@ -2529,11 +2686,16 @@ def render_step_classic(ad: AnnulusData, i: int, images: StepImages, out_png: Op
         cur_cps = ad.clean_per_source[i] if 0 <= i < ad.n else None
         best_src = ad.sources[bi] if 0 <= bi < ad.n else []
         best_ps = ad.per_source[bi] if 0 <= bi < ad.n else []
-        if images.best_sources is not None:        # the image's own injections; see StepImages
-            best_src = list(images.best_sources)
-            best_ps = list(images.best_labels or [])
         y_i = ad.y[i] if 0 <= i < ad.n else np.nan
         y_b = ad.y[bi] if 0 <= bi < ad.n else np.nan
+        b_who = f"best (eval {bi + 1})"
+        if images.best_sources is not None:        # the image's own injections; see StepImages
+            other = not _same_sources(images.best_sources, best_src)
+            best_src = list(images.best_sources)
+            best_ps = list(images.best_labels or [])
+            if other and images.best_trial:        # another trial's picture, with its own values
+                b_who = f"best (eval {bi + 1}, {images.best_trial})"
+                y_b = _label_stat(best_ps)
         note = images.note
         cl = images.cur_label or f"eval {i + 1}"
         # row 1: images.  A known companion is measured on the CLEAN reductions -- the ones
@@ -2550,7 +2712,7 @@ def render_step_classic(ad: AnnulusData, i: int, images: StepImages, out_png: Op
         draw_image(fig.add_subplot(gs[0, 1]), images.cur_inj, ad,
                    f"{cl}: injected  score {_fnum(y_i)}{mean_i}", cmap, sources=cur_src, labels=cur_ps, note=note)
         draw_image(fig.add_subplot(gs[0, 2]), images.best_inj, ad,
-                   f"best (eval {bi + 1}): injected  score {_fnum(y_b)}{mean_b}", cmap, sources=best_src, labels=best_ps,
+                   f"{b_who}: injected  score {_fnum(y_b)}{mean_b}", cmap, sources=best_src, labels=best_ps,
                    note=note)
         draw_image(fig.add_subplot(gs[0, 3]), images.best_clean, ad, f"best (eval {bi + 1}): clean", cmap,
                    note=note, known_labels=k_best)
@@ -3365,17 +3527,67 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
                 style: str = "idl", white: bool = False, loop_s: float = np.nan, last_s: float = np.nan,
                 eta_full_s: float = np.nan, corner_partition: Optional[str] = "__cycle__",
                 timing: Optional[Dict[str, Any]] = None) -> Figure:
-    """The main live panel for evaluation ``i`` of ``ad``.  ``eta_s`` / ``eta_full_s`` are
-    IDL's ``rem_ann`` / ``rem`` (remaining for this annulus / for the whole run).
+    """Draw the main live panel of an evaluation.
 
-    ``style="idl"`` (default) reproduces the IDL ``near2m_show`` window: two rows of
-    five image cells (test / test no-inj / best / stitched no-inj / stitched inj, and
-    their S/N maps with per-source ``raw/corr`` labels), the TPE convergence trace
-    with its rotated S/N histogram and the KLIP-FM / injected-PSF squares, night
-    inclusion and SNR=5 contrast, and on the right the BEST / TEST parameter
-    vectors, elapsed / ETA, the night-effect panels and the scatter corner.  Black
-    background like the live window unless ``white`` (the IDL PDF/PNG snapshots).
-    ``style="classic"`` is the previous klip-tpe layout."""
+    ``style="idl"`` draws the IDL predecessor's ``near2m_show`` window: two rows of five image cells
+    (test, test without injections, best, and the stitch without and with injections) over their S/N
+    maps with each source's ``raw/corr`` label, the convergence trace beside its rotated S/N histogram,
+    the KLIP-FM and injected-PSF squares, the partition inclusion and the 5-sigma contrast, and on the
+    right the BEST and TEST parameter vectors, the elapsed and remaining times, the partition panels
+    and the S/N landscape.  The stitched cells stretch each tile by its own sigma when
+    ``images.stitch_edges`` gives the tiles, and the best cell names the trial it shows
+    (``images.best_trial``).  ``style="classic"`` is the earlier klip-tpe layout
+    (:func:`render_step_classic`).
+
+    Parameters
+    ----------
+    ad : AnnulusData
+        The annulus.
+    i : int
+        Index of the current evaluation.
+    images : StepImages
+        The images and labels.
+    out_png : str or None, default None
+        PNG to write.
+    out_pdf : str or None, default None
+        PDF to write.
+    curves : sequence of tuple, default ()
+        Contrast curves, as ``(label, curve, plot keywords)``.
+    elapsed_s : float, default nan
+        The run's elapsed time, in seconds.
+    eta_s : float, default nan
+        Time left for this annulus, in seconds, the IDL predecessor's ``rem_ann``.
+    cmap : str, default "inferno"
+        Color map of the images.
+    dpi : int, default 100
+        Resolution.
+    fig : Figure or None, default None
+        Figure to draw into.  None makes one.
+    step_label : str, default ""
+        The header line, such as "NEW BEST".
+    contrast_note : str or None, default None
+        What the contrast panel says when no curve can be drawn.
+    style : {"idl", "classic"}, default "idl"
+        The layout.
+    white : bool, default False
+        Whether to draw on white, as the IDL predecessor's snapshots are, instead of black.
+    loop_s : float, default nan
+        Interval between two finished evaluations, in seconds.
+    last_s : float, default nan
+        The newest evaluation's time, in seconds, unused since ``timing`` gives it.
+    eta_full_s : float, default nan
+        Time left for the run, in seconds, the IDL predecessor's ``rem``.
+    corner_partition : str or None, default "__cycle__"
+        The partition the S/N landscape shows.  "__cycle__" steps through them by panel, and None pools
+        them.
+    timing : dict or None, default None
+        ``avg``, ``last``, ``every`` and ``flight`` from the live display (:meth:`LiveDisplay._timing`).
+
+    Returns
+    -------
+    fig : Figure
+        The figure.
+    """
     if style == "classic":
         return render_step_classic(ad, i, images, out_png, out_pdf, curves, elapsed_s, eta_s, cmap, dpi, fig,
                                    step_label, contrast_note, timing=timing)
@@ -3399,6 +3611,7 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
         y_i, y_b = (ad.y[i] if n_ok else np.nan), (ad.y[bi] if b_ok else np.nan)
         raw_i, raw_b = (ad.raw[i] if n_ok else np.nan), (ad.raw[bi] if b_ok else np.nan)
         who_b = "Best"
+        t_best = f"Best (eval {bi + 1})" if b_ok else "Best"
         if images.best_sources is not None:        # the image's own injections; see StepImages
             other = not _same_sources(images.best_sources, best_src)
             best_src = list(images.best_sources)
@@ -3408,6 +3621,8 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
                 y_b, raw_b = _label_stat(best_ps), np.nan
                 if images.best_trial:
                     who_b = f"Best ({images.best_trial})"
+                    # the picture is that trial's, with its injections, not eval bi's search draw
+                    t_best = f"Best (eval {bi + 1}, {images.best_trial})" if b_ok else who_b
         if images.cur_override:                    # validation trial in the current cells
             ov = images.cur_override
             cur_src = list(ov.get("sources") or [])
@@ -3434,6 +3649,11 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
         st_inj = images.stitch_inj if images.stitch_inj is not None else images.best_inj
         st_src = images.stitch_sources if images.stitch_inj is not None else best_src
         st_lab = None if images.stitch_inj is not None else [_lbl(v, r) for v, r in zip(best_ps, best_rps or [None] * len(best_ps))]
+        # a stitch's tiles at their own sigma each (the S/N cells below are unchanged)
+        st_e = images.stitch_edges if images.stitch_clean is not None else None
+        st_kw = {"vrange": (-1.0, 5.0)} if st_e else {}
+        st_name = images.stitch_label or "Stitched best"
+        st_snr = "Stitched SNR" if st_name == "Stitched best" else f"{st_name} SNR"
 
         def cell(x0, y0, y1, img, title, **kw):
             ax = _sq_box(fig, x0, y0, x0 + colw, y1)
@@ -3451,12 +3671,13 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
         t0 = images.cur_label or f"Ann {ad.annulus + 1}/{ad.nann}  Eval {i + 1}/{ad.n_iter}"
         cell(xs[0], img_y0, img_y1, images.cur_inj, t0)
         cell(xs[1], img_y0, img_y1, images.cur_clean, "Test (no inj)")
-        cell(xs[2], img_y0, img_y1, images.best_inj, f"Best (eval {bi + 1})" if b_ok else "Best")
-        cell(xs[3], img_y0, img_y1, st_clean, "Stitched best (no inj)")
-        cell(xs[4], img_y0, img_y1, st_inj, "Stitched best (with inj)")
+        cell(xs[2], img_y0, img_y1, images.best_inj, t_best)
+        cell(xs[3], img_y0, img_y1, _per_tile_sigma(st_clean, st_e), f"{st_name} (no inj)", **st_kw)
+        cell(xs[4], img_y0, img_y1, _per_tile_sigma(st_inj, st_e), f"{st_name} (with inj)", **st_kw)
         cax = _box(fig, cbx0, img_y0 + 0.012, cbx0 + cbw, img_y1 - 0.012)
         fig.colorbar(matplotlib.cm.ScalarMappable(norm=mcolors.Normalize(-1, 5), cmap=cmap), cax=cax)
-        cax.set_ylabel("KLIP image stretch (sigma)", fontsize=6.5)
+        cax.set_ylabel("KLIP image stretch (each annulus' sigma)" if st_e else "KLIP image stretch (sigma)",
+                       fontsize=6.5)
         cax.tick_params(labelsize=6)
         # ---- row 2: S/N maps -------------------------------------------------------
         cur_lab = [_lbl(v, r) for v, r in zip(cur_ps, cur_rps or [None] * len(cur_ps))]
@@ -3474,8 +3695,9 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
                 ax_.text(0.03, 0.97, cap, transform=ax_.transAxes, fontsize=6, color=SRC_COLOR, va="top", ha="left")
         cell(xs[1], st_y0, st_y1, _snr_map(images.cur_clean, ad, cur_src), "Test S/N (no inj)", sources=cur_src,
              labels=[_lbl(None if c is None else float(c)) for c in cur_cps] or None, snr=True)
-        cell(xs[3], st_y0, st_y1, _snr_map(st_clean, ad, None), "Stitched SNR (no inj)", snr=True)
-        cell(xs[4], st_y0, st_y1, _snr_map(st_inj, ad, st_src), "Stitched SNR (with inj)", sources=st_src, labels=st_lab, snr=True)
+        cell(xs[3], st_y0, st_y1, _snr_map(st_clean, ad, None), f"{st_snr} (no inj)", snr=True)
+        cell(xs[4], st_y0, st_y1, _snr_map(st_inj, ad, st_src), f"{st_snr} (with inj)", sources=st_src, labels=st_lab,
+             snr=True)
         cax = _box(fig, cbx0, st_y0 + 0.012, cbx0 + cbw, st_y1 - 0.012)
         fig.colorbar(matplotlib.cm.ScalarMappable(norm=mcolors.Normalize(*SNR_RANGE), cmap=cmap), cax=cax)
         cax.set_ylabel("Image SNR", fontsize=6.5)
@@ -4192,12 +4414,44 @@ def annulus_end_elapsed(run_dir: str, ia: int) -> Optional[float]:
 
 def _redrawn_final_frame(run_dir: str, ia: int, full: "AnnulusData", i: int, c_inj, c_clean, b_inj, b_clean,
                          fm_note: Optional[str], inj_model_fn=None) -> Tuple["StepImages", Dict[str, Any]]:
-    """What annulus ``ia``'s live annulus-done frame drew (:meth:`LiveDisplay.on_annulus_done`),
-    from the run's products: the validated winner in the best cells (its committed trial,
-    ``best_inj.fits``, circled at its own sources), the running stitch of the finished annuli
-    (:meth:`klip_tpe.runner.Runner.annulus_end_stitch`), the KLIP-FM model of the winner's
-    injections and their injected-PSF model, and the run's elapsed time at the annulus' end
-    (:func:`annulus_end_elapsed`).  Returns the cells and ``{"elapsed_s", "step_label"}``."""
+    """Return the cells of an annulus' live annulus-done frame, made again from the run's products.
+
+    The best cells hold the validated winner, its committed trial (``best_inj.fits``) circled at its own
+    sources, and the stitched cells the running stitch of the finished annuli with its tiles' edges
+    (:meth:`klip_tpe.runner.Runner.annulus_end_stitch`).  The KLIP-FM model of the winner's injections,
+    their injected-PSF model and the run's elapsed time at the annulus' end
+    (:func:`annulus_end_elapsed`) come with them, as :meth:`LiveDisplay.on_annulus_done` drew them.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run directory.
+    ia : int
+        The annulus, counted from 0.
+    full : AnnulusData
+        The annulus with every evaluation and its winner.
+    i : int
+        Index of the last evaluation.
+    c_inj : ndarray or None
+        The last evaluation's injected image.
+    c_clean : ndarray or None
+        The last evaluation's clean image.
+    b_inj : ndarray or None
+        The committed trial's injected image, ``best_inj.fits``.  None takes the winner's own evaluation.
+    b_clean : ndarray or None
+        The committed trial's clean image.
+    fm_note : str or None
+        Why the run has no KLIP-FM, for its cell.
+    inj_model_fn : callable or None, default None
+        Function ``inj_model_fn(sources, shape) -> image`` for an injected-PSF model the run did not save.
+
+    Returns
+    -------
+    cells : StepImages
+        The cells.
+    frame : dict
+        ``elapsed_s`` and ``step_label``.
+    """
     from .runner import Runner
     w = full.winner or {}
     d = os.path.join(run_dir, f"annulus{ia + 1:02d}")
@@ -4225,7 +4479,7 @@ def _redrawn_final_frame(run_dir: str, ia: int, full: "AnnulusData", i: int, c_i
     if ia > 0:                           # annulus 1 shows the best images, as the IDL does
         st = Runner.annulus_end_stitch(run_dir, ia)
         if st is not None and st.get("clean") is not None:
-            stitch = {"stitch_clean": st["clean"]}
+            stitch = {"stitch_clean": st["clean"], "stitch_edges": st.get("edges")}
             if st.get("inj") is not None:
                 stitch.update(stitch_inj=st["inj"], stitch_sources=st.get("sources"))
     imgs = StepImages(fm_unavailable=fm_note, cur_clean=c_clean, cur_inj=c_inj, best_inj=b_inj, best_clean=b_clean,
@@ -4242,24 +4496,90 @@ def _redrawn_final_frame(run_dir: str, ia: int, full: "AnnulusData", i: int, c_i
     return imgs, {"elapsed_s": el, "step_label": lab}
 
 
+def _final_stitch_cells(run_dir: str, imgs: "StepImages") -> Optional["StepImages"]:
+    """Return an annulus-done frame's cells with the run's final stitch in the stitched cells.
+
+    The running stitch the last annulus-done frame shows is an equal-weight stitch without the seam
+    patches, and on NEAR2 (2026-11-15) it differed from the final stitch by up to 0.5 sigma beyond 1.44".
+    The run's last frame (:meth:`LiveDisplay.on_finish`, :func:`render_steps`) shows the final one.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run directory, with ``klip_stitched.fits`` and ``klip_stitched_inj.fits``.
+    imgs : StepImages
+        The last annulus-done frame's cells.
+
+    Returns
+    -------
+    cells : StepImages or None
+        A copy with ``klip_stitched.fits``, its injected stitch and their sources and tile edges in the
+        stitched cells, named "Final stitch", None without a final stitch.
+    """
+    import dataclasses
+    path = os.path.join(run_dir, "klip_stitched.fits")
+    clean = _fits(path)
+    if clean is None or clean.ndim != 2:
+        return None
+    ipath = os.path.join(run_dir, "klip_stitched_inj.fits")
+    inj = _fits(ipath)
+    inj = inj if inj is not None and inj.ndim == 2 else None
+    return dataclasses.replace(imgs, stitch_clean=clean, stitch_inj=inj,
+                               stitch_sources=_header_sources(ipath) if inj is not None else None,
+                               stitch_edges=_header_edges(path), stitch_label="Final stitch", note="run complete")
+
+
 def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: int = 1, dpi: int = 90,
                  out_dir: Optional[str] = None, movie: bool = True,
                  partition_label: Optional[str] = None, movie_dir: Optional[str] = None,
                  inj_model_fn=None, reducer=None) -> List[str]:
-    """Rebuild the step PNGs of a run from its log and the per-evaluation crops it saved
-    (``annulusNN/evals/``); where a crop is missing the image cells show the annulus
-    winner's FITS with a note.  ``every``-th evaluation of each annulus, and its last.
-    Optionally assembles the movie, as ``opt_steps.gif`` / ``.mp4`` in ``movie_dir``
-    (default: the run directory, where the live run's own movie is).
-    ``partition_label`` overrides what the partition panels call the partitions, for a run
-    written before the reducer carried one.  ``klip-tpe render`` is this from a terminal.
+    """Draw the step panels of a run again from its log and the crops it saved.
 
-    An annulus' last frame is its annulus-done frame, as the live display drew it
-    (:func:`_redrawn_final_frame`).  ``inj_model_fn(sources, shape)``: the injected-PSF model of
-    ``sources`` (:func:`klip_tpe.injection.injected_model` on the run's reducer), for the best
-    eval of every frame and for a last frame whose run did not save it.  ``reducer``: the run's
-    reducer, built as the run built it (a run started from a script), from which that model is
-    drawn; its plate scale has to be the run's (``run_setup.json``)."""
+    Each annulus' every ``every``-th evaluation and its last are drawn from the per-evaluation crops
+    (``annulusNN/evals/``), and where a crop is missing the image cells show the annulus winner's FITS
+    with a note.  An annulus' last frame is its annulus-done frame, as the live display drew it
+    (:func:`_redrawn_final_frame`), and a finished run ends, as the live one does, on the frame of its
+    final stitch (:func:`_final_stitch_cells`), its "Elapsed" from ``heartbeat.json``.  ``klip-tpe
+    render`` is this from a terminal.  The PNGs go to ``out_dir``, and with ``movie`` the movie
+    ``opt_steps.gif`` and ``.mp4`` to ``movie_dir``.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run directory.
+    annuli : sequence of int or None, default None
+        Annuli to draw, counted from 0.  None draws every one.
+    every : int, default 1
+        Interval between the evaluations drawn.
+    dpi : int, default 90
+        Resolution.
+    out_dir : str or None, default None
+        Directory of the PNGs.  None takes ``<run_dir>/steps``.
+    movie : bool, default True
+        Whether to put the movie together.
+    partition_label : str or None, default None
+        What the partition panels call the partitions, for a run written before the reducer carried a
+        name.
+    movie_dir : str or None, default None
+        Directory of the movie.  None takes the run directory, where the live run's movie is.
+    inj_model_fn : callable or None, default None
+        Function ``inj_model_fn(sources, shape) -> image``, the injected-PSF model of the sources
+        (:func:`klip_tpe.injection.injected_model` on the run's reducer), for every frame's best
+        evaluation and for a last frame whose run did not save it.
+    reducer : Reducer or None, default None
+        The run's reducer, built as the run built it, such as by a script, from which that model is
+        drawn when ``inj_model_fn`` is None.
+
+    Returns
+    -------
+    paths : list of str
+        The PNGs written.
+
+    Raises
+    ------
+    ValueError
+        If the reducer's plate scale is not the run's (``run_setup.json``).
+    """
     run = load_run(run_dir)
     if reducer is not None and inj_model_fn is None:
         from .injection import injected_model
@@ -4295,6 +4615,8 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
             lst.append(("KLIP-FM cross-check (winner)" + tag, wj["fm_curve"], {"color": FM_COLOR, "lw": 1.4}))
         finished[int(ja)] = lst
     inj_cache: Dict[Tuple[int, int], Optional[np.ndarray]] = {}
+    last_ia = max(_annuli(run)) if _annuli(run) else None
+    last_done = None                        # the run's last annulus-done frame, for its final frame
     for ia in ias:
         full = annulus_from_run(run_dir, ia, run)
         done = [c for ja in sorted(finished) if ja < ia for c in finished[ja]]
@@ -4359,6 +4681,25 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
                               eta_s=float(np.nanmean(full.wall[:i + 1]) * (full.n - i - 1)) if i + 1 < full.n else 0.0,
                               dpi=dpi, fig=fig, step_label=ff.get("step_label") or "(rebuilt from log)",
                               contrast_note=cnote)
+            paths.append(p)
+            step += 1
+            if final and ia == last_ia:
+                last_done = (ad, i, imgs, curves, float(el), cnote)
+    # the run's last frame: the final stitch, once the run has finished (LiveDisplay.on_finish)
+    if last_done is not None and os.path.exists(os.path.join(run_dir, "final_results.json")):
+        ad, i, imgs, curves, el, cnote = last_done
+        cells = _final_stitch_cells(run_dir, imgs)
+        if cells is not None:
+            try:
+                with open(os.path.join(run_dir, "heartbeat.json")) as f:
+                    hb = json.load(f)
+                if hb.get("stage") == "finished":
+                    el = float(hb["elapsed_s"])
+            except Exception:
+                pass
+            p = os.path.join(out_dir, f"step{step:04d}.png")
+            fig = render_step(ad, i, cells, p, curves=curves, elapsed_s=el, eta_s=0.0, dpi=dpi, fig=fig,
+                              step_label="run complete -- final stitch (rebuilt from log)", contrast_note=cnote)
             paths.append(p)
             step += 1
     if movie and paths:
@@ -4882,8 +5223,21 @@ class LiveDisplay(RunCallback):
         self._show_latest()
 
     def _running_stitch(self, runner) -> Dict[str, Any]:
-        """Running-stitch images for the stitched cells when there is more than one annulus
-        (annulus 1 shows the best images, as IDL does)."""
+        """Return the running stitch for the stitched cells, after the first annulus.
+
+        Parameters
+        ----------
+        runner : Runner
+            The runner.
+
+        Returns
+        -------
+        cells : dict
+            ``stitch_clean``, ``stitch_edges`` (its ``EDGES`` header), ``stitch_inj`` and ``stitch_sources``
+            as far as ``klip_stitched_running*.fits`` give them, empty in annulus 1, which shows the best
+            images, as the IDL predecessor does.  While an annulus runs its running best is in the stitch
+            with that evaluation's sources, and once it is done its winner with the winner's.
+        """
         if getattr(runner, "ia", 0) <= 0:
             return {}
         out: Dict[str, Any] = {}
@@ -4891,6 +5245,8 @@ class LiveDisplay(RunCallback):
             img = _fits(os.path.join(self.run_dir, name))
             if img is not None and img.ndim == 2:
                 out[key] = img
+        if "stitch_clean" in out:
+            out["stitch_edges"] = _header_edges(os.path.join(self.run_dir, "klip_stitched_running.fits"))
         if "stitch_inj" in out:
             src = []
             done = False
@@ -5516,6 +5872,22 @@ class LiveDisplay(RunCallback):
                     os.path.join(self._ann_dir(runner.ia), "validation_panel.png"), cmap=self.cmap, **self._val_args)
 
     def on_annulus_done(self, runner, result, winner: Dict[str, Any]) -> None:
+        """Draw an annulus' books, sheets and last frame once it is done.
+
+        The books and the products sheet are drawn (``annulusNN/products.pdf``), the validation panel again
+        with the KLIP-FM response, and the annulus-done frame (``steps/stepNNNN.png`` and
+        ``annulusNN/step_display_white.png``) with the validated winner in its best cells and the running
+        stitch in its stitched cells.  That frame is kept for the run's last frame (:meth:`_final_frame`).
+
+        Parameters
+        ----------
+        runner : Runner
+            The runner.
+        result : AnnulusResult
+            The annulus' result.
+        winner : dict
+            The winner's record, with its KLIP-FM passes.
+        """
         self._eta_mark(runner, "done")
         ad = self._guard(runner, "annulus data", self._data, runner)
         if ad is None:
@@ -5596,6 +5968,8 @@ class LiveDisplay(RunCallback):
                             dpi=self.dpi, fig=self._figure(),
                             step_label="annulus done -- " + ("VALIDATED winner" if result.validated else "winner NOT validated"),
                             contrast_note="no validated curve for this annulus" if not curves else None)
+            # the run's last frame redraws this one with the final stitch (on_finish)
+            self._done_frame = (ad, i, imgs, curves, "no validated curve for this annulus" if not curves else None)
             if r is not None:
                 self._paths.append(png); self._ann_frames.append(png)
                 self._step += 1
@@ -5645,8 +6019,49 @@ class LiveDisplay(RunCallback):
                     self._say(runner, note)
         self._books = keep
 
+    def _final_frame(self, runner) -> None:
+        """Draw the run's last frame, the last annulus-done frame with the final stitch.
+
+        The stitched cells show ``klip_stitched.fits`` and ``klip_stitched_inj.fits``, named "Final stitch"
+        (:func:`_final_stitch_cells`), and the frame goes to ``steps/`` and into the movie.  Nothing is drawn
+        without PNGs, an annulus-done frame or a final stitch.
+
+        Parameters
+        ----------
+        runner : Runner
+            The runner.
+        """
+        fr = getattr(self, "_done_frame", None)
+        if not self.save_png or fr is None:
+            return
+        ad, i, imgs, curves, cnote = fr
+        cells = _final_stitch_cells(self.run_dir, imgs)
+        if cells is None:
+            return
+        png = os.path.join(self.run_dir, "steps", f"step{self._step:04d}.png")
+        el = time.time() - runner.wall0 + runner.wall_prev
+        r = self._guard(runner, "run's last frame", render_step, ad, i, cells, png, None, curves=curves,
+                        elapsed_s=el, eta_s=0.0, cmap=self.cmap, dpi=self.dpi, fig=self._figure(),
+                        step_label="run complete -- final stitch", contrast_note=cnote)
+        if r is not None:
+            self._paths.append(png)
+            self._step += 1
+            self._window_show(png=png, fig=self._figure() if self.show and not self.inline else None)
+
     def on_finish(self, runner) -> None:
+        """Finish the display at the run's end.
+
+        The panels being drawn are waited for, the run's last frame is drawn (:meth:`_final_frame`), the
+        books' processes are collected, and with ``movie`` the movie ``opt_steps.gif`` and ``.mp4`` is put
+        together, the calibration frames first.
+
+        Parameters
+        ----------
+        runner : Runner
+            The runner.
+        """
         self._wait_renders()
+        self._final_frame(runner)
         self._collect_books(runner, wait=True)
         if not self.movie or not self._paths:
             return
