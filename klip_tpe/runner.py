@@ -233,6 +233,14 @@ class RunConfig:
         verify measures each source on it whichever tiles its footprint takes.  ``"own"``:
         each annulus' validated injected image, with its own sources only, as a run saved
         before 2026-11-03 resumes.  The annuli' own ``best_inj.fits`` are never changed.
+    tpe_density
+        how a TPE proposal sums its univariate densities (:func:`klip_tpe.optimizers.tpe_propose`).
+        ``"binned"`` (the default): over a grid the samples are gathered on, which costs the same
+        at any history.  ``"exact"``: over every sample, which grows with the history (0.075 s at
+        10,000 trials of a 56-D space in the sandbox, against 0.017 s binned).  The two give the
+        same proposal but where two candidates' scores differ by less than the grid's error,
+        within 1e-4 of each density and 1e-5 typically.  A run saved before 2026-11-17 resumes
+        with ``"exact"``, its own.
     batch / batch_mode
         ``batch > 1`` keeps that many trials in flight.  ``"pipeline"`` (the default): when
         the oldest trial is in, the next proposal is asked from the history so far and goes
@@ -309,6 +317,7 @@ class RunConfig:
     n_elite: int = 5
     explore_frac: float = 0.15
     blocks: Any = "univariate"          # TPE density model: univariate (reference) | partitions | full | [[names], ...]
+    tpe_density: str = "binned"           # how a TPE proposal sums its univariate densities: binned | exact
     warmstart_tie: Optional[bool] = None  # None -> True if partitions
     link_params: List[str] = field(default_factory=lambda: ["bin", "filter"])
     grid_axes: Optional[List[str]] = None
@@ -562,6 +571,8 @@ class RunConfig:
         d.setdefault("ann_extra", [])
         # and one saved before batch_mode evaluated its batches whole
         d.setdefault("batch_mode", "sync")
+        # and one saved before 2026-11-17 summed its TPE densities over every sample
+        d.setdefault("tpe_density", "exact")
         d["calibration"] = _from_dict_filtered(CalibrationConfig, d.get("calibration", {}))
         # one saved before 2026-10-28 compared candidates by their vectors and reported the
         # election's median: it goes on that way, so its annuli stay alike
@@ -935,14 +946,28 @@ def _write_fits(path: str, data: np.ndarray, header: Optional[Dict[str, Any]] = 
 
 
 class _ReductionQueue:
-    """Reductions submitted over time and taken back in the order submitted: the stream a
-    pipelined search feeds its trials' reductions into and :meth:`Runner._trial_finish`
-    reads.  ``window`` threads run them, and the rest wait their turn.  With a window of 1
-    each reduction runs on this thread when its result is taken.  A reduction that raises
-    yields its exception as the result."""
+    """Reductions submitted over time and taken back in the order submitted.
+
+    It is the stream a pipelined search feeds its trials' reductions into and :meth:`Runner._trial_finish`
+    reads.  ``window`` threads run them, and the rest wait their turn.  With a window of 1 each reduction
+    runs on this thread when its result is taken.  A reduction that raises yields its exception as the
+    result.
+
+    Parameters
+    ----------
+    window : int
+        Number of threads, 1 or less for none.
+
+    Attributes
+    ----------
+    wait_s : float
+        Seconds the taker spent waiting for results not yet in, which the main process' line of each
+        annulus reads (:meth:`Runner._main_note`).
+    """
 
     def __init__(self, window: int):
         self.serial = int(window) <= 1
+        self.wait_s = 0.0
         self._ex = None
         if not self.serial:
             import concurrent.futures as _cf
@@ -957,6 +982,20 @@ class _ReductionQueue:
         return self
 
     def __next__(self) -> Tuple[int, Any]:
+        """Return the next result, waiting for it when it is not in, the wait counted in :attr:`wait_s`.
+
+        Returns
+        -------
+        i : int
+            Its index, in the order submitted.
+        result : object
+            The reduction's result, or the exception it raised.
+
+        Raises
+        ------
+        StopIteration
+            When every result has been taken.
+        """
         if not self._items:
             raise StopIteration
         it = self._items.popleft()
@@ -965,7 +1004,12 @@ class _ReductionQueue:
             if self.serial:
                 return i, it()
             from .parallel import pump_wait
-            return i, pump_wait([it])[0]
+            ready, t0 = it.done(), time.time()
+            try:
+                return i, pump_wait([it])[0]
+            finally:
+                if not ready:
+                    self.wait_s += time.time() - t0
         except Exception as exc:          # noqa: BLE001 - handed to the caller
             return i, exc
 
@@ -1185,6 +1229,8 @@ class Runner:
         self._draw_tally: Dict[int, Dict[str, Any]] = {}   # annulus -> search draws, failed draws, reasons
         self._card_mark: Optional[Dict[str, Any]] = None    # the card's counts as the search started
         self._card_annuli: Dict[int, Dict[str, Any]] = {}   # annulus -> its search's card numbers
+        self._main_annuli: Dict[int, Dict[str, Any]] = {}   # annulus -> its search's main-process numbers
+        self._main_acc: Optional[Dict[str, Any]] = None
         self._card_shares: Optional[List[float]] = None     # the automatic share, one a card
         self._card_trial_shares: Dict[str, List[float]] = {}   # trial tag -> the shares it went out with
         self._card_win: Optional[Dict[str, Any]] = None     # the counts at the last re-balance
@@ -1569,6 +1615,71 @@ class Runner:
         self._card_annuli[ia] = rec
         self._card_mark = None
 
+    def _main_note(self, ia: int) -> None:
+        """Log how busy the main process was during an annulus' search, and keep the numbers.
+
+        Once the workers keep up, the main process sets a pipelined search's pace, since every trial waits
+        for it to be scored, recorded and followed by the next proposal.  The first line gives the share of
+        the search's time the main thread was not waiting for a trial's reductions, and how long a trial
+        waited for it on average once its reductions were back and scored.  The second gives the main
+        thread's time per trial and its steps, scoring what the workers left, recording the trial,
+        proposing and sending out the next one, and the trial's files, checkpoint, display and log line.
+        The numbers go into :attr:`_main_annuli`, from which the annulus' ``annulus_done.json`` and the run's
+        summary take them (NEAR2 note, 2026-11-16).  A search without trials in flight gets no line.
+
+        Parameters
+        ----------
+        ia : int
+            The annulus, counted from 0.
+        """
+        acc, self._main_acc = self._main_acc, None
+        if not isinstance(acc, dict) or not acc.get("n"):
+            return
+        n = int(acc["n"])
+        span = max(time.time() - float(acc["t0"]), 1e-9)
+        busy = 1.0 - min(float(acc["wait"]) / span, 1.0)
+        steps = {k: float(acc[k]) / n for k in ("score", "record", "propose", "rest")}
+        per = sum(steps.values())
+        since = " since the resume" if acc.get("resumed") else ""
+        self.log(f"  annulus {ia+1}: the main process was busy {100 * busy:.0f} % of the search's {_dur(span)}{since}, "
+                 f"and a trial waited {float(acc['trial_wait']) / n:.2f} s for it on average once it was reduced "
+                 f"and scored")
+        self.log(f"  annulus {ia+1}: the main process took {per:.3f} s a trial, {steps['score']:.3f} s scoring, "
+                 f"{steps['record']:.3f} s recording, {steps['propose']:.3f} s proposing and {steps['rest']:.3f} s "
+                 f"on the files, the checkpoint, the display and the log")
+        self._main_annuli[ia] = {"annulus": ia + 1, "trials": n, "search_s": round(span, 1),
+                                 "busy_fraction": round(busy, 4),
+                                 "trial_wait_s": round(float(acc["trial_wait"]) / n, 4),
+                                 "step_s": {k: round(v, 5) for k, v in steps.items()},
+                                 "since_resume": bool(acc.get("resumed"))}
+
+    def _main_per_annulus(self, results: Sequence[AnnulusResult]) -> List[Dict[str, Any]]:
+        """Return each finished annulus' main-process numbers, for the run's summary.
+
+        Parameters
+        ----------
+        results : sequence of AnnulusResult
+            The finished annuli.
+
+        Returns
+        -------
+        numbers : list of dict
+            Each annulus' numbers (:meth:`_main_note`), from this process or, for an annulus finished before
+            a resume, from its ``annulus_done.json``, an annulus without them left out.
+        """
+        out = []
+        for r in results:
+            rec = self._main_annuli.get(int(r.annulus))
+            if rec is None:
+                try:
+                    with open(os.path.join(self._ann_dir(int(r.annulus)), "annulus_done.json")) as f:
+                        rec = json.load(f).get("main")
+                except (OSError, ValueError, AttributeError):
+                    rec = None
+            if rec:
+                out.append(dict(rec))
+        return out
+
     def _mark_card(self, resumed: bool = False) -> None:
         """Take the cards' counts as an annulus' search starts, into :attr:`_card_mark` and :attr:`_card_win`.
 
@@ -1584,6 +1695,8 @@ class Runner:
             self._card_mark["resumed"] = bool(resumed)
         self._card_win = self._card_mark
         self._card_since = 0
+        self._main_acc = {"t0": time.time(), "resumed": bool(resumed), "n": 0, "wait": 0.0, "trial_wait": 0.0,
+                          "score": 0.0, "record": 0.0, "propose": 0.0, "rest": 0.0}
 
     def _card_adaptive(self) -> int:
         """Return the trials between two re-balances of the automatic share, 0 when the share stays as set.
@@ -2006,7 +2119,8 @@ class Runner:
         if c.search_mode == "tpe":
             return TPE(self.space, n_init=n_init, gamma=c.gamma, ncand=c.ncand, prior_weight=c.prior_weight,
                        bw_floor=c.bw_floor, pbest=pbest, p_local=c.p_local, n_elite=c.n_elite,
-                       explore_frac=c.explore_frac, blocks=c.blocks, warmstart_tie=wtie, link_params=c.link_params)
+                       explore_frac=c.explore_frac, blocks=c.blocks, warmstart_tie=wtie, link_params=c.link_params,
+                       density=c.tpe_density)
         if c.search_mode == "random":
             return RandomSearch(self.space, n_init=0, warmstart_tie=wtie, link_params=c.link_params)
         if c.search_mode == "grid":
@@ -3961,14 +4075,17 @@ class Runner:
         on_draw = (lambda j, nd, r, i_, c_: self._on_draw(ia, j, nd, r, i_, c_)) if n > 1 else None
 
         def dispatch(item):
-            item["t0"], item["back"] = time.time(), []
+            item["t0"], item["back"], item["ready"] = time.time(), [], []
             # shares= only for a resumed trial that went out with some, so a _trial_calls of the old
             # signature (a test's spy) still serves every other trial
             kw = {"shares": item["card_shares"]} if item.get("card_shares") is not None else {}
             calls = self._timed(self._trial_calls(item["cfg"], item["draws"], item["tag"], **kw), item["back"])
             if item.get("card_shares") is None:
                 item["card_shares"] = self._card_trial_shares.get(item["tag"])
-            for fn in self._scored_calls(calls, item["draws"]):
+            # each call notes when it is done, scored too: when the trial is ready for this thread
+            scored = self._timed(self._scored_calls(calls, item["draws"]), item["ready"])
+            item["calls"] = len(scored)
+            for fn in scored:
                 q.submit(fn)
             pend.append(item)
 
@@ -3989,12 +4106,17 @@ class Runner:
                 self.log(f"[ann {ia+1}] {b} trials in flight: the next goes out as soon as the oldest is in")
                 ask(min(b, n_iter - len(self.history)))
             t_loop = time.time()
+            acc = self._main_acc if isinstance(self._main_acc, dict) else None
             while pend:
                 item = pend[0]
                 self._hb_eval(ia, len(self.history) + 1, n_iter, item["phase"])
+                t_take, w0 = time.time(), q.wait_s
+                rdy = item.get("ready") or []
+                wait = max(t_take - max(rdy), 0.0) if rdy and len(rdy) >= item.get("calls", 0) else 0.0
                 rec, inj, clean = self._trial_finish(item["x"], item["cfg"], item["phase"], item["tag"],
                                                      item["draws"], q, on_draw, item["t0"], combine=n > 1,
                                                      back=item["back"])
+                t_scored = time.time()
                 pend.popleft()
                 i = self._append(rec)
                 rc = self._recal_check(ia, i)
@@ -4004,9 +4126,20 @@ class Runner:
                     self.rng.bit_generator.state = item["rng_after"]
                     self._eval_bookkeeping(ia, n_iter, i, item["phase"], rec, inj, clean, t_loop)
                     return self._recal_apply(ia, rc)
+                t_rec = time.time()
                 if len(self.history) + len(pend) < n_iter:
                     ask(1)                          # the pool keeps working through what follows
+                t_ask = time.time()
                 self._eval_bookkeeping(ia, n_iter, i, item["phase"], rec, inj, clean, t_loop)
+                if acc is not None:
+                    waited = q.wait_s - w0
+                    acc["n"] += 1
+                    acc["wait"] += waited
+                    acc["trial_wait"] += wait
+                    acc["score"] += t_scored - t_take - waited
+                    acc["record"] += t_rec - t_scored
+                    acc["propose"] += t_ask - t_rec
+                    acc["rest"] += time.time() - t_ask
                 if rc is not None:
                     self._recal_apply(ia, rc)
                 t_loop = time.time()
@@ -4016,15 +4149,27 @@ class Runner:
             q.close()
 
     def _ask_history(self, pend) -> History:
-        """The history the optimizer proposes from: the trials scored so far, then the
-        pending ones as unscored rows.  They advance the warm-up count and the grid, and
-        cannot train the model."""
+        """Return the history the optimizer proposes from.
+
+        It is the trials scored so far, then the pending ones as unscored rows.  They advance the warm-up
+        count and the grid, and cannot train the model.  The rows go behind the history's own arrays
+        (:meth:`~klip_tpe.optimizers.History.with_rows`), so asking copies nothing of the history, which a
+        copy for every trial did until 2026-11-17 (four copies of 4.5 MB at 10,000 trials of a 56-D space).
+
+        Parameters
+        ----------
+        pend : sequence of dict
+            The trials in flight.
+
+        Returns
+        -------
+        history : History
+            The history, good until its next append.
+        """
         if not pend:
             return self.history
-        h = History(self.history.ndim, self.history.X.copy(), self.history.y.copy(), list(self.history.flags))
-        for it in pend:
-            h.append(it["x"], np.nan, {"phase": it["phase"], "pending": True})
-        return h
+        return self.history.with_rows([it["x"] for it in pend],
+                                      [{"phase": it["phase"], "pending": True} for it in pend])
 
     def _pending_state(self) -> Optional[List[Dict[str, Any]]]:
         """Return the trials in flight, as the checkpoint stores them.
@@ -4890,6 +5035,7 @@ class Runner:
         self._draw_note(ia)
         self.log(f"  search done: best {bs:.3f} at eval {bi+1}")
         self._card_note(ia)
+        self._main_note(ia)
         self._memory_note()
         table, vwin, winner = ([], -1, {})
         if self.cfg.validation.n_valid >= 1 and self.cfg.validation.n_top >= 1:
@@ -4953,6 +5099,8 @@ class Runner:
             done = {"annulus": ia + 1, "elapsed_s": float(self.done_wall_s), "winner_index": int(res.winner_index)}
             if self._card_annuli.get(ia):
                 done["card"] = self._card_annuli[ia]     # the run's summary reads it after a resume
+            if self._main_annuli.get(ia):
+                done["main"] = self._main_annuli[ia]
             _atomic_write(os.path.join(self._ann_dir(ia), "annulus_done.json"), json.dumps(done, indent=1))
         except OSError as exc:                       # a record for the display, never fatal
             self.log(f"  annulus_done.json: {exc!r}")
@@ -5826,6 +5974,9 @@ class Runner:
             out["card"] = card
             self.log(f"  card: {card['jobs']} jobs, its workers busy {100 * card['busy_fraction']:.0f} % of the time "
                      f"since the pool started" + ("" if card["up"] else f" (left out: {card['why_down']})"))
+        main = self._main_per_annulus(results)
+        if main:
+            out["main"] = main
         _atomic_write(os.path.join(self.run_dir, "final_results.json"), json.dumps(out, indent=1, default=_json_default))
         # append to the benchmark summary (run-tagged, one row per annulus)
         with open(os.path.join(self.run_dir, "bench_summary.txt"), "a") as f:
@@ -5851,6 +6002,14 @@ class Runner:
                                if len(each) > 1 else "")
                             + (f", share {_shares_text(c['shares_end'])} at its end" if c.get("shares_end") else "")
                             + "\n")
+            for m in main:
+                st = m.get("step_s") or {}
+                f.write(f"# main annulus {int(m['annulus']):d}: busy {100 * float(m['busy_fraction']):.0f} % of the "
+                        f"search's {float(m['search_s']):.0f} s"
+                        + (" since the resume" if m.get("since_resume") else "")
+                        + f", a trial waited {float(m['trial_wait_s']):.3f} s for it, "
+                        f"{sum(float(v) for v in st.values()):.3f} s a trial ("
+                        + ", ".join(f"{k} {float(v):.3f}" for k, v in st.items()) + ")\n")
         # final-layer hooks (guarded)
         if results and stitched is not None:
             if self.do_param_verify:

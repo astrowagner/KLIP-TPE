@@ -1977,6 +1977,7 @@ def _protocol_config(a) -> dict:
                 liveness_check=getattr(a, "liveness_check", "warn"),
                 batch=max(int(getattr(a, "batch", 1) or 1), 1),
                 **({"batch_mode": a.batch_mode} if getattr(a, "batch_mode", None) else {}),
+                **({"tpe_density": a.tpe_density} if getattr(a, "tpe_density", None) else {}),
                 **({"edge_padding": a.edge_padding} if getattr(a, "edge_padding", None) else {}),
                 **({"n_sources": ns} if ns is not None else {}),
                 **({"min_r_fwhm": rmin} if rmin is not None else {}),
@@ -2793,8 +2794,8 @@ def cmd_plots(a):
 def cmd_render(a):
     """Run ``klip-tpe render``, which draws every evaluation's panel after the fact.
 
-    The live display skips a panel whenever the render thread is still drawing the last one, so the
-    window shows the present instead of falling behind, and says so with a pointer here.  The run's log
+    The live display skips a panel whenever the last one is still being drawn, so the window shows the
+    present instead of falling behind, and says so with a pointer here.  The run's log
     and its per-evaluation crops hold everything a panel needs, so the complete set can be drawn
     afterwards.  It goes into its own directory, ``steps_rebuilt`` by default, because the live
     ``steps/`` also holds the calibration and validation frames this cannot redraw, and renumbering
@@ -3019,6 +3020,11 @@ def _add_run_args(p):
     # any `klip-tpe near` / `generic` call without --blocks ran block-multivariate densities.
     p.add_argument("--blocks", default="univariate",
                    help="TPE density model: univariate (default; the IDL reference) | partitions | full")
+    p.add_argument("--tpe-density", default=None, choices=["binned", "exact"],
+                   help="how a TPE proposal sums its univariate densities. binned (the default) gathers the samples "
+                        "on a grid, at the same cost at any history. exact sums over every sample, at a cost that "
+                        "grows with the history. They give the same proposal but where two candidates differ by "
+                        "less than the grid's error, 1e-5 of a density typically")
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--contrast0", type=float, default=3e-5)
     p.add_argument("--use-contrast", type=float, nargs="+", default=None,

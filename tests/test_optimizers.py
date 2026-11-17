@@ -6,8 +6,8 @@ from scipy.integrate import quad
 
 from klip_tpe import optimizers as O
 from klip_tpe.optimizers import (GridSearch, History, RandomSearch, TPE, block_log_density,
-                                 make_optimizer, parzen_bandwidth, parzen_density, parzen_density_many,
-                                 resolve_blocks, tpe_propose)
+                                 make_optimizer, parzen_bandwidth, parzen_density, parzen_density_binned,
+                                 parzen_density_many, resolve_blocks, tpe_propose)
 from klip_tpe.space import Param, SearchSpace, kgrid
 
 
@@ -197,6 +197,98 @@ def test_tpe_proposals_are_bit_for_bit_what_they_were(partition_space):
         assert np.array_equal(many, [parzen_density(v, s, h, lo, hi, 0.25) for v in x]), trial
 
 
+def test_gathered_proposals_are_bit_for_bit_the_old_ones_at_any_history(partition_space):
+    """Since 2026-11-17 the good and the bad set are gathered once, a row per dimension, the densities
+    are summed a block of candidates at a time in place, the candidates are drawn with Python numbers,
+    and a history's valid rows are passed as indices instead of copied out.  The proposals and the
+    generator state after them stay what the candidate-at-a-time code gave, at histories past the
+    block size of the density and with failed trials among the rows."""
+    sp = partition_space.replicate([Param("m", 0, 2, "categorical", choices=["x", "y", "z"])], ["p0", "p1"])
+    for seed in range(6):
+        g = np.random.default_rng(seed)
+        n = int(g.integers(3000, 7000))
+        X = np.array([sp.sanitize(sp.random(g)) for _ in range(n)])
+        y = g.standard_normal(n) * 3
+        y[g.random(n) < 0.2] = np.nan                                     # failed or pending trials
+        v = np.isfinite(y)
+        for kw in ({}, {"gamma": 0.15, "pbest": 0.2, "prior_weight": 0.1}):
+            r1, r2 = np.random.default_rng(100 + seed), np.random.default_rng(100 + seed)
+            a = _propose_one_candidate_at_a_time(X[v], y[v], sp, r1, **kw)
+            b = tpe_propose(X, y, sp, r2, rows=np.flatnonzero(v), density="exact", **kw)
+            assert np.array_equal(a, b), (seed, n, kw)
+            assert r1.bit_generator.state == r2.bit_generator.state
+    g = np.random.default_rng(8)
+    for trial in range(40):
+        s = g.uniform(-3, 9, int(g.integers(2000, 20000)))               # several blocks of candidates
+        x = g.uniform(-4, 10, int(g.integers(1, 80)))
+        h = float(g.uniform(1e-3, 3))
+        many = parzen_density_many(x, s, h, 0.0, 6.0, 0.25)
+        assert np.array_equal(many, [parzen_density(v, s, h, 0.0, 6.0, 0.25) for v in x]), trial
+
+
+def test_binned_density_is_the_exact_one_within_1e4():
+    """The binned density gathers the samples on a grid: whole-number dimensions on their values, which
+    is exact but for the order of the sum, and the others by linear binning at 16 points a bandwidth."""
+    g = np.random.default_rng(3)
+    worst = []
+    for trial in range(150):
+        lo, hi = 0.3, 3.0
+        n = int(g.integers(5, 20000))
+        k = int(g.integers(1, 6))
+        cen = g.uniform(lo, hi, k)
+        s = np.clip(cen[g.integers(0, k, n)] + g.normal(0, g.uniform(0.01, 0.8), n), lo, hi)
+        h = parzen_bandwidth(s, lo, hi, 0.08)
+        x = g.uniform(lo, hi, 48)
+        exact = parzen_density_many(x, s, h, lo, hi, 0.25)
+        worst.append(np.max(np.abs(parzen_density_binned(x, s, h, lo, hi, 0.25) / exact - 1)))
+    assert max(worst) < 2e-4 and np.median(worst) < 3e-5, (max(worst), np.median(worst))
+    for trial in range(60):
+        n = int(g.integers(5, 20000))
+        s = np.round(np.clip(g.normal(g.uniform(5, 30), g.uniform(0.5, 10), n), 5, 30))
+        h = parzen_bandwidth(s, 5, 30, 0.08)
+        x = g.uniform(5, 30, 48)
+        np.testing.assert_allclose(parzen_density_binned(x, s, h, 5, 30, 0.25, integral=True),
+                                   parzen_density_many(x, s, h, 5, 30, 0.25), rtol=1e-12)
+    # a whole-number dimension whose samples are not all whole is binned as any other
+    s = np.r_[np.arange(5, 31, dtype=float), 7.5]
+    np.testing.assert_allclose(parzen_density_binned(x, s, 2.0, 5, 30, 0.25, integral=True),
+                               parzen_density_many(x, s, 2.0, 5, 30, 0.25), rtol=2e-4)
+    empty = np.zeros(0)
+    assert np.array_equal(parzen_density_binned(x, empty, 2.0, 5, 30), parzen_density_many(x, empty, 2.0, 5, 30))
+
+
+def test_binned_proposals_are_the_exact_ones(partition_space):
+    """The grid's error moves a proposal only where two candidates' scores differ by less than it."""
+    sp = partition_space
+    same = tot = 0
+    for seed in range(30):
+        g = np.random.default_rng(seed)
+        n = int(g.integers(50, 3000))
+        X = np.array([sp.sanitize(sp.random(g)) for _ in range(n)])
+        y = (X - sp.lo) / (sp.hi - sp.lo) @ g.normal(size=sp.ndim) + g.normal(0, 1.0, n)
+        r1, r2 = np.random.default_rng(seed), np.random.default_rng(seed)
+        a = tpe_propose(X, y, sp, r1)
+        b = tpe_propose(X, y, sp, r2, density="binned")
+        same += np.array_equal(a, b)
+        tot += 1
+        assert r1.bit_generator.state == r2.bit_generator.state, "the grid draws nothing"
+    assert same >= 0.95 * tot, f"{same} of {tot}"
+    with pytest.raises(ValueError, match="density"):
+        tpe_propose(X, y, sp, r1, density="kde")
+    with pytest.raises(ValueError, match="density"):
+        TPE(sp, density="kde")
+
+
+def test_the_run_config_carries_the_density_and_old_runs_keep_theirs(partition_space):
+    from klip_tpe.runner import RunConfig
+    assert RunConfig().tpe_density == "binned"
+    d = RunConfig().to_dict()
+    assert RunConfig.from_dict(d).tpe_density == "binned"
+    d.pop("tpe_density")
+    assert RunConfig.from_dict(d).tpe_density == "exact", "a run saved before 2026-11-17 sums as it did"
+    assert TPE(partition_space).density == "exact" and TPE(partition_space).describe()["density"] == "exact"
+
+
 def test_tpe_propose_sanitized_in_bounds(simple_space, rng):
     sp = simple_space
     X = np.array([sp.random(rng) for _ in range(30)])
@@ -252,6 +344,69 @@ def test_history_best_order_and_round_trip():
     assert len(h2) == 5 and np.isnan(h2.y[4]) and h2.flags == h.flags
     np.testing.assert_array_equal(h2.X, h.X)
     assert h2.order().tolist() == h.order().tolist()
+
+
+def test_history_appends_into_room_and_earlier_views_keep_their_rows():
+    """Since 2026-11-17 an append copies one row, not the whole history: ``X`` and ``y`` are views of
+    arrays with room to spare.  An ``X`` read before keeps the trials it had, a history built from
+    given arrays or from a dict takes its rows into room of its own, and a pickle holds the rows only."""
+    import pickle
+    h = History(3)
+    seen = []
+    for k in range(200):
+        h.append([k, k + 1, k + 2], float(k), {"phase": "tpe"})
+        seen.append((h.X, h.y))
+    for k, (X, y) in enumerate(seen):
+        assert X.shape == (k + 1, 3) and np.array_equal(X[:, 0], np.arange(k + 1))
+        assert np.array_equal(y, np.arange(k + 1))
+    assert h._xbuf.shape[0] >= 200 and h.X.base is h._xbuf
+    given = np.arange(12.0).reshape(4, 3)
+    h2 = History(3, given, np.arange(4.0), [{}] * 4)
+    h2.append([9, 9, 9], 1.0)
+    assert np.array_equal(given, np.arange(12.0).reshape(4, 3)), "the given arrays are not written to"
+    assert len(h2) == 5 and h2.X[4].tolist() == [9, 9, 9]
+    h3 = History.from_dict(h.to_dict())
+    h3.append([0, 0, 0], None)
+    assert len(h3) == 201 and np.isnan(h3.y[-1]) and len(h) == 200
+    back = pickle.loads(pickle.dumps(h))
+    assert "_xbuf" not in back.__dict__ and np.array_equal(back.X, h.X) and back.flags == h.flags
+    back.append([1, 2, 3], 2.0)
+    assert len(back) == 201 and len(h) == 200
+
+
+def test_history_with_rows_shares_the_arrays_and_leaves_the_history_alone():
+    h = History(2)
+    for k in range(5):
+        h.append([k, -k], float(k))
+    X0 = h.X
+    w = h.with_rows([np.array([7.0, 8.0]), np.array([9.0, 10.0])], [{"phase": "tpe"}, {"phase": "local"}])
+    assert len(w) == 7 and len(h) == 5 and np.isnan(w.y[5:]).all() and w.X[6].tolist() == [9.0, 10.0]
+    assert [f.get("phase") for f in w.flags[5:]] == ["tpe", "local"] and len(h.flags) == 5
+    assert np.array_equal(h.X, X0) and np.array_equal(w.X[:5], h.X)
+    assert w.X.base is h._xbuf, "the rows went into the history's room, nothing copied"
+    assert h.with_rows([], []) is h
+    h.append([5, -5], 5.0)                                   # the history goes on as before
+    assert len(h) == 6 and h.X[5].tolist() == [5, -5]
+
+
+def test_tpe_ask_copies_the_history_only_for_warmup_rows(simple_space, monkeypatch):
+    """A batch after the warm-up asks from the history itself, a batch inside it from a copy that
+    takes its warm-up rows, and neither changes the history."""
+    rng = np.random.default_rng(0)
+    h = History(simple_space.ndim)
+    for _ in range(12):
+        h.append(simple_space.random(rng), float(rng.normal()))
+    copies = []
+    orig = History.__init__
+
+    def spy(self, *a, **kw):
+        copies.append(a)
+        orig(self, *a, **kw)
+    monkeypatch.setattr(History, "__init__", spy)
+    TPE(simple_space, n_init=5).ask(h, rng, 4)
+    assert not copies
+    TPE(simple_space, n_init=20).ask(h, rng, 4)
+    assert len(copies) == 1 and len(h) == 12
 
 
 def test_history_from_dict_empty():

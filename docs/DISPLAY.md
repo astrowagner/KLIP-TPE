@@ -104,8 +104,8 @@ median so far …`, `annulus done — VALIDATED winner`, and on the run's last f
 (`klip_stitched.fits`, `klip_stitched_inj.fits`) in its stitched cells.  The running stitch the
 annulus-done frame shows is an equal-weight stitch without the seam patches, and on NEAR2 it
 differed from the final stitch by up to 0.5 σ beyond 1.44".  During validation the Test cells show
-the validation trials.  A trial gets a panel when the render thread is free and goes without
-one at once when it is busy, so validation never waits for the display.  Before the search,
+the validation trials.  A trial gets a panel when no panel is being drawn and goes without one
+at once otherwise, so validation never waits for the display.  Before the search,
 the calibration trials are shown
 (`steps/calib_annNN_trialNNNN.png`), preceded by the launch movie when `aliens=True`.
 
@@ -162,6 +162,22 @@ are the same as when the run drew them itself, and it runs at a lower priority t
 workers.  The books of an annulus appear a few minutes after it ends, and the run waits for
 the last of them at its end.  A Ctrl-C of the run does not stop that process, which finishes
 the books and exits.  `KLIP_TPE_BOOKS=inline` draws them on the run's main thread instead.
+
+The step panels, their PDFs (`--pdf-every`), the validation trials' panels and the progress
+movies are drawn by another process too, started with the first panel and closed at the run's
+end (`klip_tpe/panels.py`).  The run sends it each evaluation's record once, and for a panel the
+evaluation's images, the best images when they change and the panel's numbers.  The process
+builds the annulus' data, the contrast preview and the stitched cells itself, so the run's
+main thread only queues a message.  Drawn on a thread of the run's own process, a panel held the
+interpreter for its 2-4 s, and a search with trials in flight ran at a fraction of its pace.
+NEAR2 measured the main thread's steps 2 to 4 times slower in s7e (2026-11-16), and a NEAR-shaped
+synthetic search took 373 ms a trial with the panels on the render thread, 94-111 ms with them
+in their own process and 83-87 ms without them.  A panel asked for while the process draws another is skipped
+at once, but for an annulus' last evaluation and a PDF that is due.  The process runs at a lower
+priority than the workers and finishes what it was sent when the run is stopped.
+`KLIP_TPE_PANELS=thread` draws the panels on the run's render thread as before, and so does a run
+whose panel process cannot start or stops, with a line in the log.  The annulus-done frames and
+the calibration panels are drawn by the run itself, once an annulus.
 
 Each annulus is reduced over its zone padded by 2 px where it meets another annulus, and
 its stitch tile overlaps the neighbor by 2 px there.  The inner edge of the innermost

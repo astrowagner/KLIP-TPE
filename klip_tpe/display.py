@@ -851,10 +851,19 @@ def _runner_known(runner) -> List[Tuple[float, float]]:
     return []
 
 
-def annulus_from_runner(runner, records: Sequence[Dict[str, Any]]) -> AnnulusData:
-    """Live :class:`AnnulusData` from a runner and the record dicts collected so far."""
-    space = runner.space.to_dict()
-    cfg = runner.cfg.to_dict()
+def runner_recipe(runner) -> Dict[str, Any]:
+    """Return what :func:`annulus_from_records` takes from a runner, besides the records.
+
+    Parameters
+    ----------
+    runner : Runner
+        The runner.
+
+    Returns
+    -------
+    recipe : dict
+        The keywords of :func:`annulus_from_records` but ``records``, for the runner's annulus.
+    """
     ia = runner.ia
     try:
         d = runner.objective.describe()
@@ -864,14 +873,32 @@ def annulus_from_runner(runner, records: Sequence[Dict[str, Any]]) -> AnnulusDat
     winner = None
     if len(runner.results) > ia and runner.results[ia] is not None:
         winner = runner.results[ia].to_dict()
-    calib = getattr(runner, "_display_calib", None)
-    return annulus_from_records(records, space, cfg, ia, runner.pxscale, runner.fwhm, mname,
-                                os.path.basename(os.path.abspath(runner.run_dir)), winner,
-                                None if winner is None else winner.get("validation_table"), calib,
-                                getattr(runner.reducer, "angle_convention",
+    return {"space": runner.space.to_dict(), "cfg": runner.cfg.to_dict(), "ia": ia, "pxscale": runner.pxscale,
+            "fwhm": runner.fwhm, "metric_name": mname, "run_name": os.path.basename(os.path.abspath(runner.run_dir)),
+            "winner": winner, "validation": None if winner is None else winner.get("validation_table"),
+            "calibration": getattr(runner, "_display_calib", None),
+            "angle_convention": getattr(runner.reducer, "angle_convention",
                                         getattr(runner.objective.metric, "angle_convention", "pa")),
-                                getattr(runner.reducer, "partition_label", "night"),
-                                _runner_known(runner), _runner_pixel_mask(runner), _runner_rules(runner))
+            "partition_label": getattr(runner.reducer, "partition_label", "night"),
+            "known": _runner_known(runner), "pixel_mask": _runner_pixel_mask(runner), "rules": _runner_rules(runner)}
+
+
+def annulus_from_runner(runner, records: Sequence[Dict[str, Any]]) -> AnnulusData:
+    """Return the live data of a runner's annulus.
+
+    Parameters
+    ----------
+    runner : Runner
+        The runner.
+    records : sequence of dict
+        The annulus' record dicts so far.
+
+    Returns
+    -------
+    ad : AnnulusData
+        The data (:func:`annulus_from_records` with :func:`runner_recipe`).
+    """
+    return annulus_from_records(records, **runner_recipe(runner))
 
 
 # ----------------------------------------------------------------------------
@@ -4718,6 +4745,114 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
 # ----------------------------------------------------------------------------
 # the live callback
 # ----------------------------------------------------------------------------
+def _head_curves(live: Optional[Dict[str, Any]], best: Optional[Dict[str, Any]], done: bool = False
+                 ) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
+    """Return the contrast panel's first curves, the evaluation's preview and the best evaluation's.
+
+    Parameters
+    ----------
+    live : dict or None
+        This evaluation's preview (:func:`_live_curve_info`).
+    best : dict or None
+        The best evaluation's preview.
+    done : bool, default False
+        Whether it is the finished annulus' frame, which leaves the best evaluation's preview out.
+
+    Returns
+    -------
+    curves : list of tuple
+        Each curve's label, dict and line style.
+    """
+    out = []
+    if live:
+        out.append(("this eval (preview from its sources)", live, {"color": CUR_COLOR, "lw": 0.9, "ls": "--"}))
+    if best and not done:
+        out.append(("best eval (preview)", best, {"color": PHASE_COLORS["tpe"], "lw": 1.3}))
+    return out
+
+
+def _abs(path: Optional[str]) -> Optional[str]:
+    """Return a path made absolute, for a process that runs in another directory.
+
+    Parameters
+    ----------
+    path : str or None
+        The path.
+
+    Returns
+    -------
+    path : str or None
+        The absolute path, None for None.
+    """
+    return None if path is None else os.path.abspath(path)
+
+
+def stitch_cells(run_dir: str, ia: int, sources=None) -> Dict[str, Any]:
+    """Return the stitched cells of a panel, the running stitch read from a run directory.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run directory.
+    ia : int
+        The annulus drawn, counted from 0.  The first annulus has no stitched cells.
+    sources : list, callable or None, default None
+        The sources injected in the stitch, or a function returning them, asked only when there is an
+        injected stitch.
+
+    Returns
+    -------
+    cells : dict
+        ``stitch_clean``, ``stitch_edges``, ``stitch_inj`` and ``stitch_sources`` as far as
+        ``klip_stitched_running.fits`` and ``klip_stitched_running_inj.fits`` give them.
+    """
+    if ia <= 0:
+        return {}
+    out: Dict[str, Any] = {}
+    for key, name in (("stitch_clean", "klip_stitched_running.fits"), ("stitch_inj", "klip_stitched_running_inj.fits")):
+        img = _fits(os.path.join(run_dir, name))
+        if img is not None and img.ndim == 2:
+            out[key] = img
+    if "stitch_clean" in out:
+        out["stitch_edges"] = _header_edges(os.path.join(run_dir, "klip_stitched_running.fits"))
+    if "stitch_inj" in out:
+        out["stitch_sources"] = (sources() if callable(sources) else sources) or None
+    return out
+
+
+def corner_pick(ad: "AnnulusData", mode: Optional[str], k: int) -> Tuple[Optional[str], int]:
+    """Return the partition whose landscape a panel shows, and how far the cycle moves.
+
+    Pooling every partition into one corner overlays landscapes that need not agree.  A parameter can
+    be good on one night and poor on the next, and the pooled cloud is then a blur true of no night in
+    particular.  So the panel shows one at a time and advances by one each frame, and the title says
+    which.
+
+    Parameters
+    ----------
+    ad : AnnulusData
+        The annulus.
+    mode : str or None
+        ``"cycle"`` (or None) steps through the partitions, ``"pooled"`` overlays them, a partition id pins
+        it.
+    k : int
+        The cycle's count, the panels drawn so far.
+
+    Returns
+    -------
+    partition : str or None
+        The partition, None for the pooled landscape.
+    step : int
+        1 when the cycle moved, else 0.
+    """
+    parts = [str(p) for p in (getattr(ad, "partitions", None) or [])]
+    if mode == "pooled" or not getattr(ad, "replicated", False) or len(parts) < 2:
+        return None, 0
+    if mode not in ("cycle", "", None):
+        return (mode if mode in parts else None), 0
+    return parts[k % len(parts)], 1
+
+
 def injected_model_image(runner, sources, shape) -> Optional[np.ndarray]:
     """IDL ``disp_injmdl``: the injected-PSF model of ``sources`` as it appears in the final
     (north-up) image, from ``runner``'s reducer (:func:`klip_tpe.injection.injected_model`)."""
@@ -5071,30 +5206,57 @@ class LiveDisplay(RunCallback):
     #: the search's grace made nearly every trial wait it out on the main thread: about
     #: 0.25 s of a NEAR2 trial's 0.52-0.68 s, 5 min of each annulus' validation.
     VALIDATION_GRACE = 0.0
+    #: the same for the panel process (:mod:`klip_tpe.panels`), search and validation alike: none.
+    #: The panels no longer slow the main thread, so a wait for one would be the only cost they had.
+    PROCESS_GRACE = 0.0
+    #: the longest the run waits for the panel process at an annulus' end, after which it draws the
+    #: panels itself
+    PROCESS_WAIT = 900.0
     _skipped_panels = 0
     _skip_warned = False
 
     def _render_room(self, grace: Optional[float] = None) -> bool:
-        """True when a panel can be drawn now without putting one behind another.
+        """Return whether a panel can be drawn now without putting one behind another.
 
-        The window is a live view, so its lag must be bounded by how long *one* panel takes
-        to draw -- never by how long the run has been going.  ``--display-every 1`` asks for
-        a panel per evaluation; a NEAR panel takes far longer to draw than an evaluation
-        takes to run, so without a gate the single render thread accumulated a queue that
-        grew for the whole run.  The thread was always drawing a frame from minutes ago,
-        the window drifted further behind the longer it lasted (~250 evaluations stale and
-        still growing when it was reported), and every queued job held its image arrays
-        alive.
+        A busy render thread is given a short grace period, long enough that a fast panel simply
+        finishes and nothing is skipped at all, and this evaluation goes without a panel only if the
+        thread is still busy afterwards.  The panel process gets :attr:`PROCESS_GRACE`, none in
+        production, since a wait there is the only cost its panels have.
 
-        The gate belongs here, before the panel is promised, rather than on the queue:
-        a panel that was never requested costs nothing, whereas cancelling one already
-        promised would leave a hole in ``steps/`` that the progress movie and the resumed
-        history both read.  So a busy render thread is given a short grace period -- long
-        enough that a fast panel simply finishes and nothing is skipped at all -- and this
-        evaluation goes without a panel only if the thread is still busy afterwards.
-        ``grace``: that period in seconds, :attr:`RENDER_GRACE` by default.
+        Parameters
+        ----------
+        grace : float or None, default None
+            The render thread's grace in seconds, None for :attr:`RENDER_GRACE`.
+
+        Returns
+        -------
+        room : bool
+            True when nothing is being drawn by the end of the grace.
+
+        Notes
+        -----
+        The window is a live view, so its lag must be bounded by how long *one* panel takes to draw,
+        never by how long the run has been going.  ``--display-every 1`` asks for a panel per evaluation.
+        A NEAR panel takes far longer to draw than an evaluation takes to run, so without a gate the
+        single render thread accumulated a queue that grew for the whole run.  The thread was always
+        drawing a frame from minutes ago, the window drifted further behind the longer it lasted (about
+        250 evaluations stale and still growing when it was reported), and every queued job held its
+        image arrays alive.
+
+        The gate belongs here, before the panel is promised, rather than on the queue.  A panel that was
+        never requested costs nothing, whereas cancelling one already promised would leave a hole in
+        ``steps/`` that the progress movie and the resumed history both read.
         """
         from .parallel import run_idle_hooks
+        pp = self._pp
+        if pp is not None and pp.broken is None:
+            deadline = time.time() + float(self.PROCESS_GRACE)          # drawn elsewhere: no wait here
+            while pp.busy("panel"):
+                if time.time() >= deadline or pp.broken is not None:
+                    return False
+                run_idle_hooks()
+                time.sleep(0.02)
+            return True
         deadline = time.time() + (self.RENDER_GRACE if grace is None else float(grace))
         while True:
             # getattr: the gate runs on the first evaluation, before any render pool exists
@@ -5111,20 +5273,20 @@ class LiveDisplay(RunCallback):
     _corner_i: int = 0
 
     def _next_corner_partition(self, ad) -> Optional[str]:
-        """The partition whose landscape this panel should show.
+        """Return the partition whose landscape this panel shows, and step the cycle on (:func:`corner_pick`).
 
-        Pooling every partition into one corner overlays landscapes that need not agree --
-        a parameter can be good on one night and poor on the next, and the pooled cloud is
-        then a blur true of no night in particular.  So the panel shows one at a time and
-        advances by one each frame, and the title says which.
+        Parameters
+        ----------
+        ad : AnnulusData
+            The annulus.
+
+        Returns
+        -------
+        partition : str or None
+            The partition, None for the pooled landscape.
         """
-        parts = [str(p) for p in (getattr(ad, "partitions", None) or [])]
-        if self.corner_mode == "pooled" or not getattr(ad, "replicated", False) or len(parts) < 2:
-            return None
-        if self.corner_mode not in ("cycle", "", None):
-            return self.corner_mode if self.corner_mode in parts else None
-        pid = parts[self._corner_i % len(parts)]
-        self._corner_i += 1
+        pid, step = corner_pick(ad, self.corner_mode, self._corner_i)
+        self._corner_i += step
         return pid
 
     def _skip_panel(self) -> None:
@@ -5189,8 +5351,22 @@ class LiveDisplay(RunCallback):
             IDLE_HOOKS.append(self._show_latest)
 
     def _show_latest(self) -> None:
-        """Main thread: put the newest finished render in the window (idle hook + on_eval)."""
+        """Put the newest finished panel in the window, and log the panels that failed.
+
+        It runs on the main thread, as an idle hook and after each panel asked for, and takes the panel
+        process' reports or the render thread's finished panels.
+        """
         self._pump()                     # always, even with no render pending
+        pp = self._pp
+        if pp is not None:
+            shown = None
+            for r in pp.take():
+                if not r.get("ok"):
+                    self._say(None, f"{r.get('kind', 'panel')} failed in the panel process: {r.get('error', '')}")
+                elif r.get("kind") == "panel" and r.get("png"):
+                    shown = (r["png"], r.get("screen"))
+            if shown and self.show and not self._intro_on:
+                self._window_show(png=shown[0], img=shown[1])
         if not getattr(self, "_renders", None):
             return
         latest = None
@@ -5210,6 +5386,14 @@ class LiveDisplay(RunCallback):
             self._window_show(png=latest[0], img=latest[1])
 
     def _wait_renders(self) -> None:
+        """Wait for the panels and movies asked for, then show the newest panel."""
+        pp = self._pp
+        if pp is not None:
+            if pp.broken is None:
+                pp.send({"op": "wait"}, reply=True)        # after the panels sent and the movie being made
+                if not pp.wait(timeout=self.PROCESS_WAIT) and pp.broken is None:
+                    pp.fail(f"its panels were not done after {self.PROCESS_WAIT:.0f} s")
+            self._show_latest()
         for fut in list(getattr(self, "_movies", []) or []):
             try:
                 fut.result()
@@ -5220,6 +5404,333 @@ class LiveDisplay(RunCallback):
                 fut.result()
             except Exception:
                 pass
+        self._show_latest()
+
+    # -- the panel process (klip_tpe.panels) -----------------------------------------------
+    _pp = None
+    _pp_off = False
+    _pp_key = None
+    _pp_bkey = None
+    _pp_sent = 0
+    _rec_gen = 0
+
+    def _reset_records(self, records: Optional[Sequence[Dict[str, Any]]] = None) -> None:
+        """Start the annulus' records again, empty or with ``records``, and the panel process' copy with them.
+
+        Parameters
+        ----------
+        records : sequence of dict or None, default None
+            The records, None for none.
+        """
+        self._records = list(records or [])
+        self._rec_gen = getattr(self, "_rec_gen", 0) + 1
+        self._pp_sent = 0
+
+    def _panel_proc(self):
+        """Return the process that draws the step panels, started at the first panel.
+
+        ``KLIP_TPE_PANELS=thread`` keeps the panels on the render thread (:mod:`klip_tpe.panels`), and so does
+        a process that cannot start or that stops, with a line in the log.
+
+        Returns
+        -------
+        process : PanelProcess or None
+            The process, None when the panels are drawn on the render thread.
+        """
+        pp = self._pp
+        if pp is not None:
+            if pp.broken is None:
+                return pp
+            self._say(None, f"the panel process stopped, so the panels are drawn here from now on: {pp.broken}")
+            self._close_panels()
+            self._pp_off = True
+            return None
+        if self._pp_off:
+            return None
+        from . import panels
+        if panels.engine() != "process":
+            self._pp_off = True
+            return None
+        try:
+            self._pp = panels.PanelProcess({"run_dir": os.path.abspath(self.run_dir), "dpi": self.dpi,
+                                            "corner_mode": self.corner_mode})
+        except Exception as exc:                  # noqa: BLE001 - the render thread draws them
+            self._say(None, f"no panel process ({exc!r}), so the panels are drawn here")
+            self._pp_off = True
+            return None
+        self._pp_key = self._pp_bkey = None
+        self._pp_sent = 0
+        return self._pp
+
+    def _close_panels(self) -> None:
+        """Let the panel process finish what it was sent, then end it."""
+        pp, self._pp = self._pp, None
+        if pp is not None:
+            try:
+                pp.close()
+            except Exception:                     # noqa: BLE001 - the run is unaffected
+                pass
+
+    def _eta_counts(self, runner):
+        """Return the annulus' size and records so far as :meth:`_eta_estimate` reads them from its data.
+
+        Parameters
+        ----------
+        runner : Runner
+            The runner.
+
+        Returns
+        -------
+        counts : SimpleNamespace
+            ``n`` and ``n_iter``.
+        """
+        import types
+        return types.SimpleNamespace(n=len(self._records), n_iter=_per_annulus(runner.cfg.n_iter, runner.ia))
+
+    def _window_box(self, png: Optional[str]):
+        """Return the window's pixels a panel's screen copy is drawn at.
+
+        Parameters
+        ----------
+        png : str or None
+            The panel's PNG, None when the panels are not saved.
+
+        Returns
+        -------
+        box : tuple of 2 int or None
+            The window's width and height in device pixels, None without a window.
+        """
+        return LiveDisplay._win_px if (png and self.show and not self.inline) else None
+
+    def _remote_sync(self, pp, runner, model: bool = True) -> None:
+        """Send the panel process what it lacks for the next panel.
+
+        That is the annulus' recipe (:func:`runner_recipe`) when the annulus, its calibration or the finished
+        annuli changed, the records it has not had, and the best images when the runner keeps others.
+
+        Parameters
+        ----------
+        pp : PanelProcess
+            The process.
+        runner : Runner
+            The runner.
+        model : bool, default True
+            Whether the injected-PSF model of the best evaluation's sources goes with new best images, as in
+            the search.  Validation keeps the search's.
+        """
+        key = (self._rec_gen, runner.ia, id(getattr(runner, "_display_calib", None)),
+               sum(r is not None for r in runner.results))
+        if key != self._pp_key:
+            reset = self._pp_key is None or self._pp_key[0] != self._rec_gen
+            recipe = runner_recipe(runner)
+            if self.title:
+                recipe["run_name"] = self.title
+            rules = recipe.get("rules")
+            if isinstance(rules, dict) and callable(rules.get("kernel_at")):
+                from .books import _snapshot                 # the kernels sampled, as the books get them
+                recipe["rules"] = _snapshot(annulus_from_records([], **recipe)).extra["rules"]
+            pp.send({"op": "recipe", "kw": recipe, "reset": reset})
+            if reset:
+                self._pp_sent, self._pp_bkey = 0, None
+            self._pp_key = key
+        if self._pp_sent < len(self._records):
+            pp.send({"op": "records", "start": self._pp_sent, "recs": self._records[self._pp_sent:]})
+            self._pp_sent = len(self._records)
+        bimg = self._best_images(runner)
+        brec = bimg.get("record")
+        bkey = (runner.ia, None if brec is None else brec.index, id(bimg.get("inj")), id(bimg.get("clean")))
+        if bkey == self._pp_bkey:
+            return
+        fields = {"best_inj": bimg.get("inj"), "best_clean": bimg.get("clean")}
+        if model:
+            if brec is not None and getattr(brec, "annulus", runner.ia) == runner.ia:
+                b_src = [s.as_tuple() if hasattr(s, "as_tuple") else tuple(s) for s in (brec.sources or [])]
+                mkey = (runner.ia, int(brec.index), tuple(tuple(np.round(t, 6)) for t in b_src))
+                if self._inj_model is None or getattr(self, "_inj_model_key", None) != mkey:
+                    b_img = bimg.get("inj")
+                    self._inj_model = injected_model_image(runner, b_src, None if b_img is None else np.shape(b_img))
+                    self._inj_model_key = mkey
+            fields["inj_model"] = self._inj_model
+        pp.send({"op": "best", "fields": fields})
+        self._pp_bkey = bkey
+
+    def _on_eval_remote(self, pp, runner, record, inj, i: int, cur_inj, cur_clean, is_best: bool, last: bool,
+                        pdf_due: bool, movie_due: bool, drawn: bool, calib: bool) -> None:
+        """Hand a drawn evaluation's panel to the panel process.
+
+        The process gets the records it lacks, the best images when they changed, this evaluation's images
+        and the panel's numbers, and builds the annulus' data, the contrast preview and the stitched cells
+        itself.  The main thread builds the data only for the calibration panel, once an annulus.  A panel
+        is skipped at once when the process is still drawing one, but for the annulus' last evaluation and
+        a PDF that is due, and a new best evaluation's preview still goes for the panels to come.
+
+        Parameters
+        ----------
+        pp : PanelProcess
+            The process.
+        runner : Runner
+            The runner.
+        record : EvalRecord
+            The evaluation's record.
+        inj : EvalImages or None
+            Its injected images.
+        i : int
+            Its index.
+        cur_inj : ndarray or None
+            Its injected image.
+        cur_clean : ndarray or None
+            Its clean image.
+        is_best : bool
+            Whether it is the best so far.
+        last : bool
+            Whether it is the annulus' last.
+        pdf_due : bool
+            Whether its panel goes to a PDF too.
+        movie_due : bool
+            Whether the progress movie is due.
+        drawn : bool
+            Whether it gets a panel.
+        calib : bool
+            Whether the calibration panel waits for it.
+        """
+        if calib:
+            ad = self._data(runner)
+            self._calib_pending = False
+            self._guard(runner, "calibration panel", render_calibration, ad, self._calib_info,
+                        os.path.join(self._ann_dir(runner.ia), "calibration_panel.png"), clean=cur_clean, inj=cur_inj,
+                        sources=ad.sources[i], per_source=ad.per_source[i], clean_per_source=ad.clean_per_source[i],
+                        cmap=self.cmap, target=tuple(runner.cfg.calibration.target))
+        if not drawn:
+            if movie_due:
+                self._submit_progress_movie(runner.ia)
+            return
+        if not (last or pdf_due or self._render_room()):
+            if is_best and cur_clean is not None:
+                self._remote_sync(pp, runner)
+                pp.send({"op": "best_curve", "i": i, "clean": cur_clean})
+            self._skip_panel()
+            if movie_due:
+                self._submit_progress_movie(runner.ia)
+            return
+        self._remote_sync(pp, runner)
+        bimg = self._best_images(runner)
+        brec = bimg.get("record")
+        bi = int(brec.index) if brec is not None and getattr(brec, "annulus", runner.ia) == runner.ia else None
+        fm = bimg.get("fm") or {}
+        fm_img = fm.get("fm_image")
+        if fm_img is None and inj is not None and getattr(inj, "fm_image", None) is not None:
+            fm_img = inj.fm_image
+        fm_src = [s.as_tuple() if hasattr(s, "as_tuple") else tuple(s) for s in (fm.get("sources") or [])] or None
+        elapsed = time.time() - runner.wall0 + runner.wall_prev
+        et = self._eval_times[-50:]
+        per = (et[-1] - et[0]) / (len(et) - 1) if len(et) >= 2 else np.nan
+        last_s = et[-1] - et[-2] if len(et) >= 2 else np.nan
+        eta, eta_full = self._eta_estimate(runner, self._eta_counts(runner), per)
+        png = os.path.join(self.run_dir, "steps", f"step{self._step:04d}.png") if self.save_png else None
+        pdf = os.path.join(self._ann_dir(runner.ia), f"eval_{i + 1:04d}_panel.pdf") if pdf_due else None
+        if png:
+            os.makedirs(os.path.dirname(png), exist_ok=True)
+        self._note_trial(record)        # its time so far: everything but drawing this panel
+        timing = self._timing(runner, per)
+        pp.send({"op": "panel", "i": i, "is_best": bool(is_best), "live": True, "corner": True, "stitch": True,
+                 "stitch_sources": self._stitch_sources(runner) if runner.ia > 0 else None,
+                 "cur": {"cur_clean": cur_clean, "cur_inj": cur_inj},
+                 "img": {"fm_unavailable": getattr(self, "_fm_note", None), "best_index": bi, "fm_image": fm_img,
+                         "fm_sources": fm_src,
+                         "fm_label": None if bi is None else f"KLIP-FM preview (best, eval {bi + 1})"},
+                 "tail": self._curve_tail(runner, runner.ia),
+                 "kw": {"elapsed_s": elapsed, "eta_s": eta, "eta_full_s": eta_full, "cmap": self.cmap, "loop_s": per,
+                        "last_s": last_s, "step_label": "NEW BEST" if is_best else "", "timing": timing},
+                 "png": _abs(png), "pdf": _abs(pdf), "box": self._window_box(png)}, reply=True)
+        if png:
+            self._paths.append(png); self._ann_frames.append(png)
+            self._step += 1
+        if movie_due:
+            self._submit_progress_movie(runner.ia)
+        self._show_latest()
+
+    def _validation_remote(self, pp, runner, ia: int, ci: int, n_cand: int, e: int, t: int, n_valid: int,
+                           inj, clean, sources, r, trials) -> None:
+        """Hand a validation trial's panel to the panel process, as :meth:`on_validation_trial` draws it.
+
+        Parameters
+        ----------
+        pp : PanelProcess
+            The process.
+        runner : Runner
+            The runner.
+        ia : int
+            The annulus, counted from 0.
+        ci : int
+            The candidate, counted from 0.
+        n_cand : int
+            Number of candidates.
+        e : int
+            The candidate's evaluation.
+        t : int
+            The trial, counted from 0.
+        n_valid : int
+            Number of trials.
+        inj : EvalImages or ndarray or None
+            The trial's injected images.
+        clean : EvalImages or ndarray or None
+            Its clean images.
+        sources : sequence
+            Its sources.
+        r : ScoreResult
+            Its score.
+        trials : sequence of float
+            The candidate's trial scores so far.
+        """
+        if not self._records:
+            return
+        self._eta_mark(runner, "val")                # every trial, drawn or not: it is the ETA's clock
+        if not self._render_room():
+            self._skip_panel()
+            return
+        et = getattr(self, "_eval_times", [])[-50:]
+        per = (et[-1] - et[0]) / (len(et) - 1) if len(et) >= 2 else np.nan
+        trials_left = (n_cand - ci - 1) * n_valid + (n_valid - t - 1)
+        eta, eta_full = self._eta_estimate(runner, self._eta_counts(runner), per, in_validation=True,
+                                           trials_left=trials_left)
+        img_i = None if inj is None else getattr(inj, "image", inj)
+        img_c = None if clean is None else getattr(clean, "image", clean)
+        src = [s.as_tuple() if hasattr(s, "as_tuple") else tuple(s) for s in sources]
+        ps = [None if not np.isfinite(v) else float(v) for v in getattr(r, "per_source", [])]
+        rps = getattr(r, "raw_per_source", None)
+        rps = None if rps is None else [None if not np.isfinite(v) else float(v) for v in rps]
+        cps = getattr(r, "clean_per_source", None)
+        cps = None if cps is None else [None if not np.isfinite(v) else float(v) for v in cps]
+        done = [v for v in trials if v is not None and np.isfinite(v)]
+        med = float(np.median(done)) if done else np.nan
+        self._remote_sync(pp, runner, model=False)
+        bimg = self._best_images(runner)
+        b_src = [s.as_tuple() if hasattr(s, "as_tuple") else tuple(s)
+                 for s in (bimg.get("sources") or [])] or None
+        brec = bimg.get("record")
+        png = os.path.join(self.run_dir, "steps", f"step{self._step:04d}.png") if self.save_png else None
+        if png:
+            os.makedirs(os.path.dirname(png), exist_ok=True)
+        label = f"VALIDATION  cand {ci + 1}/{n_cand}  trial {t + 1}/{n_valid}  median so far {med:.2f}" if done else \
+            f"VALIDATION  cand {ci + 1}/{n_cand}  trial {t + 1}/{n_valid}"
+        pp.send({"op": "panel", "i": int(e), "winner_none": True, "stitch": True,
+                 "stitch_sources": self._stitch_sources(runner) if runner.ia > 0 else None,
+                 "cur": {"cur_clean": img_c, "cur_inj": img_i},
+                 "img": {"fm_unavailable": getattr(self, "_fm_note", None), "best_index": int(e), "best_sources": b_src,
+                         "best_labels_from": None if b_src is None else
+                         (None if brec is None else int(brec.index), len(b_src)),
+                         "fm_image": (bimg.get("fm") or {}).get("fm_image"),
+                         "cur_label": f"Ann {ia + 1}/{runner.cfg.nann}  Valid {ci + 1}/{n_cand} "
+                                      f"trial {t + 1}/{n_valid} (eval {e + 1})",
+                         "cur_override": {"sources": src, "per_source": ps, "raw_per_source": rps,
+                                          "clean_per_source": cps, "score": float(getattr(r, "score", np.nan)),
+                                          "raw": np.nan}},
+                 "tail": self._curve_tail(runner, runner.ia),
+                 "kw": {"elapsed_s": time.time() - runner.wall0 + runner.wall_prev, "eta_s": eta,
+                        "eta_full_s": eta_full, "cmap": self.cmap, "loop_s": per, "step_label": label},
+                 "png": _abs(png), "pdf": None, "box": self._window_box(png)}, reply=True)
+        if png:
+            self._paths.append(png); self._ann_frames.append(png); self._step += 1
         self._show_latest()
 
     def _running_stitch(self, runner) -> Dict[str, Any]:
@@ -5238,30 +5749,36 @@ class LiveDisplay(RunCallback):
             images, as the IDL predecessor does.  While an annulus runs its running best is in the stitch
             with that evaluation's sources, and once it is done its winner with the winner's.
         """
-        if getattr(runner, "ia", 0) <= 0:
-            return {}
-        out: Dict[str, Any] = {}
-        for key, name in (("stitch_clean", "klip_stitched_running.fits"), ("stitch_inj", "klip_stitched_running_inj.fits")):
-            img = _fits(os.path.join(self.run_dir, name))
-            if img is not None and img.ndim == 2:
-                out[key] = img
-        if "stitch_clean" in out:
-            out["stitch_edges"] = _header_edges(os.path.join(self.run_dir, "klip_stitched_running.fits"))
-        if "stitch_inj" in out:
-            src = []
-            done = False
-            for r in getattr(runner, "results", []) or []:
-                if r is not None:
-                    src.extend(tuple(t) for t in getattr(r, "winner_sources", []) or [])
-                    done = done or int(getattr(r, "annulus", -1)) == int(getattr(runner, "ia", -2))
-            # while the annulus runs, its running best is in the stitch with that eval's sources;
-            # once it is done, its winner is, with the winner's sources (counted above)
-            b = self._best_images(runner)
-            brec = b.get("record")
-            if not done and brec is not None and getattr(brec, "sources", None):
-                src.extend(t.as_tuple() if hasattr(t, "as_tuple") else tuple(t) for t in brec.sources)
-            out["stitch_sources"] = src or None
-        return out
+        ia = int(getattr(runner, "ia", 0) or 0)
+        return stitch_cells(self.run_dir, ia, (lambda: self._stitch_sources(runner)) if ia > 0 else None)
+
+    def _stitch_sources(self, runner) -> Optional[List[Tuple[float, ...]]]:
+        """Return the sources injected in the running stitch.
+
+        Parameters
+        ----------
+        runner : Runner
+            The runner.
+
+        Returns
+        -------
+        sources : list of tuple or None
+            Each finished annulus' winner's sources, and while an annulus runs its running best's, None
+            without any.
+        """
+        src = []
+        done = False
+        for r in getattr(runner, "results", []) or []:
+            if r is not None:
+                src.extend(tuple(t) for t in getattr(r, "winner_sources", []) or [])
+                done = done or int(getattr(r, "annulus", -1)) == int(getattr(runner, "ia", -2))
+        # while the annulus runs, its running best is in the stitch with that eval's sources;
+        # once it is done, its winner is, with the winner's sources (counted above)
+        b = self._best_images(runner)
+        brec = b.get("record")
+        if not done and brec is not None and getattr(brec, "sources", None):
+            src.extend(t.as_tuple() if hasattr(t, "as_tuple") else tuple(t) for t in brec.sources)
+        return src or None
 
     def _data(self, runner) -> AnnulusData:
         ad = None
@@ -5278,20 +5795,58 @@ class LiveDisplay(RunCallback):
         return ad
 
     def _curves(self, runner, ad: AnnulusData, live: Optional[Dict[str, Any]], done: bool = False):
-        """Contrast-panel curves: this eval's preview, the best eval's preview (+ its
-        KLIP-FM preview with ``fm_preview``) and, once the annulus is finished, the
-        validated injection curve together with the KLIP-FM cross-check curve.
+        """Return the contrast panel's curves.
 
-        The finished annulus's frame (``done``) leaves the best eval's preview out.  It is
-        that evaluation's own few injections, and validation's curve replaces it.  Left in,
-        it drew a second solid curve beside the validated one in the IDL panel, which
-        colours both alike, so the final frame showed two curves that disagree for no
-        reason a reader could see."""
+        They are this evaluation's preview, the best evaluation's preview (and its KLIP-FM preview with
+        ``fm_preview``) and, once an annulus is finished, its validated injection curve with the KLIP-FM
+        cross-check curve.
+
+        Parameters
+        ----------
+        runner : Runner
+            The runner.
+        ad : AnnulusData
+            The annulus.
+        live : dict or None
+            This evaluation's preview.
+        done : bool, default False
+            Whether it is the finished annulus' frame.
+
+        Returns
+        -------
+        curves : list of tuple
+            Each curve's label, dict and line style.
+
+        Notes
+        -----
+        The finished annulus' frame leaves the best evaluation's preview out.  It is that evaluation's own
+        few injections, and validation's curve replaces it.  Left in, it drew a second solid curve beside
+        the validated one in the IDL panel, which colors both alike, so the final frame showed two curves
+        that disagree for no reason a reader could see.
+        """
+        return _head_curves(live, self._best_curve, done) + self._curve_tail(runner, ad.annulus, done)
+
+    def _curve_tail(self, runner, annulus: int, done: bool = False) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
+        """Return the contrast panel's curves after the two previews.
+
+        They are the best evaluation's KLIP-FM preview while the annulus runs and the validated curves of
+        every finished annulus, the run's own.
+
+        Parameters
+        ----------
+        runner : Runner
+            The runner.
+        annulus : int
+            The annulus drawn, counted from 0.
+        done : bool, default False
+            Whether it is the finished annulus' frame.
+
+        Returns
+        -------
+        curves : list of tuple
+            Each curve's label, dict and line style.
+        """
         out = []
-        if live:
-            out.append(("this eval (preview from its sources)", live, {"color": CUR_COLOR, "lw": 0.9, "ls": "--"}))
-        if self._best_curve and not done:
-            out.append(("best eval (preview)", self._best_curve, {"color": PHASE_COLORS["tpe"], "lw": 1.3}))
         fm_prev = (self._best_images(runner).get("fm") or {}).get("curve") if not done else None
         if fm_prev:
             out.append(("KLIP-FM preview (best eval)", fm_prev, {"color": FM_COLOR, "lw": 1.0, "ls": "--"}))
@@ -5301,7 +5856,7 @@ class LiveDisplay(RunCallback):
         for r in runner.results:
             if r is None:
                 continue
-            tag = f" annulus {r.annulus + 1}" if r.annulus != ad.annulus else ""
+            tag = f" annulus {r.annulus + 1}" if r.annulus != annulus else ""
             if getattr(r, "grid_curve", None):
                 out.append((f"injection grid (median over PA){tag}", r.grid_curve, {"color": VALID_COLOR, "lw": 1.6}))
             elif r.contrast_curve:
@@ -5495,7 +6050,7 @@ class LiveDisplay(RunCallback):
             clean = None if ev_c is None else getattr(ev_c, "image", ev_c)
             src = [s.as_tuple() if hasattr(s, "as_tuple") else tuple(s) for s in images.get("sources") or []]
             ps, cps = images.get("per_source"), images.get("clean_per_source")
-        self._records = []
+        self._reset_records()
         self._ia = ia
         ad = self._guard(runner, "calibration data", self._data, runner)
         if ad is None:
@@ -5518,7 +6073,7 @@ class LiveDisplay(RunCallback):
         self._calib_info = dict(info or {})
         runner._display_calib = self._calib_info
         self._eta_mark(runner, "cal")
-        self._records = []
+        self._reset_records()
         self._ia = runner.ia
         self._calib_pending = False
         inj = clean = None
@@ -5610,7 +6165,7 @@ class LiveDisplay(RunCallback):
         if self._intro_on or record.index == 0:
             self._intro_stop()
         if runner.ia != self._ia or record.index == 0:
-            self._records = []
+            self._reset_records()
             self._ann_frames = []
             self._ia = runner.ia
             self._best_curve = None
@@ -5623,7 +6178,7 @@ class LiveDisplay(RunCallback):
                 from .plots import load_run
                 prior = {int(r.get("index", -1)): r for r in _annulus_records(load_run(self.run_dir), runner.ia)}
                 if all(k in prior for k in range(record.index)):
-                    self._records = [prior[k] for k in range(record.index)]
+                    self._reset_records([prior[k] for k in range(record.index)])
                     self._say(runner, f"display: restored {record.index} earlier evaluations of annulus "
                                       f"{runner.ia + 1} from results.jsonl")
             except Exception as exc:
@@ -5631,6 +6186,7 @@ class LiveDisplay(RunCallback):
         rec = _record_dict(record)
         if record.index < len(self._records):        # re-emission (should not happen) -> replace
             self._records[record.index] = rec
+            self._pp_sent = min(getattr(self, "_pp_sent", 0), record.index)
         else:
             self._records.append(rec)
         i = record.index
@@ -5657,6 +6213,11 @@ class LiveDisplay(RunCallback):
             # panel drawn one evaluation in --display-every.
             if movie_due:
                 self._submit_progress_movie(runner.ia)
+            return
+        pp = self._panel_proc()
+        if pp is not None:
+            self._on_eval_remote(pp, runner, record, inj, i, cur_inj, cur_clean, is_best, last, pdf_due, movie_due,
+                                 drawn, calib)
             return
         ad = self._data(runner)
         if calib:
@@ -5753,12 +6314,28 @@ class LiveDisplay(RunCallback):
         return self._mex
 
     def _submit_progress_movie(self, ia: int) -> None:
-        """Rebuild ``annulusNN/progress.gif`` / ``.mp4`` from this annulus' frames so far
-        (calibration frames first, like IDL); runs on the movie thread, so neither the
-        evaluation loop nor the live panel ever waits for it."""
+        """Rebuild an annulus' progress movie from its frames so far, the calibration frames first.
+
+        The movie, ``annulusNN/progress.gif`` and ``.mp4``, is made as the IDL predecessor makes it, by the
+        panel process or on the movie thread, so neither the evaluation loop nor the live panel waits for
+        it.  A rebuild asked while one is being made is dropped, since it would only repeat it.
+
+        Parameters
+        ----------
+        ia : int
+            The annulus, counted from 0.
+        """
         frames = [p for p in getattr(self, "_calib_paths", []) if f"calib_ann{ia + 1:02d}_" in os.path.basename(p)] \
             + list(self._ann_frames)
         d = self._ann_dir(ia)
+        pp = self._panel_proc()
+        if pp is not None:
+            if not pp.busy("movie"):                       # one still being made: this would repeat it
+                d = os.path.abspath(d)                     # the process runs in a directory of its own
+                pp.send({"op": "movie", "frames": [os.path.abspath(f) for f in frames],
+                         "gif": os.path.join(d, "progress.gif"), "mp4": os.path.join(d, "progress.mp4"),
+                         "hold_last": 4}, reply=True)
+            return
 
         def _job():
             from .animate import make_movie
@@ -5773,19 +6350,53 @@ class LiveDisplay(RunCallback):
 
     def on_validation_trial(self, runner, ia: int, ci: int, n_cand: int, e: int, t: int, n_valid: int,
                             inj, clean, sources, r, trials) -> None:
-        """Validation trials go through the step panel like IDL's ``valid`` frames: the
-        trial's images in the Test cells, candidate / trial / fresh sources in the title.
+        """Draw a validation trial in the step panel, as the IDL predecessor's ``valid`` frames do.
 
-        They pass the same render gate as the search panels.  The trials arrive back to
-        back -- ``n_top x n_valid`` of them, 48 in the README's first run -- and every one
-        used to be queued: on a machine where a panel takes longer to draw than a trial
-        takes to run, the window fell minutes behind (3.7 min on that run), the annulus
-        then sat in ``_wait_renders`` until the backlog had drained, and the annulus books
-        were written while queued panels were still drawing.  A trial is drawn when the
-        render thread is free and skipped at once when it is not (:attr:`VALIDATION_GRACE`).
-        The annulus-done frame that follows is drawn regardless, so the result never goes
-        without its panel.  The annulus' data is built once per validation
-        (:meth:`_validation_data`)."""
+        The trial's images go in the Test cells, and the candidate, the trial and the fresh sources in the
+        title.  A trial is drawn when nothing is being drawn and skipped at once otherwise
+        (:attr:`VALIDATION_GRACE`).  The annulus-done frame that follows is drawn regardless, so the result
+        never goes without its panel.  The annulus' data is built once per validation
+        (:meth:`_validation_data`), and the panel process builds its own (:meth:`_validation_remote`).
+
+        Parameters
+        ----------
+        runner : Runner
+            The runner.
+        ia : int
+            The annulus, counted from 0.
+        ci : int
+            The candidate, counted from 0.
+        n_cand : int
+            Number of candidates.
+        e : int
+            The candidate's evaluation.
+        t : int
+            The trial, counted from 0.
+        n_valid : int
+            Number of trials.
+        inj : EvalImages or ndarray or None
+            The trial's injected images.
+        clean : EvalImages or ndarray or None
+            Its clean images.
+        sources : sequence
+            Its sources.
+        r : ScoreResult
+            Its score.
+        trials : sequence of float
+            The candidate's trial scores so far.
+
+        Notes
+        -----
+        The trials arrive back to back, ``n_top x n_valid`` of them, 48 in the README's first run, and every
+        one used to be queued.  On a machine where a panel takes longer to draw than a trial takes to run,
+        the window fell minutes behind (3.7 min on that run), the annulus then sat in ``_wait_renders``
+        until the backlog had drained, and the annulus books were written while queued panels were still
+        drawing.
+        """
+        pp = self._panel_proc()
+        if pp is not None:
+            self._validation_remote(pp, runner, ia, ci, n_cand, e, t, n_valid, inj, clean, sources, r, trials)
+            return
         ad = self._validation_data(runner)
         if ad is None or ad.n == 0:
             return
@@ -6062,6 +6673,7 @@ class LiveDisplay(RunCallback):
         """
         self._wait_renders()
         self._final_frame(runner)
+        self._close_panels()
         self._collect_books(runner, wait=True)
         if not self.movie or not self._paths:
             return

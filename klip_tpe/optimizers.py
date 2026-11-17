@@ -18,8 +18,9 @@ import numpy as np
 
 from .space import SearchSpace
 
-__all__ = ["History", "Proposal", "Optimizer", "TPE", "RandomSearch", "GridSearch",
-           "parzen_bandwidth", "parzen_density", "block_log_density", "resolve_blocks", "tpe_propose"]
+__all__ = ["History", "Proposal", "Optimizer", "TPE", "RandomSearch", "GridSearch", "DENSITIES",
+           "parzen_bandwidth", "parzen_density", "parzen_density_many", "parzen_density_binned",
+           "block_log_density", "resolve_blocks", "tpe_propose"]
 
 
 # ----------------------------------------------------------------------------
@@ -71,6 +72,38 @@ class History:
         """
         return np.isfinite(self.y)
 
+    def _reserve(self, n: int) -> Tuple[np.ndarray, np.ndarray]:
+        """Make room for ``n`` rows in the arrays behind ``X`` and ``y``.
+
+        ``X`` and ``y`` are views of the first rows of two arrays with room to spare, which double when
+        full, so an append copies one row instead of the whole history.  Arrays set from outside (a
+        history built from given arrays, :meth:`from_dict`) are copied in at the first append.
+
+        Parameters
+        ----------
+        n : int
+            Number of rows wanted.
+
+        Returns
+        -------
+        xbuf : ndarray, shape (cap, ndim)
+            The array behind ``X``, ``cap`` at least ``n``.
+        ybuf : ndarray, shape (cap,)
+            The array behind ``y``.
+        """
+        st = self.__dict__
+        xbuf, ybuf = st.get("_xbuf"), st.get("_ybuf")
+        mine = xbuf is not None and self.X is st.get("_xview") and self.y is st.get("_yview")
+        if not mine or xbuf.shape[0] < n:
+            m = len(self)
+            cap = max(64, 2 * n) if mine or m else max(16, n)
+            nx, ny = np.empty((cap, self.ndim)), np.empty(cap)
+            nx[:m], ny[:m] = self.X, self.y
+            self._xbuf, self._ybuf = xbuf, ybuf = nx, ny
+            self.X, self.y = nx[:m], ny[:m]
+            self._xview, self._yview = self.X, self.y
+        return xbuf, ybuf
+
     def append(self, x: np.ndarray, y: float, flags: Optional[Dict[str, Any]] = None) -> int:
         """Append a trial.
 
@@ -87,11 +120,70 @@ class History:
         -------
         i : int
             The trial's index.
+
+        Notes
+        -----
+        Until 2026-11-17 each append stacked a new ``X``, a copy of the whole history per trial (4.5 MB at
+        10,000 trials of a 56-D space).  ``X`` and ``y`` are now views of arrays with room to spare
+        (:meth:`_reserve`).  The rows a view holds never change, so an ``X`` or ``y`` read earlier keeps
+        the trials it had.
         """
-        self.X = np.vstack([self.X, np.asarray(x, dtype=float)[None, :]])
-        self.y = np.append(self.y, np.nan if y is None else float(y))
+        n = len(self)
+        x = np.asarray(x, dtype=float).reshape(self.ndim)
+        xbuf, ybuf = self._reserve(n + 1)
+        xbuf[n] = x
+        ybuf[n] = np.nan if y is None else float(y)
+        self.X, self.y = xbuf[:n + 1], ybuf[:n + 1]
+        self._xview, self._yview = self.X, self.y
         self.flags.append(dict(flags or {}))
-        return len(self) - 1
+        return n
+
+    def with_rows(self, xs: Sequence[np.ndarray], flags: Sequence[Dict[str, Any]]) -> "History":
+        """Return this history followed by rows without a score, sharing its arrays.
+
+        The rows go into the room behind this history's arrays, so nothing of the history is copied but the
+        list of flags.  The history returned is good until this one's next append, which writes over its
+        first extra row.
+
+        Parameters
+        ----------
+        xs : sequence of ndarray, each shape (ndim,)
+            The extra rows' vectors.
+        flags : sequence of dict
+            Their flags.
+
+        Returns
+        -------
+        history : History
+            The trials, then the extra rows with NaN scores.
+        """
+        n, p = len(self), len(xs)
+        if p == 0:
+            return self
+        xbuf, ybuf = self._reserve(n + p)
+        xbuf[n:n + p] = np.asarray(xs, dtype=float).reshape(p, self.ndim)
+        ybuf[n:n + p] = np.nan
+        return History(self.ndim, xbuf[:n + p], ybuf[:n + p], self.flags + [dict(f or {}) for f in flags])
+
+    def __getstate__(self) -> Dict[str, Any]:
+        """Return the state to pickle, without the spare room behind ``X`` and ``y``.
+
+        Returns
+        -------
+        state : dict
+            ``ndim``, ``X``, ``y`` and ``flags``, the arrays copied to their rows.
+        """
+        return {"ndim": self.ndim, "X": np.array(self.X), "y": np.array(self.y), "flags": self.flags}
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        """Restore a pickled state.
+
+        Parameters
+        ----------
+        state : dict
+            The state from :meth:`__getstate__`.
+        """
+        self.__dict__.update(state)
 
     def set_score(self, i: int, y: float, **extra) -> None:
         """Set a trial's score and add to its flags.
@@ -299,7 +391,103 @@ def parzen_density_many(x: np.ndarray, s: np.ndarray, h: float, lo: float, hi: f
     n = s.size
     if n < 1 or hi <= lo:
         return np.full(x.shape, 1.0 / max(hi - lo, 1e-12))
-    d = np.sum(np.exp(-0.5 * ((x[:, None] - s[None, :]) / h) ** 2), axis=1) / (n * h * np.sqrt(2.0 * np.pi))
+    # Each step in place, a few points at a time (2026-11-17): the same operations on the same
+    # numbers as -0.5 * ((x - s) / h) ** 2 with a new array per step, in a block that stays in the
+    # cache, and each point's row summed on its own as before
+    rows = max(1, min(x.size, _DENSITY_BLOCK // n))
+    t = np.empty((rows, n))
+    sums = np.empty(x.shape)
+    for i in range(0, x.size, rows):
+        tb = t[:min(rows, x.size - i)]
+        np.subtract.outer(x[i:i + rows], s, out=tb)
+        tb /= h
+        np.square(tb, out=tb)
+        tb *= -0.5
+        np.exp(tb, out=tb)
+        sums[i:i + rows] = np.sum(tb, axis=1)
+    d = sums / (n * h * np.sqrt(2.0 * np.pi))
+    return (1.0 - prior_weight) * d + prior_weight / (hi - lo)
+
+
+#: elements of the kernel block :func:`parzen_density_many` works on at a time, 1 MB
+_DENSITY_BLOCK = 1 << 17
+
+
+#: bins across a dimension's range for :func:`parzen_density_binned`, at least, and per bandwidth
+BINS_PER_RANGE = 512
+BINS_PER_BANDWIDTH = 16
+
+
+def parzen_density_binned(x: np.ndarray, s: np.ndarray, h: float, lo: float, hi: float,
+                          prior_weight: float = 0.25, integral: bool = False) -> np.ndarray:
+    """Return :func:`parzen_density_many` with the samples gathered onto a grid.
+
+    The kernel sum runs over the grid's occupied points, weighted by the samples they hold, so its cost
+    stops growing once every point is occupied.  A dimension of whole numbers whose samples are all
+    whole puts each value on a point of its own, and the sum is then exact but for its order.  Any other
+    dimension shares each sample between its two neighboring points (linear binning), with
+    :data:`BINS_PER_RANGE` points across the range or :data:`BINS_PER_BANDWIDTH` per bandwidth,
+    whichever spacing is finer.
+
+    Parameters
+    ----------
+    x : ndarray
+        The points.
+    s : ndarray
+        The samples.
+    h : float
+        The bandwidth.
+    lo : float
+        Lower bound.
+    hi : float
+        Upper bound.
+    prior_weight : float, default 0.25
+        Weight of the uniform prior.
+    integral : bool, default False
+        Whether the dimension takes whole numbers only.
+
+    Returns
+    -------
+    density : ndarray
+        The density at each point.
+
+    Notes
+    -----
+    With 16 points per bandwidth the density is within 1e-4 of the exact sum, 1e-5 typically, and on a
+    dimension of whole numbers it is the exact sum.  ``tests/test_optimizers.py`` measures it.
+    """
+    s = np.asarray(s, dtype=float)
+    x = np.asarray(x, dtype=float)
+    n = s.size
+    if n < 1 or hi <= lo:
+        return np.full(x.shape, 1.0 / max(hi - lo, 1e-12))
+    if not h > 0:                                  # no grid for a bandwidth of 0 (a floor of 0)
+        return parzen_density_many(x, s, h, lo, hi, prior_weight)
+    pts = w = None
+    if integral:
+        v = np.rint(s)
+        if np.array_equal(v, s):
+            iv = v.astype(np.int64)
+            base = int(iv.min())
+            if int(iv.max()) - base <= 1 << 16:
+                cnt = np.bincount(iv - base)
+                nz = np.flatnonzero(cnt)
+                pts, w = (nz + base).astype(float), cnt[nz].astype(float)
+    if pts is None:
+        step = min((hi - lo) / BINS_PER_RANGE, h / BINS_PER_BANDWIDTH)
+        nb = int(np.ceil((hi - lo) / step)) + 1
+        u = np.clip((s - lo) / step, 0.0, nb - 1.0)
+        k = np.minimum(u.astype(np.intp), nb - 2)
+        f = u - k
+        cnt = np.bincount(k, weights=1.0 - f, minlength=nb) + np.bincount(k + 1, weights=f, minlength=nb)
+        nz = np.flatnonzero(cnt)
+        pts, w = lo + nz * step, cnt[nz]
+    t = np.subtract.outer(x, pts)
+    t /= h
+    np.square(t, out=t)
+    t *= -0.5
+    np.exp(t, out=t)
+    d = (t @ w) / (n * h * np.sqrt(2.0 * np.pi))
     return (1.0 - prior_weight) * d + prior_weight / (hi - lo)
 
 
@@ -436,10 +624,39 @@ def resolve_blocks(space: SearchSpace, blocks) -> List[np.ndarray]:
     return out
 
 
+def _columns(X: np.ndarray, idx: np.ndarray) -> np.ndarray:
+    """Return the rows ``idx`` of ``X`` transposed, one row per dimension.
+
+    Row ``d`` holds the same numbers in the same order as ``X[idx, d]``.  Each row starts 16 bytes after
+    the one before, as a new array from the allocator does, so a reduction over it is the same one.
+
+    Parameters
+    ----------
+    X : ndarray, shape (n, ndim)
+        The vectors.
+    idx : ndarray of int, shape (m,)
+        The rows.
+
+    Returns
+    -------
+    columns : ndarray, shape (ndim, m)
+        The columns.
+    """
+    m = len(idx)
+    out = np.empty((X.shape[1], m + (m & 1)))
+    out[:, :m] = X[idx].T
+    return out[:, :m]
+
+
+#: the TPE's density evaluations, :func:`parzen_density_many` ("exact") or
+#: :func:`parzen_density_binned` ("binned")
+DENSITIES = ("exact", "binned")
+
+
 def tpe_propose(X: np.ndarray, y: np.ndarray, space: SearchSpace, rng: np.random.Generator,
                 gamma: float = 0.25, ncand: int = 48, pbest: float = 0.0,
                 prior_weight: float = 0.25, bw_floor: float = 0.08,
-                blocks=None) -> np.ndarray:
+                blocks=None, rows: Optional[np.ndarray] = None, density: str = "exact") -> np.ndarray:
     """Make one TPE proposal from a history.
 
     The steps are:
@@ -459,7 +676,7 @@ def tpe_propose(X: np.ndarray, y: np.ndarray, space: SearchSpace, rng: np.random
     Parameters
     ----------
     X : ndarray, shape (n, ndim)
-        The valid vectors.
+        The valid vectors, or every vector of a history with ``rows``.
     y : ndarray, shape (n,)
         Their scores.
     space : SearchSpace
@@ -478,15 +695,36 @@ def tpe_propose(X: np.ndarray, y: np.ndarray, space: SearchSpace, rng: np.random
         Floor of the bandwidths, as a fraction of the range.
     blocks : str, sequence or None, default None
         The density model (:func:`resolve_blocks`).
+    rows : ndarray of int or None, default None
+        The rows of ``X`` and ``y`` to use, in order, the valid ones of a history.  None uses them all.
+    density : {"exact", "binned"}, default "exact"
+        How the univariate densities are summed, over every sample (:func:`parzen_density_many`) or over
+        a grid (:func:`parzen_density_binned`).  Blocks of several dimensions are summed exactly.
 
     Returns
     -------
     x : ndarray, shape (ndim,)
         The proposal, sanitized, a random vector for fewer than 2 rows.
+
+    Raises
+    ------
+    ValueError
+        If ``density`` is not one of :data:`DENSITIES`.
+
+    Notes
+    -----
+    Since 2026-11-17 the good and the bad set are gathered once, a row per dimension, and the
+    candidates are drawn with Python numbers.  The proposal and the generator's state after it are
+    the same bit for bit as before (``tests/test_optimizers.py``).
     """
+    if density not in DENSITIES:
+        raise ValueError(f"density {density!r}: one of {DENSITIES}")
     X = np.asarray(X, dtype=float)
     y = np.asarray(y, dtype=float)
-    n, ndim = X.shape
+    if rows is not None:
+        rows = np.asarray(rows, dtype=np.intp)
+        y = y[rows]
+    n, ndim = y.shape[0], X.shape[1]
     lo, hi = space.lo, space.hi
     cat = space.is_categorical
     ncat = space.n_categories
@@ -497,41 +735,55 @@ def tpe_propose(X: np.ndarray, y: np.ndarray, space: SearchSpace, rng: np.random
     if ng >= n:
         ng = n - 1
     good, bad = ord_[:ng], ord_[ng:]
+    if rows is not None:
+        good, bad = rows[good], rows[bad]
+    Xg = X[good]
+    G, B = _columns(X, good), _columns(X, bad)
 
-    hg = np.array([parzen_bandwidth(X[good, d], lo[d], hi[d], bw_floor) for d in range(ndim)])
-    hb = np.array([parzen_bandwidth(X[bad, d], lo[d], hi[d], bw_floor) for d in range(ndim)])
-    pmf_g = {d: _categorical_pmf(X[good, d], ncat[d], prior_weight) for d in range(ndim) if cat[d]}
-    pmf_b = {d: _categorical_pmf(X[bad, d], ncat[d], prior_weight) for d in range(ndim) if cat[d]}
+    hg = np.array([parzen_bandwidth(G[d], lo[d], hi[d], bw_floor) for d in range(ndim)])
+    hb = np.array([parzen_bandwidth(B[d], lo[d], hi[d], bw_floor) for d in range(ndim)])
+    cat_dims = [d for d in range(ndim) if cat[d]]
+    pmf_g = {d: _categorical_pmf(G[d], ncat[d], prior_weight) for d in cat_dims}
+    pmf_b = {d: _categorical_pmf(B[d], ncat[d], prior_weight) for d in cat_dims}
     blk = resolve_blocks(space, blocks)
 
+    # Python numbers in the loop: the same IEEE arithmetic as numpy's scalars, at a fraction of
+    # the cost, and the generator called in the same order with the same arguments
+    blk_l = [[int(d) for d in b] for b in blk]
+    hgl, lol, hil = hg.tolist(), lo.tolist(), hi.tolist()
+    item = Xg.item
+    rand, normal = rng.random, rng.standard_normal
     C = np.empty((ncand, ndim))
     for c in range(ncand):
-        anchor = good[0] if rng.random() < pbest else -1
+        anchor = 0 if rand() < pbest else -1
         # one anchor observation per block (univariate: per dimension), or the running
         # best for every block with probability pbest
-        for b in blk:
-            j = anchor if anchor >= 0 else good[int(rng.random() * ng)]
+        for b in blk_l:
+            j = anchor if anchor >= 0 else int(rand() * ng)
             for d in b:
-                v = X[j, d] + hg[d] * rng.standard_normal()
-                C[c, d] = min(max(v, lo[d]), hi[d])
-        for d in range(ndim):
-            if cat[d]:
-                C[c, d] = float(rng.choice(ncat[d], p=pmf_g[d]))
+                v = item(j, d) + hgl[d] * normal()
+                C[c, d] = min(max(v, lol[d]), hil[d])
+        for d in cat_dims:
+            C[c, d] = float(rng.choice(ncat[d], p=pmf_g[d]))
 
+    integral = space.is_int if density == "binned" else None
     ei = np.zeros(ncand)
     for b in blk:
         if len(b) == 1:
             d = int(b[0])
-            ld = parzen_density_many(C[:, d], X[good, d], hg[d], lo[d], hi[d], prior_weight)
-            gd = parzen_density_many(C[:, d], X[bad, d], hb[d], lo[d], hi[d], prior_weight)
+            if integral is None:
+                ld = parzen_density_many(C[:, d], G[d], hg[d], lo[d], hi[d], prior_weight)
+                gd = parzen_density_many(C[:, d], B[d], hb[d], lo[d], hi[d], prior_weight)
+            else:
+                ld = parzen_density_binned(C[:, d], G[d], hg[d], lo[d], hi[d], prior_weight, bool(integral[d]))
+                gd = parzen_density_binned(C[:, d], B[d], hb[d], lo[d], hi[d], prior_weight, bool(integral[d]))
             ei += np.log(ld) - np.log(gd)
         else:
             ei += block_log_density(C, X, good, hg, b, lo, hi, prior_weight) \
                 - block_log_density(C, X, bad, hb, b, lo, hi, prior_weight)
-    for d in range(ndim):
-        if cat[d]:
-            ci = C[:, d].astype(int)
-            ei += np.log(pmf_g[d][ci]) - np.log(pmf_b[d][ci])
+    for d in cat_dims:
+        ci = C[:, d].astype(int)
+        ei += np.log(pmf_g[d][ci]) - np.log(pmf_b[d][ci])
     best = int(np.argmax(ei))
     return space.sanitize(C[best])
 
@@ -899,6 +1151,8 @@ class TPE(Optimizer):
         Whether to tie every partition slot of each base in the warm-up draws, a global warm start.
     link_params : sequence of str, default ()
         Bases whose partition slots are tied on every proposal.
+    density : {"exact", "binned"}, default "exact"
+        How a TPE proposal sums its univariate densities (:func:`tpe_propose`).
 
     Notes
     -----
@@ -912,9 +1166,13 @@ class TPE(Optimizer):
     def __init__(self, space: SearchSpace, n_init: int = 40, gamma: float = 0.25, ncand: int = 48,
                  prior_weight: float = 0.25, bw_floor: float = 0.08, pbest: float = 0.0,
                  p_local: float = 0.15, n_elite: int = 5, explore_frac: float = 0.15,
-                 blocks="univariate", warmstart_tie: bool = False, link_params: Sequence[str] = ()):
+                 blocks="univariate", warmstart_tie: bool = False, link_params: Sequence[str] = (),
+                 density: str = "exact"):
         super().__init__(space, n_init=n_init, warmstart_tie=warmstart_tie, link_params=link_params)
+        if density not in DENSITIES:
+            raise ValueError(f"density {density!r}: one of {DENSITIES}")
         self.blocks = blocks
+        self.density = str(density)
         self.gamma, self.ncand = float(gamma), int(ncand)
         self.prior_weight, self.bw_floor = float(prior_weight), float(bw_floor)
         self.pbest, self.p_local, self.n_elite = float(pbest), float(p_local), int(n_elite)
@@ -985,20 +1243,19 @@ class TPE(Optimizer):
             return Proposal(self._finish(self._local_move(history, rng)), {"phase": "local"})
         if rng.random() < self.explore_frac:
             return Proposal(self._finish(sp.random(rng)), {"phase": "explore"})
-        v = history.valid
-        if v.sum() < 2:
+        rows = np.flatnonzero(history.valid)
+        if rows.size < 2:
             return Proposal(self._finish(sp.random(rng)), {"phase": "explore"})
-        x = tpe_propose(history.X[v], history.y[v], sp, rng, gamma=self.gamma, ncand=self.ncand,
+        x = tpe_propose(history.X, history.y, sp, rng, gamma=self.gamma, ncand=self.ncand,
                         pbest=self.pbest, prior_weight=self.prior_weight, bw_floor=self.bw_floor,
-                        blocks=self.blocks)
+                        blocks=self.blocks, rows=rows, density=self.density)
         return Proposal(self._finish(x), {"phase": "tpe"})
 
     def ask(self, history: History, rng: np.random.Generator, n: int = 1) -> List[Proposal]:
-        # batch proposals share the same posterior (HPBoo-style); the warm-up counter
-        # advances with the batch so a batch never over-runs n_init.
         """Return a batch of proposals from the same posterior.
 
-        The warm-up count advances with the batch, so a batch never overruns ``n_init``.
+        The warm-up count advances with the batch, so a batch never overruns ``n_init``.  The warm-up
+        proposals enter a copy of the history, made only when there are any.
 
         Parameters
         ----------
@@ -1015,11 +1272,13 @@ class TPE(Optimizer):
             The proposals.
         """
         out = []
-        fake = History(history.ndim, history.X.copy(), history.y.copy(), list(history.flags))
+        fake = history
         for _ in range(n):
             pr = self.propose_one(fake, rng)
             out.append(pr)
             if len(fake) < self.n_init:
+                if fake is history:
+                    fake = History(history.ndim, history.X.copy(), history.y.copy(), list(history.flags))
                 fake.append(pr.x, np.nan, pr.flags)
         return out
 
@@ -1029,13 +1288,13 @@ class TPE(Optimizer):
         Returns
         -------
         info : dict
-            The base settings, the TPE's parameters, ``blocks`` and ``resolved_blocks``, each block's
-            dimension names.
+            The base settings, the TPE's parameters, ``density``, ``blocks`` and ``resolved_blocks``, each
+            block's dimension names.
         """
         d = super().describe()
         d.update(gamma=self.gamma, ncand=self.ncand, prior_weight=self.prior_weight,
                  bw_floor=self.bw_floor, pbest=self.pbest, p_local=self.p_local,
-                 n_elite=self.n_elite, explore_frac=self.explore_frac,
+                 n_elite=self.n_elite, explore_frac=self.explore_frac, density=self.density,
                  blocks=self.blocks if isinstance(self.blocks, (str, type(None))) else [list(map(str, b)) for b in self.blocks],
                  resolved_blocks=[[self.space.params[i].name for i in b] for b in resolve_blocks(self.space, self.blocks)])
         return d
