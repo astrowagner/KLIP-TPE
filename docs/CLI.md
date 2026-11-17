@@ -62,7 +62,8 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--n-iter N_ITER [N_ITER ...]]
                         [--n-init N_INIT [N_INIT ...]]
                         [--mode {tpe,random,grid}] [--blocks BLOCKS]
-                        [--seed SEED] [--contrast0 CONTRAST0]
+                        [--tpe-density {binned,exact}] [--seed SEED]
+                        [--contrast0 CONTRAST0]
                         [--use-contrast USE_CONTRAST [USE_CONTRAST ...]]
                         [--cmax-cal CMAX_CAL] [--k-max K_MAX] [--n-top N_TOP]
                         [--n-valid N_VALID] [--n-rescore N]
@@ -280,6 +281,14 @@ options:
   --mode {tpe,random,grid}
   --blocks BLOCKS       TPE density model: univariate (default; the IDL
                         reference) | partitions | full
+  --tpe-density {binned,exact}
+                        how a TPE proposal sums its univariate densities.
+                        binned (the default) gathers the samples on a grid, at
+                        the same cost at any history. exact sums over every
+                        sample, at a cost that grows with the history. They
+                        give the same proposal but where two candidates differ
+                        by less than the grid's error, 1e-5 of a density
+                        typically
   --seed SEED
   --contrast0 CONTRAST0
   --use-contrast USE_CONTRAST [USE_CONTRAST ...]
@@ -713,7 +722,8 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--ann-extra IN:OUT [IN:OUT ...]]
                      [--n-iter N_ITER [N_ITER ...]]
                      [--n-init N_INIT [N_INIT ...]] [--mode {tpe,random,grid}]
-                     [--blocks BLOCKS] [--seed SEED] [--contrast0 CONTRAST0]
+                     [--blocks BLOCKS] [--tpe-density {binned,exact}]
+                     [--seed SEED] [--contrast0 CONTRAST0]
                      [--use-contrast USE_CONTRAST [USE_CONTRAST ...]]
                      [--cmax-cal CMAX_CAL] [--k-max K_MAX] [--n-top N_TOP]
                      [--n-valid N_VALID] [--n-rescore N]
@@ -929,6 +939,14 @@ options:
   --mode {tpe,random,grid}
   --blocks BLOCKS       TPE density model: univariate (default; the IDL
                         reference) | partitions | full
+  --tpe-density {binned,exact}
+                        how a TPE proposal sums its univariate densities.
+                        binned (the default) gathers the samples on a grid, at
+                        the same cost at any history. exact sums over every
+                        sample, at a cost that grows with the history. They
+                        give the same proposal but where two candidates differ
+                        by less than the grid's error, 1e-5 of a density
+                        typically
   --seed SEED
   --contrast0 CONTRAST0
   --use-contrast USE_CONTRAST [USE_CONTRAST ...]

@@ -1,5 +1,85 @@
 # Changelog
 
+## Unreleased — 2026-11-17 (the main process' steps: the panels' own process, the TPE's growth, a line per annulus)
+
+From NEAR2's note of 2026-11-16 on s7e, "the main process paces the large-bin searches, and
+something slows its steps".
+
+- **The step panels are drawn by a process of their own** (`klip_tpe/panels.py`), and so are
+  their PDFs (`--pdf-every`), the validation trials' panels and the progress movies.  Drawn on a
+  thread of the run's own process, a panel held the interpreter for its 2-4 s, and the movie
+  rebuilt every `--pdf-every` evaluations held it too.  The main thread then ran at a fraction of
+  its speed, which is what NEAR2 saw in s7e's steps.
+  - The display starts `python -m klip_tpe.panels` with the first panel and sends it each
+    evaluation's record once, and for a panel the evaluation's images, the best images when they
+    change, the panel's numbers and the finished annuli's curves.  The process keeps the annulus'
+    records, builds its data (`display.annulus_from_records` with the new `display.runner_recipe`),
+    works out the contrast preview, reads the running stitch (`display.stitch_cells`) and steps the
+    landscape's partition (`display.corner_pick`).  Two threads of the run write and read the
+    pipes, so the main thread only queues a message.
+  - A panel asked for while the process draws another is skipped at once
+    (`LiveDisplay.PROCESS_GRACE`, 0), but for an annulus' last evaluation and a PDF that is due.
+    The render thread's grace kept the main thread waiting up to 0.25 s for each panel it skipped.
+  - The process runs at nice 10, finishes what it was sent when the run is stopped, and stops when
+    the run that started it is gone.  A window's panel comes back drawn at the window's pixels, as
+    the render thread draws it.  `KLIP_TPE_PANELS=thread` keeps the render thread, and so does a
+    run whose panel process cannot start or stops, with a line in the log.  The calibration panels
+    and the annulus-done frames are drawn by the run itself, once an annulus.
+  - Measured on a NEAR-shaped synthetic search (6 nights of 150 px, 56 dimensions, reductions that
+    take no time, 4 trials in flight, `--display-every 20 --pdf-every 100`) resumed at 9,800 trials
+    in the sandbox, for 200 trials.  A trial took 373 ms on average with the panels on the render
+    thread (195 ms median), 94-111 ms with them in their own process and 83-87 ms without them, with
+    the exact TPE the run was saved with.  With the binned TPE below it took 62 ms with the panels
+    in their own process and 49 ms without them.
+- **A TPE proposal no longer grows with the history** (`RunConfig.tpe_density`, `--tpe-density`,
+  `optimizers.parzen_density_binned`).  Its densities summed a kernel over every sample of the
+  good and the bad set, 48 candidates times the history in each of 56 dimensions, the 0.0077 s per
+  1,000 trials of NEAR2's fit.  `"binned"`, the default of a new run, gathers the samples on a
+  grid first.  A whole-number dimension puts them on its values, which is exact but for the order
+  of the sum, and any other shares each between two grid points at 16 points a bandwidth (linear
+  binning), within 1e-4 of the exact density and 1e-5 typically.  On synthetic NEAR-shaped
+  histories the binned proposals were the exact ones in 120 of 120 cases.  A run saved before
+  today resumes with `"exact"`, its own sum, bit for bit.
+  - The exact sum is faster too, and still the same to the bit (`tests/test_optimizers.py` checks it
+    against the candidate-at-a-time code at histories of up to 7,000 trials with failed ones among
+    them).  The good and the bad set are gathered once, a row per dimension, the kernel is computed
+    in place a cache-sized block of candidates at a time, the candidates are drawn with Python
+    numbers, and `TPE.propose_one` passes the valid rows as indices instead of copying them out.
+  - One TPE proposal in a 56-D space, in the sandbox:
+
+    | trials | before | exact | binned |
+    |---:|---:|---:|---:|
+    | 1,000 | 16 ms | 13 ms | 10 ms |
+    | 5,000 | 47 ms | 38 ms | 13 ms |
+    | 10,000 | 96 ms | 75 ms | 18 ms |
+    | 20,000 | 167 ms | 134 ms | 23 ms |
+
+- **The history is not copied for every trial any more.**  `History.append` stacked a new `X`, a
+  copy of the whole history per trial (4.5 MB at 10,000 trials of 56 dimensions).  `X` and `y` are
+  now views of arrays with room to spare, and an `X` read earlier keeps its rows.  The pipeline's
+  trials in flight go behind the history's arrays (`History.with_rows`, `Runner._ask_history`)
+  instead of a copy and three appends, and `TPE.ask` copies the history only for warm-up rows.  A
+  pickle of a history holds its rows only.
+- **A line per annulus says how busy the main process was** (`Runner._main_note`), beside the cards'
+  lines, for a search with trials in flight:
+
+  ```
+    annulus 1: the main process was busy 100 % of the search's 19s since the resume, and a trial waited 0.25 s for it on average once it was reduced and scored
+    annulus 1: the main process took 0.094 s a trial, 0.000 s scoring, 0.001 s recording, 0.067 s proposing and 0.025 s on the files, the checkpoint, the display and the log
+  ```
+
+  The busy share is the part of the search's time the main thread did not wait for a trial's
+  reductions (`_ReductionQueue.wait_s`), and a trial's wait runs from when its reductions were back
+  and scored until the main thread took it up.  `annulus_done.json` and `final_results.json` keep
+  the numbers (`main`), and `bench_summary.txt` has a `# main annulus` line per annulus.  The
+  example is the synthetic search above with the panels in their own process, whose main thread
+  spent 0.067 s of its 0.094 s on the exact TPE (0.028 s of 0.062 s with the binned one).
+- `docs/DISPLAY.md` and `docs/RUNNING.md` describe the panel process, the main process' lines and
+  the TPE's density, and `docs/CLI.md` has `--tpe-density`.  The suite draws the panels on the
+  render thread, where its display tests watch them (`tests/conftest.py`), and
+  `tests/test_panels.py` draws them in their own process.  `klip_tpe/panels.py` follows the
+  documentation rule.
+
 ## Unreleased — 2026-11-16 (the stitch `klip-tpe elect` reads, and its winners for `rereduce`)
 
 From NEAR2's note of 2026-11-16 on `elect --plan` for s7.

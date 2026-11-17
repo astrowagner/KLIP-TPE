@@ -54,6 +54,7 @@ DONE = [
     "klip_tpe/klip_gpu.py",
     "klip_tpe/metrics.py",
     "klip_tpe/optimizers.py",
+    "klip_tpe/panels.py",
     "klip_tpe/parallel.py",
     "klip_tpe/positions.py",
     "klip_tpe/products.py",

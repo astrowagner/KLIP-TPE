@@ -184,10 +184,31 @@ and both ETAs come from it.
 
 With several trials in flight, the main thread sets the pace once the workers keep up: it
 scores every trial, asks for the next proposal and writes the files, the checkpoint and the
-display.  `KLIP_TPE_PROFILE_MAIN=300 klip-tpe resume ...` writes `main_thread_profile.txt`
-into the run directory every 300 s.  It lists the share of the time each function held the
-main thread over the last 300 s and since the start, and the share it spent waiting.  It
-needs no other package.
+display.  Each annulus of such a search ends with two lines beside the cards' lines, here from a
+NEAR-shaped synthetic search resumed at 9,800 trials in the sandbox, where the reductions take
+no time:
+
+```
+  annulus 1: the main process was busy 100 % of the search's 19s since the resume, and a trial waited 0.25 s for it on average once it was reduced and scored
+  annulus 1: the main process took 0.094 s a trial, 0.000 s scoring, 0.001 s recording, 0.067 s proposing and 0.025 s on the files, the checkpoint, the display and the log
+```
+
+The busy share is the part of the search's time the main thread was not waiting for a trial's
+reductions.  Near 100 % it sets the pace, and then more trials in flight only lengthen the
+trials' wait.  `annulus_done.json` and `final_results.json` keep the numbers (`main`), and
+`bench_summary.txt` has a `# main annulus` line per annulus.  The live panels are drawn by a
+process of their own (`docs/DISPLAY.md`), so they no longer take the main thread's time.
+
+A TPE proposal sums its densities over a grid the samples are gathered on (`--tpe-density binned`,
+the default), at the same cost whatever the history.  Summed over every sample
+(`--tpe-density exact`, as runs saved before 2026-11-17 resume) it took 0.075 s at 10,000 trials
+of NEAR's 56 dimensions in the sandbox, growing with the history, against 0.017 s.  The two give
+the same proposal unless two candidates' scores differ by less than the grid's error, 1e-5 of a
+density typically.
+
+`KLIP_TPE_PROFILE_MAIN=300 klip-tpe resume ...` writes `main_thread_profile.txt` into the run
+directory every 300 s.  It lists the share of the time each function held the main thread over
+the last 300 s and since the start, and the share it spent waiting.  It needs no other package.
 
 Six NEAR nights are ~2000 frames × 150² each, and the workers share them.  Each running job
 holds its own binned cube and KL bases.  No worker holds injected frames.  A set of sources
@@ -968,8 +989,9 @@ batch.
 
 ### The live window
 
-`--show` opens a window in the optimizer's own process. Rendering happens off-thread and
-the window only blits a finished panel, but the blit still belongs to the main thread, so
+`--show` opens a window in the optimizer's own process. The panels are drawn by a process of
+their own and the window only blits a finished panel, but the blit still belongs to the main
+thread, so
 a very long evaluation can leave it unrepainted (on macOS the system marks the process
 unresponsive after about two seconds and stops compositing it — the run is unaffected, the
 picture is just stale).

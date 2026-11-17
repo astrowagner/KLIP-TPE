@@ -93,6 +93,11 @@ def _never_skip_panels():
     mp = pytest.MonkeyPatch()
     mp.setattr(LiveDisplay, "RENDER_GRACE", 600.0)
     mp.setattr(LiveDisplay, "VALIDATION_GRACE", 600.0)
+    mp.setattr(LiveDisplay, "PROCESS_GRACE", 600.0)
+    # The panels are drawn on the render thread, where the display's tests watch render_step
+    # being called.  tests/test_panels.py draws them in their own process, the production
+    # default, and KLIP_TPE_TEST_PANELS=process runs the suite that way.
+    mp.setenv("KLIP_TPE_PANELS", os.environ.get("KLIP_TPE_TEST_PANELS", "thread"))
     # The injection-recovery grid is on by default and costs a hundred reductions or more an
     # annulus, which the suite's many short runs do not need.  A test of it asks for it.
     mp.setitem(contrast_grid._DEFAULT, "mode", "off")
