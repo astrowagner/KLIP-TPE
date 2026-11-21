@@ -2730,6 +2730,82 @@ def cmd_elect(a):
             logf.close()
 
 
+def cmd_extract(a):
+    """Run ``klip-tpe extract``, a known companion's position and contrast, with uncertainties, from a finished run.
+
+    The run's runner is resumed as ``elect`` resumes it, and :func:`klip_tpe.extract.extract_companion`
+    fits the companion, with the elected winner of the annulus that holds it unless ``--annulus`` or
+    ``--config`` names another configuration.  What it finds goes to ``--out``
+    (:func:`klip_tpe.extract.write_extract`), and the log to ``extract.log`` there.  The run is only read.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The parsed command line.
+
+    Raises
+    ------
+    SystemExit
+        If a setting is out of range, the run's frames had a source near the start taken out, or the step
+        fails.
+    """
+    from .extract import ExtractConfig, extract_companion, write_extract
+    from .runner import Runner
+    try:
+        _fill_from_registry(a, getattr(a, "_argv", None))
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"  (could not read the run record: {exc!r}, carrying on with what was given)")
+    _resolve_run_dir(a)
+    _klip_gram_for_run(a, record=False)    # the run directory is only read
+    _data_edits_for_rereduce(a)
+    _constants_for_run(a)
+    cfg = ExtractConfig(box_rho_as=a.box_rho, box_pa_deg=a.box_pa, box_contrast=(float(a.box_contrast[0]),
+                        float(a.box_contrast[1])), patch_fwhm=a.patch, n_init=a.n_init, n_iter=a.n_iter,
+                        gamma=a.gamma, ncand=a.ncand, explore_frac=a.explore, best_frac=a.best_frac, nref=a.nref,
+                        n_fakes=a.fakes, fake_iter=a.fake_iter, per_group=not a.no_groups, seed=a.seed)
+    try:
+        cfg.check()
+    except ValueError as exc:
+        raise SystemExit(f"extract: {exc}") from None
+    if not (a.rho > 0 and a.contrast > 0):
+        raise SystemExit("extract: --rho and --contrast must be positive")
+    if getattr(a, "subtract_sources", None):
+        for src in _sources_file(a.subtract_sources):
+            d_as = math.hypot(src.rho * math.cos(math.radians(src.theta)) - a.rho * math.cos(math.radians(a.pa)),
+                              src.rho * math.sin(math.radians(src.theta)) - a.rho * math.sin(math.radians(a.pa)))
+            if d_as < 0.5 * a.rho and d_as < 0.5:
+                raise SystemExit(f"extract: the run's frames had a source at rho {src.rho:g}\", pa {src.theta:g} deg "
+                                 f"taken out (--subtract-sources {a.subtract_sources}), {d_as:.3f}\" from the start.  "
+                                 f"Give --subtract-sources a list without it to fit it.")
+    label = a.label or "companion"
+    base = os.path.abspath(a.run_dir).rstrip(os.sep)
+    out = os.path.abspath(a.out or (base + "_extract" + (f"_{a.label}" if a.label else "")))
+    red, objective, sampler, guard, thr = _near_objects(a)
+    r = Runner.resume(a.run_dir, red, objective, sampler, project=guard, throughput_fn=thr, same_frames=False)
+    os.makedirs(out, exist_ok=True)
+    logf = open(os.path.join(out, "extract.log"), "a")
+
+    def log(msg: str) -> None:
+        print(msg, flush=True)
+        logf.write(msg + "\n")
+        logf.flush()
+
+    r.log = log                            # the run's own log is only read
+    try:
+        found = extract_companion(r, a.rho, a.pa, a.contrast, annulus=None if a.annulus is None else a.annulus - 1,
+                                  evaluation=a.config, config=cfg, log=log)
+        files = write_extract(found, out, label=label)
+        with open(files["summary_txt"]) as f:
+            log(f.read().rstrip())
+        log(f"extract: wrote {len(files)} files to {out}")
+    except ValueError as exc:
+        raise SystemExit(f"extract: {exc}") from None
+    finally:
+        logf.close()
+
+
 def cmd_replay(a):
     """Run ``klip-tpe replay``, which reduces again a sample of the evaluations in the IDL predecessor's log.
 
@@ -3406,6 +3482,52 @@ def _build_parser():
                         "contrast_curve.txt")
     p.add_argument("--plan", action="store_true", help="count the finalists, points and reductions, reduce nothing")
     p.set_defaults(func=cmd_elect)
+    p = sub.add_parser("extract", help="a known companion's position and contrast, with uncertainties, from a "
+                                       "finished run: a TPE search of its negative injection, profile scans and a "
+                                       "recovery check (docs/EXTRACT.md)")
+    _add_near_args(p)
+    p.add_argument("--run-dir", default="last", help="the finished run (default: the newest on record)")
+    p.add_argument("--rho", type=float, required=True, metavar="AS",
+                   help="the companion's starting separation, in arcsec")
+    p.add_argument("--pa", type=float, required=True, metavar="DEG",
+                   help="its starting position angle, in degrees East of North")
+    p.add_argument("--contrast", type=float, required=True,
+                   help="its starting contrast, in the injection model's flux unit")
+    p.add_argument("--annulus", type=int, default=None, metavar="N",
+                   help="the annulus whose configuration reduces, counted from 1 (default: the one that holds --rho)")
+    p.add_argument("--config", type=int, default=None, metavar="EVAL",
+                   help="the evaluation of that annulus whose configuration reduces, numbered as the run's log "
+                        "numbers it (default: the annulus' elected winner)")
+    p.add_argument("--out", default=None, metavar="DIR",
+                   help="output directory (default <run>_extract beside the run, <run>_extract_LABEL with --label)")
+    p.add_argument("--label", default=None, help="the companion's name, for the summary and the default directory")
+    p.add_argument("--box-rho", type=float, default=None, metavar="AS",
+                   help="half-width of the search box in separation, in arcsec (default 0.5 FWHM)")
+    p.add_argument("--box-pa", type=float, default=None, metavar="DEG",
+                   help="half-width of the box in angle, in degrees (default 0.5 FWHM along the arc)")
+    p.add_argument("--box-contrast", type=float, nargs=2, default=[0.5, 2.0], metavar=("LO", "HI"),
+                   help="the box in contrast, as factors on --contrast (default 0.5 2)")
+    p.add_argument("--patch", type=float, default=2.0, metavar="FWHM",
+                   help="radius of the patch the residual is read in, in FWHM (default 2)")
+    p.add_argument("--n-iter", type=int, default=1000, metavar="N", help="trials of the search (default 1000)")
+    p.add_argument("--n-init", type=int, default=100, metavar="N", help="random trials first (default 100)")
+    p.add_argument("--gamma", type=float, default=0.15,
+                   help="fraction of the trials the TPE takes as good (default 0.15)")
+    p.add_argument("--ncand", type=int, default=24, metavar="N", help="candidates per TPE proposal (default 24)")
+    p.add_argument("--explore", type=float, default=0.15,
+                   help="fraction of the guided trials drawn at random instead (default 0.15)")
+    p.add_argument("--best-frac", type=float, default=0.4,
+                   help="fraction of the trials, the best, that the quadratic is fitted to (default 0.4)")
+    p.add_argument("--nref", type=int, default=5, metavar="N",
+                   help="profile scans of 4 N + 1 points per parameter, below 3 for none (default 5)")
+    p.add_argument("--fakes", type=int, default=5, metavar="N",
+                   help="fake sources of the recovery check, 0 for none (default 5)")
+    p.add_argument("--fake-iter", type=int, default=None, metavar="N",
+                   help="trials of each fake source's fit (default --n-iter)")
+    p.add_argument("--no-groups", action="store_true",
+                   help="skip each partition's contrast with the position held")
+    p.add_argument("--seed", type=int, default=None, help="seed of the random draws")
+    p.set_defaults(func=cmd_extract)
 
     p = sub.add_parser("replay", help="re-score configurations from an IDL optimize_tpe_results.txt")
     _add_near_args(p)

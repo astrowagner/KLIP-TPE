@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — 2026-11-21 (a known companion's position and contrast: `klip-tpe extract`)
+
+From the HD 984 ALES note of 2026-11-20, "a companion parameter-extraction step".
+
+- **`klip-tpe extract`** (`klip_tpe/extract.py`, `docs/EXTRACT.md`) fits a known companion on a
+  finished run.  It ports the IDL predecessor's `subtract_mwc758c_tpe.pro`, which fitted MWC 758c
+  this way.  A TPE search of `(rho, pa, contrast)` in a box around the start minimizes the residual
+  of the companion's negative injection in a fixed patch, over the patch without it.  The annulus'
+  elected winner reduces unless `--annulus` or `--config` names another configuration, and a run
+  made by a script calls `extract_companion` on its resumed runner.
+  - Two 1-sigma estimates, as the IDL predecessor reported them: a full quadratic fitted to the best
+    40 % of the trials, and profile scans of 21 points per parameter with a parabola each.
+  - A recovery check: 5 fake sources at the fit's separation and contrast, at other angles, fitted
+    the same way.  Their mean offset is the bias and their scatter the spread of a fit.
+  - With several partitions, such as ALES's wavelength groups, each partition's contrast with the
+    position held, and its own recovery check.  That is the spectrum.
+  - The summary quotes the larger of the profile sigma and the fakes' scatter.  On beta Pic b
+    (`scripts/check_betapic_extract.py`) the fakes scattered 3 to 20 times more than either
+    estimator gave, and the fit lies within 1 sigma of Absil et al. (2013) in separation, angle
+    and contrast.
+  - It writes `extract_summary.txt` and `.json`, the trials, the profiles, the partitions, the
+    fakes, a `--subtract-sources` line, the images and three figures.
+
 ## Unreleased — 2026-11-21 (the election's z at 2, US spelling, eight more modules documented)
 
 - **The election's default z is 2** (`FinalGridConfig.z`, `--fg-z`, `klip-tpe elect --z`), from 1.
