@@ -37,11 +37,11 @@ matched-filter S/N (``--cg-snr``).
 
 The run writes to ``--run-dir`` (``~/klip_tpe_runs/rxj0534/readme_3ann``, or
 ``~/klip_tpe_runs/hd95086``), outside any synced folder; the single-annulus run of 2026-10-30 is
-in ``~/klip_tpe_runs/rxj0534/readme``.  Its last panel, the last annulus finished with its
-validated winner, is the image at the top of the README (``docs/img/step_display.png``): its
-stitched images and contrast curve cover every annulus, the companion's included, and its
-convergence and parameter panels are the last annulus'.  Running the command again resumes the
-run.
+in ``~/klip_tpe_runs/rxj0534/readme``.  The image at the top of the README
+(``docs/img/step_display.png``) is the three-annulus run's panel at the end of its second annulus,
+finished with its validated winner: its stitched images and contrast curve cover the first two
+annuli, the companion's included, and its convergence and parameter panels are the second
+annulus'.  Running the command again resumes the run.
 """
 from __future__ import annotations
 

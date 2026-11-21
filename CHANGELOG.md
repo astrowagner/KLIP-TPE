@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — 2026-11-21 (the README's panel over two annuli)
+
+- **The README's panel ends at the second of the three annuli** (Kevin Wagner, 2026-11-21).
+  `docs/img/step_display.png` is now the same run's annulus-done frame of annulus 2 (0.58–0.97"),
+  drawn on `a795c83` when that annulus' validated winner was chosen: its stitched images and
+  contrast curve cover the companion's annulus and the next one out (0.20–0.97"), it circles the
+  two winners' four injected sources, and the best S/N cell reads 14.36 from its validation trial.
+  It replaces the third annulus' frame of the entry below.
+
 ## Unreleased — 2026-11-21 (the README's panel over three annuli)
 
 - **The README's panel is RX J0534's three-annulus run** (Kevin Wagner, 2026-11-07).
