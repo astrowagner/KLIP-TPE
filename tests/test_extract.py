@@ -194,7 +194,8 @@ def test_each_partition_gets_its_own_contrast_with_the_position_held(two_partiti
                                search_best_score=5.0, validated=True, winner_index=0, winner_score=5.0,
                                winner_x=list(win.x), winner_config=win.to_dict(), validation_table=[],
                                validation_samples={})]
-    ec = ExtractConfig(n_iter=40, n_init=15, nref=3, n_fakes=2, fake_iter=25, seed=2)
+    ec = ExtractConfig(n_iter=40, n_init=15, nref=3, n_fakes=2, fake_iter=25, seed=2, group_positions=True,
+                       group_iter=30, group_init=10)
     found = extract_companion(r, TRUE.rho, TRUE.theta + 1.0, 3e-3, config=ec, log=lambda s: None)
     g = {x["partition"]: x for x in found["groups"]}
     assert g["a"]["contrast"] == pytest.approx(4e-3, rel=0.15) and g["b"]["contrast"] == pytest.approx(2e-3, rel=0.15)
@@ -203,6 +204,16 @@ def test_each_partition_gets_its_own_contrast_with_the_position_held(two_partiti
     s = json.load(open(files["summary_json"]))
     assert all(x["sigma_quoted"] >= x["sigma"] for x in s["groups"])
     assert os.path.exists(files["spectrum_pdf"]) and os.path.exists(files["partitions"])
+    # each partition's own position, the same in both: their mean sits on the combined fit
+    gp = s["group_positions"]
+    assert [r["partition"] for r in gp["rows"]] == ["a", "b"]
+    for row in gp["rows"]:
+        assert _px_offset(red, (row["rho"], row["pa"]), (TRUE.rho, TRUE.theta)) < 1.0
+        assert row["sigma_dx_px"] > 0 and row["sigma_dy_px"] > 0
+    assert abs(gp["mean"]["ddx_px"]) < 1.0 and abs(gp["mean"]["ddy_px"]) < 1.0
+    assert gp["chromatic"]["dx"]["dof"] == 1 and gp["wavelength"] in ("um", "index")
+    assert os.path.exists(files["positions_pdf"]) and os.path.exists(files["partition_positions"])
+    assert "chromatic:" in open(files["summary_txt"]).read()
 
 
 def test_the_cli_parses_extract():
@@ -211,3 +222,4 @@ def test_the_cli_parses_extract():
                                    "7e-4", "--n-iter", "300", "--fakes", "0", "--box-contrast", "0.6", "1.8"])
     assert a.rho == 0.452 and a.n_iter == 300 and a.fakes == 0 and a.box_contrast == [0.6, 1.8]
     assert a.patch == 2.0 and a.nref == 5 and a.annulus is None and a.config is None
+    assert not a.group_positions and a.group_iter == 300 and a.group_box == 0.5

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased — 2026-11-21 (each partition's own position in `klip-tpe extract`)
+
+From a user's note of 2026-11-21, "a live display for `klip-tpe extract`, and the per-group
+position fit".
+
+- **Each partition's own position** (`ExtractConfig.group_positions`, `--group-positions`), beside the
+  combined fit, which stays as it is.  Each partition gets a TPE search of its own position and
+  contrast, `--group-iter` trials (300) in a box half as wide as the combined fit's (`--group-box`),
+  with its profile scans and, with fakes, its own recovery check.
+- The summary gives each partition's dx and dy from the star, rho, pa and contrast with the sigmas to
+  quote (`extract_partition_positions.txt`), their weighted mean against the combined fit in pixels and
+  sigma, and a chromatic test: the weighted slope of dx and dy against wavelength with its
+  significance, and a constant's chi2 with its probability.  `extract_positions.pdf` draws them.
+
 ## Unreleased — 2026-11-21 (pyKLIP's pools from a forkserver on Linux too, a louder stall line)
 
 From the FLIP validation's note of 2026-11-20, "pyKLIP's worker pool hangs on Linux when forked beside

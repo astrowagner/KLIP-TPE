@@ -3700,7 +3700,8 @@ usage: klip-tpe extract [-h] [--instrument {near,nomic,generic,ales}]
                         [--n-iter N] [--n-init N] [--gamma GAMMA] [--ncand N]
                         [--explore EXPLORE] [--best-frac BEST_FRAC] [--nref N]
                         [--fakes N] [--fake-iter N] [--no-groups]
-                        [--seed SEED]
+                        [--group-positions] [--group-iter N] [--group-box F]
+                        [--group-fake-iter N] [--seed SEED]
 
 options:
   -h, --help            show this help message and exit
@@ -3897,6 +3898,14 @@ options:
                         (default 5)
   --fake-iter N         trials of each fake source's fit (default --n-iter)
   --no-groups           skip each partition's contrast with the position held
+  --group-positions     also fit each partition's own position and contrast,
+                        with its profiles and fakes: a chromatic check of the
+                        position
+  --group-iter N        trials of each partition's position fit (default 300)
+  --group-box F         each partition's box, as a fraction of the combined
+                        fit's in separation and angle (default 0.5)
+  --group-fake-iter N   trials of each fake source's fit in a partition
+                        (default --group-iter)
   --seed SEED           seed of the random draws
 
 generic cubes (--instrument generic / klip-tpe generic):

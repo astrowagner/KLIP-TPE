@@ -2764,7 +2764,9 @@ def cmd_extract(a):
     cfg = ExtractConfig(box_rho_as=a.box_rho, box_pa_deg=a.box_pa, box_contrast=(float(a.box_contrast[0]),
                         float(a.box_contrast[1])), patch_fwhm=a.patch, n_init=a.n_init, n_iter=a.n_iter,
                         gamma=a.gamma, ncand=a.ncand, explore_frac=a.explore, best_frac=a.best_frac, nref=a.nref,
-                        n_fakes=a.fakes, fake_iter=a.fake_iter, per_group=not a.no_groups, seed=a.seed)
+                        n_fakes=a.fakes, fake_iter=a.fake_iter, per_group=not a.no_groups,
+                        group_positions=a.group_positions, group_iter=a.group_iter, group_box=a.group_box,
+                        group_fake_iter=a.group_fake_iter, seed=a.seed)
     try:
         cfg.check()
     except ValueError as exc:
@@ -3526,6 +3528,16 @@ def _build_parser():
                    help="trials of each fake source's fit (default --n-iter)")
     p.add_argument("--no-groups", action="store_true",
                    help="skip each partition's contrast with the position held")
+    p.add_argument("--group-positions", action="store_true",
+                   help="also fit each partition's own position and contrast, with its profiles and fakes: a "
+                        "chromatic check of the position")
+    p.add_argument("--group-iter", type=int, default=300, metavar="N",
+                   help="trials of each partition's position fit (default 300)")
+    p.add_argument("--group-box", type=float, default=0.5, metavar="F",
+                   help="each partition's box, as a fraction of the combined fit's in separation and angle "
+                        "(default 0.5)")
+    p.add_argument("--group-fake-iter", type=int, default=None, metavar="N",
+                   help="trials of each fake source's fit in a partition (default --group-iter)")
     p.add_argument("--seed", type=int, default=None, help="seed of the random draws")
     p.set_defaults(func=cmd_extract)
 

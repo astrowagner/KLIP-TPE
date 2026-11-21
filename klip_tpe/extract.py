@@ -25,6 +25,10 @@ JWST/NIRCam data, and its ``subtract_profile_scan.pro``.
   from all of them combined.  Each group's contrast is then fitted alone with the position held
   (:func:`fit_contrast`), and with fakes its own recovery check fits fake sources' contrasts the same
   way (:func:`recovery_contrast`).  The contrasts with their sigmas are the spectrum.
+* **The groups' own positions**, on request (``group_positions``).  Each group also gets a search of
+  its own position and contrast in a smaller box around the combined fit, with its profiles and its
+  fakes.  The summary gives each group's position, their weighted mean against the combined fit, and
+  a chromatic test, the slope of each axis' offset with wavelength and its significance.
 
 The two estimators measure how sharply the residual rises around its minimum, not the speckle noise
 that moves the minimum.  On beta Pic b (``scripts/check_betapic_extract.py``) they came out 3 to 20
@@ -121,6 +125,16 @@ class ExtractConfig:
         Whether each partition's contrast is fitted alone with the position held, when there are several.
     group_points : int, default 11
         Number of points of each partition's coarse contrast scan.
+    group_positions : bool, default False
+        Whether each partition also gets a fit of its own position and contrast, a chromatic check.
+    group_iter : int, default 300
+        Number of trials of each partition's position fit.
+    group_init : int, default 50
+        Number of random trials of each partition's position fit.
+    group_box : float, default 0.5
+        The partitions' boxes, as a fraction of the combined fit's half-widths in separation and angle.
+    group_fake_iter : int or None, default None
+        Number of trials of each fake source's fit in a partition, None for ``group_iter``.
     seed : int or None, default None
         Seed of the random draws.
     """
@@ -142,6 +156,11 @@ class ExtractConfig:
     fake_iter: Optional[int] = None
     per_group: bool = True
     group_points: int = 11
+    group_positions: bool = False
+    group_iter: int = 300
+    group_init: int = 50
+    group_box: float = 0.5
+    group_fake_iter: Optional[int] = None
     seed: Optional[int] = None
 
     def check(self) -> None:
@@ -173,6 +192,13 @@ class ExtractConfig:
             raise ValueError("n_fakes must be at least 0 and group_points at least 5")
         if self.fake_iter is not None and int(self.fake_iter) < 20:
             raise ValueError("fake_iter must be at least 20, or None")
+        if int(self.group_iter) < 20 or not 1 <= int(self.group_init) < int(self.group_iter):
+            raise ValueError(f"group_iter {self.group_iter} and group_init {self.group_init}: needs group_iter >= 20 "
+                             f"and 1 <= group_init < group_iter")
+        if not 0.0 < float(self.group_box) <= 1.0:
+            raise ValueError("group_box must lie in (0, 1]")
+        if self.group_fake_iter is not None and int(self.group_fake_iter) < 20:
+            raise ValueError("group_fake_iter must be at least 20, or None")
 
 
 # ----------------------------------------------------------------------------- the residual
@@ -947,6 +973,26 @@ def extract_companion(runner, rho: float, pa: float, contrast: float, *, annulus
                                                   g["contrast"], fwhm_px=fwhm, pxscale=pxs, angle_convention=conv,
                                                   patch_fwhm=cfg.patch_fwhm, n_fakes=int(cfg.n_fakes),
                                                   n_coarse=int(cfg.group_points))
+        if cfg.group_positions and groups:
+            lo, hi = fit["lo"], fit["hi"]
+            half_rho = 0.5 * (hi[0] - lo[0]) * float(cfg.group_box)
+            half_pa = 0.5 * (hi[1] - lo[1]) * float(cfg.group_box)
+            say(f"  extract: each of {len(groups)} partitions' own position, {int(cfg.group_iter)} trials each")
+            for k, g in enumerate(groups):
+                pid = next(p for p in selected if str(p) == g["partition"])
+                sub_cfg = dataclasses.replace(cfg, box_rho_as=half_rho, box_pa_deg=half_pa, n_iter=int(cfg.group_iter),
+                                              n_init=int(cfg.group_init), n_fakes=int(cfg.n_fakes),
+                                              fake_iter=int(cfg.group_fake_iter or cfg.group_iter),
+                                              seed=None if cfg.seed is None else int(cfg.seed) + 101 + k)
+                red_g = (lambda s, pid=pid: reduce_fn(s, sel=[pid]))
+                fg = fit_companion(red_g, b["rho"], b["pa"], max(float(g["contrast"]), 1e-12), fwhm_px=fwhm,
+                                   pxscale=pxs, angle_convention=conv, config=sub_cfg, log=None)
+                fg.pop("images", None)
+                rg = (recovery_check(red_g, fg, fwhm_px=fwhm, pxscale=pxs, angle_convention=conv, config=sub_cfg)
+                      if int(cfg.n_fakes) > 0 else None)
+                g["position"] = {"fit": fg, "recovery": rg}
+                bb = fg["best"]
+                say(f"    {pid}: rho {bb['rho']:.5f}\", pa {bb['pa']:.4f} deg, contrast {bb['contrast']:.4e}")
     finally:
         runner.ia = keep["ia"]
         runner.cfg.subtract_known = keep["known"]
@@ -1006,6 +1052,131 @@ def _position(found: Dict[str, Any], x: Dict[str, float]) -> Dict[str, float]:
     cx, cy = star_center(shape)
     px, py = _xy(shape, x["rho"], x["pa"], found["pxscale"], found["angle_convention"])
     return {"dx_px": float(px - cx), "dy_px": float(py - cy), "rho_px": float(x["rho"]) / float(found["pxscale"])}
+
+
+def _xy_sigma(found: Dict[str, Any], x: Dict[str, float], s_rho: float, s_pa: float) -> Tuple[float, float]:
+    """Return a position's sigmas in pixels along the image's axes, from its sigmas in separation and angle.
+
+    Parameters
+    ----------
+    found : dict
+        :func:`extract_companion`'s result.
+    x : dict
+        The position, with ``rho`` and ``pa``.
+    s_rho : float
+        Its sigma in separation, in arcsec.
+    s_pa : float
+        Its sigma in angle, in degrees.
+
+    Returns
+    -------
+    s_dx : float
+        The sigma along x, in pixels.
+    s_dy : float
+        The sigma along y, in pixels.
+    """
+    base = _position(found, x)
+    out = []
+    for key in ("dx_px", "dy_px"):
+        terms = []
+        for dr, dp in ((s_rho, 0.0), (0.0, s_pa)):
+            if not np.isfinite(dr) or not np.isfinite(dp):
+                terms.append(np.nan)
+                continue
+            moved = _position(found, {"rho": x["rho"] + dr, "pa": x["pa"] + dp})
+            terms.append(moved[key] - base[key])
+        out.append(float(np.sqrt(np.sum(np.square(terms)))))
+    return out[0], out[1]
+
+
+def _chromatic(lam: Sequence[float], v: Sequence[float], s: Sequence[float]) -> Dict[str, Any]:
+    """Return a weighted straight line of a quantity against wavelength, and the test of a constant.
+
+    Parameters
+    ----------
+    lam : sequence of float
+        The wavelengths, in microns.
+    v : sequence of float
+        The values.
+    s : sequence of float
+        Their sigmas.
+
+    Returns
+    -------
+    line : dict
+        ``mean`` and ``mean_se`` (the weighted mean), ``slope`` and ``slope_se`` (per micron), ``z`` (the
+        slope over its error), ``chi2`` and ``dof`` of the constant and ``p_const`` (its probability), NaN
+        with fewer than 2 points that have sigmas.
+    """
+    lam, v, s = (np.asarray(a, float) for a in (lam, v, s))
+    g = np.isfinite(lam) & np.isfinite(v) & np.isfinite(s) & (s > 0)
+    out = {k: float("nan") for k in ("mean", "mean_se", "slope", "slope_se", "z", "chi2", "p_const")}
+    out["dof"] = int(max(g.sum() - 1, 0))
+    if g.sum() < 2:
+        return out
+    w = 1.0 / s[g] ** 2
+    mean = float(np.sum(w * v[g]) / np.sum(w))
+    l0 = float(np.sum(w * lam[g]) / np.sum(w))
+    sxx = float(np.sum(w * (lam[g] - l0) ** 2))
+    slope = float(np.sum(w * (lam[g] - l0) * (v[g] - mean)) / sxx) if sxx > 0 else float("nan")
+    chi2 = float(np.sum(w * (v[g] - mean) ** 2))
+    from scipy.stats import chi2 as _chi2
+    out.update(mean=mean, mean_se=float(1.0 / np.sqrt(np.sum(w))), slope=slope,
+               slope_se=float(1.0 / np.sqrt(sxx)) if sxx > 0 else float("nan"),
+               chi2=chi2, p_const=float(_chi2.sf(chi2, out["dof"])))
+    out["z"] = out["slope"] / out["slope_se"] if np.isfinite(out["slope_se"]) else float("nan")
+    return out
+
+
+def _group_positions(found: Dict[str, Any], best: Dict[str, float]) -> Optional[Dict[str, Any]]:
+    """Return the partitions' own positions, their weighted mean against the combined fit, and the chromatic test.
+
+    Parameters
+    ----------
+    found : dict
+        :func:`extract_companion`'s result.
+    best : dict
+        The combined fit's best values, with ``dx_px`` and ``dy_px``.
+
+    Returns
+    -------
+    positions : dict or None
+        ``rows`` (per partition the best values, dx and dy, the profile sigmas, the fakes' scatter and the
+        sigmas to quote), ``mean`` (the weighted mean of dx and dy, and its offset from the combined fit in
+        pixels and in sigma) and ``chromatic`` (:func:`_chromatic` of dx and dy), None without the
+        partitions' position fits.
+    """
+    rows = []
+    for g in found["groups"]:
+        pos = g.get("position")
+        if not pos:
+            continue
+        fg, rg = pos["fit"], pos.get("recovery")
+        b = dict(fg["best"])
+        b.update(_position(found, b))
+        prof = [p["sigma"] for p in fg["profile_fits"]] or list(fg["quadratic"]["sigma"])
+        sc = ([rg["scatter"]["rho"], rg["scatter"]["pa"], rg["scatter"]["contrast"] * b["contrast"]]
+              if rg and rg.get("fakes") else [float("nan")] * 3)
+        q = [float(np.nanmax([a, c])) if np.isfinite(a) or np.isfinite(c) else float("nan") for a, c in zip(prof, sc)]
+        sdx, sdy = _xy_sigma(found, b, q[0], q[1])
+        rows.append({"partition": g["partition"], "lam_um": g["lam_um"], "rho": b["rho"], "pa": b["pa"],
+                     "contrast": b["contrast"], "dx_px": b["dx_px"], "dy_px": b["dy_px"],
+                     "sigma_profile": dict(zip(NAMES, prof)), "scatter": dict(zip(NAMES, sc)),
+                     "sigma_quoted": dict(zip(NAMES, q)), "sigma_dx_px": sdx, "sigma_dy_px": sdy,
+                     "residual": b["residual"], "n_reductions": int(fg["n_reductions"]) + int((rg or {}).get(
+                         "n_reductions", 0))})
+    if not rows:
+        return None
+    lam = [r["lam_um"] if r["lam_um"] is not None else float(k) for k, r in enumerate(rows)]
+    cx = _chromatic(lam, [r["dx_px"] for r in rows], [r["sigma_dx_px"] for r in rows])
+    cy = _chromatic(lam, [r["dy_px"] for r in rows], [r["sigma_dy_px"] for r in rows])
+    mean = {"dx_px": cx["mean"], "dx_se": cx["mean_se"], "dy_px": cy["mean"], "dy_se": cy["mean_se"]}
+    mean["ddx_px"] = mean["dx_px"] - best["dx_px"]
+    mean["ddy_px"] = mean["dy_px"] - best["dy_px"]
+    mean["ddx_z"] = mean["ddx_px"] / mean["dx_se"] if mean["dx_se"] and np.isfinite(mean["dx_se"]) else float("nan")
+    mean["ddy_z"] = mean["ddy_px"] / mean["dy_se"] if mean["dy_se"] and np.isfinite(mean["dy_se"]) else float("nan")
+    return {"rows": rows, "mean": mean, "chromatic": {"dx": cx, "dy": cy},
+            "wavelength": "um" if all(r["lam_um"] is not None for r in rows) else "index"}
 
 
 def _summary(found: Dict[str, Any]) -> Dict[str, Any]:
@@ -1069,9 +1240,13 @@ def _summary(found: Dict[str, Any]) -> Dict[str, Any]:
         "sigma_quoted": sig(quoted),
         "n_reductions": int(fit["n_reductions"] + sum(g["n_reductions"] for g in found["groups"])
                             + sum((g.get("recovery") or {}).get("n_reductions", 0) for g in found["groups"])
+                            + sum(int(g["position"]["fit"]["n_reductions"])
+                                  + int((g["position"].get("recovery") or {}).get("n_reductions", 0))
+                                  for g in found["groups"] if g.get("position"))
                             + (found["recovery"] or {}).get("n_reductions", 0)),
         "n_trials": len(fit["trials"]["residual"]), "seconds": fit["seconds"],
         "groups": groups,
+        "group_positions": _group_positions(found, best),
         "recovery": None if found["recovery"] is None else {k: found["recovery"][k] for k in
                                                            ("bias", "bias_se", "scatter", "fakes")},
         "configuration": found["configuration"], "run_dir": found["run_dir"], "pxscale": pxs,
@@ -1149,6 +1324,23 @@ def _txt(s: Dict[str, Any], label: str) -> str:
                                                  f"{100 * g['scatter']:.1f} %")
             L.append(f"  {g['partition']:>10s}{lam}  {g['contrast']:.4e} +- {g['sigma_quoted']:.2e} "
                      f"(profile {g['sigma']:.2e}{fk})" + ("" if g["ok"] else "  (parabola failed: the best point)"))
+    gp = s.get("group_positions")
+    if gp:
+        L.append("partitions' own positions: dx, dy from the star and rho, pa, contrast +- the sigma to quote")
+        for r in gp["rows"]:
+            lam = "" if r["lam_um"] is None else f"  {r['lam_um']:.4f} um"
+            q = r["sigma_quoted"]
+            L.append(f"  {r['partition']:>10s}{lam}  dx {r['dx_px']:+.3f} +- {r['sigma_dx_px']:.3f}  dy {r['dy_px']:+.3f} "
+                     f"+- {r['sigma_dy_px']:.3f} px  rho {r['rho']:.5f} +- {q['rho']:.1e}\"  pa {r['pa']:.3f} +- "
+                     f"{q['pa']:.3f} deg  contrast {r['contrast']:.4e} +- {q['contrast']:.1e}")
+        m, cx, cy = gp["mean"], gp["chromatic"]["dx"], gp["chromatic"]["dy"]
+        unit = "px/um" if gp["wavelength"] == "um" else "px per partition"
+        L += [f"  weighted mean: dx {m['dx_px']:+.3f} +- {m['dx_se']:.3f}  dy {m['dy_px']:+.3f} +- {m['dy_se']:.3f} px, "
+              f"{m['ddx_px']:+.3f} ({m['ddx_z']:+.1f} sigma) and {m['ddy_px']:+.3f} ({m['ddy_z']:+.1f} sigma) from the "
+              f"combined fit",
+              f"  chromatic: dx {cx['slope']:+.3f} +- {cx['slope_se']:.3f} {unit} ({cx['z']:+.1f} sigma, a constant's "
+              f"chi2 {cx['chi2']:.1f} for {cx['dof']}, p {cx['p_const']:.2g}), dy {cy['slope']:+.3f} +- "
+              f"{cy['slope_se']:.3f} ({cy['z']:+.1f} sigma, chi2 {cy['chi2']:.1f}, p {cy['p_const']:.2g})"]
     L.append(f"--subtract-sources line: {s['subtract_sources']}")
     return "\n".join(L) + "\n"
 
@@ -1315,6 +1507,46 @@ def _plot_spectrum(s: Dict[str, Any], path: str) -> str:
     return path
 
 
+def _plot_positions(s: Dict[str, Any], path: str) -> str:
+    """Draw the partitions' own positions against wavelength, with the combined fit and the fitted line.
+
+    Parameters
+    ----------
+    s : dict
+        :func:`_summary`'s numbers, with ``group_positions``.
+    path : str
+        Where the figure goes.
+
+    Returns
+    -------
+    path : str
+        The figure's path.
+    """
+    gp = s["group_positions"]
+    rows = gp["rows"]
+    xs = np.array([r["lam_um"] if gp["wavelength"] == "um" else k for k, r in enumerate(rows)], float)
+    fig = _figure(9.0, 3.6)
+    accent, ink = "#1f5fa8", "#333333"
+    for k, (key, sk, name) in enumerate((("dx_px", "sigma_dx_px", "dx"), ("dy_px", "sigma_dy_px", "dy"))):
+        ax = fig.add_subplot(1, 2, k + 1)
+        ax.errorbar(xs, [r[key] for r in rows], yerr=[r[sk] for r in rows], fmt="o", ms=4, lw=1, color=accent,
+                    capsize=2, label="partitions")
+        ax.axhline(s["best"][key], ls="--", lw=1, color=ink, label="combined fit")
+        ch = gp["chromatic"][name]
+        if np.isfinite(ch["slope"]):
+            w = 1.0 / np.square([r[sk] for r in rows])
+            l0 = float(np.sum(w * xs) / np.sum(w))
+            xl = np.array([xs.min(), xs.max()])
+            ax.plot(xl, ch["mean"] + ch["slope"] * (xl - l0), ":", lw=1.2, color=accent, label="weighted line")
+        ax.set_xlabel("wavelength (um)" if gp["wavelength"] == "um" else "partition")
+        ax.set_ylabel(f"{name} from the star (px)")
+        if k == 0:
+            ax.legend(fontsize=8, frameon=False)
+    fig.tight_layout()
+    fig.savefig(path)
+    return path
+
+
 def write_extract(found: Dict[str, Any], out_dir: str, label: str = "companion") -> Dict[str, str]:
     """Write an extraction's summary, tables, images and figures.
 
@@ -1335,9 +1567,11 @@ def write_extract(found: Dict[str, Any], out_dir: str, label: str = "companion")
     Notes
     -----
     The files are ``extract_summary.json`` and ``extract_summary.txt``, ``extract_trials.txt``,
-    ``extract_profiles.txt``, ``extract_partitions.txt`` and ``extract_fakes.txt`` where there are any,
+    ``extract_profiles.txt``, ``extract_partitions.txt``, ``extract_partition_positions.txt`` and
+    ``extract_fakes.txt`` where there are any,
     ``extract_subtract_sources.txt``, the images ``extract_clean.fits`` and ``extract_residual.fits``,
-    and the figures ``extract_fit.pdf``, ``extract_images.png`` and ``extract_spectrum.pdf``.  A figure
+    and the figures ``extract_fit.pdf``, ``extract_images.png``, ``extract_spectrum.pdf`` and
+    ``extract_positions.pdf``.  A figure
     that fails is left out with a line in the summary, and the numbers are written regardless.
     """
     from . import durable
@@ -1372,6 +1606,17 @@ def write_extract(found: Dict[str, Any], out_dir: str, label: str = "companion")
             rows.append(f"{g['partition']} {lam} {g['contrast']:.6e} {g['sigma_quoted']:.3e} {g['sigma']:.3e} {fb} {fs} "
                         f"{g['floor']:.3e} {int(g['ok'])}")
         put("partitions", "extract_partitions.txt", "\n".join(rows) + "\n")
+    gp = s.get("group_positions")
+    if gp:
+        rows = ["# partition  lam_um  dx_px  sigma_dx  dy_px  sigma_dy  rho_as  sigma_rho  pa_deg  sigma_pa  contrast  "
+                "sigma_contrast  (the sigmas to quote)"]
+        for r in gp["rows"]:
+            q = r["sigma_quoted"]
+            lam = "nan" if r["lam_um"] is None else f"{r['lam_um']:.5f}"
+            rows.append(f"{r['partition']} {lam} {r['dx_px']:+.4f} {r['sigma_dx_px']:.4f} {r['dy_px']:+.4f} "
+                        f"{r['sigma_dy_px']:.4f} {r['rho']:.6f} {q['rho']:.2e} {r['pa']:.4f} {q['pa']:.4f} "
+                        f"{r['contrast']:.6e} {q['contrast']:.2e}")
+        put("partition_positions", "extract_partition_positions.txt", "\n".join(rows) + "\n")
     rec = found["recovery"]
     if rec and rec["fakes"]:
         rows = ["# fake  true_rho  true_pa  true_contrast  fit_rho  fit_pa  fit_contrast  residual"]
@@ -1393,7 +1638,9 @@ def write_extract(found: Dict[str, Any], out_dir: str, label: str = "companion")
     for kind, fn in (("fit_pdf", lambda: _plot_fit(found, s, os.path.join(out_dir, "extract_fit.pdf"))),
                      ("images_png", lambda: _plot_images(found, os.path.join(out_dir, "extract_images.png"))),
                      ("spectrum_pdf", (lambda: _plot_spectrum(s, os.path.join(out_dir, "extract_spectrum.pdf")))
-                      if s["groups"] else None)):
+                      if s["groups"] else None),
+                     ("positions_pdf", (lambda: _plot_positions(s, os.path.join(out_dir, "extract_positions.pdf")))
+                      if s.get("group_positions") else None)):
         if fn is None:
             continue
         try:

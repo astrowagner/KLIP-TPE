@@ -65,6 +65,27 @@ write_extract(found, run_dir + "_extract_b", label="b")
    the companion taken out at that contrast, each fitted the same way with its position held.  The
    contrasts with their sigmas are the spectrum.  `--no-groups` skips them.
 
+## The groups' own positions
+
+`--group-positions` (`ExtractConfig.group_positions`) adds a fit of each group's own position and
+contrast, alongside the combined fit, which stays as it is.  Each group gets a TPE search of
+`--group-iter` trials (300) in a box half as wide as the combined fit's (`--group-box`), centered on
+the combined position, with its contrast from its own fit with the position held.  Its profile
+scans give the sigmas, and with fakes its own recovery check gives their scatter.  The summary
+then has:
+
+- each group's dx and dy from the star, rho, pa and contrast, each with its sigma to quote
+  (`extract_partition_positions.txt`),
+- the weighted mean of the groups' dx and dy, and its offset from the combined fit in pixels and in
+  sigma,
+- a chromatic test: the weighted slope of dx and of dy against wavelength with its significance,
+  and the chi2 of a constant with its probability,
+- `extract_positions.pdf`, dx and dy against wavelength with the combined fit and the fitted line.
+
+It is a check of the registration across wavelength, and of the astrometry before it goes out.
+Each group adds about `group_iter + 64` reductions of that group alone, and with fakes
+`n_fakes (1 + group_iter)` more.
+
 ## Which sigma to quote
 
 The quadratic and the profiles measure how sharply the residual rises around its minimum.  They do
@@ -108,12 +129,14 @@ always a lower floor.  Name it with `--config` to compare.
 | `extract_trials.txt` | Every search trial: rho, pa, contrast, residual and how it was proposed |
 | `extract_profiles.txt` | The profile scans' points |
 | `extract_partitions.txt` | Each partition's wavelength, contrast, the sigma to quote, the profile sigma, its fakes' bias and scatter, and the floor |
+| `extract_partition_positions.txt` | With `--group-positions`, each group's dx, dy, rho, pa and contrast with the sigmas to quote |
 | `extract_fakes.txt` | Each fake source's true and fitted values |
 | `extract_subtract_sources.txt` | The fitted companion, for `--subtract-sources` in later runs |
 | `extract_clean.fits`, `extract_residual.fits` | The reduction without the injection and the best fit's |
 | `extract_fit.pdf` | The residual against each parameter, the best trials with their parabolas and the quadratic's sigmas above, the profiles with theirs below |
 | `extract_images.png` | Both reductions around the companion, with the patch |
 | `extract_spectrum.pdf` | Each partition's contrast with the sigma to quote |
+| `extract_positions.pdf` | With `--group-positions`, each group's dx and dy against wavelength, the combined fit and the weighted line |
 
 ## Cost
 
