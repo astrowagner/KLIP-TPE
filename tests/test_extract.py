@@ -1,6 +1,7 @@
 """Tests of the companion extraction step (klip_tpe.extract)."""
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 
@@ -111,6 +112,88 @@ def test_fit_contrast_with_the_position_held(red):
     assert g["n_reductions"] == len(g["points"]["contrast"]) + 1
 
 
+def _held(c_true, b=0.27, n=41):
+    """Return a reduction with the position held: smooth noise, and the companion less the injection."""
+    from scipy.ndimage import gaussian_filter
+    rng = np.random.default_rng(1)
+    cx, cy = star_center((n, n))
+    (x0,), (y0,) = source_xy([TRUE.rho], [TRUE.theta], PX, cx, cy, "pa")
+    yy, xx = np.mgrid[0:n, 0:n]
+    psf = np.exp(-((xx - x0) ** 2 + (yy - y0) ** 2) / (2 * (4.0 / 2.355) ** 2))
+    noise = gaussian_filter(rng.standard_normal((n, n)), 4.0 / 2.355)
+    mask = patch_mask((n, n), TRUE.rho, TRUE.theta, 8.0, PX, "pa")
+    noise *= b * patch_residual(c_true * psf, mask) / patch_residual(noise, mask)
+    return (lambda srcs: noise + c_true * psf + sum(s.contrast * psf for s in (srcs or []))), mask
+
+
+def test_fit_contrast_refines_before_its_profile_and_takes_the_given_width():
+    rf, mask = _held(4e-3)
+    cs = np.linspace(2e-3, 6e-3, 4001)
+    c_min = cs[int(np.argmin([patch_residual(rf([Source(TRUE.rho, TRUE.theta, -c)]), mask) for c in cs]))]
+    fits = [fit_contrast(rf, TRUE.rho, TRUE.theta, c0, fwhm_px=4.0, pxscale=PX, half_frac=0.05)
+            for c0 in (0.853 * c_min, c_min, 1.11 * c_min)]
+    for g in fits:
+        # wherever the coarse scan's points fall, the fit lands on the minimum
+        assert g["ok"] and g["contrast"] == pytest.approx(c_min, rel=2e-3)
+        assert g["half"] == pytest.approx(0.05 * g["refined"])
+        lo, hi = min(g["profile"]["contrast"]), max(g["profile"]["contrast"])
+        assert 0.5 * (hi - lo) == pytest.approx(g["half"], rel=1e-6)
+    # the sigma where the parabola has risen by its floor grows with the profile's width: a profile as
+    # wide as the coarse scan's steps reads the scan, not the data
+    wide = fit_contrast(rf, TRUE.rho, TRUE.theta, c_min, fwhm_px=4.0, pxscale=PX, half_frac=0.4)
+    assert wide["sigma"] > 10 * fits[1]["sigma"] and wide["floor"] > 100 * fits[1]["floor"]
+    with pytest.raises(ValueError, match="half_frac"):
+        fit_contrast(rf, TRUE.rho, TRUE.theta, c_min, fwhm_px=4.0, pxscale=PX, half_frac=0.0)
+
+
+def test_debias_tests_the_fakes_bias_with_students_t():
+    from klip_tpe.extract import _debias
+    r = _debias(60.0, 0.15, 0.03, 5, "pa")
+    assert r["corrected"] == pytest.approx(59.85) and r["t"] == pytest.approx(5.0) and r["se"] == 0.03
+    assert r["t95"] == pytest.approx(2.776, abs=1e-3) and r["significant"]
+    assert _debias(0.1, 0.2, 0.01, 5, "pa")["corrected"] == pytest.approx(359.9)
+    assert not _debias(0.9, 2e-4, 5e-4, 5, "rho")["significant"]
+    c = _debias(4e-3, -0.02, 0.009, 5, "contrast")
+    assert c["corrected"] == pytest.approx(4e-3 / 0.98) and c["se"] == pytest.approx(0.009 * c["corrected"])
+    assert not c["significant"], "t -2.2 is short of 2.78 for 4 degrees of freedom"
+    one = _debias(0.9, 0.5, float("nan"), 1, "rho")
+    assert not one["significant"] and np.isnan(one["corrected"])
+
+
+def test_the_summary_quotes_the_fit_less_a_significant_bias(red):
+    from klip_tpe.extract import _summary, _txt
+    f = fit_companion(_reduce_fn(red), TRUE.rho, TRUE.theta, TRUE.contrast, fwhm_px=red.fwhm, pxscale=PX,
+                      angle_convention=red.angle_convention, config=QUICK)
+    b = f["best"]
+    rec = {"fakes": [{}] * 5, "bias": {"rho": 1e-4, "pa": 0.15, "contrast": -0.02},
+           "bias_se": {"rho": 5e-4, "pa": 0.01, "contrast": 0.009},
+           "scatter": {"rho": 1.1e-3, "pa": 0.022, "contrast": 0.02}, "n_reductions": 50}
+
+    def group(pid, bias, se):
+        return {"partition": pid, "lam_um": 3.5, "contrast": 4e-3, "sigma": 1e-5, "ok": True, "floor": 1e-6,
+                "best": 4e-3, "n_reductions": 40, "recovery": {"fakes": [{}] * 5, "bias": bias, "bias_se": se,
+                                                               "scatter": se * 5 ** 0.5, "n_reductions": 100}}
+
+    found = {"fit": f, "groups": [group("a", -0.03, 0.005), group("b", 0.005, 0.006)], "recovery": rec,
+             "config": dataclasses.asdict(QUICK), "run_dir": "run", "fwhm_px": red.fwhm, "pxscale": PX,
+             "configuration": {"what": "a test", "annulus": 0, "inrad": 8.0, "outrad": 26.0},
+             "angle_convention": red.angle_convention, "left_out": []}
+    s = _summary(found)
+    assert s["bias_test"]["significant"] == {"rho": False, "pa": True, "contrast": False}
+    assert s["quoted"]["pa"] == pytest.approx((b["pa"] - 0.15) % 360)
+    assert s["quoted"]["rho"] == b["rho"] and s["quoted"]["contrast"] == b["contrast"]
+    assert s["corrected"]["contrast"] == pytest.approx(b["contrast"] / 0.98)
+    assert s["sigma_quoted"]["pa"] == pytest.approx(np.hypot(max(s["sigma_profile"]["pa"], 0.022), 0.01))
+    assert s["sigma_quoted"]["rho"] == pytest.approx(max(s["sigma_profile"]["rho"], 1.1e-3))
+    a, bb = s["groups"]
+    assert a["bias_significant"] and a["contrast_quoted"] == pytest.approx(4e-3 / 0.97)
+    assert a["sigma_quoted"] == pytest.approx(np.hypot(0.005 * 5 ** 0.5 * 4e-3, 0.005 * 4e-3 / 0.97))
+    assert not bb["bias_significant"] and bb["contrast_quoted"] == 4e-3
+    text = _txt(s, "a test")
+    assert "best less bias" in text and "pa is the best less the fakes' significant bias" in text
+    assert "less its significant bias" in text
+
+
 def test_recovery_check_fits_fakes_like_the_companion(red):
     f = fit_companion(_reduce_fn(red), TRUE.rho, TRUE.theta, TRUE.contrast, fwhm_px=red.fwhm, pxscale=PX,
                       angle_convention=red.angle_convention, config=QUICK)
@@ -199,6 +282,9 @@ def test_each_partition_gets_its_own_contrast_with_the_position_held(two_partiti
     found = extract_companion(r, TRUE.rho, TRUE.theta + 1.0, 3e-3, config=ec, log=lambda s: None)
     g = {x["partition"]: x for x in found["groups"]}
     assert g["a"]["contrast"] == pytest.approx(4e-3, rel=0.15) and g["b"]["contrast"] == pytest.approx(2e-3, rel=0.15)
+    # the partitions' profiles take the combined fit's relative width
+    hf = min(max(found["fit"]["profile_half"][2] / found["fit"]["best"]["contrast"], 0.01), 0.5)
+    assert all(x["half"] == pytest.approx(hf * x["refined"]) for x in found["groups"])
     assert all(len(x["recovery"]["fakes"]) == 2 for x in found["groups"])
     files = write_extract(found, str(tmp_path / "out2"))
     s = json.load(open(files["summary_json"]))

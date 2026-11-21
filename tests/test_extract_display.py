@@ -72,6 +72,25 @@ def test_a_panel_is_1600_by_760_on_black(tmp_path):
     assert size == PANEL_PX
 
 
+def test_the_fakes_table_fits_its_slot_whatever_it_holds():
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    from klip_tpe.extract_display import _fakes_table
+    fig = Figure(figsize=(PANEL_PX[0] / 100.0, PANEL_PX[1] / 100.0), dpi=100)
+    FigureCanvasAgg(fig)
+    x0, y0 = 0.675 + 0.155, 0.46                       # the later stages' top-right slot, at the panel's edge
+    ax = fig.add_axes([x0 + 0.008, y0 + 0.06, 0.155 - 0.016, 0.37 - 0.12])
+    rows = [{"d_rho": 0.0123, "d_pa": -12.345, "d_c": -0.987}] * 12
+    _fakes_table(ax, {"fakes": {"ctx": "a partition with a long name", "n": 14, "rows": rows}})
+    from matplotlib.text import Text
+    fig.canvas.draw()
+    r = fig.canvas.get_renderer()
+    texts = [t for t in ax.get_children() if isinstance(t, Text) and t.get_text()]
+    assert len(texts) == 2, "the title and the table"
+    for t in texts:
+        assert t.get_window_extent(r).x1 <= fig.bbox.x1 - 5, t.get_text()[:40]
+
+
 def test_the_fit_tells_its_progress(red):  # noqa: F811
     cfg = ExtractConfig(n_iter=24, n_init=10, nref=3, n_fakes=0, seed=4)
     ev = []

@@ -59,11 +59,14 @@ write_extract(found, run_dir + "_extract_b", label="b")
    and their standard deviation is the spread of a fit.
 7. **Wavelength groups.**  With several partitions the position comes from all of them combined.
    Each partition's contrast is then fitted alone with the position held.  A coarse scan of 11 points
-   from 0.2 to 2.2 times the combined contrast, moved once when its minimum falls on an edge, is
-   followed by a profile of `4 nref + 1` points and its parabola.  With fakes, each partition also
-   gets its own recovery check: fake sources at its fitted contrast, at the same angles as above, with
-   the companion taken out at that contrast, each fitted the same way with its position held.  The
-   contrasts with their sigmas are the spectrum.  `--no-groups` skips them.
+   from 0.2 to 2.2 times the combined contrast, moved once when its minimum falls on an edge, brackets
+   the minimum.  A bounded Brent search between the lowest point's two neighbors refines it to 0.2 %,
+   and a profile of `4 nref + 1` points around it gives the parabola.  The profile is as wide,
+   relative to the contrast, as the combined fit's contrast profile, so the two sigmas read alike
+   (below).  With fakes, each partition also gets its own recovery check: fake sources at its fitted
+   contrast, at the same angles as above, with the companion taken out at that contrast, each fitted
+   the same way with its position held, from a start as far off as the partition's own.  The contrasts
+   with their sigmas are the spectrum.  `--no-groups` skips them.
 
 ## The groups' own positions
 
@@ -180,6 +183,23 @@ and the fakes' scatter, per parameter, and each partition's contrast carries the
 profile sigma and its own fakes' scatter.  With 5 fakes the scatter is itself uncertain by about a
 third.  More fakes, or a second check with another seed, firm it up.
 
+The profile sigma also depends on how wide the profile is.  The residual is a smooth, deterministic
+function of each parameter, parabolic only near its minimum, so the parabola's floor, the rms of its
+residuals, grows with the profile's width, and the sigma with it, about as the width squared.  A
+partition's profile used to span 4 times a first sigma read off its coarse scan, up to the scan's own
+width.  That read the scan's steps, not the data, and gave sigmas several times the partition's fakes'
+scatter.  It now takes the combined fit's relative width.
+
+### The fakes' bias
+
+The fakes' mean offsets are the bias, with a standard error from their scatter.  The summary prints
+the best less the bias (`best less bias`) and each bias over its standard error.  Where that exceeds
+the two-sided 95 % point of Student's t with `n_fakes - 1` degrees of freedom (2.78 for 5 fakes), the
+bias is significant.  The `to quote` value is then the best less the bias, and its sigma has the bias'
+standard error added in quadrature.  Each partition's contrast follows the same rule with its own
+fakes.  The fakes sit at the companion's separation and contrast, so a bias the configuration puts on
+every source there comes off the companion as it does off them.
+
 ## Which configuration
 
 The annulus' elected winner reduces unless another is named.  A negative injection cancels the
@@ -193,21 +213,36 @@ its production ARDI configuration the same way.
 A configuration whose references never hold the companion (RDI) gives a sharper minimum, but not
 always a lower floor.  Name it with `--config` to compare.
 
+An angle offset between the injection and the derotation cannot bias the fakes.  Each fake and each
+trial's negative go into the frames through the same injection, with the frames' angles and the same
+true north, so an offset turns them together and their null, the residual's minimum, stays where the
+fake was put.  In a synthetic sequence of 100 frames over 78 degrees, an RDI configuration with the
+injection turned 0.5 degrees from the derotation brought its six fakes back +0.012 +- 0.027 degrees
+from where they were put.  For the same reason the companion's fitted angle is in the injection's
+frame.  A wrong north or a wrong sign in the frames' angles would move it, and no fake can show that.
+
+A bias in angle that every fake shares therefore comes from the reduction or the fit, not from the
+angles' bookkeeping.  ADI's self-subtraction is one candidate.  When the field turns faster near
+transit it is uneven in time, so a source's subtracted lobes are not symmetric along the arc.  The
+run's RDI configuration (`--config`) shows whether a bias goes with the ADI references.  The fakes sit
+at the companion's separation and contrast in the same configuration, so they measure such a bias for
+the companion too, and the summary takes it off where it is significant.
+
 ## What it writes
 
 | File | What it holds |
 |---|---|
-| `extract_summary.txt`, `extract_summary.json` | The best values, the position in pixels from the star, both sets of sigmas in arcsec, degrees, pixels and percent, the profiles' minima, the floors, the reductions, the partitions' contrasts, the recovery check and the `--subtract-sources` line |
+| `extract_summary.txt`, `extract_summary.json` | The best values, the position in pixels from the star, both sets of sigmas in arcsec, degrees, pixels and percent, the profiles' minima, the floors, the reductions, the recovery check with the best less its bias and the bias' t, the values and sigmas to quote, the partitions' contrasts and the `--subtract-sources` line |
 | `extract_trials.txt` | Every search trial: rho, pa, contrast, residual and how it was proposed |
 | `extract_profiles.txt` | The profile scans' points |
-| `extract_partitions.txt` | Each partition's wavelength, contrast, the sigma to quote, the profile sigma, its fakes' bias and scatter, and the floor |
+| `extract_partitions.txt` | Each partition's wavelength, contrast, the sigma to quote, the profile sigma, its fakes' bias and scatter, the floor, and the contrast less the bias and the contrast to quote |
 | `extract_partition_positions.txt` | With `--group-positions`, each group's dx, dy, rho, pa and contrast with the sigmas to quote |
 | `extract_fakes.txt` | Each fake source's true and fitted values |
 | `extract_subtract_sources.txt` | The fitted companion, for `--subtract-sources` in later runs |
 | `extract_clean.fits`, `extract_residual.fits` | The reduction without the injection and the best fit's |
 | `extract_fit.pdf` | The residual against each parameter, the best trials with their parabolas and the quadratic's sigmas above, the profiles with theirs below |
 | `extract_images.png` | Both reductions around the companion, with the patch |
-| `extract_spectrum.pdf` | Each partition's contrast with the sigma to quote |
+| `extract_spectrum.pdf` | Each partition's contrast to quote with its sigma, and the fit where a significant bias was taken off |
 | `extract_positions.pdf` | With `--group-positions`, each group's dx and dy against wavelength, the combined fit and the weighted line |
 | `steps/stepNNNN.png`, `extract_steps.gif` | The live display's panels and its progress movie (`extract_steps.mp4` too where imageio has ffmpeg) |
 | `extract_trial_crops.npz` | With the live display, each search trial's image around the star, for `--render` |
@@ -216,8 +251,7 @@ always a lower floor.  Name it with `--config` to compare.
 ## Cost
 
 A fit takes `1 + n_iter + 3 (4 nref + 1)` reductions, 1064 with the defaults.  Each partition adds
-about 30 reductions of that partition alone, and as many again per fake source for its recovery
-check.  Each fake source of the combined fit adds `1 + fake_iter` reductions.  These are the larger
+about 40 reductions of that partition alone, and about 35 per fake source for its recovery check.  Each fake source of the combined fit adds `1 + fake_iter` reductions.  These are the larger
 part with the defaults, 5005 reductions, so `--fake-iter 300` or `--fakes 3` makes a quicker first
 pass.  On beta Pic b's 61 NACO frames the defaults took 4 minutes on 2 cores.
 

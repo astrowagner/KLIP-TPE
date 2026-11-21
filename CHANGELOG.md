@@ -1,5 +1,45 @@
 # Changelog
 
+## Unreleased — 2026-11-21 (extract: the partitions' profiles, the fakes' bias in what to quote, the display's table)
+
+After a user's note of 2026-11-21, "a companion's extraction, and its render".
+
+- **Each partition's contrast profile takes the combined fit's relative width**
+  (`klip_tpe/extract.py`).  The residual is a smooth, deterministic function of the contrast,
+  parabolic only near its minimum.  The parabola's floor, the rms of its residuals, and the sigma
+  read where the parabola has risen by it, therefore grow about as the profile's width squared.  A
+  partition's profile spanned 4 times a first sigma read off its 11-point coarse scan, up to the
+  scan's own width, so its sigma measured the scan's steps and came out several times its fakes'
+  scatter.  The coarse scan now only brackets the minimum.  A bounded Brent search between the
+  lowest point's neighbors refines it to 0.2 %, and the profile spans the combined fit's contrast
+  profile's half-width over its contrast (`fit_contrast(half_frac=)`, from `fit["profile_half"]`).  The
+  partitions' fakes start as far off as the partition's own fit (`recovery_contrast(c_start=)`).  On a
+  model residual the old rule's sigma ran from 0.2 to 9 % with where the coarse points fell, and the
+  new one gives 0.03 to 0.13 % whatever the start, with the fit on the minimum to 0.005 %.
+- **The fakes' bias in what the summary quotes.**  The summary prints the best less the fakes' bias
+  (`best less bias`) and each bias over its standard error.  Where that exceeds the two-sided 95 %
+  point of Student's t with `n_fakes - 1` degrees of freedom, the `to quote` value is the best less the
+  bias, with the bias' standard error added to its sigma in quadrature (`_debias`, `summary["quoted"]`,
+  `["corrected"]`, `["bias_test"]`).  Each partition's contrast follows the same rule with its own fakes
+  (`contrast_quoted`).  `extract_partitions.txt` appends the contrast less the bias and the contrast to
+  quote, and `extract_spectrum.pdf` draws the contrasts to quote.
+- **An offset between the injection and the derotation cannot bias the fakes.**  A fake and every
+  trial's negative go into the frames through the same injection, so an offset turns them together
+  and their null stays where the fake was put.  A synthetic RDI sequence with the injection turned
+  0.5 degrees from the derotation brought its six fakes back +0.012 +- 0.027 degrees from where they
+  were put.  EXTRACT.md now says so, and that a bias every fake shares comes from the reduction or
+  the fit.
+- **The display's fakes' table stays on the panel** (`klip_tpe/extract_display.py`).  In the grid's
+  right-hand column the title ran past the panel's edge and the table reached it.  The table takes its
+  slot's whole width, and its title and text shrink to fit whatever the font measures (`_shrink_to`).
+- `parabola_sigma` no longer warns when the trials crowd the best and polyfit is poorly conditioned.
+- Docs: EXTRACT.md (the wavelength groups, which sigma to quote, the fakes' bias, which configuration,
+  the outputs and the cost) and the module's docstrings.  Tests: the refinement and the profile's width
+  (`test_fit_contrast_refines_before_its_profile_and_takes_the_given_width`), the partitions' width from
+  the combined fit, the t test (`test_debias_tests_the_fakes_bias_with_students_t`), the summary's
+  quoted values (`test_the_summary_quotes_the_fit_less_a_significant_bias`) and the table
+  (`test_the_fakes_table_fits_its_slot_whatever_it_holds`).
+
 ## Unreleased — 2026-11-21 (the README's panel over three annuli)
 
 - **The README's panel is RX J0534's three-annulus run** (Kevin Wagner, 2026-11-07).

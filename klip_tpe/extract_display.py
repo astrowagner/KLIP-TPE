@@ -840,8 +840,33 @@ def _chromatic(ax, st: Dict[str, Any], C: Dict[str, Any]) -> None:
               labelcolor=C["fg"], handletextpad=0.3, columnspacing=0.8, borderaxespad=0.0)
 
 
+def _shrink_to(txt, right_px: float, renderer, smallest: float = 4.5) -> None:
+    """Shrink a text's font until its right edge lies at or left of a limit.
+
+    Parameters
+    ----------
+    txt : matplotlib.text.Text
+        The text.
+    right_px : float
+        The limit, in display pixels.
+    renderer : matplotlib.backend_bases.RendererBase
+        The renderer that measures the text.
+    smallest : float, default 4.5
+        The smallest font size, in points.  A text that is still too wide at it stays there.
+    """
+    for _ in range(8):
+        ext = txt.get_window_extent(renderer)
+        if ext.x1 <= right_px or txt.get_fontsize() <= smallest:
+            return
+        room = max(right_px - ext.x0, 1.0) / max(ext.x1 - ext.x0, 1.0)
+        txt.set_fontsize(max(smallest, txt.get_fontsize() * room * 0.97))
+
+
 def _fakes_table(ax, st: Dict[str, Any]) -> None:
     """Write the fake sources' offsets from their true values as a table.
+
+    The title and the table shrink to the slot's width, so neither runs off the panel whatever the font
+    measures.
 
     Parameters
     ----------
@@ -854,21 +879,26 @@ def _fakes_table(ax, st: Dict[str, Any]) -> None:
     rows = list(fk.get("rows") or [])
     ax.set_axis_off()
     ctx = fk.get("ctx") or ""
-    ax.set_title("fake sources, " + (f"partition {ctx}" if ctx else "the companion's fit"), loc="left")
-    lines = ["   #  d rho (mas)  d PA (deg)  d c (%)"]
+    fig = ax.figure
+    renderer = fig.canvas.get_renderer()
+    right = min(ax.get_window_extent(renderer).x1, fig.bbox.x1 - 6.0)
+    title = ax.set_title("fake sources, " + (f"partition {ctx}" if ctx else "the companion's fit"), loc="left")
+    _shrink_to(title, right, renderer)
+    lines = ["  #  d rho (mas)  d PA (deg)  d c (%)"]
     first = max(len(rows) - 9, 0)
     for k, f in enumerate(rows[first:], start=first + 1):
-        lines.append(f"{k:4d}  {1e3 * f['d_rho']:+10.2f}  {f['d_pa']:+9.3f}  {100 * f['d_c']:+7.1f}")
+        lines.append(f"{k:3d}  {1e3 * f['d_rho']:+10.2f}  {f['d_pa']:+9.3f}  {100 * f['d_c']:+7.1f}")
     if len(rows) >= 2:
         a = np.array([[f["d_rho"], f["d_pa"], f["d_c"]] for f in rows], float)
         m, s = a.mean(axis=0), a.std(axis=0, ddof=1)
-        lines += [f"mean  {1e3 * m[0]:+10.2f}  {m[1]:+9.3f}  {100 * m[2]:+7.1f}",
-                  f"sd    {1e3 * s[0]:10.2f}  {s[1]:9.3f}  {100 * s[2]:7.1f}"]
+        lines += [f"mean {1e3 * m[0]:+10.2f}  {m[1]:+9.3f}  {100 * m[2]:+7.1f}",
+                  f"sd   {1e3 * s[0]:10.2f}  {s[1]:9.3f}  {100 * s[2]:7.1f}"]
     n = int(fk.get("n") or 0)
     if n and len(rows) < n:
         lines.append(f"fake {len(rows) + 1} of {n} being fitted")
-    ax.text(0.0, 0.97, "\n".join(lines), transform=ax.transAxes, va="top", family="monospace", fontsize=6.8,
-            linespacing=1.3)
+    txt = ax.text(0.0, 0.97, "\n".join(lines), transform=ax.transAxes, va="top", family="monospace", fontsize=6.8,
+                  linespacing=1.3)
+    _shrink_to(txt, right, renderer)
 
 
 def _extras(st: Dict[str, Any]) -> List[str]:
@@ -916,7 +946,10 @@ def _slots(fig, st: Dict[str, Any], run: Dict[str, Any], C: Dict[str, Any]) -> N
     for k, item in enumerate(items):
         r, c = divmod(k, 2)
         x0, y0 = 0.675 + c * 0.155, 0.46 - r * 0.37
-        ax = fig.add_axes([x0 + 0.045, y0 + 0.06, 0.155 - 0.06, 0.37 - 0.12])
+        # a table needs no room for an axis' labels, so it takes the slot's whole width
+        rect = ([x0 + 0.008, y0 + 0.06, 0.155 - 0.016, 0.37 - 0.12] if item == "fakes"
+                else [x0 + 0.045, y0 + 0.06, 0.155 - 0.06, 0.37 - 0.12])
+        ax = fig.add_axes(rect)
         if item == "spectrum":
             _spectrum(ax, st, C)
         elif item == "chromatic":

@@ -23,8 +23,9 @@ JWST/NIRCam data, and its ``subtract_profile_scan.pro``.
   (:func:`recovery_check`).  Their mean offsets are the bias, and their scatter the spread of a fit.
 * **Wavelength groups.**  With several partitions, such as ALES's wavelength groups, the position comes
   from all of them combined.  Each group's contrast is then fitted alone with the position held
-  (:func:`fit_contrast`), and with fakes its own recovery check fits fake sources' contrasts the same
-  way (:func:`recovery_contrast`).  The contrasts with their sigmas are the spectrum.
+  (:func:`fit_contrast`): a coarse scan, a refinement, and a profile as wide, relative to the contrast,
+  as the combined fit's contrast profile.  With fakes its own recovery check fits fake sources'
+  contrasts the same way (:func:`recovery_contrast`).  The contrasts with their sigmas are the spectrum.
 * **The groups' own positions**, on request (``group_positions``).  Each group also gets a search of
   its own position and contrast in a smaller box around the combined fit, with its profiles and its
   fakes.  The summary gives each group's position, their weighted mean against the combined fit, and
@@ -33,7 +34,9 @@ JWST/NIRCam data, and its ``subtract_profile_scan.pro``.
 The two estimators measure how sharply the residual rises around its minimum, not the speckle noise
 that moves the minimum.  On beta Pic b (``scripts/check_betapic_extract.py``) they came out 3 to 20
 times smaller than the fake sources' scatter.  The summary therefore quotes the larger of the profile
-sigma and the fakes' scatter, per parameter and per partition.
+sigma and the fakes' scatter, per parameter and per partition.  It also gives the fit less the fakes'
+bias, and where Student's t finds the bias significant at 95 % the value to quote is the fit less the
+bias, with the bias' standard error added to its sigma in quadrature.
 
 :func:`extract_companion` runs the step on a runner whose annuli are done, resumed from the run's
 directory, and :func:`write_extract` writes what it found.  ``klip-tpe extract`` does both from the
@@ -69,6 +72,7 @@ import json
 import math
 import os
 import time
+import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -373,7 +377,9 @@ def parabola_sigma(xv: Sequence[float], yv: Sequence[float], x0: float, scale: f
         return out
     sc = float(scale)
     u = (xv - float(x0)) / sc
-    c2, c1, c0 = np.polyfit(u, yv, 2)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")              # trials crowded on the best make a poorly conditioned fit
+        c2, c1, c0 = np.polyfit(u, yv, 2)
     floor = float(np.sqrt(np.mean((yv - np.polyval([c2, c1, c0], u)) ** 2)))
     out.update(floor=floor, coef=[float(c0), float(c1), float(c2)])
     if c2 > 0:
@@ -476,7 +482,8 @@ def fit_companion(reduce_fn: ReduceFn, rho: float, pa: float, contrast: float, *
     -------
     fit : dict
         The start, the box, the patch, the trials, the best of every reduction, the quadratic's and the
-        profiles' sigmas and minima, the near-best trials' parabolas and the number of reductions.
+        profiles' sigmas and minima, the near-best trials' parabolas, ``profile_half`` (each profile's
+        half-width, also without profiles) and the number of reductions.
 
     Raises
     ------
@@ -554,11 +561,11 @@ def fit_companion(reduce_fn: ReduceFn, rho: float, pa: float, contrast: float, *
     gbest, gbest_r = tpe_best.copy(), float(R[ib])
     prof: Dict[str, Any] = {"values": [], "residual": []}
     sig2: List[Dict[str, Any]] = []
+    sig1 = np.asarray(quad["sigma"], float)
+    span = np.where(np.isfinite(sig1) & (sig1 > 0), 4.0 * sig1, 0.05 * scale) if quad["ok"] else 0.05 * scale
+    span = np.minimum(span, 0.5 * scale)
     if int(cfg.nref) >= 3:
         npx = 4 * int(cfg.nref) + 1
-        sig1 = np.asarray(quad["sigma"], float)
-        span = np.where(np.isfinite(sig1) & (sig1 > 0), 4.0 * sig1, 0.05 * scale) if quad["ok"] else 0.05 * scale
-        span = np.minimum(span, 0.5 * scale)
         say(f"  extract: profile scans, {3 * npx} reductions ({npx} per parameter)")
         for d in range(3):
             vals = np.clip(tpe_best[d] + span[d] * np.linspace(-1.0, 1.0, npx), lo[d], hi[d])
@@ -590,6 +597,7 @@ def fit_companion(reduce_fn: ReduceFn, rho: float, pa: float, contrast: float, *
         "tpe_best": dict(_vec(tpe_best), residual=float(R[ib]), trial=ib + 1),
         "best": dict(_vec(gbest), residual=float(gbest_r)),
         "quadratic": quad, "marginal": marg, "profiles": prof, "profile_fits": sig2,
+        "profile_half": [float(v) for v in span],
         "n_reductions": int(nred), "seconds": float(secs),
         "images": {"clean": clean, "best": best_img},
     }
@@ -599,8 +607,9 @@ def fit_companion(reduce_fn: ReduceFn, rho: float, pa: float, contrast: float, *
 
 def fit_contrast(reduce_fn: ReduceFn, rho: float, pa: float, c0: float, *, fwhm_px: float, pxscale: float,
                  angle_convention: str = "pa", patch_fwhm: float = 2.0, nref: int = 5, n_coarse: int = 11,
-                 span: Tuple[float, float] = (0.2, 2.2)) -> Dict[str, Any]:
-    """Fit a companion's contrast with its position held, over a coarse scan and a profile.
+                 span: Tuple[float, float] = (0.2, 2.2), half_frac: float = 0.05, xtol: float = 2e-3
+                 ) -> Dict[str, Any]:
+    """Fit a companion's contrast with its position held, over a coarse scan, a refinement and a profile.
 
     Parameters
     ----------
@@ -628,21 +637,40 @@ def fit_contrast(reduce_fn: ReduceFn, rho: float, pa: float, c0: float, *, fwhm_
     span : tuple of 2 floats, default (0.2, 2.2)
         The coarse scan's range, as factors on ``c0``.  It moves once by its width when its minimum
         falls on an edge.
+    half_frac : float, default 0.05
+        Half-width of the profile, as a fraction of the refined minimum.  :func:`extract_companion` passes
+        the combined fit's own, its contrast profile's half-width over its contrast.
+    xtol : float, default 2e-3
+        Tolerance of the refinement, as a fraction of the coarse scan's lowest point.
 
     Returns
     -------
     fit : dict
-        ``contrast`` (the profile parabola's minimum, or the best point when the parabola fails),
-        ``sigma``, ``ok``, ``floor``, ``best`` (the lowest point), ``points`` (the contrasts and their
-        residuals), ``ref`` and ``n_reductions``.
+        ``contrast`` (the profile parabola's minimum, or the refined minimum when the parabola fails),
+        ``sigma``, ``ok``, ``floor``, ``refined`` (the refinement's minimum), ``half`` (the profile's
+        half-width), ``best`` (the lowest point), ``points`` (every contrast reduced and its residual),
+        ``profile``, ``ref`` and ``n_reductions``.
 
     Raises
     ------
     ValueError
-        If ``c0`` is not positive or the patch holds no light without the injection.
+        If ``c0`` or ``half_frac`` is not positive or the patch holds no light without the injection.
+
+    Notes
+    -----
+    The coarse scan only brackets the minimum.  A bounded Brent search between the lowest point's two
+    neighbors refines it, and the profile is read around the refined minimum.  The profile's sigma is
+    where the parabola has risen by its floor, the rms of the parabola's residuals, as in
+    :func:`parabola_sigma`.  The residual is a smooth, deterministic function of the contrast that is
+    parabolic only near its minimum, so the floor, and with it the sigma, grows with the profile's
+    width, as the square of it.  A profile as wide as the coarse scan's steps reads the scan, not the
+    data, which is why the profile takes the combined fit's relative width.
     """
     if not c0 > 0:
         raise ValueError(f"c0 {c0!r} must be positive")
+    if not half_frac > 0:
+        raise ValueError(f"half_frac {half_frac!r} must be positive")
+    from scipy.optimize import minimize_scalar
     clean = np.asarray(reduce_fn(None), float)
     mask = patch_mask(clean.shape, rho, pa, float(patch_fwhm) * float(fwhm_px), pxscale, angle_convention)
     ref = patch_residual(clean, mask)
@@ -651,10 +679,15 @@ def fit_contrast(reduce_fn: ReduceFn, rho: float, pa: float, c0: float, *, fwhm_
     pts: Dict[float, float] = {}
 
     def at(c: float) -> float:
+        c = float(c)
         if c not in pts:
-            img = np.asarray(reduce_fn([Source(float(rho), float(pa), -float(c))]), float)
+            img = np.asarray(reduce_fn([Source(float(rho), float(pa), -c)]), float)
             pts[c] = patch_residual(img, mask) / ref
         return pts[c]
+
+    def table() -> Tuple[np.ndarray, np.ndarray]:
+        cs = np.array(sorted(pts))
+        return cs, np.array([pts[c] for c in cs])
 
     a, b = float(span[0]) * c0, float(span[1]) * c0
     for _ in range(2):
@@ -667,24 +700,27 @@ def fit_contrast(reduce_fn: ReduceFn, rho: float, pa: float, c0: float, *, fwhm_
         a, b = (max(a - w, 0.0), a) if i == 0 else (b, b + w)
         if b <= 0:
             break
-    c_all = np.array(sorted(pts))
-    r_all = np.array([pts[c] for c in c_all])
+    c_all, r_all = table()
     ib = int(np.nanargmin(r_all))
-    width = float(c_all.max() - c_all.min()) or c0
-    k = np.argsort(np.abs(c_all - c_all[ib]))[:5]
-    first = parabola_sigma(c_all[k], r_all[k], c_all[ib], width)
-    s0 = first["sigma"] if first["ok"] and first["sigma"] > 0 else 0.1 * c_all[ib]
-    half = min(4.0 * s0, 0.5 * width)
+    step = float(np.median(np.diff(c_all))) if c_all.size > 1 else 0.1 * c0
+    lo_b = float(c_all[ib - 1]) if ib > 0 else max(float(c_all[ib]) - step, 1e-3 * float(c_all[ib]))
+    hi_b = float(c_all[ib + 1]) if ib < c_all.size - 1 else float(c_all[ib]) + step
+    minimize_scalar(lambda c: at(c) if np.isfinite(at(c)) else np.inf, bounds=(lo_b, hi_b), method="bounded",
+                    options={"xatol": float(xtol) * float(c_all[ib])})
+    c_all, r_all = table()
+    ib = int(np.nanargmin(r_all))
+    c_ref = float(c_all[ib])
+    half = float(half_frac) * c_ref
     npx = 4 * int(nref) + 1
-    vals = np.clip(c_all[ib] + half * np.linspace(-1.0, 1.0, npx), 1e-12 * c0, None)
+    vals = np.clip(c_ref + half * np.linspace(-1.0, 1.0, npx), 1e-6 * c_ref, None)
     rs = [at(float(v)) for v in vals]
-    prof = parabola_sigma(vals, rs, c_all[ib], width)
-    c_all = np.array(sorted(pts))
-    r_all = np.array([pts[c] for c in c_all])
+    prof = parabola_sigma(vals, rs, c_ref, half)
+    c_all, r_all = table()
     ib = int(np.nanargmin(r_all))
-    return {"contrast": float(prof["minimum"] if prof["ok"] else c_all[ib]), "sigma": float(prof["sigma"]),
-            "ok": bool(prof["ok"]), "floor": float(prof["floor"]), "best": float(c_all[ib]),
-            "best_residual": float(r_all[ib]), "points": {"contrast": c_all.tolist(), "residual": r_all.tolist()},
+    return {"contrast": float(prof["minimum"] if prof["ok"] else c_ref), "sigma": float(prof["sigma"]),
+            "ok": bool(prof["ok"]), "floor": float(prof["floor"]), "refined": c_ref, "half": half,
+            "best": float(c_all[ib]), "best_residual": float(r_all[ib]),
+            "points": {"contrast": c_all.tolist(), "residual": r_all.tolist()},
             "profile": {"contrast": [float(v) for v in vals], "residual": [float(v) for v in rs]},
             "ref": float(ref), "n_reductions": int(len(pts) + 1)}
 
@@ -780,11 +816,13 @@ def recovery_check(reduce_fn: ReduceFn, fit: Dict[str, Any], *, fwhm_px: float, 
 
 def recovery_contrast(reduce_fn: ReduceFn, rho: float, pa: float, contrast: float, *, fwhm_px: float,
                       pxscale: float, angle_convention: str = "pa", patch_fwhm: float = 2.0, n_fakes: int = 5,
-                      nref: int = 3, n_coarse: int = 11) -> Dict[str, Any]:
+                      nref: int = 3, n_coarse: int = 11, half_frac: float = 0.05,
+                      c_start: Optional[float] = None) -> Dict[str, Any]:
     """Fit fake sources' contrasts like a companion's, with their positions held, and return the bias and spread.
 
     Each fake source goes in at the companion's separation and contrast, at angles spread evenly from the
-    companion's, with the companion taken out at its fit, and :func:`fit_contrast` fits it.
+    companion's, with the companion taken out at its fit, and :func:`fit_contrast` fits it from a start
+    as far off as the companion's was.
 
     Parameters
     ----------
@@ -810,6 +848,11 @@ def recovery_contrast(reduce_fn: ReduceFn, rho: float, pa: float, contrast: floa
         Size of each fit's profile, ``4 nref + 1`` points.
     n_coarse : int, default 11
         Number of points of each fit's coarse scan.
+    half_frac : float, default 0.05
+        Half-width of each fit's profile, as a fraction of its contrast (:func:`fit_contrast`).
+    c_start : float or None, default None
+        Where the companion's own fit started, None for ``contrast``.  Each fake's fit starts at
+        ``c_start / contrast`` times its true contrast.
 
     Returns
     -------
@@ -819,6 +862,7 @@ def recovery_contrast(reduce_fn: ReduceFn, rho: float, pa: float, contrast: floa
         ``n_reductions``.
     """
     comp = Source(float(rho), float(pa), -float(contrast))
+    c_go = float(contrast) if c_start is None else float(c_start)
     fakes: List[Dict[str, Any]] = []
     for k in range(1, int(n_fakes) + 1):
         pa_k = (float(pa) + 360.0 * k / (int(n_fakes) + 1)) % 360.0
@@ -827,8 +871,8 @@ def recovery_contrast(reduce_fn: ReduceFn, rho: float, pa: float, contrast: floa
         def rf(srcs, true=true):
             return reduce_fn([true, comp] + list(srcs or []))
 
-        g = fit_contrast(rf, rho, pa_k, contrast, fwhm_px=fwhm_px, pxscale=pxscale,
-                         angle_convention=angle_convention, patch_fwhm=patch_fwhm, nref=nref, n_coarse=n_coarse)
+        g = fit_contrast(rf, rho, pa_k, c_go, fwhm_px=fwhm_px, pxscale=pxscale, angle_convention=angle_convention,
+                         patch_fwhm=patch_fwhm, nref=nref, n_coarse=n_coarse, half_frac=half_frac)
         fakes.append({"pa": pa_k, "true": float(contrast), "fit": float(g["contrast"]),
                       "n_reductions": int(g["n_reductions"])})
     dv = np.array([f["fit"] / f["true"] - 1.0 for f in fakes])
@@ -997,12 +1041,15 @@ def extract_companion(runner, rho: float, pa: float, contrast: float, *, annulus
             f"residual {b['residual']:.4f}, after {fit['n_reductions']} reductions")
         groups: List[Dict[str, Any]] = []
         parts = getattr(red, "reducers", None)
+        # the partitions' profiles take the combined fit's relative width, so their sigmas read the same
+        half_frac = min(max(float(fit["profile_half"][2]) / float(b["contrast"]), 0.01), 0.5)
         if cfg.per_group and parts and len(selected) > 1:
-            say(f"  extract: each of {len(selected)} partitions' contrast with the position held")
+            say(f"  extract: each of {len(selected)} partitions' contrast with the position held, profiles "
+                f"+- {100 * half_frac:.1f} %")
             for k, pid in enumerate(selected):
                 g = fit_contrast(lambda s, pid=pid: reduce_fn(s, sel=[pid]), b["rho"], b["pa"], b["contrast"],
                                  fwhm_px=fwhm, pxscale=pxs, angle_convention=conv, patch_fwhm=cfg.patch_fwhm,
-                                 nref=max(int(cfg.nref), 3), n_coarse=int(cfg.group_points))
+                                 nref=max(int(cfg.nref), 3), n_coarse=int(cfg.group_points), half_frac=half_frac)
                 lam = getattr(parts.get(pid), "lam_m", None) if hasattr(parts, "get") else None
                 g.update(partition=str(pid), lam_um=None if lam is None else float(lam) * 1e6)
                 groups.append(g)
@@ -1020,7 +1067,8 @@ def extract_companion(runner, rho: float, pa: float, contrast: float, *, annulus
                 g["recovery"] = recovery_contrast(lambda s, pid=pid: reduce_fn(s, sel=[pid]), b["rho"], b["pa"],
                                                   g["contrast"], fwhm_px=fwhm, pxscale=pxs, angle_convention=conv,
                                                   patch_fwhm=cfg.patch_fwhm, n_fakes=int(cfg.n_fakes),
-                                                  n_coarse=int(cfg.group_points))
+                                                  n_coarse=int(cfg.group_points), half_frac=half_frac,
+                                                  c_start=b["contrast"])
                 if progress is not None:
                     progress({"kind": "group_fakes", "phase": "partitions' fakes", "k": k + 1, "n": len(groups),
                               "partition": g["partition"], "bias": g["recovery"]["bias"],
@@ -1238,6 +1286,50 @@ def _group_positions(found: Dict[str, Any], best: Dict[str, float]) -> Optional[
             "wavelength": "um" if all(r["lam_um"] is not None for r in rows) else "index"}
 
 
+def _debias(value: float, bias: float, bias_se: float, n: int, name: str) -> Dict[str, Any]:
+    """Return a fitted value less its fake sources' bias, with Student's t test of the bias.
+
+    Parameters
+    ----------
+    value : float
+        The fitted value, ``rho`` in arcsec, ``pa`` in degrees or the contrast.
+    bias : float
+        The fake sources' mean offset, the contrast's as a fraction (fitted over true, less 1).
+    bias_se : float
+        Its standard error, in the bias' unit.
+    n : int
+        Number of fake sources.
+    name : {"rho", "pa", "contrast"}
+        Which parameter the value is.
+
+    Returns
+    -------
+    rule : dict
+        ``corrected`` (the value less the bias, the contrast divided by 1 plus it), ``se`` (the bias'
+        standard error in the value's unit), ``t`` (the bias over its standard error), ``t95`` (the
+        two-sided 95 % point of Student's t with ``n - 1`` degrees of freedom) and ``significant``
+        (whether ``|t|`` exceeds ``t95``).  NaN and False with fewer than 2 fake sources.
+    """
+    out = {"corrected": float("nan"), "se": float("nan"), "t": float("nan"), "t95": float("nan"),
+           "significant": False}
+    bias, bias_se = float(bias), float(bias_se)
+    if int(n) < 2 or not np.isfinite(bias):
+        return out
+    from scipy.stats import t as _student
+    if name == "contrast":
+        corrected = float(value) / (1.0 + bias)
+        se = bias_se * corrected
+    elif name == "pa":
+        corrected, se = (float(value) - bias) % 360.0, bias_se
+    else:
+        corrected, se = float(value) - bias, bias_se
+    t = bias / bias_se if np.isfinite(bias_se) and bias_se > 0 else float("nan")
+    t95 = float(_student.ppf(0.975, int(n) - 1))
+    out.update(corrected=float(corrected), se=float(se), t=float(t), t95=t95,
+               significant=bool(np.isfinite(t) and abs(t) > t95))
+    return out
+
+
 def _summary(found: Dict[str, Any]) -> Dict[str, Any]:
     """Return the numbers an extraction is reported with.
 
@@ -1251,8 +1343,17 @@ def _summary(found: Dict[str, Any]) -> Dict[str, Any]:
     summary : dict
         The best values with the position in pixels, both sets of sigmas in arcsec, degrees and pixels,
         the profiles' minima, the residual floors, the reductions, the partitions' contrasts and the
-        recovery check.  ``sigma_quoted`` is the larger of the profile sigma, or the quadratic's without
-        profiles, and the fake sources' scatter, per parameter and per partition.
+        recovery check.  ``corrected``, ``bias_test``, ``quoted`` and ``sigma_quoted`` follow the rule in
+        the Notes.
+
+    Notes
+    -----
+    ``corrected`` is the best less the fake sources' bias and ``bias_test`` the bias' Student's t test
+    (:func:`_debias`).  ``quoted`` is the best, less the bias where the bias is significant at 95 %.
+    ``sigma_quoted`` is the larger of the profile sigma, or the quadratic's without profiles, and the
+    fake sources' scatter, with the bias' standard error added in quadrature where the bias is taken
+    off.  Each partition's contrast carries the same, as ``corrected``, ``bias_t``,
+    ``bias_significant``, ``contrast_quoted`` and ``sigma_quoted``.
     """
     fit = found["fit"]
     best = dict(fit["best"])
@@ -1276,15 +1377,27 @@ def _summary(found: Dict[str, Any]) -> Dict[str, Any]:
         spread = [float("nan")] * 3
     quoted = [float(np.nanmax([a, b])) if np.isfinite(a) or np.isfinite(b) else float("nan")
               for a, b in zip(curv, spread)]
+    nf = len(rec["fakes"]) if rec is not None and rec["fakes"] else 0
+    rules = ({n: _debias(best[n], rec["bias"][n], rec["bias_se"][n], nf, n) for n in NAMES} if nf else None)
+    value_q = {n: float(rules[n]["corrected"] if rules and rules[n]["significant"] else best[n]) for n in NAMES}
+    if rules:
+        quoted = [float(np.hypot(q, rules[n]["se"])) if rules[n]["significant"] else q for q, n in zip(quoted, NAMES)]
     groups = []
     for g in found["groups"]:
         e = {k: g[k] for k in ("partition", "lam_um", "contrast", "sigma", "ok", "floor", "best")}
         gr = g.get("recovery")
         e["bias"] = None if gr is None else gr["bias"]
+        e["bias_se"] = None if gr is None else gr["bias_se"]
         e["scatter"] = None if gr is None else gr["scatter"]
         sc = float("nan") if gr is None else gr["scatter"] * g["contrast"]
-        e["sigma_quoted"] = float(np.nanmax([g["sigma"], sc])) if np.isfinite(g["sigma"]) or np.isfinite(sc) \
-            else float("nan")
+        q = float(np.nanmax([g["sigma"], sc])) if np.isfinite(g["sigma"]) or np.isfinite(sc) else float("nan")
+        rule = (_debias(g["contrast"], gr["bias"], gr["bias_se"], len(gr["fakes"]), "contrast")
+                if gr is not None and gr.get("fakes") else None)
+        e["corrected"] = None if rule is None else rule["corrected"]
+        e["bias_t"] = None if rule is None else rule["t"]
+        e["bias_significant"] = bool(rule is not None and rule["significant"])
+        e["contrast_quoted"] = float(rule["corrected"] if e["bias_significant"] else g["contrast"])
+        e["sigma_quoted"] = float(np.hypot(q, rule["se"])) if e["bias_significant"] else q
         groups.append(e)
     out = {
         "best": best, "tpe_best": fit["tpe_best"], "start": dict(zip(NAMES, fit["start"])),
@@ -1296,7 +1409,10 @@ def _summary(found: Dict[str, Any]) -> Dict[str, Any]:
         "floor_profile": dict(zip(NAMES, [p["floor"] for p in prof])) if prof else None,
         "sigma_near_best": sig([m["sigma"] for m in fit["marginal"]]),
         "minimum_near_best": dict(zip(NAMES, [m["minimum"] for m in fit["marginal"]])),
-        "sigma_quoted": sig(quoted),
+        "sigma_quoted": sig(quoted), "quoted": value_q,
+        "corrected": None if rules is None else {n: rules[n]["corrected"] for n in NAMES},
+        "bias_test": None if rules is None else {"t": {n: rules[n]["t"] for n in NAMES}, "t95": rules["rho"]["t95"],
+                                                 "significant": {n: rules[n]["significant"] for n in NAMES}},
         "n_reductions": int(fit["n_reductions"] + sum(g["n_reductions"] for g in found["groups"])
                             + sum((g.get("recovery") or {}).get("n_reductions", 0) for g in found["groups"])
                             + sum(int(g["position"]["fit"]["n_reductions"])
@@ -1363,10 +1479,7 @@ def _txt(s: Dict[str, Any], label: str) -> str:
         m = s["minimum_profile"]
         L.append(f"profile minima   : rho {m['rho']:.5f}\"  pa {m['pa'] % 360:.4f} deg  contrast {m['contrast']:.4e}")
     rec = s["recovery"]
-    q = s["sigma_quoted"]
-    L.append(f"to quote         : rho {q['rho']:.2e}\" ({q['rho_px']:.3f} px)  pa {q['pa']:.3f} deg ({q['arc_px']:.3f} px)  "
-             f"contrast {q['contrast']:.2e} ({100 * q['contrast_frac']:.1f} %), the larger of the profile sigma "
-             f"and the fakes' scatter")
+    bt = s.get("bias_test")
     if rec is not None and rec["fakes"]:
         bi, se, sc = rec["bias"], rec["bias_se"], rec["scatter"]
         L += [f"recovery check   : {len(rec['fakes'])} fake sources at the fit's separation and contrast",
@@ -1374,15 +1487,31 @@ def _txt(s: Dict[str, Any], label: str) -> str:
               f"contrast {100 * bi['contrast']:+.1f} +- {100 * se['contrast']:.1f} %",
               f"  scatter        : rho {sc['rho']:.2e}\"  pa {sc['pa']:.3f} deg  contrast "
               f"{100 * sc['contrast']:.1f} %"]
+        if bt:
+            t = bt["t"]
+            cr = s["corrected"]
+            L += [f"  bias / its se  : rho {t['rho']:+.1f}  pa {t['pa']:+.1f}  contrast {t['contrast']:+.1f}, "
+                  f"significant beyond {bt['t95']:.2f} (Student's t at 95 % for {len(rec['fakes'])} fakes)",
+                  f"  best less bias : rho {cr['rho']:.5f}\"  pa {cr['pa']:.4f} deg  contrast {cr['contrast']:.4e}"]
+    q, v = s["sigma_quoted"], s["quoted"]
+    off = [n for n in NAMES if bt and bt["significant"][n]]
+    L += [f"to quote         : rho {v['rho']:.5f} +- {q['rho']:.2e}\" ({q['rho_px']:.3f} px)  pa {v['pa']:.4f} +- "
+          f"{q['pa']:.3f} deg ({q['arc_px']:.3f} px)  contrast {v['contrast']:.4e} +- {q['contrast']:.2e} "
+          f"({100 * q['contrast_frac']:.1f} %)",
+          "  the sigmas are the larger of the profile sigma and the fakes' scatter"
+          + (f", and {' and '.join(off)} {'is' if len(off) == 1 else 'are'} the best less the fakes' significant bias, "
+             f"with the bias' se added in quadrature" if off else "")]
     if s["groups"]:
         L.append("partitions, the position held: contrast +- the sigma to quote (profile sigma, fakes' bias and "
                  "scatter)")
         for g in s["groups"]:
             lam = "" if g["lam_um"] is None else f"  {g['lam_um']:.4f} um"
-            fk = "" if g["scatter"] is None else (f", bias {100 * g['bias']:+.1f} %, scatter "
-                                                 f"{100 * g['scatter']:.1f} %")
-            L.append(f"  {g['partition']:>10s}{lam}  {g['contrast']:.4e} +- {g['sigma_quoted']:.2e} "
-                     f"(profile {g['sigma']:.2e}{fk})" + ("" if g["ok"] else "  (parabola failed: the best point)"))
+            fk = "" if g["scatter"] is None else (f", bias {100 * g['bias']:+.1f} +- {100 * g['bias_se']:.1f} %, "
+                                                 f"scatter {100 * g['scatter']:.1f} %")
+            fix = (f"  (the fit {g['contrast']:.4e} less its significant bias)" if g.get("bias_significant") else "")
+            L.append(f"  {g['partition']:>10s}{lam}  {g['contrast_quoted']:.4e} +- {g['sigma_quoted']:.2e} "
+                     f"(profile {g['sigma']:.2e}{fk})" + fix
+                     + ("" if g["ok"] else "  (parabola failed: the refined minimum)"))
     gp = s.get("group_positions")
     if gp:
         L.append("partitions' own positions: dx, dy from the star and rho, pa, contrast +- the sigma to quote")
@@ -1535,7 +1664,7 @@ def _plot_images(found: Dict[str, Any], path: str) -> str:
 
 
 def _plot_spectrum(s: Dict[str, Any], path: str) -> str:
-    """Draw each partition's contrast with the sigma to quote.
+    """Draw each partition's contrast to quote with its sigma, and the fit where a bias was taken off.
 
     Parameters
     ----------
@@ -1554,8 +1683,13 @@ def _plot_spectrum(s: Dict[str, Any], path: str) -> str:
     xs = np.array(lam if all(v is not None for v in lam) else range(len(g)), float)
     fig = _figure(6.0, 3.6)
     ax = fig.add_subplot(1, 1, 1)
-    ax.errorbar(xs, [x["contrast"] for x in g], yerr=[x["sigma_quoted"] for x in g], fmt="o", ms=4, lw=1,
-                color="#1f5fa8", capsize=2)
+    ax.errorbar(xs, [x["contrast_quoted"] for x in g], yerr=[x["sigma_quoted"] for x in g], fmt="o", ms=4, lw=1,
+                color="#1f5fa8", capsize=2, label="to quote")
+    moved = [k for k, x in enumerate(g) if x.get("bias_significant")]
+    if moved:
+        ax.plot(xs[moved], [g[k]["contrast"] for k in moved], "o", ms=3, mfc="none", color="0.45",
+                label="the fit, before its fakes' bias")
+        ax.legend(frameon=False, fontsize=7)
     ax.set_xlabel("wavelength (um)" if all(v is not None for v in lam) else "partition")
     ax.set_ylabel("contrast")
     if not all(v is not None for v in lam):
@@ -1657,13 +1791,16 @@ def write_extract(found: Dict[str, Any], out_dir: str, label: str = "companion")
                 rows.append(f"{NAMES[d]:>8s} {v:.7e} {r:.7e}")
         put("profiles", "extract_profiles.txt", "\n".join(rows) + "\n")
     if found["groups"]:
-        rows = ["# partition  lam_um  contrast  sigma_quoted  sigma_profile  fake_bias  fake_scatter  floor  ok"]
+        rows = ["# partition  lam_um  contrast  sigma_quoted  sigma_profile  fake_bias  fake_scatter  floor  ok  "
+                "contrast_corrected  contrast_quoted  (sigma_quoted goes with contrast_quoted, the contrast less the "
+                "fakes' bias where it is significant)"]
         for g in s["groups"]:
             lam = "nan" if g["lam_um"] is None else f"{g['lam_um']:.5f}"
             fb = "nan" if g["bias"] is None else f"{g['bias']:+.4f}"
             fs = "nan" if g["scatter"] is None else f"{g['scatter']:.4f}"
+            cc = "nan" if g.get("corrected") is None else f"{g['corrected']:.6e}"
             rows.append(f"{g['partition']} {lam} {g['contrast']:.6e} {g['sigma_quoted']:.3e} {g['sigma']:.3e} {fb} {fs} "
-                        f"{g['floor']:.3e} {int(g['ok'])}")
+                        f"{g['floor']:.3e} {int(g['ok'])} {cc} {g['contrast_quoted']:.6e}")
         put("partitions", "extract_partitions.txt", "\n".join(rows) + "\n")
     gp = s.get("group_positions")
     if gp:
