@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased — 2026-11-21 (pyKLIP's pools from a forkserver on Linux too, a louder stall line)
+
+From the FLIP validation's note of 2026-11-20, "pyKLIP's worker pool hangs on Linux when forked beside
+klip-tpe's threads".
+
+- **pyKLIP's worker pools start from a forkserver on Linux too** (`backends/pyklip.py`,
+  `_pyklip_start_method`), as they did on macOS.  `klip_parallelized` builds a pool for every
+  reduction, and under `fork` each worker was forked from the run's process while its other threads
+  ran.  A worker forked while another thread held a lock started with that lock taken for good, and
+  the pool's `join()` waited forever: tutorial 03 hung that way twice on patrick, at evaluations 295
+  and 151.  The forkserver is single-threaded, so its workers start clean.  Windows keeps `spawn`,
+  and `KLIP_TPE_PYKLIP_START` still overrides.
+- **pyKLIP's pools never import the run's main script** (`_NoMainContext`).  A forkserver or spawn
+  worker imports it first, which ran a script without a main guard, such as a tutorial run as a
+  script, again inside the worker, and the pool never started.  A pool's workers now start with the
+  main module out of sight, and without `maxtasksperchild`, since a replacement worker would import
+  it.
+- **The heartbeat's stall line names the run's sleeping children and is flushed**
+  (`heartbeat.children`).  It lists the child processes that have slept since the stage began, the
+  way such a hung worker shows, `heartbeat.json` keeps the warning as `stall`, and standard output
+  is flushed after it.  A script that logs with `print` to a file held the line in its buffer while
+  the run hung, which is likely why neither run's log had it.  The line no longer uses semicolons.
+- `backends/pyklip.py` documented to the rule.
+
 ## Unreleased — 2026-11-21 (seven more modules documented)
 
 - **Documented to the rule** (`tests/test_docstrings.py`): `animate.py`, `backends/custom.py`,

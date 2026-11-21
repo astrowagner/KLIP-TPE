@@ -31,11 +31,12 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-__all__ = ["Heartbeat", "FILENAME", "PERIOD", "read", "describe"]
+__all__ = ["Heartbeat", "FILENAME", "PERIOD", "read", "describe", "children"]
 
 #: file written in the run directory
 FILENAME = "heartbeat.json"
@@ -220,7 +221,10 @@ class Heartbeat:
         """Log a line when the current stage has run past its stall limit.
 
         The first line comes at ``stall_after`` and each next one once the stage's time has doubled since the
-        last.
+        last.  It names the process's children that have slept since the stage began, the way a pool worker
+        forked beside the run's threads hangs, and it goes into ``heartbeat.json`` as ``stall``.  Standard
+        output is flushed after it, since a line held in a buffer never reaches a log file while the run
+        hangs (FLIP note, 2026-11-20).
         """
         with self._lock:
             after, warned = self._stall_after, self._warned
@@ -231,11 +235,62 @@ class Heartbeat:
         limit = after if not warned else warned * 2.0
         if s < limit:
             return
+        kids = children()
         with self._lock:
             self._warned = s
-        self.log(f"  still in '{stage}' after {_dur(s)} (expected ~{_dur(after / 8.0)}); the run is "
-                 f"alive -- heartbeat.json is being stamped. Fewer concurrent searches, or fewer "
-                 f"workers each, is usually the cause; Ctrl-C is safe and  resume  is exact.")
+            self._state["stall"] = {"stage": stage, "seconds": round(s, 1), "expected_s": round(after / 8.0, 1),
+                                    "children": kids}
+        idle = [k for k in kids if k["state"] in ("S", "D") and k["age_s"] >= 0.9 * s]
+        self.log(f"  still in '{stage}' after {_dur(s)}, against about {_dur(after / 8.0)} usually.  The run "
+                 f"is alive, since heartbeat.json is still being stamped."
+                 + (f"  {len(idle)} child process{'es' * (len(idle) != 1)} "
+                    f"({', '.join(str(k['pid']) for k in idle[:4])}) {'have' if len(idle) != 1 else 'has'} "
+                    f"slept since the stage began, the way a pool worker forked beside the run's threads hangs."
+                    if idle else "")
+                 + "  Fewer concurrent searches, or fewer workers each, is the usual cause.  Ctrl-C is safe "
+                   "and resume is exact.")
+        for stream in (sys.stdout, sys.stderr):           # a line held in a buffer never reaches a log file
+            try:
+                stream.flush()
+            except Exception:
+                pass
+        self.write()
+
+
+def children(pid: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Return a process's children with their state and age, from ``/proc``.
+
+    Parameters
+    ----------
+    pid : int or None, default None
+        The process, None for this one.
+
+    Returns
+    -------
+    kids : list of dict
+        Each child's ``pid``, ``state`` (``/proc``'s letter, such as ``S`` for asleep) and ``age_s``
+        (seconds since it started), empty where ``/proc`` is missing, as on macOS.
+    """
+    pid = os.getpid() if pid is None else int(pid)
+    out: List[Dict[str, Any]] = []
+    try:
+        hz = float(os.sysconf("SC_CLK_TCK"))
+        with open("/proc/uptime") as f:
+            up = float(f.read().split()[0])
+        pids = [int(d) for d in os.listdir("/proc") if d.isdigit()]
+    except (OSError, ValueError, AttributeError):
+        return out
+    for k in pids:
+        try:
+            with open(f"/proc/{k}/stat") as f:
+                st = f.read()
+            rest = st[st.rindex(")") + 2:].split()
+            if int(rest[1]) != pid:
+                continue
+            out.append({"pid": k, "state": rest[0], "age_s": round(up - int(rest[19]) / hz, 1)})
+        except (OSError, ValueError, IndexError):
+            continue
+    return sorted(out, key=lambda d: d["pid"])
 
 
 def _dur(s: float) -> str:

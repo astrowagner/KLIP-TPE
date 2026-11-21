@@ -38,6 +38,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DONE = [
     "klip_tpe/animate.py",
     "klip_tpe/backends/custom.py",
+    "klip_tpe/backends/pyklip.py",
     "klip_tpe/backends/spaceklip.py",
     "klip_tpe/backends/vip.py",
     "klip_tpe/bench.py",

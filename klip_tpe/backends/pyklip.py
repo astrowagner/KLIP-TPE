@@ -1,28 +1,30 @@
-"""pyKLIP backend (https://pyklip.readthedocs.io).
+"""The pyKLIP backend (https://pyklip.readthedocs.io).
 
-* :class:`PyKLIPReducer` -- the optimizer's pre-processed cube goes through
-  ``pyklip.parallelized.klip_parallelized`` (ADI, RDI or ADI+RDI; ``algo`` klip / nmf /
-  empca); derotation and combination are done here with the package's own routines so
-  the conventions match the other backends.  Parameter mapping (searched -> pyKLIP):
+* :class:`PyKLIPReducer` sends the search's prepared cube through
+  ``pyklip.parallelized.klip_parallelized``, in ADI, RDI or ADI+RDI with the ``klip``, ``nmf`` or
+  ``empca`` algorithm.  The derotation and combination are this package's own, so the conventions
+  match the other backends.  The searched parameters map onto pyKLIP's:
 
   ==============  ==========================================================
-  ``k_klip``       ``numbasis`` (k-scan: ``numbasis = 1..k`` in one call)
+  ``k_klip``       ``numbasis`` (a k-scan asks for ``numbasis = 1..k`` in one call)
   ``n_ang``        ``subsections``
-  ``inrad/outrad`` ``IWA / OWA`` with ``annuli = n_annuli`` (default 1)
-  ``angsep``       ``movement = max(angsep * lambda/D, 1e-6) [px]`` (0 = the frame itself only)
+  ``inrad/outrad`` ``IWA`` and ``OWA``, with ``annuli = n_annuli`` (default 1)
+  ``angsep``       ``movement = max(angsep * lambda/D, 1e-6)`` px, 0 for the frame itself only
   ``anglemax``     ``maxrot``
-  ``bin, filter, corr_thresh, noise_max, coronoise_max``  handled upstream
+  ``bin, filter, corr_thresh, noise_max, coronoise_max``  handled before pyKLIP
   ==============  ==========================================================
 
-* :func:`dataset_from_pyklip` -- turn any ``pyklip.instruments.Instrument.Data`` object
-  (GPI, CHARIS, JWST from spaceKLIP, GenericData ...) into :class:`Dataset`\\ s: frames
-  are re-centred on a common pixel, cropped, and split into partitions (default: one per
-  ``filenums`` group, i.e. per exposure / roll; ``partition_by=None`` for one dataset).
+* :func:`dataset_from_pyklip` turns any ``pyklip.instruments.Instrument.Data`` object (GPI, CHARIS,
+  JWST from spaceKLIP, GenericData and others) into :class:`~klip_tpe.reducer.Dataset` objects.  The
+  frames are centered again on a common pixel, cropped and split into partitions, by default one per
+  ``filenums`` group, an exposure or a roll, or none with ``partition_by=None``.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
+import threading
 from typing import Any, Callable, Dict, Optional, Sequence
 
 import numpy as np
@@ -39,6 +41,16 @@ MIN_MOVEMENT_PX = 1e-6
 
 
 def _require_pyklip():
+    """Import pyKLIP and set it up for a search.
+
+    It checks pyKLIP against this numpy (:func:`_check_pyklip_numpy`), quiets its progress bars
+    (:func:`_quiet_pyklip_progress`) and chooses how its worker pools start (:func:`_pyklip_start_method`).
+
+    Raises
+    ------
+    ImportError
+        If pyklip is missing, or needs a newer numpy than this environment has.
+    """
     try:
         import pyklip.parallelized as par  # noqa: F401
         import pyklip.klip as pk
@@ -50,42 +62,149 @@ def _require_pyklip():
 
 
 def _pyklip_start_method(par) -> None:
-    """How pyKLIP starts the worker pool it builds for EVERY reduction.
+    """Choose how pyKLIP starts the worker pool it builds for every reduction.
 
-    ``klip_parallelized`` creates a new ``multiprocessing.Pool`` on each call.  Under
-    ``spawn`` -- macOS's default start method since Python 3.8 -- each pool worker is a fresh
-    interpreter that imports numpy, scipy and pyklip before doing anything, which costs
-    seconds per reduction, and a three-draw evaluation is six reductions: a MIRI search on a
-    Mac spent most of its time starting processes (measured on Linux with spawn forced: 18.0
-    and 12.6 s per three-draw evaluation against 8.5 and 4.4 with fork).  So on macOS pyKLIP's
-    pools come from a ``forkserver`` instead: one server process with pyklip imported, the
-    workers forked from it (8.7 and 4.0 s; safe on macOS, where the server is single-threaded).
-    ``KLIP_TPE_PYKLIP_START`` overrides (``spawn``, ``fork``, ``forkserver``); elsewhere the
-    platform default stands.  The arithmetic does not change -- the same functions run on the
-    same arrays -- only how the workers come to exist.
+    ``klip_parallelized`` creates a new ``multiprocessing.Pool`` on each call, so a search starts
+    workers thousands of times.  They come from a ``forkserver``, one server process with numpy,
+    scipy and pyklip imported, the workers forked from it, on Linux and macOS alike (Windows keeps
+    ``spawn``).  ``KLIP_TPE_PYKLIP_START`` overrides, with ``spawn``, ``fork`` or ``forkserver``.
+    The arithmetic does not change, only how the workers come to exist.
+
+    Parameters
+    ----------
+    par : module
+        ``pyklip.parallelized``, whose ``mp`` this replaces with a :class:`_NoMainContext`.
+
+    Notes
+    -----
+    Under ``spawn``, macOS's default, each worker is a new interpreter that imports numpy, scipy and
+    pyklip first.  A three-draw MIRI evaluation then took 18.0 and 12.6 s against 8.7 and 4.0 s from
+    the forkserver.  Under ``fork``, Linux's default until Python 3.14, each worker is forked from the
+    run's own process while its other threads run, the heartbeat, the panel pipes and the reduction
+    pools.  A worker forked while another thread holds a lock starts with that lock taken for good, and
+    pyKLIP's ``join()`` then waits for it forever.  Tutorial 03 hung that way twice on patrick, at
+    evaluations 295 and 151 of its forward-modeled search (FLIP note, 2026-11-20).  The forkserver is a
+    single-threaded process, so its workers start clean.  Its pools never import the run's main script
+    (:class:`_NoMainContext`), so a script without an ``if __name__ == "__main__":`` guard, such as a
+    tutorial run as a script, works too.
     """
     name = os.environ.get("KLIP_TPE_PYKLIP_START", "").strip().lower()
-    if not name and sys.platform == "darwin":
-        name = "forkserver"
-    if not name or getattr(par, "_klip_tpe_start", None) == name:
+    if not name:
+        name = "spawn" if sys.platform == "win32" else "forkserver"
+    if getattr(par, "_klip_tpe_start", None) == name:
         return
     import multiprocessing
     ctx = multiprocessing.get_context(name)
     if name == "forkserver":
         ctx.set_forkserver_preload(["numpy", "scipy.ndimage", "pyklip.parallelized"])
-    par.mp = ctx
+    par.mp = _NoMainContext(ctx)
     par._klip_tpe_start = name
 
 
-def _quiet_pyklip_progress(par) -> None:
-    """Turn off pyklip's per-call progress bar.
+#: one pool at a time hides the main module, so two threads never restore each other's
+_MAIN_LOCK = threading.Lock()
 
-    ``klip_parallelized`` waits for its workers inside ``trange(len(outputs))`` regardless
-    of ``verbose``, so an optimizer that calls it hundreds of times draws hundreds of bars:
-    in a terminal that is scrolling noise, and in a notebook with ipywidgets installed each
-    bar is a widget output with its state saved into the file -- tutorial 03 grew from 2 to
-    7 MB (426 widgets) the day ipywidgets appeared.  The bars are replaced by disabled ones
-    on the pyklip module itself, once; ``KLIP_TPE_PYKLIP_PROGRESS=1`` keeps them.
+
+@contextlib.contextmanager
+def _main_hidden():
+    """Hide the main module's ``__file__`` and ``__spec__`` from the processes started meanwhile.
+
+    A ``forkserver`` or ``spawn`` worker imports the parent's main script first, as ``__mp_main__``,
+    found by those two attributes.  Without them the worker leaves the main module alone, as it does
+    for an interactive session or a notebook.
+
+    Yields
+    ------
+    None
+        The attributes are back when the block ends, however it ends.
+    """
+    m = sys.modules.get("__main__")
+    if m is None:
+        yield
+        return
+    has_file = "__file__" in vars(m)
+    path = vars(m).get("__file__")
+    spec = getattr(m, "__spec__", None)
+    try:
+        if has_file:
+            del m.__file__
+        m.__spec__ = None
+        yield
+    finally:
+        if has_file:
+            m.__file__ = path
+        m.__spec__ = spec
+
+
+class _NoMainContext:
+    """A multiprocessing context whose pools' workers never import the run's main script.
+
+    pyKLIP's workers run pyklip's own functions on shared arrays and need nothing from the script that
+    started the run.  A ``forkserver`` or ``spawn`` worker would import that script first, which runs a
+    script without an ``if __name__ == "__main__":`` guard again inside the worker, and the pool never
+    starts.  So a pool is made with the main module out of sight (:func:`_main_hidden`), and without
+    ``maxtasksperchild``, since a worker started later to replace one would import the script.
+    Everything else is the context's own.
+
+    Parameters
+    ----------
+    ctx : multiprocessing.context.BaseContext
+        The context.
+    """
+
+    def __init__(self, ctx):
+        self._ctx = ctx
+
+    def __getattr__(self, name: str):
+        """Return the context's own attribute.
+
+        Parameters
+        ----------
+        name : str
+            The attribute.
+
+        Returns
+        -------
+        value : object
+            The context's attribute.
+        """
+        return getattr(self._ctx, name)
+
+    def Pool(self, *args, **kwargs):
+        """Return the context's pool, its workers started with the main module out of sight.
+
+        Parameters
+        ----------
+        args : tuple
+            The pool's positional arguments.
+        kwargs : dict
+            Its keyword arguments, ``maxtasksperchild`` dropped.
+
+        Returns
+        -------
+        pool : multiprocessing.pool.Pool
+            The pool, its workers running.
+        """
+        kwargs.pop("maxtasksperchild", None)
+        if len(args) > 3:                       # (processes, initializer, initargs, maxtasksperchild)
+            args = args[:3]
+        with _MAIN_LOCK, _main_hidden():
+            return self._ctx.Pool(*args, **kwargs)
+
+
+def _quiet_pyklip_progress(par) -> None:
+    """Turn off pyklip's progress bar of each call.
+
+    ``klip_parallelized`` waits for its workers inside ``trange(len(outputs))`` whatever ``verbose`` says,
+    so a search that calls it hundreds of times draws hundreds of bars.  In a terminal that is scrolling
+    noise, and in a notebook with ipywidgets each bar is a widget whose state is saved into the file.
+    Tutorial 03 grew from 2 to 7 MB (426 widgets) the day ipywidgets appeared.  The bars are replaced by
+    disabled ones on the pyklip module itself, once, and ``KLIP_TPE_PYKLIP_PROGRESS=1`` keeps them.
+
+    Parameters
+    ----------
+    par : module
+        ``pyklip.parallelized``.
     """
     if getattr(par, "_klip_tpe_quiet", False) or os.environ.get("KLIP_TPE_PYKLIP_PROGRESS"):
         return
@@ -106,12 +225,23 @@ def _quiet_pyklip_progress(par) -> None:
 
 
 def _check_pyklip_numpy(pk=None) -> None:
-    """pyklip >= 2.9 calls ``numpy.reshape(..., copy=False)`` -- a keyword that exists only
-    in numpy >= 2.1 -- and declares no numpy version.  With an older numpy every rotation
-    and alignment raises ``TypeError("reshape() got an unexpected keyword argument 'copy'")``,
-    which inside a search is not one error but every evaluation failing the same way: paper
-    run D on 2026-09-17 spent 350 evaluations on it and ended with "run complete" and no
-    winner.  Probe once, at construction, and say what to do."""
+    """Refuse a pyklip that needs a newer numpy than this environment has.
+
+    pyklip 2.9 and later call ``numpy.reshape(..., copy=False)``, a keyword of numpy 2.1 and later, and
+    declare no numpy version.  With an older numpy every rotation and alignment raises ``TypeError``, which
+    inside a search is every evaluation failing the same way.  Paper run D spent 350 evaluations on it on
+    2026-09-17 and ended with "run complete" and no winner.  So it is probed once, at construction.
+
+    Parameters
+    ----------
+    pk : module or None, default None
+        ``pyklip.klip``, None to import it.
+
+    Raises
+    ------
+    ImportError
+        If pyklip calls ``numpy.reshape(copy=...)`` and numpy is older than 2.1, with what to install.
+    """
     try:
         np.reshape(np.zeros(2), (2,), copy=False)
         return                                                    # numpy >= 2.1: nothing to check
@@ -135,13 +265,40 @@ def _check_pyklip_numpy(pk=None) -> None:
 
 
 class PyKLIPReducer(KLIPReducer):
-    """KLIP/NMF/empca subtraction by pyKLIP on the optimizer's pre-processed cube.
+    """KLIP, NMF or empca subtraction by pyKLIP, on the search's prepared cube.
 
-    Extra defaults (fixed unless you add them to the search space): ``algo``
-    (``'klip'`` | ``'nmf'`` | ``'empca'``), ``mode`` (``'ADI'`` | ``'RDI'`` | ``'ADI+RDI'``;
-    RDI needs ``Dataset.ref_cube``), ``n_annuli`` (radial subdivisions of the zone),
-    ``annuli_spacing``, ``corr_smooth``, ``numthreads``.  ``comb_type`` ``'nwadi'`` (default,
-    the noise-weighted combine of the built-in reducer) | ``'mean'`` | ``'median'``.
+    Its extra defaults stay fixed unless the search space holds them: ``algo`` (``"klip"``, ``"nmf"`` or
+    ``"empca"``), ``mode`` (``"ADI"``, ``"RDI"`` or ``"ADI+RDI"``, RDI needing ``Dataset.ref_cube``),
+    ``n_annuli`` (radial divisions of the zone), ``annuli_spacing``, ``corr_smooth``, ``numthreads`` and
+    ``minrot``.  ``comb_type`` is ``"nwadi"`` (the default, the built-in reducer's noise-weighted
+    combination), ``"mean"`` or ``"median"``.
+
+    Parameters
+    ----------
+    data : Dataset
+        The pre-processed frames.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    lam_m : float
+        Wavelength, in meters.
+    diam_m : float
+        Telescope diameter, in meters.
+    kw : dict
+        Other arguments of :class:`~klip_tpe.reducer.KLIPReducer`.
+
+    Attributes
+    ----------
+    name : str
+        ``"pyklip"``.
+    supports_kscan : bool
+        True, the KL modes asked for in one call.
+    supports_fm : bool
+        False, since pyKLIP gives this package no forward model here.
+
+    Raises
+    ------
+    ImportError
+        If pyklip is missing, or needs a newer numpy (:func:`_require_pyklip`).
     """
 
     name = "pyklip"
@@ -166,22 +323,34 @@ class PyKLIPReducer(KLIPReducer):
                            default_mode: str = "ADI+RDI") -> None:
         """Search pyKLIP's own reference selection instead of a fixed one.
 
-        pyKLIP 2.10 already ranks references: per target frame and per sector, its ADI+RDI
-        keeps the ``maxnumbasis`` most-correlated frames of the union of the other roll and
-        the reference library (``parallelized._klip_section_multifile_perfile``).  Left
-        unset, ``maxnumbasis`` is ``max(numbasis)`` -- ``k_klip`` -- so one number used to set
-        both the KL truncation and the library size.  This makes the library two searched
-        dimensions of its own:
+        pyKLIP 2.10 already ranks references.  For each target frame and sector, its ADI+RDI keeps the
+        ``maxnumbasis`` most correlated frames of the other roll and the reference library together
+        (``parallelized._klip_section_multifile_perfile``).  Left unset, ``maxnumbasis`` is ``max(numbasis)``,
+        ``k_klip``, so one number set both the KL truncation and the library's size.  This makes the library
+        two searched dimensions of its own:
 
-        * ``mode`` -- which pools (``ADI``: the other roll only, ``RDI``: the reference star
-          only, ``ADI+RDI``: both, ranked together);
-        * ``maxnumbasis`` -- how many of the most-correlated frames of those pools each
-          target keeps, decoupled from ``k_klip``.
+        * ``mode``, which pools: ``ADI`` the other roll only, ``RDI`` the reference star only, ``ADI+RDI``
+          both, ranked together,
+        * ``maxnumbasis``, how many of those pools' most correlated frames each target keeps, apart from
+          ``k_klip``.
 
-        It is the pyKLIP-native counterpart of :meth:`KLIPReducer.set_reference_library`,
-        which this backend cannot apply: one count across the chosen pools rather than one
-        per pool, but ranked per sector rather than per annulus.  ``partition`` labels the
-        roll of each science frame and sizes the other-roll pool.
+        It is the pyKLIP counterpart of :meth:`~klip_tpe.reducer.KLIPReducer.set_reference_library`, which this
+        backend cannot apply: one count across the chosen pools rather than one per pool, but ranked per sector
+        rather than per annulus.
+
+        Parameters
+        ----------
+        partition : sequence
+            Each science frame's roll label, which sizes the other roll's pool.
+        modes : sequence of str, default ("ADI", "RDI", "ADI+RDI")
+            The pools to choose among.  Those without references are left out.
+        default_mode : str, default "ADI+RDI"
+            The seeded configuration's mode, the last possible one when it has no references.
+
+        Raises
+        ------
+        ValueError
+            If the labels do not match the science frames, or no mode has references.
         """
         part = np.asarray(list(partition))
         n_sci = int(self.data.cube.shape[0])
@@ -200,8 +369,14 @@ class PyKLIPReducer(KLIPReducer):
                             "default_mode": str(default_mode)}
 
     def reference_params(self):
-        """``mode`` and ``maxnumbasis`` when the native library is searched; never the
-        ``nkeep_*`` counts, which this backend cannot apply."""
+        """Return the searched dimensions of pyKLIP's own library, when it is searched.
+
+        Returns
+        -------
+        params : list of Param
+            ``mode`` and ``maxnumbasis``, empty without :meth:`set_native_library`.  Never the ``nkeep_*``
+            counts, which this backend cannot apply.
+        """
         s = getattr(self, "_native_lib", None)
         if s is None:
             return []
@@ -214,6 +389,50 @@ class PyKLIPReducer(KLIPReducer):
                       doc="most-correlated frames kept per target and sector (pyKLIP maxnumbasis)")]
 
     def _subtract(self, bcube, bang, kp: KLIPParams, p, filt, req, mcube, ref_basis, fm_ref, meta):
+        """Subtract the PSF with pyKLIP, then derotate and combine with this package's routines.
+
+        Parameters
+        ----------
+        bcube : ndarray, shape (nb, ny, nx)
+            The prepared frames, injected, selected, high-pass filtered and binned.
+        bang : ndarray, shape (nb,)
+            Parallactic angle of each frame, in degrees.
+        kp : KLIPParams
+            The KLIP settings.
+        p : dict
+            The request's parameters, with this backend's own.
+        filt : int
+            Width of the high-pass box, in pixels, for the reference cube.
+        req : ReductionRequest
+            The request, not used here.
+        mcube : ndarray or None
+            The KLIP-FM model cube, not used here.
+        ref_basis : ndarray or None
+            Reference frames for the basis, not used here: RDI takes ``Dataset.ref_cube``.
+        fm_ref : ndarray or None
+            The planet model in ``ref_basis``, not used here.
+        meta : dict
+            The reduction's notes, given ``rdi_note`` when RDI falls back to ADI.
+
+        Returns
+        -------
+        image : ndarray, shape (ny, nx) or (k_klip, ny, nx)
+            The combined image, or one per number of KL modes with ``kp.k_scan``.
+        fm_image : None
+            No forward model.
+        info : dict
+            ``backend``, ``algo``, ``mode``, ``movement_px`` and ``maxnumbasis``.
+
+        Notes
+        -----
+        pyKLIP picks references with ``moves >= movement`` and nothing else, so at ``movement = 0`` the target
+        frame, and every frame at the same angle, is in its own basis.  In ADI and ADI+RDI the frame is then
+        subtracted from itself, and a companion comes back at round-off (paper run D: a peak of 3e-7 in ADI
+        and 2e-6 in ADI+RDI, against 2.8 in RDI).  The built-in reducer's ``angsep = 0`` means the target frame
+        alone is left out, so ``movement`` has a floor of :data:`MIN_MOVEMENT_PX`.  pyKLIP also keeps at most
+        ``maxnumbasis`` references and clips ``numbasis`` to them, so ``maxnumbasis`` is held at ``k_klip`` or
+        above.
+        """
         import pyklip.parallelized as par
         n, ny, nx = bcube.shape
         cx, cy = (nx - 1) / 2.0, (ny - 1) / 2.0
@@ -278,6 +497,13 @@ class PyKLIPReducer(KLIPReducer):
                            "maxnumbasis": mnb}
 
     def describe(self) -> Dict[str, Any]:
+        """Return the reducer's setup, with the backend's name.
+
+        Returns
+        -------
+        setup : dict
+            :meth:`klip_tpe.reducer.KLIPReducer.describe`'s, with ``backend``.
+        """
         d = super().describe()
         d.update(backend="pyklip")
         return d
@@ -287,20 +513,39 @@ def dataset_from_pyklip(data, crop_half: Optional[int] = None, partition_by: Opt
                         name: str = "pyklip", texp_per_frame: Optional[float] = None,
                         tags_fn: Optional[Callable[[Any, np.ndarray], Optional[Dict[str, np.ndarray]]]] = None,
                         include_psflib: bool = True, wv_index: Optional[int] = None) -> Dict[str, Dataset]:
-    """Convert a pyKLIP ``Data`` object into :class:`Dataset`\\ s.
+    """Turn a pyKLIP ``Data`` object into datasets, one per partition.
 
-    Frames (``data.input``) are shifted (bilinear) so every star center (``data.centers``)
-    lands on the common pixel ``((nx-1)/2, (ny-1)/2)`` of a ``2*crop_half`` cut-out
-    (default: the largest square that fits); ``data.PAs`` are the parallactic angles
-    (pyKLIP derotates CCW by PA, like this package).  Multi-wavelength data: pass
-    ``wv_index`` to pick one channel (spectral collapse is not done here).
-    ``partition_by``: ``'roll'`` (one partition per distinct position angle -- the natural
-    unit for JWST, where each exposure of a roll is its own ``filenum``), ``'filenums'``
-    (one partition per exposure), ``'filenames'``, any other attribute of ``data``, or
-    ``None`` (one dataset).
-    ``tags_fn(data, index) -> {'corrs','noises','coronoise'}`` optionally supplies frame
-    quality tags.  ``include_psflib`` attaches ``data.psflib`` master frames as
-    ``Dataset.ref_cube`` for RDI when present.
+    The frames (``data.input``) are shifted, bilinearly, so that each star center (``data.centers``) lands
+    on the common pixel ``((nx - 1) / 2, (ny - 1) / 2)`` of a cut-out of side ``2 crop_half``.
+    ``data.PAs`` are the parallactic angles, since pyKLIP derotates counter-clockwise by PA, as this
+    package does.
+
+    Parameters
+    ----------
+    data : pyklip.instruments.Instrument.Data
+        The pyKLIP data.
+    crop_half : int or None, default None
+        Half the cut-out's side, in pixels, None for the largest square that fits.
+    partition_by : str or None, default "filenums"
+        ``"roll"`` for one partition per distinct position angle, the natural unit for JWST, where each
+        exposure of a roll is its own filenum, ``"filenums"`` for one per exposure, ``"filenames"`` or any
+        other attribute of ``data``, None for one dataset.
+    name : str, default "pyklip"
+        Start of the partitions' names.
+    texp_per_frame : float or None, default None
+        Exposure time per frame, None to weight a partition by its number of frames.
+    tags_fn : callable or None, default None
+        Function ``tags_fn(data, index) -> {"corrs", "noises", "coronoise"}`` giving the frames' quality
+        tags, None for none.
+    include_psflib : bool, default True
+        Whether to attach ``data.psflib``'s master frames as ``Dataset.ref_cube`` for RDI, when present.
+    wv_index : int or None, default None
+        The channel of multi-wavelength data, None for every frame.  No spectral collapse is done here.
+
+    Returns
+    -------
+    datasets : dict of str to Dataset
+        The partitions, by name.
     """
     from scipy import ndimage
     imgs = np.asarray(data.input, np.float32)

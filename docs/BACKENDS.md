@@ -103,12 +103,27 @@ the calibration reaches its contrast cap (`CalibrationConfig.max_contrast = 0.1`
 injections still invisible, and the search ranks noise.  Give both for any real run.
 
 **pyKLIP starts a worker pool for every reduction.**  `klip_parallelized` builds a new
-`multiprocessing.Pool` on each call, and under `spawn` -- macOS's default -- each worker is a
-fresh interpreter importing numpy, scipy and pyklip first.  On macOS the backend therefore hands
-pyKLIP a `forkserver` context: one server with pyklip imported, the workers forked from it.
-Measured on MIRI F1140C evaluations (three draws each), spawn cost 18.0 and 12.6 s against 8.7
-and 4.0 s with the forkserver, and the scores are identical to the last bit.
-`KLIP_TPE_PYKLIP_START=spawn|fork|forkserver` overrides; elsewhere the platform default stands.
+`multiprocessing.Pool` on each call, so a search starts workers thousands of times.  The backend
+hands pyKLIP a `forkserver` context on Linux and macOS (Windows keeps `spawn`): one server with
+numpy, scipy and pyklip imported, the workers forked from it.
+
+- Under `spawn`, macOS's default, each worker is a new interpreter importing numpy, scipy and
+  pyklip first.  Measured on MIRI F1140C evaluations of three draws each, spawn cost 18.0 and
+  12.6 s against 8.7 and 4.0 s with the forkserver, and the scores are identical to the last bit.
+- Under `fork`, Linux's default, each worker is forked from the run's own process while its other
+  threads run.  A worker forked while another thread holds a lock starts with that lock taken for
+  good, and pyKLIP's `join()` waits for it forever.  Tutorial 03 hung that way twice on patrick, at
+  evaluations 295 and 151 of its forward-modeled search (FLIP note, 2026-11-20).  The forkserver is
+  single-threaded, so its workers start clean.
+- The pools' workers never import the run's main script.  A forkserver or spawn worker would import
+  it first, which runs a script without an `if __name__ == "__main__":` guard again inside the
+  worker, and the pool never starts.  A tutorial run as a script works for that reason.
+
+`KLIP_TPE_PYKLIP_START=spawn|fork|forkserver` overrides.
+
+When a stage runs far longer than the run's evaluations usually take, the heartbeat's line in the
+log names the run's child processes that have slept since the stage began, which is how such a
+hung pool worker shows, and `heartbeat.json` keeps it as `stall`.
 
 **pyKLIP's `maxnumbasis` selects the library; it does not truncate it.**  Per target frame and
 sector, pyKLIP keeps the `maxnumbasis` frames of the chosen pools most correlated with the

@@ -10,6 +10,8 @@ import json
 import os
 import time
 
+import pytest
+
 from klip_tpe import heartbeat as hbmod
 from klip_tpe.heartbeat import FILENAME, Heartbeat, describe, read
 
@@ -273,3 +275,26 @@ def test_the_annulus_books_are_not_filed_under_the_last_hook(tmp_path):
     assert any(s is not None for s in seen["eval"]), "the evaluations set a threshold"
     assert seen["hook"] == ("annulus 1 candidate search", None)
     assert seen["books"] == ("annulus 1 display books", None)
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="needs /proc")
+def test_the_stall_line_names_a_sleeping_child_and_reaches_the_file(tmp_path):
+    """A pool worker forked beside the run's threads sleeps for good, and the line was held in
+    stdout's buffer while the run hung (FLIP note, 2026-11-20)."""
+    import subprocess
+    said = []
+    child = subprocess.Popen(["sleep", "30"])
+    try:
+        time.sleep(0.05)
+        hb = Heartbeat(str(tmp_path), log=said.append, period=5.0)
+        hb.stage("annulus 1 eval 151/300 (tpe)")
+        hb.stall_after(0.05)
+        time.sleep(0.08)
+        hb._check_stall()
+    finally:
+        child.kill()
+        child.wait()
+    assert len(said) == 1 and "alive" in said[0] and "resume" in said[0]
+    assert str(child.pid) in said[0] and "slept since the stage began" in said[0], said
+    st = read(str(tmp_path))["stall"]
+    assert st["stage"].startswith("annulus 1 eval 151") and any(k["pid"] == child.pid for k in st["children"])
