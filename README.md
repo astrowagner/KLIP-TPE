@@ -191,7 +191,7 @@ lists all of them.
 | `runner.py` | calibrate → search → validate, products, checkpoints, `resume` / `extend`, callbacks |
 | `display.py`, `intro.py`, `animate.py`, `plots.py` | live panel, books, launch movie, GIF / MP4, diagnostics |
 | `products.py`, `stitch.py`, `verify.py`, `param_verify.py`, `candidates.py` | contrast curves, stitches, S/N maps, the verification stack |
-| `companion.py`, `extract.py` | known companions: taking one out, its S/N, and its position and contrast with uncertainties |
+| `companion.py`, `extract.py`, `extract_display.py` | known companions: taking one out, its S/N, and its position and contrast with uncertainties, with a live dashboard |
 | `instruments/` | `generic`, `near`, `nomic`, `ales` adapters |
 | `backends/` | `pyklip`, `vip`, `spaceklip`, `custom` |
 | `datasets.py` | public example data (auto-download) |
@@ -207,7 +207,7 @@ lists all of them.
 * `docs/DISPLAY.md` — the live panel, cell by cell, and every product file.
 * `docs/BACKENDS.md` — pyKLIP / VIP / spaceKLIP: parameter mapping, conventions, ingestion.
 * `docs/CUSTOM_PIPELINE.md` — plugging in your own reduction (three levels).
-* `docs/EXTRACT.md` — a known companion's position and contrast with uncertainties, per wavelength group too (`klip-tpe extract`).
+* `docs/EXTRACT.md` — a known companion's position and contrast with uncertainties, per wavelength group too, and its live dashboard (`klip-tpe extract`).
 * `docs/CLI.md` — every command-line argument.
 * `CHANGELOG.md`.
 

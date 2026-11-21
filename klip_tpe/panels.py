@@ -20,6 +20,9 @@ of the pipe closes.
 
 ``KLIP_TPE_PANELS=thread`` draws the panels on the run's render thread, as before, and so does
 a run whose process cannot start or stops.
+
+``klip-tpe extract``'s dashboard is drawn by the same process
+(:class:`klip_tpe.extract_display.ExtractDisplay`), one ``extract_panel`` message a panel.
 """
 from __future__ import annotations
 
@@ -547,6 +550,26 @@ class _Worker:
             box = msg.get("box")
             if box and not D._fills((int(fig.bbox.width), int(fig.bbox.height)), box):
                 out["screen"] = screen_copy(fig, box)
+            out["ok"] = True
+        except Exception as exc:                  # noqa: BLE001 - reported to the run
+            out.update(ok=False, error=f"{exc!r}\n" + traceback.format_exc(limit=4))
+        out["s"] = time.time() - t0
+        self.reply(out)
+
+    def _op_extract_panel(self, msg: Dict[str, Any]) -> None:
+        """Draw a panel of ``klip-tpe extract``'s dashboard and report it.
+
+        Parameters
+        ----------
+        msg : dict
+            ``id``, ``st`` (the panel's state, :meth:`klip_tpe.extract_display.ExtractDisplay.state`) and
+            ``png``.
+        """
+        t0 = time.time()
+        out: Dict[str, Any] = {"op": "done", "id": msg.get("id"), "kind": "extract_panel", "png": msg.get("png")}
+        try:
+            from .extract_display import render_panel
+            render_panel(msg["st"], msg["png"])
             out["ok"] = True
         except Exception as exc:                  # noqa: BLE001 - reported to the run
             out.update(ok=False, error=f"{exc!r}\n" + traceback.format_exc(limit=4))

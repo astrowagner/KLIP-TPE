@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased — 2026-11-21 (a live dashboard for `klip-tpe extract`)
+
+From a user's note of 2026-11-21, "a live display for `klip-tpe extract`, and the per-group
+position fit".
+
+- **A live dashboard for the extraction** (`klip_tpe/extract_display.py`, `ExtractDisplay`), after the
+  IDL predecessor's `mwcm_sub_dash` and laid out as it was.  Each panel is 1600 x 760 pixels on black,
+  in `steps/` of the extraction's directory.  It holds two rows of five inferno images centered on the
+  star (the original, the best null, the current trial, the injected models of the best and of the
+  trial, the three S/N maps and the PSF models from the run's injection model), 13 x 13 zoom stamps on
+  the best, the convergence trace with its sideways histogram, the parabolas of the trials near the best
+  and then of the profile scans, the corner plot colored by -log residual, and the text with the times
+  and the live minimum with its 1-sigma.
+- The fake sources' and the partitions' own fits get panels of their own, on their own reductions.  A
+  running table of the fakes' offsets, a spectrum that fills as the partitions' contrasts come, and with
+  `--group-positions` a chromatic panel of the partitions' dx and dy less the combined fit take the
+  corner plot's place.
+- The run's panel process draws the panels (an `extract_panel` message), so the fit never waits for one,
+  and `klip-tpe view --run-dir <dir>` shows them.  A panel asked for while the last is being drawn is
+  skipped, but for the last of each stage, and the panels make `extract_steps.gif` at the end.
+  `--no-display` turns it off, `--display-every` thins it, and `--reference RHO PA` draws a published
+  position as a green circle.
+- **`klip-tpe extract --render DIR`** draws the dashboard of a finished extraction from its tables, with
+  no fit (`render_saved`).  The live display saves each trial's cut-out for it
+  (`extract_trial_crops.npz`).  Without them, a trial's panels show the best's injected model moved to
+  the trial and scaled to its contrast, titled as an approximation.
+- `fit_companion`, `recovery_check` and `extract_companion` take a `progress` callback.  It gets each
+  trial with its image and the best so far, and the partitions' contrasts and fakes as they finish.
+- `scripts/check_betapic_extract.py --display DIR`, and `docs/img/extract_display.png` from it.
+
 ## Unreleased — 2026-11-21 (each partition's own position in `klip-tpe extract`)
 
 From a user's note of 2026-11-21, "a live display for `klip-tpe extract`, and the per-group

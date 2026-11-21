@@ -49,6 +49,7 @@ DONE = [
     "klip_tpe/datasets.py",
     "klip_tpe/durable.py",
     "klip_tpe/extract.py",
+    "klip_tpe/extract_display.py",
     "klip_tpe/final_grid.py",
     "klip_tpe/fmmf.py",
     "klip_tpe/heartbeat.py",

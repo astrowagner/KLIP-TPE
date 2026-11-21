@@ -18,7 +18,7 @@ klip-tpe extract --run-dir RUN --rho 0.452 --pa 211.2 --contrast 7e-4 --label b
 
 The data options come from the run's record, as `klip-tpe elect` takes them, and the run is only
 read.  The output goes to `RUN_extract_b` beside the run (`--out` to choose), with its log in
-`extract.log`.
+`extract.log` and its live display in `steps/` (below).
 
 On a run made by a script, resume the runner with the script's reducer and call the step:
 
@@ -86,6 +86,77 @@ It is a check of the registration across wavelength, and of the astrometry befor
 Each group adds about `group_iter + 64` reductions of that group alone, and with fakes
 `n_fakes (1 + group_iter)` more.
 
+## The live display
+
+The step draws a live dashboard of the fit into `steps/` in its output directory, after the IDL
+predecessor's `mwcm_sub_dash`.  Watch it from another terminal with
+
+```
+klip-tpe view --run-dir RUN_extract_b
+```
+
+The run's panel process draws the panels, so the fit never waits for one, and a panel asked for while
+the last is still being drawn is skipped.  The last panel of each stage, and those of the partitions
+and the fake sources, are always drawn.  At the end the panels make `extract_steps.gif`.
+
+![The dashboard on beta Pic b, at trial 236 of 300 (the --quick check)](img/extract_display.png)
+
+Each panel is 1600 x 760 pixels on black, laid out as the IDL predecessor drew it:
+
+- **The images**, centered on the star in inferno.  The upper row holds the original, the best null, the
+  current trial and the injected models of the best and of the trial (the original less each null), on
+  the original's scale.  The lower row holds their S/N maps (a matched filter with the small-sample
+  correction, from -2 to 5) and the PSF models of the best and of the trial, from the run's injection
+  model.  The star is a +, and the best an x on every panel.  A cyan circle marks the trial on its
+  panels and the best on the others, and a green circle the reference position (`--reference RHO PA`,
+  such as a published position).
+- **The zoom stamps**, 13 x 13 pixels on the best, under the upper row and on its scale.
+- **The convergence trace**, the residual of every trial, with the random draws as gray open circles,
+  the TPE's proposals filled, the running best as a line, the best as a green circle and a sideways
+  histogram.
+- **The parabolas**, the residual against each parameter for the best 40 % of the trials, with the
+  parabola, its minimum and 1-sigma.  Once the profile scans run, they take the trials' place.
+- **The corner plot** of the trials in rho, PA and contrast, colored by -log residual.
+- **The text**, with the trial count, the best and the trial's values, the time per trial, the elapsed
+  time, the ETA and the live minimum with its 1-sigma.
+
+The later stages have panels of their own:
+
+- each fake source's fit, on its own reduction, with its true position as a dashed magenta circle and a
+  running table of the fakes' offsets,
+- with partitions, a spectrum that fills as each partition's contrast is fitted, its error bars widened
+  to the partition's fakes' scatter as they come,
+- with `--group-positions`, each partition's own fit, on that partition's reduction, and a chromatic
+  panel of the partitions' dx and dy less the combined fit against wavelength.
+
+They take the corner plot's place, which keeps as many of its pairs as there is room for.
+
+`--display-every N` asks for a panel every N trials (default 1), and `--no-display` draws none.  The
+display adds no reductions.  A panel takes 1 to 2 s to draw, so a fast fit gets one every few trials.
+The `--quick` check on beta Pic b, about 960 reductions of 0.02 s each, drew 47 panels.
+
+From a script, give `extract_companion` (or `fit_companion`) the display as its `progress`:
+
+```python
+from klip_tpe.extract_display import ExtractDisplay
+
+disp = ExtractDisplay(out_dir, label="b", reference=(0.452, 211.2))
+found = extract_companion(runner, 0.452, 211.2, 7e-4, progress=disp)
+write_extract(found, out_dir, label="b")
+disp.close()                     # waits for the panels and makes the movie
+```
+
+### Afterwards, from the saved tables
+
+`klip-tpe extract --render DIR` draws the dashboard of a finished extraction without a new fit, a panel
+every 10 trials unless `--display-every` says otherwise.  The trials, the profile scans, the partitions,
+their own positions and the fakes come from the extraction's tables and summary, and the images from
+`extract_clean.fits` and `extract_residual.fits`.  The live display saves each trial's cut-out in
+`extract_trial_crops.npz`, which the render takes.  An extraction made without it has no trial images,
+so each trial's panels show the best's injected model moved to the trial and scaled to its contrast,
+titled as an approximation.  The fakes' and the partitions' own fits come as their tables, since their
+trials were not saved.  The panels go to `steps/`, or to `steps_saved/` beside a live display's.
+
 ## Which sigma to quote
 
 The quadratic and the profiles measure how sharply the residual rises around its minimum.  They do
@@ -137,6 +208,9 @@ always a lower floor.  Name it with `--config` to compare.
 | `extract_images.png` | Both reductions around the companion, with the patch |
 | `extract_spectrum.pdf` | Each partition's contrast with the sigma to quote |
 | `extract_positions.pdf` | With `--group-positions`, each group's dx and dy against wavelength, the combined fit and the weighted line |
+| `steps/stepNNNN.png`, `extract_steps.gif` | The live display's panels and its progress movie (`extract_steps.mp4` too where imageio has ffmpeg) |
+| `extract_trial_crops.npz` | With the live display, each search trial's image around the star, for `--render` |
+| `extract.log` | The step's log |
 
 ## Cost
 

@@ -3693,15 +3693,17 @@ usage: klip-tpe extract [-h] [--instrument {near,nomic,generic,ales}]
                         [--drop-frames NIGHT:INDEX[,INDEX...]]
                         [--subtract-sources FILE] [--subtract-line FILE]
                         [--inject-sources FILE] [--metric {mawet,fmmf}]
-                        [--run-dir RUN_DIR] --rho AS --pa DEG
-                        --contrast CONTRAST [--annulus N] [--config EVAL]
+                        [--run-dir RUN_DIR] [--rho AS] [--pa DEG]
+                        [--contrast CONTRAST] [--annulus N] [--config EVAL]
                         [--out DIR] [--label LABEL] [--box-rho AS]
                         [--box-pa DEG] [--box-contrast LO HI] [--patch FWHM]
                         [--n-iter N] [--n-init N] [--gamma GAMMA] [--ncand N]
                         [--explore EXPLORE] [--best-frac BEST_FRAC] [--nref N]
                         [--fakes N] [--fake-iter N] [--no-groups]
                         [--group-positions] [--group-iter N] [--group-box F]
-                        [--group-fake-iter N] [--seed SEED]
+                        [--group-fake-iter N] [--seed SEED] [--display]
+                        [--no-display] [--display-every N]
+                        [--reference RHO PA] [--render DIR]
 
 options:
   -h, --help            show this help message and exit
@@ -3862,9 +3864,11 @@ options:
                         the result (klip_tpe.fmmf)
   --run-dir RUN_DIR     the finished run (default: the newest on record)
   --rho AS              the companion's starting separation, in arcsec
+                        (required but with --render)
   --pa DEG              its starting position angle, in degrees East of North
+                        (required but with --render)
   --contrast CONTRAST   its starting contrast, in the injection model's flux
-                        unit
+                        unit (required but with --render)
   --annulus N           the annulus whose configuration reduces, counted from
                         1 (default: the one that holds --rho)
   --config EVAL         the evaluation of that annulus whose configuration
@@ -3907,6 +3911,15 @@ options:
   --group-fake-iter N   trials of each fake source's fit in a partition
                         (default --group-iter)
   --seed SEED           seed of the random draws
+  --display             draw the live dashboard into <out>/steps, for klip-tpe
+                        view --run-dir <out> (default)
+  --no-display          no live dashboard
+  --display-every N     trials between two panels (default 1, a panel skipped
+                        while the last is drawn, and 10 with --render)
+  --reference RHO PA    a reference position, in arcsec and degrees, drawn on
+                        the panels as a green circle
+  --render DIR          draw the dashboard's panels afterwards from the
+                        finished extraction in DIR, without a fit
 
 generic cubes (--instrument generic / klip-tpe generic):
   --cube CUBE [CUBE ...]

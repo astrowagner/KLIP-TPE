@@ -2737,6 +2737,9 @@ def cmd_extract(a):
     fits the companion, with the elected winner of the annulus that holds it unless ``--annulus`` or
     ``--config`` names another configuration.  What it finds goes to ``--out``
     (:func:`klip_tpe.extract.write_extract`), and the log to ``extract.log`` there.  The run is only read.
+    The live dashboard (:class:`klip_tpe.extract_display.ExtractDisplay`) draws into ``steps/`` there
+    unless ``--no-display`` is given.  ``--render DIR`` draws the dashboard of a finished extraction instead
+    (:func:`klip_tpe.extract_display.render_saved`), with no fit.
 
     Parameters
     ----------
@@ -2746,11 +2749,19 @@ def cmd_extract(a):
     Raises
     ------
     SystemExit
-        If a setting is out of range, the run's frames had a source near the start taken out, or the step
-        fails.
+        If a setting is out of range or missing, the run's frames had a source near the start taken out,
+        ``--render`` names no extraction, or the step fails.
     """
     from .extract import ExtractConfig, extract_companion, write_extract
     from .runner import Runner
+    if a.render:
+        from .extract_display import render_saved
+        if not os.path.exists(os.path.join(a.render, "extract_summary.json")):
+            raise SystemExit(f"extract: {a.render} holds no finished extraction (no extract_summary.json)")
+        render_saved(a.render, every=a.display_every or 10, reference=a.reference, log=print)
+        return
+    if a.rho is None or a.pa is None or a.contrast is None:
+        raise SystemExit("extract: --rho, --pa and --contrast are required, but with --render")
     try:
         _fill_from_registry(a, getattr(a, "_argv", None))
     except SystemExit:
@@ -2795,9 +2806,20 @@ def cmd_extract(a):
         logf.flush()
 
     r.log = log                            # the run's own log is only read
+    disp = None
+    if a.display:
+        from .extract_display import ExtractDisplay
+        from .injection import injected_model
+        from .metrics import Source
+
+        def psf_fn(rho, pa, shape, red=r.reducer):
+            return injected_model(red, [Source(float(rho), float(pa), 1.0)], shape)
+
+        disp = ExtractDisplay(out, label=label, every=a.display_every or 1, reference=a.reference, psf_fn=psf_fn,
+                              log=log)
     try:
         found = extract_companion(r, a.rho, a.pa, a.contrast, annulus=None if a.annulus is None else a.annulus - 1,
-                                  evaluation=a.config, config=cfg, log=log)
+                                  evaluation=a.config, config=cfg, log=log, progress=disp)
         files = write_extract(found, out, label=label)
         with open(files["summary_txt"]) as f:
             log(f.read().rstrip())
@@ -2805,6 +2827,8 @@ def cmd_extract(a):
     except ValueError as exc:
         raise SystemExit(f"extract: {exc}") from None
     finally:
+        if disp is not None:
+            disp.close()
         logf.close()
 
 
@@ -3489,12 +3513,12 @@ def _build_parser():
                                        "recovery check (docs/EXTRACT.md)")
     _add_near_args(p)
     p.add_argument("--run-dir", default="last", help="the finished run (default: the newest on record)")
-    p.add_argument("--rho", type=float, required=True, metavar="AS",
-                   help="the companion's starting separation, in arcsec")
-    p.add_argument("--pa", type=float, required=True, metavar="DEG",
-                   help="its starting position angle, in degrees East of North")
-    p.add_argument("--contrast", type=float, required=True,
-                   help="its starting contrast, in the injection model's flux unit")
+    p.add_argument("--rho", type=float, default=None, metavar="AS",
+                   help="the companion's starting separation, in arcsec (required but with --render)")
+    p.add_argument("--pa", type=float, default=None, metavar="DEG",
+                   help="its starting position angle, in degrees East of North (required but with --render)")
+    p.add_argument("--contrast", type=float, default=None,
+                   help="its starting contrast, in the injection model's flux unit (required but with --render)")
     p.add_argument("--annulus", type=int, default=None, metavar="N",
                    help="the annulus whose configuration reduces, counted from 1 (default: the one that holds --rho)")
     p.add_argument("--config", type=int, default=None, metavar="EVAL",
@@ -3539,6 +3563,16 @@ def _build_parser():
     p.add_argument("--group-fake-iter", type=int, default=None, metavar="N",
                    help="trials of each fake source's fit in a partition (default --group-iter)")
     p.add_argument("--seed", type=int, default=None, help="seed of the random draws")
+    p.add_argument("--display", dest="display", action="store_true", default=True,
+                   help="draw the live dashboard into <out>/steps, for klip-tpe view --run-dir <out> (default)")
+    p.add_argument("--no-display", dest="display", action="store_false", help="no live dashboard")
+    p.add_argument("--display-every", type=int, default=None, metavar="N",
+                   help="trials between two panels (default 1, a panel skipped while the last is drawn, and 10 "
+                        "with --render)")
+    p.add_argument("--reference", type=float, nargs=2, default=None, metavar=("RHO", "PA"),
+                   help="a reference position, in arcsec and degrees, drawn on the panels as a green circle")
+    p.add_argument("--render", default=None, metavar="DIR",
+                   help="draw the dashboard's panels afterwards from the finished extraction in DIR, without a fit")
     p.set_defaults(func=cmd_extract)
 
     p = sub.add_parser("replay", help="re-score configurations from an IDL optimize_tpe_results.txt")

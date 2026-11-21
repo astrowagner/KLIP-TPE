@@ -3,6 +3,7 @@
 
     python scripts/check_betapic_extract.py            # the step's defaults, about 6,000 reductions
     python scripts/check_betapic_extract.py --quick    # 300 trials and 3 fakes of 200, for a first look
+    python scripts/check_betapic_extract.py --quick --display betapic_extract   # with the live dashboard
 
 The VLT/NACO L' sequence of beta Pictoris that VIP distributes is public, and Absil et al. (2013,
 A&A 559, L12) measured beta Pic b in these same data.  The script fits it with
@@ -13,6 +14,8 @@ The star's flux is VIP's published ``starphot`` (``datasets.PHOTOMETRY``), as
 
 It prints the fit, both sets of 1-sigma uncertainties, the recovery check and the offsets from the
 published values in units of the combined uncertainty.  The data download once (``klip-tpe fetch``).
+``--display DIR`` draws the step's live dashboard into ``DIR/steps``
+(:class:`klip_tpe.extract_display.ExtractDisplay`), with the published position as the reference.
 
 Expected with the defaults (2026-11-21): rho 0.4516", pa 210.64 deg, dL' 7.86.  The quadratic gives
 0.0007", 0.046 deg and 0.9 %, the profiles 0.0002", 0.013 deg and 0.2 %, and 5 fakes scatter by
@@ -28,6 +31,7 @@ import sys
 from klip_tpe import datasets
 from klip_tpe.extract import ExtractConfig, fit_companion, recovery_check
 from klip_tpe.instruments import generic
+from klip_tpe.metrics import Source
 from klip_tpe.reducer import ReductionRequest
 
 #: Absil et al. 2013: separation (arcsec), PA (deg) and L' magnitude difference, with 1-sigma errors
@@ -52,6 +56,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--quick", action="store_true", help="300 trials and 3 fakes of 200 trials each")
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--display", default=None, metavar="DIR", help="draw the live dashboard into DIR/steps")
+    ap.add_argument("--display-every", type=int, default=1, metavar="N", help="trials between two panels")
     a = ap.parse_args(argv)
     files = datasets.fetch("naco_betapic", quiet=True)
     inst = datasets.INSTRUMENT["naco_betapic"]
@@ -69,10 +75,19 @@ def main(argv=None) -> int:
     cfg = (ExtractConfig(n_iter=300, n_init=50, n_fakes=3, fake_iter=200, seed=a.seed) if a.quick
            else ExtractConfig(seed=a.seed))
     c0 = 10.0 ** (-0.4 * 7.9)
+    disp = None
+    if a.display:
+        from klip_tpe.extract_display import ExtractDisplay
+        from klip_tpe.injection import injected_model
+        disp = ExtractDisplay(a.display, label="beta Pic b", every=a.display_every,
+                              reference=(PUB["rho"][0], PUB["pa"][0]), log=print,
+                              psf_fn=lambda rho, pa, shape: injected_model(red, [Source(rho, pa, 1.0)], shape))
     fit = fit_companion(reduce_fn, 0.45, 212.0, c0, fwhm_px=red.fwhm, pxscale=red.pxscale,
-                        angle_convention=red.angle_convention, config=cfg, log=print)
+                        angle_convention=red.angle_convention, config=cfg, log=print, progress=disp)
     rec = recovery_check(reduce_fn, fit, fwhm_px=red.fwhm, pxscale=red.pxscale,
-                         angle_convention=red.angle_convention, config=cfg, log=print)
+                         angle_convention=red.angle_convention, config=cfg, log=print, progress=disp)
+    if disp is not None:
+        disp.close()
     b = fit["best"]
     s1 = fit["quadratic"]["sigma"]
     s2 = [p["sigma"] for p in fit["profile_fits"]]

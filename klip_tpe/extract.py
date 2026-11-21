@@ -37,7 +37,9 @@ sigma and the fakes' scatter, per parameter and per partition.
 
 :func:`extract_companion` runs the step on a runner whose annuli are done, resumed from the run's
 directory, and :func:`write_extract` writes what it found.  ``klip-tpe extract`` does both from the
-command line, and a run made by a script resumes its runner with the script's reducer.
+command line, and a run made by a script resumes its runner with the script's reducer.  Its
+``progress`` callback takes each trial as it goes, and :class:`klip_tpe.extract_display.ExtractDisplay`
+draws the IDL predecessor's live dashboard from it.
 
 Which configuration
 -------------------
@@ -57,7 +59,8 @@ step the run's injection spectrum is set flat, so a fake source and the negative
 every partition at the contrast given.  A source of ``RunConfig.subtract_known`` near the companion is
 left out of the reductions, since the step fits it.
 
-The step follows a user's note of 2026-11-20, "a companion parameter-extraction step".
+The step follows a user's note of 2026-11-20, "a companion parameter-extraction step", and its
+display and the groups' own positions the note of 2026-11-21.
 """
 from __future__ import annotations
 
@@ -434,7 +437,8 @@ def _vec(x: Sequence[float]) -> Dict[str, float]:
 
 def fit_companion(reduce_fn: ReduceFn, rho: float, pa: float, contrast: float, *, fwhm_px: float,
                   pxscale: float, angle_convention: str = "pa", config: Optional[ExtractConfig] = None,
-                  log: Optional[Callable[[str], None]] = None, log_every: int = 50) -> Dict[str, Any]:
+                  log: Optional[Callable[[str], None]] = None, log_every: int = 50,
+                  progress: Optional[Callable[[Dict[str, Any]], None]] = None, phase: str = "main") -> Dict[str, Any]:
     """Fit a companion's separation, angle and contrast by a TPE search of its negative injection.
 
     Parameters
@@ -460,6 +464,13 @@ def fit_companion(reduce_fn: ReduceFn, rho: float, pa: float, contrast: float, *
         Function that takes a line of progress.
     log_every : int, default 50
         Number of trials between progress lines.
+    progress : callable or None, default None
+        Function that takes each event of the fit as a dict, such as an
+        :class:`~klip_tpe.extract_display.ExtractDisplay`.  The events are ``start`` (the box, the reduction
+        without the injection and the geometry), ``trial`` (each trial of the search and each point of the
+        profile scans, with its image and the best so far) and ``done`` (the result).
+    phase : str, default "main"
+        The fit's name in the events.
 
     Returns
     -------
@@ -490,6 +501,8 @@ def fit_companion(reduce_fn: ReduceFn, rho: float, pa: float, contrast: float, *
     nred = 1
     best_img = clean
     best_r = float("inf")
+    best_x = np.array([float(rho), float(pa), float(contrast)])
+    tell = progress or (lambda ev: None)
 
     def resid(x: np.ndarray) -> Tuple[float, np.ndarray]:
         img = np.asarray(reduce_fn([Source(float(x[0]), float(x[1]), -float(x[2]))]), float)
@@ -506,6 +519,9 @@ def fit_companion(reduce_fn: ReduceFn, rho: float, pa: float, contrast: float, *
     phases: List[str] = []
     say(f"  extract: {n} trials ({int(cfg.n_init)} random first) in rho {lo[0]:.4f}-{hi[0]:.4f}\", "
         f"pa {lo[1]:.2f}-{hi[1]:.2f} deg, contrast {lo[2]:.3e}-{hi[2]:.3e}, patch {radius:.2f} px")
+    tell({"kind": "start", "phase": phase, "n": n, "lo": lo.tolist(), "hi": hi.tolist(), "clean": clean,
+          "start": [float(rho), float(pa), float(contrast)], "pxscale": float(pxscale), "fwhm_px": float(fwhm_px),
+          "angle_convention": str(angle_convention)})
     for it in range(n):
         p = opt.ask(hist, rng, 1)[0]
         x = np.clip(np.asarray(p.x, float), lo, hi)
@@ -514,8 +530,12 @@ def fit_companion(reduce_fn: ReduceFn, rho: float, pa: float, contrast: float, *
         X[it], R[it] = x, r
         phases.append(str(p.flags.get("phase", "")))
         hist.append(x, -math.log(max(r, 1e-30)) if np.isfinite(r) else float("nan"), dict(p.flags))
-        if np.isfinite(r) and r < best_r:
-            best_r, best_img = r, img
+        new = bool(np.isfinite(r) and r < best_r)
+        if new:
+            best_r, best_img, best_x = r, img, x.copy()
+        tell({"kind": "trial", "phase": phase, "stage": "search", "it": it + 1, "n": n, "x": x, "r": float(r),
+              "img": img, "flag": phases[-1], "best_x": best_x, "best_r": best_r, "best_img": best_img,
+              "new_best": new})
         if log_every and ((it + 1) % int(log_every) == 0 or it + 1 == n):
             b = int(np.nanargmin(R[:it + 1]))
             say(f"    trial {it + 1}/{n}: best residual {R[b]:.4f} at rho {X[b, 0]:.4f}\", pa {X[b, 1] % 360:.3f} "
@@ -543,7 +563,7 @@ def fit_companion(reduce_fn: ReduceFn, rho: float, pa: float, contrast: float, *
         for d in range(3):
             vals = np.clip(tpe_best[d] + span[d] * np.linspace(-1.0, 1.0, npx), lo[d], hi[d])
             rs = []
-            for v in vals:
+            for j, v in enumerate(vals):
                 g = tpe_best.copy()
                 g[d] = v
                 r, img = resid(g)
@@ -551,13 +571,18 @@ def fit_companion(reduce_fn: ReduceFn, rho: float, pa: float, contrast: float, *
                 rs.append(r)
                 if np.isfinite(r) and r < gbest_r:
                     gbest, gbest_r = g.copy(), float(r)
-                if np.isfinite(r) and r < best_r:
-                    best_r, best_img = r, img
+                new = bool(np.isfinite(r) and r < best_r)
+                if new:
+                    best_r, best_img, best_x = r, img, g.copy()
+                tell({"kind": "trial", "phase": phase, "stage": "profile", "it": d * npx + j + 1, "n": 3 * npx,
+                      "x": g, "r": float(r), "img": img, "best_x": best_x, "best_r": best_r, "best_img": best_img,
+                      "new_best": new, "profiles": {"values": prof["values"] + [[float(u) for u in vals[:j + 1]]],
+                                                    "residual": prof["residual"] + [[float(u) for u in rs]]}})
             prof["values"].append([float(v) for v in vals])
             prof["residual"].append([float(v) for v in rs])
             sig2.append(parabola_sigma(vals, rs, tpe_best[d], scale[d]))
     secs = time.time() - t0
-    return {
+    out = {
         "start": [float(rho), float(pa), float(contrast)], "lo": lo.tolist(), "hi": hi.tolist(),
         "patch_px": radius, "patch_center_px": list(_xy(clean.shape, rho, pa, pxscale, angle_convention)),
         "ref": float(ref), "shape": list(clean.shape),
@@ -568,6 +593,8 @@ def fit_companion(reduce_fn: ReduceFn, rho: float, pa: float, contrast: float, *
         "n_reductions": int(nred), "seconds": float(secs),
         "images": {"clean": clean, "best": best_img},
     }
+    tell({"kind": "done", "phase": phase, "fit": out})
+    return out
 
 
 def fit_contrast(reduce_fn: ReduceFn, rho: float, pa: float, c0: float, *, fwhm_px: float, pxscale: float,
@@ -664,7 +691,8 @@ def fit_contrast(reduce_fn: ReduceFn, rho: float, pa: float, c0: float, *, fwhm_
 
 def recovery_check(reduce_fn: ReduceFn, fit: Dict[str, Any], *, fwhm_px: float, pxscale: float,
                    angle_convention: str = "pa", config: Optional[ExtractConfig] = None,
-                   log: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
+                   log: Optional[Callable[[str], None]] = None,
+                   progress: Optional[Callable[[Dict[str, Any]], None]] = None, prefix: str = "") -> Dict[str, Any]:
     """Fit fake sources like the companion and return the bias and spread of the fits.
 
     Each fake source goes in at the companion's fitted separation and contrast, at angles spread evenly
@@ -687,6 +715,11 @@ def recovery_check(reduce_fn: ReduceFn, fit: Dict[str, Any], *, fwhm_px: float, 
         The settings, None for the defaults.
     log : callable or None, default None
         Function that takes a line of progress.
+    progress : callable or None, default None
+        Function that takes the events of each fake source's fit (:func:`fit_companion`), each with ``true``
+        (the fake's true values) and ``n_fakes``.
+    prefix : str, default ""
+        What the fits' names in the events start with, before ``fake K of N``.
 
     Returns
     -------
@@ -716,8 +749,13 @@ def recovery_check(reduce_fn: ReduceFn, fit: Dict[str, Any], *, fwhm_px: float, 
             return reduce_fn([true, comp] + list(srcs or []))
 
         sub_k = dataclasses.replace(sub, seed=None if sub.seed is None else sub.seed + k)
+
+        def tell(ev, true=(rho_b, pa_k, c_b)):
+            progress(dict(ev, true=list(true), n_fakes=nf))
+
         f = fit_companion(rf, rho_b + d_rho, pa_k + d_pa, c_b * f_c, fwhm_px=fwhm_px, pxscale=pxscale,
-                          angle_convention=angle_convention, config=sub_k, log=None)
+                          angle_convention=angle_convention, config=sub_k, log=None,
+                          progress=tell if progress is not None else None, phase=f"{prefix}fake {k} of {nf}")
         fb = f["best"]
         fakes.append({"true": _vec([rho_b, pa_k, c_b]), "fit": {k2: float(fb[k2]) for k2 in NAMES},
                       "residual": float(fb["residual"]), "n_reductions": int(f["n_reductions"])})
@@ -877,7 +915,8 @@ def _record_config(run_dir: str, annulus: int, evaluation: int) -> Dict[str, Any
 
 def extract_companion(runner, rho: float, pa: float, contrast: float, *, annulus: Optional[int] = None,
                       evaluation: Optional[int] = None, config: Optional[ExtractConfig] = None,
-                      log: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
+                      log: Optional[Callable[[str], None]] = None,
+                      progress: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
     """Extract a known companion's position and contrast, with uncertainties, from a finished run.
 
     Parameters
@@ -899,6 +938,12 @@ def extract_companion(runner, rho: float, pa: float, contrast: float, *, annulus
         The settings, None for the defaults.
     log : callable or None, default None
         Function that takes a line of progress, None for the runner's log.
+    progress : callable or None, default None
+        Function that takes each event of the extraction as a dict, such as an
+        :class:`~klip_tpe.extract_display.ExtractDisplay`.  The fits' events (:func:`fit_companion`) are named
+        ``main``, ``fake K of N``, ``partition P (K of N)`` and ``partition P, fake K of N``, and a partition's
+        own carry ``partition`` and ``lam_um``.  Each partition's contrast gives a ``group`` event, and its
+        fake sources a ``group_fakes`` event.
 
     Returns
     -------
@@ -946,7 +991,7 @@ def extract_companion(runner, rho: float, pa: float, contrast: float, *, annulus
         if keep["scale"] is not None:
             red.injection_scale = None
         fit = fit_companion(reduce_fn, rho, pa, contrast, fwhm_px=fwhm, pxscale=pxs, angle_convention=conv,
-                            config=cfg, log=say)
+                            config=cfg, log=say, progress=progress, phase="main")
         b = fit["best"]
         say(f"  extract: best rho {b['rho']:.5f}\", pa {b['pa']:.4f} deg, contrast {b['contrast']:.4e}, "
             f"residual {b['residual']:.4f}, after {fit['n_reductions']} reductions")
@@ -954,7 +999,7 @@ def extract_companion(runner, rho: float, pa: float, contrast: float, *, annulus
         parts = getattr(red, "reducers", None)
         if cfg.per_group and parts and len(selected) > 1:
             say(f"  extract: each of {len(selected)} partitions' contrast with the position held")
-            for pid in selected:
+            for k, pid in enumerate(selected):
                 g = fit_contrast(lambda s, pid=pid: reduce_fn(s, sel=[pid]), b["rho"], b["pa"], b["contrast"],
                                  fwhm_px=fwhm, pxscale=pxs, angle_convention=conv, patch_fwhm=cfg.patch_fwhm,
                                  nref=max(int(cfg.nref), 3), n_coarse=int(cfg.group_points))
@@ -962,17 +1007,24 @@ def extract_companion(runner, rho: float, pa: float, contrast: float, *, annulus
                 g.update(partition=str(pid), lam_um=None if lam is None else float(lam) * 1e6)
                 groups.append(g)
                 say(f"    {pid}: contrast {g['contrast']:.4e} +- {g['sigma']:.2e}")
+                if progress is not None:
+                    progress({"kind": "group", "phase": "partitions", "k": k + 1, "n": len(selected),
+                              "group": {key: g[key] for key in ("partition", "lam_um", "contrast", "sigma")}})
         rec = None
         if int(cfg.n_fakes) > 0:
             rec = recovery_check(reduce_fn, fit, fwhm_px=fwhm, pxscale=pxs, angle_convention=conv, config=cfg,
-                                 log=say)
-            for g in groups:
+                                 log=say, progress=progress)
+            for k, g in enumerate(groups):
                 pid = next(p for p in selected if str(p) == g["partition"])
                 say(f"  extract: recovery check of {pid}'s contrast, {int(cfg.n_fakes)} fake sources")
                 g["recovery"] = recovery_contrast(lambda s, pid=pid: reduce_fn(s, sel=[pid]), b["rho"], b["pa"],
                                                   g["contrast"], fwhm_px=fwhm, pxscale=pxs, angle_convention=conv,
                                                   patch_fwhm=cfg.patch_fwhm, n_fakes=int(cfg.n_fakes),
                                                   n_coarse=int(cfg.group_points))
+                if progress is not None:
+                    progress({"kind": "group_fakes", "phase": "partitions' fakes", "k": k + 1, "n": len(groups),
+                              "partition": g["partition"], "bias": g["recovery"]["bias"],
+                              "scatter": g["recovery"]["scatter"]})
         if cfg.group_positions and groups:
             lo, hi = fit["lo"], fit["hi"]
             half_rho = 0.5 * (hi[0] - lo[0]) * float(cfg.group_box)
@@ -985,10 +1037,17 @@ def extract_companion(runner, rho: float, pa: float, contrast: float, *, annulus
                                               fake_iter=int(cfg.group_fake_iter or cfg.group_iter),
                                               seed=None if cfg.seed is None else int(cfg.seed) + 101 + k)
                 red_g = (lambda s, pid=pid: reduce_fn(s, sel=[pid]))
+
+                def tell_g(ev, pid=pid, lam=g["lam_um"]):
+                    progress(dict(ev, partition=str(pid), lam_um=lam))
+
+                tg = tell_g if progress is not None else None
                 fg = fit_companion(red_g, b["rho"], b["pa"], max(float(g["contrast"]), 1e-12), fwhm_px=fwhm,
-                                   pxscale=pxs, angle_convention=conv, config=sub_cfg, log=None)
+                                   pxscale=pxs, angle_convention=conv, config=sub_cfg, log=None, progress=tg,
+                                   phase=f"partition {pid} ({k + 1} of {len(groups)})")
                 fg.pop("images", None)
-                rg = (recovery_check(red_g, fg, fwhm_px=fwhm, pxscale=pxs, angle_convention=conv, config=sub_cfg)
+                rg = (recovery_check(red_g, fg, fwhm_px=fwhm, pxscale=pxs, angle_convention=conv, config=sub_cfg,
+                                     progress=tg, prefix=f"partition {pid}, ")
                       if int(cfg.n_fakes) > 0 else None)
                 g["position"] = {"fit": fg, "recovery": rg}
                 bb = fg["best"]
