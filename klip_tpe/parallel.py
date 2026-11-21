@@ -476,7 +476,7 @@ def _watch_parent(ppid: int, period: float = 2.0) -> None:
 
 
 def _worker_main(reducers, inq, outq, ppid: Optional[int] = None):
-    """Run a worker's loop, ``(job_id, pid, request)`` in and ``(job_id, result or exception)`` out.
+    """Run a worker's loop, ``(job_id, pid, request)`` in and ``(job_id, result or exception, seconds)`` out.
 
     The worker ignores SIGINT, since the parent owns the interrupt and the workers stop when it tells
     them to, or when the watchdog sees it gone.  A None job ends the loop.
@@ -509,14 +509,16 @@ def _worker_main(reducers, inq, outq, ppid: Optional[int] = None):
         if item is None:
             return
         job_id, pid, req = item
+        t0 = time.perf_counter()
         try:
             res = reducers[pid].reduce(req)
         except BaseException as exc:      # noqa: BLE001 - report everything back to the parent
             res = exc
+        dt = time.perf_counter() - t0     # the reduction alone, for the parent's split of busy time
         try:
-            outq.put((job_id, res))
+            outq.put((job_id, res, dt))
         except Exception as exc:         # unpicklable result
-            outq.put((job_id, RuntimeError(f"worker result not picklable: {exc!r}")))
+            outq.put((job_id, RuntimeError(f"worker result not picklable: {exc!r}"), dt))
 
 
 # ----------------------------------------------------------------------------
@@ -1139,6 +1141,10 @@ class ProcessPool:
         self.card_eligible = 0             # jobs a card could have taken
         self.cpu_busy = 0.0                # seconds the CPU workers spent in jobs
         self.cpu_jobs = 0
+        self.cpu_work = 0.0                # of those, the seconds the workers timed reducing
+        self.cpu_idle_dry = 0.0            # worker-seconds idle with no job waiting
+        self.cpu_idle_queued = 0.0         # worker-seconds idle with jobs waiting
+        self._tick_t = time.perf_counter()
         self._sent: dict = {}              # CPU job id -> when it went to a worker
         self._card_t0 = time.time()
         self._notes: list = []             # log lines for the caller's thread (take_notes)
@@ -1360,6 +1366,22 @@ class ProcessPool:
             out, self._notes = self._notes, []
         return out
 
+    def cpu_summary(self) -> dict:
+        """Return how the CPU workers have spent their time since the pool started.
+
+        Returns
+        -------
+        summary : dict
+            ``jobs``, ``busy_s`` (each job from its sending to the taking of its result), ``work_s`` (the
+            reductions as the workers timed them), ``idle_dry_s`` and ``idle_queued_s`` (worker-seconds idle
+            with no job waiting, and with jobs waiting) and ``workers``.
+        """
+        with self._lock:
+            self._tick()
+            return {"jobs": self.cpu_jobs, "busy_s": round(self.cpu_busy, 3), "work_s": round(self.cpu_work, 3),
+                    "idle_dry_s": round(self.cpu_idle_dry, 3), "idle_queued_s": round(self.cpu_idle_queued, 3),
+                    "workers": self.n}
+
     def card_summary(self) -> Optional[dict]:
         """Summarize the cards and the CPU workers: shares, workers, state, warm-up reports, jobs and times.
 
@@ -1526,6 +1548,7 @@ class ProcessPool:
         with self._lock:
             if self._closed or not self._collector.is_alive():
                 raise RuntimeError("klip-tpe worker pool is closed")
+            self._tick()
             for k, (pid, req) in enumerate(jobs):
                 jid = self._next
                 self._next += 1
@@ -1541,6 +1564,21 @@ class ProcessPool:
                 heapq.heappush(self._waiting, (key, jid, pid, req))
             self._dispatch()
         return pump_wait(futs)
+
+    def _tick(self) -> None:
+        """Add the time since the last change to the idle workers' counts, with the lock held.
+
+        It runs before the number of jobs in flight or waiting changes, so the interval since the last call
+        had the idle workers and the waiting jobs it sees.
+        """
+        now = time.perf_counter()
+        dt, self._tick_t = now - getattr(self, "_tick_t", now), now
+        idle = max(self.n - self._busy, 0)
+        if idle and dt > 0:
+            if self._waiting:
+                self.cpu_idle_queued += idle * dt
+            else:
+                self.cpu_idle_dry += idle * dt
 
     def _dispatch(self) -> None:
         """Send waiting jobs, smallest key first, until every worker has one, with the lock held.
@@ -1640,8 +1678,11 @@ class ProcessPool:
                     pass
                 continue
             try:
-                jid, res = item
+                jid, res = item[0], item[1]
                 with self._lock:
+                    self._tick()
+                    if len(item) > 2 and item[2] is not None:
+                        self.cpu_work += float(item[2])
                     f = self._futures.pop(jid, None)
                     self._busy = max(self._busy - 1, 0)
                     self._threads_running -= self._threads.pop(jid, 0)

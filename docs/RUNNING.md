@@ -199,6 +199,27 @@ trials' wait.  `annulus_done.json` and `final_results.json` keep the numbers (`m
 `bench_summary.txt` has a `# main annulus` line per annulus.  The live panels are drawn by a
 process of their own (`docs/DISPLAY.md`), so they no longer take the main thread's time.
 
+A third line splits the last step, and with worker processes another gives the CPU workers' time
+(NEAR2 note, 2026-11-17).  Here they are from a small synthetic search in the sandbox, whose
+reductions take almost no time, so moving the jobs and results outweighs reducing:
+
+```
+  annulus 1: the 2 CPU workers were busy 36 % of the search's 1s, 9 % reducing and 27 % moving jobs and results, idle 63 % with no job waiting and 0 % with jobs waiting, over 194 jobs
+  annulus 1: of that, 0.000 s went to the checkpoint (2 writes of 0.00 s each, the last 0.0 MB), 0.000 s to the display, 0.000 s to the running stitch and 0.008 s to the trial's files and log line
+```
+
+The checkpoint holds the annulus' whole history, so its writes grow with it.  A routine one is
+written at most every 10 s (`Runner.CHECKPOINT_EVERY_S`), and less often once a write takes more
+than 2 % of that time (`CHECKPOINT_SHARE`), up to 120 s apart (`CHECKPOINT_MAX_S`).  Ctrl-C and an
+error still write the one held, so only a hard kill replays the trials since the last write.
+
+A worker takes the next waiting job as soon as its result is taken, so its time from a job's sending
+to the taking of its result counts as busy, and the transfers with it.  `moving` is that time less
+the reduction the worker timed.  Idle time with no job waiting is the queue running dry: the main
+thread has not yet sent the next trial's jobs, usually because it is waiting for the oldest trial in
+flight, whose last job runs on.  More trials in flight feed the queue.  `annulus_done.json` keeps
+the numbers (`cpu`, and `rest_s` and `checkpoint` under `main`).
+
 A TPE proposal sums its densities over a grid the samples are gathered on (`--tpe-density binned`,
 the default), at the same cost whatever the history.  Summed over every sample
 (`--tpe-density exact`, as runs saved before 2026-11-17 resume) it took 0.075 s at 10,000 trials
@@ -845,7 +866,12 @@ the run's contrast curve there (NEAR2's note of 2026-11-16).
   per-annulus grids.
 * **The seam line.**  Each annulus gets the curve near each tile edge over its middle, in the
   log, in `final_grid/curve.txt` and in `contrast_curve.txt`.  A ratio above 1 at a seam is a
-  curve shallower at the edge than at the middle.
+  curve shallower at the edge than at the middle.  Inside 0.8" that ratio holds the curve's own
+  slope, so the seam steps read every point over a polynomial of degree 3 in log separation and
+  log contrast fitted to the whole curve (`final_grid.seam_steps`).  Each annulus gets its inner,
+  middle and outer points over the fit, and the step from its outer edge into the next annulus'
+  inner edge.  A smooth curve reads 1 everywhere, and a tile 30 % worse than its inner neighbor
+  reads a step of 1.25 on a synthetic power law, since the fit takes a little of the jump in.
 * **The products take the elected winners.**  An annulus whose winner changed gets that winner's
   images in `final_grid/annulusNN_best_*.fits`, its parameters in `klip_stitched_params.txt` and
   its record in `final_results.json` (`final_grid`, with the configuration).  Its annulus

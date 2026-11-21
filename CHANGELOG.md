@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased — 2026-11-21 (the rest step split, the CPU workers' idle time, the seam steps)
+
+From NEAR2's note of 2026-11-17 on s7e, s7f and s7g.
+
+- **The rest step is split** (`Runner._main_note`).  A third line per annulus gives what the
+  checkpoint, the display, the running stitch and the trial's files and log line took of it, with
+  the checkpoint's writes, their time and the last one's size (`annulus_done.json`, `main`:
+  `rest_s` and `checkpoint`).
+- **The routine checkpoint is written less often as it grows** (`Runner._checkpoint_interval`).
+  It holds the annulus' whole history, 11.8 MB in s7g's annulus 8, so its serialization grows with
+  it.  A routine write still comes at most every 10 s, and now at least 50 times its own last
+  duration apart (`CHECKPOINT_SHARE`, 2 % of the main thread's time), up to 120 s
+  (`CHECKPOINT_MAX_S`).  `CHECKPOINT_EVERY_S = 0` still writes every save, and Ctrl-C or an
+  error still writes the one held.
+- **The CPU workers' time is split** (`ProcessPool.cpu_summary`, `Runner._cpu_note`).  Each worker
+  times its reductions, and the pool counts its idle workers with no job waiting and with jobs
+  waiting.  A line per annulus gives the shares reducing, moving jobs and results, idle with no job
+  waiting and idle with jobs waiting (`annulus_done.json`, `cpu`).  A worker takes the next waiting
+  job as soon as its result is taken, so its idle time is the queue running dry, and the transfers
+  count as busy.
+- **The seam steps** (`final_grid.seam_steps`).  Every point of the final grid's curve is read over
+  a polynomial of degree 3 in log separation and log contrast fitted to the whole curve, so the
+  curve's slope inside a tile drops out.  Each annulus gets its inner, middle and outer points over
+  the fit and the step into the next annulus, in the log, `final_grid/curve.txt` and
+  `contrast_curve.txt`, beside the seam line.  A smooth curve reads 1, and a tile 30 % worse than
+  its inner neighbor reads a step of 1.25 on a synthetic power law.
+
 ## Unreleased — 2026-11-21 (a known companion's position and contrast: `klip-tpe extract`)
 
 From a user's note of 2026-11-20, "a companion parameter-extraction step".

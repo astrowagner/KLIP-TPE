@@ -860,6 +860,19 @@ def write_contrast_curve(path: str, curves: Sequence[Optional[Dict[str, Any]]], 
                     + (" (seam)" if kind == "seam" else " (edge of the stitch)"))
         L.append(f"# seam, annulus {sm['annulus']}: inner {_r(sm.get('inner'), sm.get('inner_edge'))}, outer "
                  f"{_r(sm.get('outer'), sm.get('outer_edge'))}, the curve near each tile edge over its middle")
+    steps = (fin or {}).get("seam_steps") or {}
+    if steps.get("degree") is not None:
+        an = steps.get("annuli") or []
+
+        def _v(v):
+            return "-" if v is None else f"{float(v):.2f}"
+        for k, sm in enumerate(an):
+            nxt = an[k + 1]["annulus"] if k + 1 < len(an) else None
+            L.append(f"# seam step, annulus {sm['annulus']}: inner {_v(sm.get('inner'))}, middle {_v(sm.get('middle'))}, "
+                     f"outer {_v(sm.get('outer'))}"
+                     + (f", a step of {_v(sm.get('step'))} into annulus {nxt}" if nxt is not None and sm.get('step')
+                        is not None else "")
+                     + f", over a polynomial of degree {steps['degree']} fitted to the whole curve")
     if SR:
         L.append("# per-sample 5*contrast/SNR points (validation injections):")
         L.append("#   sep(\")    5sig_contrast_sample   annulus")

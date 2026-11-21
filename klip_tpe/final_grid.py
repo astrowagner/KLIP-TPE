@@ -12,8 +12,9 @@ the assembled image, as the stitched verify measures them, and uses them twice:
 * **The curve.**  The elected winners are read on a second grid, the first turned by half a position
   angle step, each point's contrast stepped to S/N 5 as the contrast grid steps it
   (:func:`klip_tpe.contrast_grid.run_grid`).  The curve is the run's ``contrast_curve.txt`` in place
-  of the per-annulus grids, with several separations per annulus, and a seam line per annulus gives
-  the curve near each tile edge over its middle.
+  of the per-annulus grids, with several separations per annulus.  A seam line per annulus gives the
+  curve near each tile edge over its middle, and the seam steps read every point over a smooth fit of
+  the whole curve, so a seam shows as a step between two tiles with the curve's slope taken out.
 
 The grid is the same for every run of a setup.  Each tile has an odd number of separations, at least
 3, at the middles of equal radial bands no wider than ``sep_step_fwhm`` FWHM, so the first and the
@@ -521,6 +522,90 @@ def seam_ratios(curve: Dict[str, Any], seps: Sequence[Tuple[int, int, int]], n_t
                     "inner_edge": "edge" if pos == 0 else "seam",
                     "outer_edge": "edge" if pos == n_tiles - 1 else "seam"})
     return out
+
+
+#: degree of the polynomial in log separation and log contrast that the seam steps are read against
+SEAM_FIT_DEGREE = 3
+
+
+def seam_steps(curve: Dict[str, Any], seps: Sequence[Tuple[int, int, int]], order: Sequence[int],
+               degree: int = SEAM_FIT_DEGREE) -> Dict[str, Any]:
+    """Return each annulus' curve over a smooth fit of the whole curve, and the step at each seam.
+
+    The seam line (:func:`seam_ratios`) holds the curve's own slope inside a tile, which is steep inside
+    0.8".  Here a polynomial in log separation and log contrast is fitted to every point of the curve,
+    and each point is read over it.  A seam then shows as a step from one tile's outer edge to the next
+    tile's inner edge, the slope between them taken out (NEAR2 note, 2026-11-17).
+
+    Parameters
+    ----------
+    curve : dict
+        The curve, :func:`klip_tpe.contrast_grid.summarize`'s, with ``r_as`` and ``curve`` per separation.
+    seps : sequence of tuple
+        ``(annulus, band, n_bands)`` per separation of the curve, the annulus counted from 0.
+    order : sequence of int
+        The annuli in the stitch's order.
+    degree : int, default 3
+        Degree of the polynomial, lowered to the number of points less 2 when there are fewer.
+
+    Returns
+    -------
+    steps : dict
+        ``degree`` (None when fewer than 4 points have a value), ``rms`` (the points' scatter about the
+        fit, as a fraction) and ``annuli``, per annulus in the stitch's order ``annulus`` (from 1),
+        ``inner``, ``middle`` and ``outer`` (the curve over the fit, None where there is no point) and
+        ``step`` (the next annulus' ``inner`` over this one's ``outer``, None at the last or without
+        both).
+    """
+    r = np.asarray(curve.get("r_as") or [], float)
+    c = np.array([np.nan if v is None else float(v) for v in curve.get("curve") or []], float)
+    m = min(len(r), len(c))
+    r, c = r[:m], c[:m]
+    good = np.isfinite(r) & np.isfinite(c) & (r > 0) & (c > 0)
+    out: Dict[str, Any] = {"degree": None, "rms": None, "annuli": []}
+    if int(good.sum()) < 4:
+        return out
+    deg = int(min(int(degree), int(good.sum()) - 2))
+    lr, lc = np.log10(r[good]), np.log10(c[good])
+    coef = np.polyfit(lr, lc, deg)
+    ratio = np.full(m, np.nan)
+    ratio[good] = 10.0 ** (lc - np.polyval(coef, lr))
+    out["degree"] = deg
+    out["rms"] = float(10.0 ** np.sqrt(np.mean((lc - np.polyval(coef, lr)) ** 2)) - 1.0)
+    for a in order:
+        mine = {b: i for i, (aa, b, _) in enumerate(seps) if aa == a and i < m}
+        n = next((nn for aa, _, nn in seps if aa == a), 0)
+
+        def at(b: int) -> Optional[float]:
+            i = mine.get(b)
+            return None if i is None or not np.isfinite(ratio[i]) else float(ratio[i])
+        out["annuli"].append({"annulus": int(a) + 1, "inner": at(0) if n > 1 else None,
+                              "middle": at(n // 2) if n else None, "outer": at(n - 1) if n > 1 else None,
+                              "step": None})
+    an = out["annuli"]
+    for k in range(len(an) - 1):
+        lo, hi = an[k]["outer"], an[k + 1]["inner"]
+        an[k]["step"] = None if lo is None or hi is None else hi / lo
+    return out
+
+
+def _step_text(s: Dict[str, Any], nxt: Optional[int]) -> str:
+    """Describe an annulus' curve over the smooth fit in words.
+
+    Parameters
+    ----------
+    s : dict
+        The annulus' entry of :func:`seam_steps`.
+    nxt : int or None
+        The next annulus in the stitch's order, from 1, None at the last.
+
+    Returns
+    -------
+    text : str
+        Such as ``inner 1.05, middle 0.98, outer 1.02, a step of 1.08 into annulus 3``.
+    """
+    return (f"inner {_f(s['inner'])}, middle {_f(s['middle'])}, outer {_f(s['outer'])}"
+            + (f", a step of {_f(s['step'])} into annulus {nxt}" if nxt is not None and s["step"] is not None else ""))
 
 
 # ----------------------------------------------------------------------------- caches
@@ -1569,9 +1654,9 @@ class FinalGrid:
         -------
         curve : dict or None
             :func:`klip_tpe.contrast_grid.summarize`'s curve, one entry per separation, with ``annulus``
-            (from 1), ``band`` and ``role`` per separation, ``seams`` (:func:`seam_ratios`), ``read_with``
-            (the measure), ``reductions`` and ``positions`` (each point's record).  None with ``curve_snr``
-            "off".
+            (from 1), ``band`` and ``role`` per separation, ``seams`` (:func:`seam_ratios`), ``seam_steps``
+            (:func:`seam_steps`), ``read_with`` (the measure), ``reductions`` and ``positions`` (each point's
+            record).  None with ``curve_snr`` "off".
         """
         from . import contrast_grid as CG
         how = str(self.fc.curve_snr)
@@ -1618,6 +1703,7 @@ class FinalGrid:
         out["band"] = [info[g][1] for g in sorted(info)]
         out["role"] = [GridPoint(0, 0, 0, info[g][1], info[g][2], 0.0, 0.0).role for g in sorted(info)]
         out["seams"] = seam_ratios(out, [info[g][:3] for g in sorted(info)], len(self.order), self.order)
+        out["seam_steps"] = seam_steps(out, [info[g][:3] for g in sorted(info)], self.order)
         out["read_with"] = how
         out["reductions"] = int(n_red)
         out["positions"] = [dict(gp.to_dict(self.px), annulus=byidx[gp.index].annulus + 1) for gp in positions]
@@ -1627,6 +1713,14 @@ class FinalGrid:
                  f"{sum(out['n_blocked'])} blocked")
         for s in out["seams"]:
             self.log(f"  final grid: seam, annulus {s['annulus']}: {_seam_text(s)}")
+        st = out["seam_steps"]
+        if st["degree"] is not None:
+            self.log(f"  final grid: the curve over a polynomial of degree {st['degree']} in log separation and log "
+                     f"contrast, which the points scatter about by {100 * st['rms']:.0f} %:")
+            an = st["annuli"]
+            for k, s in enumerate(an):
+                self.log(f"  final grid: seam step, annulus {s['annulus']}: "
+                         f"{_step_text(s, an[k + 1]['annulus'] if k + 1 < len(an) else None)}")
         return out
 
 
@@ -2106,6 +2200,13 @@ def _write_reports(out_dir: str, rec: Dict[str, Any]) -> None:
     C.append("# seam per annulus, the curve near each tile edge over its middle:")
     for s in cv.get("seams") or []:
         C.append(f"# annulus {s['annulus']}: {_seam_text(s)}")
+    st = cv.get("seam_steps") or {}
+    if st.get("degree") is not None:
+        C.append(f"# seam steps, the curve over a polynomial of degree {st['degree']} in log separation and log "
+                 f"contrast fitted to all of it (points scatter by {100 * st['rms']:.0f} %):")
+        an = st["annuli"]
+        for k, s in enumerate(an):
+            C.append(f"# annulus {s['annulus']}: {_step_text(s, an[k + 1]['annulus'] if k + 1 < len(an) else None)}")
     _atomic_text(os.path.join(out_dir, "curve.txt"), "\n".join(C) + "\n")
 
 

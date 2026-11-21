@@ -33,7 +33,7 @@ import pytest
 
 import klip_tpe.final_grid as FG
 from klip_tpe.final_grid import (READ_FWHM, FinalGrid, FinalGridConfig, GridPoint, collect_finalists, elect_one,
-                                 elect_products, exclude_known, grid_points, run_final_grid, seam_ratios,
+                                 elect_products, exclude_known, grid_points, run_final_grid, seam_ratios, seam_steps,
                                  stitch_regions, tile_separations, touched)
 from klip_tpe.contrast_grid import ContrastGridConfig
 from klip_tpe.refine import StitchScorer, config_key, run_entrants
@@ -167,6 +167,24 @@ def test_the_seam_line_is_the_curve_near_each_edge_over_its_middle():
     s = seam_ratios(cv, seps, 2, [0, 1])
     assert s[0] == {"annulus": 1, "inner": 2.0, "outer": 1.5, "inner_edge": "edge", "outer_edge": "seam"}
     assert s[1]["inner"] is None and s[1]["outer"] == pytest.approx(0.5) and s[1]["outer_edge"] == "edge"
+
+
+def test_the_seam_steps_take_the_curves_slope_out():
+    """A smooth power law reads 1 everywhere, and a jump between two tiles shows as a step there
+    (NEAR2's note of 2026-11-17, the seam line against a smooth fit)."""
+    seps = [(a, b, 3) for a in range(4) for b in range(3)]
+    r = np.linspace(0.2, 1.4, 12)
+    smooth = 1e-3 * (r / 0.2) ** -2.5
+    s = seam_steps({"r_as": list(r), "curve": list(smooth)}, seps, [0, 1, 2, 3])
+    assert s["degree"] == 3 and s["rms"] < 1e-9
+    assert all(abs(a[k] - 1.0) < 1e-6 for a in s["annuli"] for k in ("inner", "middle", "outer"))
+    assert all(abs(a["step"] - 1.0) < 1e-6 for a in s["annuli"][:-1]) and s["annuli"][-1]["step"] is None
+    jump = smooth * np.where(np.arange(12) >= 6, 1.3, 1.0)        # tiles 3 and 4 are 30 % worse
+    st = seam_steps({"r_as": list(r), "curve": list(jump)}, seps, [0, 1, 2, 3])["annuli"]
+    steps = [a["step"] for a in st[:-1]]
+    assert max(range(3), key=lambda k: steps[k]) == 1 and steps[1] > 1.15, steps
+    # too few points for a fit: no steps
+    assert seam_steps({"r_as": [0.3, 0.4, 0.5], "curve": [1e-3, 8e-4, 6e-4]}, seps[:3], [0])["degree"] is None
 
 
 def test_the_settings_are_checked_and_old_runs_resume_without_the_stage(monkeypatch):

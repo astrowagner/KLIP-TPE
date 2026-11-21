@@ -1249,6 +1249,10 @@ class Runner:
         self._hooks_done: Dict[int, List[str]] = {}             # post-annulus hooks completed (checkpointed)
         self._last_final = False
         self._ckpt_written = 0.0                                # when checkpoint.json was last written
+        self._ckpt_stats: Dict[str, float] = {"writes": 0, "write_s": 0.0, "last_s": 0.0, "mb": 0.0}
+        self._ckpt_serial_s = 0.0                               # the serialization the next write counts
+        self._cpu_mark: Optional[Dict[str, Any]] = None          # the CPU workers' counts as a search started
+        self._cpu_annuli: Dict[int, Dict[str, Any]] = {}         # annulus -> its search's CPU-worker numbers
         self._ckpt_pending: Optional[Dict[str, Any]] = None     # a routine checkpoint held back (see checkpoint)
         self._ckpt_main_ok: Optional[bool] = None               # checkpoint.json worth keeping as .prev? (None: look)
         self._unsynced: set = set()                             # files the next checkpoint write fsyncs first
@@ -1560,6 +1564,62 @@ class Runner:
                         "workers": max(int(cpu.get("workers") or 1), 1)},
                 "eligible": int(cs.get("eligible") or 0), "t": float(cs.get("t") or time.time())}
 
+    def _cpu_counts(self) -> Optional[Dict[str, Any]]:
+        """Return the CPU workers' counts so far, for an annulus' numbers.
+
+        Returns
+        -------
+        counts : dict or None
+            ``jobs``, ``busy_s`` (from sending a job to taking its result), ``work_s`` (reducing, as the
+            workers time it), ``idle_dry_s`` and ``idle_queued_s`` (worker-seconds idle with no job waiting,
+            and with jobs waiting), ``workers`` and ``t``, None without worker processes
+            (:meth:`klip_tpe.parallel.ProcessPool.cpu_summary`).
+        """
+        f = getattr(self.reducer, "cpu_summary", None)
+        cs = f() if callable(f) else None
+        if not cs:
+            return None
+        return {k: (int(cs.get(k) or 0) if k in ("jobs", "workers") else float(cs.get(k) or 0.0))
+                for k in ("jobs", "busy_s", "work_s", "idle_dry_s", "idle_queued_s", "workers")} | {"t": time.time()}
+
+    def _cpu_note(self, ia: int) -> None:
+        """Log how the CPU workers spent an annulus' search, and keep the numbers.
+
+        The line splits the workers' time into reducing, moving a job in and its result out (from the job's
+        sending to the taking of its result, less the reduction the worker timed), idle with no job waiting
+        and idle with jobs waiting.  A worker takes the next waiting job as soon as its result is taken, so
+        idle time with no job waiting is the queue running dry, and the transfers count as busy (NEAR2 note,
+        2026-11-17).  The numbers go into :attr:`_cpu_annuli` and the annulus' ``annulus_done.json``.
+
+        Parameters
+        ----------
+        ia : int
+            The annulus, counted from 0.
+        """
+        now, mark = self._cpu_counts(), getattr(self, "_cpu_mark", None)
+        self._cpu_mark = None
+        if now is None or not isinstance(mark, dict):
+            return
+        jobs = now["jobs"] - mark["jobs"]
+        span = max(now["t"] - mark["t"], 1e-9)
+        cap = span * max(now["workers"], 1)
+        d = {k: (now[k] - mark[k]) / cap for k in ("busy_s", "work_s", "idle_dry_s", "idle_queued_s")}
+        if jobs <= 0:
+            return
+        move = max(d["busy_s"] - d["work_s"], 0.0) if d["work_s"] > 0 else None
+        self.log(f"  annulus {ia+1}: the {now['workers']} CPU workers were busy {100 * d['busy_s']:.0f} % of the "
+                 f"search's {_dur(span)}"
+                 + (f", {100 * d['work_s']:.0f} % reducing and {100 * move:.0f} % moving jobs and results"
+                    if move is not None else "")
+                 + f", idle {100 * d['idle_dry_s']:.0f} % with no job waiting and {100 * d['idle_queued_s']:.0f} % "
+                 f"with jobs waiting, over {jobs} jobs")
+        self.__dict__.setdefault("_cpu_annuli", {})[ia] = {"annulus": ia + 1, "jobs": jobs, "search_s": round(span, 1),
+                                "workers": now["workers"], "busy_fraction": round(d["busy_s"], 4),
+                                "work_fraction": round(d["work_s"], 4) if move is not None else None,
+                                "move_fraction": round(move, 4) if move is not None else None,
+                                "idle_dry_fraction": round(d["idle_dry_s"], 4),
+                                "idle_queued_fraction": round(d["idle_queued_s"], 4)}
+
     def _card_note(self, ia: int) -> None:
         """Log the cards' numbers for an annulus' search, and keep them.
 
@@ -1647,10 +1707,21 @@ class Runner:
         self.log(f"  annulus {ia+1}: the main process took {per:.3f} s a trial, {steps['score']:.3f} s scoring, "
                  f"{steps['record']:.3f} s recording, {steps['propose']:.3f} s proposing and {steps['rest']:.3f} s "
                  f"on the files, the checkpoint, the display and the log")
+        rest = {k: float(acc.get("rest_" + k, 0.0)) / n for k in ("checkpoint", "display", "stitch", "files")}
+        c0, c1 = acc.get("ckpt0") or {}, getattr(self, "_ckpt_stats", None) or {}
+        writes = int(c1.get("writes", 0)) - int(c0.get("writes", 0))
+        w_s = float(c1.get("write_s", 0.0)) - float(c0.get("write_s", 0.0))
+        ck = {"writes": writes, "write_s": round(w_s / writes, 4) if writes else None,
+              "mb": round(float(c1.get("mb", 0.0)), 2)}
+        self.log(f"  annulus {ia+1}: of that, {rest['checkpoint']:.3f} s went to the checkpoint ({writes} write"
+                 f"{'s' * (writes != 1)}" + (f" of {ck['write_s']:.2f} s each, the last {ck['mb']:.1f} MB" if writes else "")
+                 + f"), {rest['display']:.3f} s to the display, {rest['stitch']:.3f} s to the running stitch and "
+                 f"{rest['files']:.3f} s to the trial's files and log line")
         self._main_annuli[ia] = {"annulus": ia + 1, "trials": n, "search_s": round(span, 1),
                                  "busy_fraction": round(busy, 4),
                                  "trial_wait_s": round(float(acc["trial_wait"]) / n, 4),
                                  "step_s": {k: round(v, 5) for k, v in steps.items()},
+                                 "rest_s": {k: round(v, 5) for k, v in rest.items()}, "checkpoint": ck,
                                  "since_resume": bool(acc.get("resumed"))}
 
     def _main_per_annulus(self, results: Sequence[AnnulusResult]) -> List[Dict[str, Any]]:
@@ -1696,7 +1767,10 @@ class Runner:
         self._card_win = self._card_mark
         self._card_since = 0
         self._main_acc = {"t0": time.time(), "resumed": bool(resumed), "n": 0, "wait": 0.0, "trial_wait": 0.0,
-                          "score": 0.0, "record": 0.0, "propose": 0.0, "rest": 0.0}
+                          "score": 0.0, "record": 0.0, "propose": 0.0, "rest": 0.0,
+                          "ckpt0": dict(getattr(self, "_ckpt_stats", None) or {})}
+        cpu = getattr(self, "_cpu_counts", None)          # a stand-in runner may lack it
+        self._cpu_mark = cpu() if callable(cpu) else None
 
     def _card_adaptive(self) -> int:
         """Return the trials between two re-balances of the automatic share, 0 when the share stays as set.
@@ -3915,6 +3989,7 @@ class Runner:
             Whether to take the checkpoint, False inside a batch, which is checkpointed after its last trial.
         """
         c = self.cfg
+        t0 = time.time()
         for line in getattr(self.reducer, "take_card_notes", lambda: [])():
             self.log(line)
         self._card_adapt(ia)                       # the trials that go out next carry a new share
@@ -3922,11 +3997,15 @@ class Runner:
         if i == bi and inj.image is not None and inj.image.ndim == 2:
             self._set_best_images(rec, inj, clean)
         self._save_eval_images(rec, inj, clean)
+        t1 = time.time()
         if checkpoint:
             self.checkpoint(routine=True)
+        t2 = time.time()
         if c.stitch_every and c.stitch_every > 0 and (i + 1) % int(c.stitch_every) == 0:
             self._guard("running stitch", self._running_stitch, ia)
+        t3 = time.time()
         self._emit("on_eval", rec, inj, clean, i == bi)
+        t4 = time.time()
         t_disp = rec.meta.get("t_dispatch")
         eval_s = None if t_disp is None else time.time() - float(t_disp)
         elapsed = time.time() - self.wall0 + self.wall_prev
@@ -3944,6 +4023,9 @@ class Runner:
                  f" best={bs:.3f}@{bi+1}  contrast={self.contrast:.2e}"
                  f"  reduce {_secs(rec.reduce_s)} / eval {_secs(eval_s)}  ({elapsed/3600:.2f} h)")
         self._tally_draws(ia, rec)
+        # the pipelined search adds these to its main-process numbers (_main_note)
+        self._rest_split = {"checkpoint": t2 - t1, "stitch": t3 - t2, "display": t4 - t3,
+                            "files": (t1 - t0) + (time.time() - t4)}
 
     #: the share of failed draws, after at least ``FAILED_DRAWS_AFTER`` of them, at which the
     #: log warns once per annulus (the end of the search gives the count either way)
@@ -4140,6 +4222,8 @@ class Runner:
                     acc["record"] += t_rec - t_scored
                     acc["propose"] += t_ask - t_rec
                     acc["rest"] += time.time() - t_ask
+                    for k, v in (getattr(self, "_rest_split", None) or {}).items():
+                        acc["rest_" + k] = acc.get("rest_" + k, 0.0) + float(v)
                 if rc is not None:
                     self._recal_apply(ia, rc)
                 t_loop = time.time()
@@ -5035,6 +5119,7 @@ class Runner:
         self._draw_note(ia)
         self.log(f"  search done: best {bs:.3f} at eval {bi+1}")
         self._card_note(ia)
+        self._cpu_note(ia)
         self._main_note(ia)
         self._memory_note()
         table, vwin, winner = ([], -1, {})
@@ -5101,6 +5186,8 @@ class Runner:
                 done["card"] = self._card_annuli[ia]     # the run's summary reads it after a resume
             if self._main_annuli.get(ia):
                 done["main"] = self._main_annuli[ia]
+            if getattr(self, "_cpu_annuli", {}).get(ia):
+                done["cpu"] = self._cpu_annuli[ia]
             _atomic_write(os.path.join(self._ann_dir(ia), "annulus_done.json"), json.dumps(done, indent=1))
         except OSError as exc:                       # a record for the display, never fatal
             self.log(f"  annulus_done.json: {exc!r}")
@@ -6773,6 +6860,11 @@ class Runner:
     #: evaluation, 2026-09-23) collected 49 "conflicted copies" of a 200 kB checkpoint.json in
     #: 20 minutes, and Dropbox once put its own older version back under the real name.
     CHECKPOINT_EVERY_S = 10.0
+    #: the routine checkpoint's share of the main thread's time at most, which lengthens the interval
+    #: between two writes as the history grows (:meth:`_checkpoint_interval`, NEAR2 note, 2026-11-17)
+    CHECKPOINT_SHARE = 0.02
+    #: the longest interval between two routine checkpoint writes, in seconds
+    CHECKPOINT_MAX_S = 120.0
 
     def checkpoint(self, final_annulus: bool = False, routine: bool = False) -> None:
         """Save the search state to ``checkpoint.json``.
@@ -6797,10 +6889,29 @@ class Runner:
         """
         self._last_final = bool(final_annulus)
         snap = self._checkpoint_snapshot(final_annulus)
-        if routine and time.time() - getattr(self, "_ckpt_written", 0.0) < self.CHECKPOINT_EVERY_S:
+        if routine and time.time() - getattr(self, "_ckpt_written", 0.0) < self._checkpoint_interval():
             self._ckpt_pending = snap
             return
         self._write_checkpoint(self._serialize_checkpoint(snap))
+
+    def _checkpoint_interval(self) -> float:
+        """Return the least time between two routine checkpoint writes.
+
+        It is :attr:`CHECKPOINT_EVERY_S`, or longer when the last write took more than
+        :attr:`CHECKPOINT_SHARE` of it: a history that has grown to many megabytes is written less often, so
+        the writes keep that share of the main thread's time at most, up to :attr:`CHECKPOINT_MAX_S` between
+        two of them.  0 writes every routine save, as before.
+
+        Returns
+        -------
+        interval : float
+            The interval, in seconds.
+        """
+        every = float(self.CHECKPOINT_EVERY_S)
+        if every <= 0:
+            return 0.0
+        w = float((getattr(self, "_ckpt_stats", None) or {}).get("last_s", 0.0) or 0.0)
+        return min(max(every, w / float(self.CHECKPOINT_SHARE)), max(float(self.CHECKPOINT_MAX_S), every))
 
     def _checkpoint_snapshot(self, final_annulus: bool) -> Dict[str, Any]:
         """Return the state between two evaluations, taken without serializing it.
@@ -6862,7 +6973,10 @@ class Runner:
         }
         if snap.get("card_shares") is not None:
             st["card_shares"] = snap["card_shares"]
-        return json.dumps(st, default=_json_default)
+        t_s = time.time()
+        text = json.dumps(st, default=_json_default)
+        self._ckpt_serial_s = time.time() - t_s       # the write that follows counts it
+        return text
 
     def _write_checkpoint(self, text: str) -> None:
         """Write a serialized checkpoint so that a crash of the machine, not only of the
@@ -6874,6 +6988,7 @@ class Runner:
         save it replaces moves to ``checkpoint.prev.json`` -- when it is a readable
         checkpoint, so that a damaged one never displaces a good copy.
         """
+        t_w = time.time()
         self._sync_files()
         main = os.path.join(self.run_dir, "checkpoint.json")
         ok = getattr(self, "_ckpt_main_ok", None)
@@ -6886,6 +7001,13 @@ class Runner:
         self._ckpt_main_ok = True
         self._ckpt_written = time.time()
         self._ckpt_pending = None
+        st = self.__dict__.setdefault("_ckpt_stats", {"writes": 0, "write_s": 0.0, "last_s": 0.0, "mb": 0.0})
+        took = (self._ckpt_written - t_w) + float(getattr(self, "_ckpt_serial_s", 0.0) or 0.0)
+        st["writes"] = int(st.get("writes", 0)) + 1
+        st["write_s"] = float(st.get("write_s", 0.0)) + took
+        st["last_s"] = took
+        st["mb"] = len(text) / 1e6
+        self._ckpt_serial_s = 0.0
 
     def flush_checkpoint(self) -> None:
         """Write the routine checkpoint the throttle is holding, if any.  Never raises: it

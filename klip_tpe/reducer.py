@@ -3289,6 +3289,17 @@ class PartitionedReducer(Reducer):
         take = getattr(self._procs, "take_notes", None)
         return take() if callable(take) else []
 
+    def cpu_summary(self) -> Optional[Dict[str, Any]]:
+        """Return the CPU workers' summary (:meth:`klip_tpe.parallel.ProcessPool.cpu_summary`).
+
+        Returns
+        -------
+        summary : dict or None
+            The summary, or None without worker processes.
+        """
+        f = getattr(self._procs, "cpu_summary", None)
+        return f() if callable(f) else None
+
     def card_summary(self) -> Optional[Dict[str, Any]]:
         """Return the card workers' summary (:meth:`klip_tpe.parallel.ProcessPool.card_summary`).
 

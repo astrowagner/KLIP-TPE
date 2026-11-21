@@ -81,6 +81,14 @@ def test_each_annulus_says_how_busy_the_main_process_was(tmp_path, monkeypatch):
         assert 0.0 <= m["busy_fraction"] <= 1.0 and m["trial_wait_s"] >= 0.0 and m["search_s"] > 0
         assert set(m["step_s"]) == {"score", "record", "propose", "rest"}
         assert all(v >= -1e-6 for v in m["step_s"].values()) and not m["since_resume"]
+        # the rest, split (NEAR2 note, 2026-11-17): the parts add up to it
+        assert set(m["rest_s"]) == {"checkpoint", "display", "stitch", "files"}
+        assert sum(m["rest_s"].values()) <= m["step_s"]["rest"] + 1e-3
+        assert m["checkpoint"]["writes"] >= 0
+    split = [s for s in logs if "went to the checkpoint" in s]
+    assert len(split) == 2 and all(re.search(r"of that, [\d.]+ s went to the checkpoint \(\d+ writes?.*\), [\d.]+ s to "
+                                             r"the display, [\d.]+ s to the running stitch and [\d.]+ s to the "
+                                             r"trial's files and log line", s) for s in split), split
     with open(os.path.join(r.run_dir, "final_results.json")) as f:
         fin = json.load(f)
     assert [m["annulus"] for m in fin["main"]] == [1, 2]
