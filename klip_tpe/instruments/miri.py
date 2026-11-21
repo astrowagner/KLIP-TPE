@@ -258,7 +258,7 @@ def locate_boundaries(inst, rho_as: float, fov: float, oversample: int, nlambda:
             i = int(np.argmin(t))
             if i not in (0, t.size - 1) or attempt:
                 break
-            log(f"    boundary near az={b:.0f} minimises at the edge of +/-{w:.0f} deg -- "
+            log(f"    boundary near az={b:.0f} minimizes at the edge of +/-{w:.0f} deg -- "
                 f"widening once; a mask rotated this far is not what this scan assumes")
             w *= 2.5
         out.append(float(a[i] % 360.0))
@@ -530,7 +530,7 @@ def quadrant_mask(shape: Tuple[int, int], center: Tuple[float, float], pxscale: 
 
     The threshold is on the measured throughput rather than on a boundary width written down once, so
     the mask follows the STPSF model for each filter.  For the Lyot mode the spot is masked out to its
-    catalogued 2.16 arcsec radius.  Pixels inside the map's innermost separation are masked too.
+    cataloged 2.16 arcsec radius.  Pixels inside the map's innermost separation are masked too.
 
     Parameters
     ----------

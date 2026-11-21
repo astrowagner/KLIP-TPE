@@ -35,7 +35,7 @@ def _run(fn):
 
 def test_a_book_cannot_restyle_a_panel_that_is_drawing():
     """The bug itself: a light context opened on the main thread while the panel was
-    drawing changed the panel's colours mid-figure."""
+    drawing changed the panel's colors mid-figure."""
     inside, release, seen = threading.Event(), threading.Event(), {}
 
     def panel():

@@ -420,7 +420,7 @@ def main(argv=None):
     cfg = RunConfig(ann_edges=list(edges), n_iter=n_iter, n_init=n_init, seed=a.seed,
                     n_sources=a.n_sources,
                     # NEAR's two-source convention collapses the band to the annulus'
-                    # AREA-weighted mid radius, which for a band centred on the companion
+                    # AREA-weighted mid radius, which for a band centered on the companion
                     # sits 4 px outside it -- the injections would leave its ring exactly
                     # when --n-sources 2 is chosen.  Here the band is already collapsed onto
                     # that ring on purpose, so the convention has nothing to add.
@@ -476,7 +476,7 @@ def main(argv=None):
         ring = 0.5 * (edges[ia] + edges[ia + 1])
         log(f"annulus {ia + 1}: {len(more)} injected at rho = "
             + ", ".join(f"{s.rho:.4f}\" ({s.rho / PXSCALE:.2f} px)" for s in more)
-            + f", PA re-drawn each evaluation; its centre ring is {ring:.2f} px")
+            + f", PA re-drawn each evaluation; its center ring is {ring:.2f} px")
 
     callbacks, disp = [], None
     if a.show or a.panels:

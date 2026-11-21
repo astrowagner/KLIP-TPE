@@ -10,7 +10,7 @@ injected images, run log) for it.
 
 Conventions shared by every routine:
 
-* Star centre `cx=(nx-1)/2, cy=(ny-1)/2` (verify 529, candidates 202, snrmap 2363).
+* Star center `cx=(nx-1)/2, cy=(ny-1)/2` (verify 529, candidates 202, snrmap 2363).
   **Exception**: `near2m_paramverify` and `near2m_pvstitch` use `cx=nx/2.` (param_verify
   147, 381) — a latent 0.5 px inconsistency (brief §8.4); the port should use `(n-1)/2`
   everywhere and note the change.
@@ -71,7 +71,7 @@ per-resel first: `ar = min(alpha_img/na, 0.49)`.
 Returns `[snr, fap, nap_used, mf_peak]`.
 
 1. `A = mfmap` if supplied with matching size, else `near2v_mfconv(img,fwhm)` (127).
-2. Nominal position `(xs,ys)` from (rho,PA). **Peak search**: over the disc `dx²+dy²≤srad²`
+2. Nominal position `(xs,ys)` from (rho,PA). **Peak search**: over the disk `dx²+dy²≤srad²`
    around `(round xs, round ys)`, pick the pixel with max `A` where `img` is finite (131–136).
    Result `(px,py)`; if none beats −1e30, stays at the rounded nominal.
 3. `r = |(px,py)−(cx,cy)|`, `nap = floor(2πr/fwhm)`. If `r<fwhm` or `nap<5` → `[NaN,NaN,nap,pkv]` (137–138).
@@ -201,7 +201,7 @@ Optimizer call sites: final pass opt 8388–8395 (`iwa=max(ann_edges[0],1.2 fwhm
 
 **Step 1 — peak detection `near2c_detect`** (32–51): mask non-finite and `r<iwa`, `r>owa`
 to −1e30; iterate up to `nmax=400`: take global max; stop if `< snrmin`; record; suppress a
-disc of radius `sep = max(0.9·fwhm, 2)` px (216). Returns `{n,px,py,snr}` (integer pixels).
+disk of radius `sep = max(0.9·fwhm, 2)` px (216). Returns `{n,px,py,snr}` (integer pixels).
 
 **Step 2 — per-candidate metrics** (222–307). Precompute: `slices[j] = radprof(cube[:,:,j])`,
 `comb = radprof(nanmean over nights)` (unweighted), even/odd subset images `s1,s2`
@@ -211,12 +211,12 @@ disc of radius `sep = max(0.9·fwhm, 2)` px (216). Returns `{n,px,py,snr}` (inte
 For each peak (skipping cached ones inside `r_freeze` within `0.6·fwhm`, 262–272):
 * `pn[j]` = `snrfap(slices[j], …, exr, srad, mfmap=…)[0]` per night;
   `Nnt = count(pn ≥ 2.0)`, `pnmin/pnmed/pnmax` (275–277).
-* **STIM (aperture version)**: `av[j]` = mean of `slices[j]` over the disc `≤ap` px around the
+* **STIM (aperture version)**: `av[j]` = mean of `slices[j]` over the disk `≤ap` px around the
   peak; `stim = mean(av)/stddev(av)` over finite nights (needs ≥2) (279–284).
 * `sub1 = snrfap(s1,…)`, `sub2 = snrfap(s2,…)` (286–287).
 * `psfc = near2c_psfcorr(comb, px, py, fwhm)` (57–72): stamp half-box `max(round(1.5 fwhm),3)`,
-  subtract stamp median, zero-mean Gaussian (`sigma=fwhm/2.3548`) centred on the peak,
-  normalised cross-correlation over finite pixels ∈[−1,1].
+  subtract stamp median, zero-mean Gaussian (`sigma=fwhm/2.3548`) centered on the peak,
+  normalized cross-correlation over finite pixels ∈[−1,1].
 * Combined `cf = snrfap(comb,…)`; `csnr = cf[0]` if finite (replaces the map value);
   look-elsewhere FAP `fap = min(1 − (1−cf[1])^nresel, 1)` (292–294).
 * Flags: `'KNOWN'` if within `0.8·fwhm` of a `msk_*` source; `'INJ'` (or `'KNOWN/INJ'`) if
@@ -256,7 +256,7 @@ Rank by descending score.
 ### C.4.1 Config selection (optimizer, opt 7795–7817)
 * Pool = TPE-phase evals only: `it ≥ n_init`, finite score `Y>−9000`, `Kbest ≥ 1`;
   fall back to all evals if empty (7796–7797).
-* Sort by `Y` descending; greedily keep a config if its mean normalised L1 distance to
+* Sort by `Y` descending; greedily keep a config if its mean normalized L1 distance to
   every already-kept config, over the base (non-night) dims,
   `d = (1/ndim_base) Σ_d |x_d − x'_d| / (hi_d − lo_d)`, is `≥ pv_divmin` (default 0.05);
   stop at `n_pv=20` (defaults opt 4494–4495). Need ≥2 kept.
@@ -375,6 +375,6 @@ nbridges=12` → `exit`, CATCH → exit status 2 for a shell relaunch loop);
 * A Mawet S/N-map function with source exclusion (`near2m_snrmap`) alongside the scalar metric.
 * Statistical core is tiny: `scipy.stats.t.sf/isf`, weighted mean/std, bootstrap; the
   one genuinely fragile piece is `radprof` (external, unread).
-* Inconsistencies to fix rather than port: `nx/2` centres in param_verify; biased weighted
+* Inconsistencies to fix rather than port: `nx/2` centers in param_verify; biased weighted
   std in `near2v_stim` vs unbiased in param-STIM; injected-STIM FAP lacking the source
   keep-out (verify 660 vs 601); bootstrap passing `srad` as `exr`.

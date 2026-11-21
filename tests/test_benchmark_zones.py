@@ -11,7 +11,7 @@ passed to the noise ring was a no-op because the planet was never in the zone.
 E2/F2 (beta Pic b at 16.6 px in [8, 22]) and H2 (HIP 65426 b at 13.2 px in [6, 20]) were
 both fine, so this was G2 alone.  Containment alone was not enough either: C's own split,
 [20, 45, 75], contains the planet but only 1.26 FWHM inside the inner edge.  G2 now uses
-[20, 36, 66], which centres it -- 3.3 FWHM from the inner edge, 3.5 from the outer -- with
+[20, 36, 66], which centers it -- 3.3 FWHM from the inner edge, 3.5 from the outer -- with
 contrasts measured for those zones rather than inherited from C's.
 """
 from __future__ import annotations
@@ -52,7 +52,7 @@ def test_the_known_companion_falls_inside_a_searched_annulus(name, mas, rho, edg
 def test_hd95086_b_sits_well_inside_annulus_2_not_on_its_edge():
     """Containment is not enough -- it has to be clear of both edges.  C's own split,
     [20, 45, 75], does contain the planet but leaves it 1.26 FWHM inside the inner edge,
-    which is still on the boundary.  [20, 36, 66] centres it."""
+    which is still on the boundary.  [20, 36, 66] centers it."""
     p = 0.620 / 0.01225
     fwhm = 4.44
     assert p == pytest.approx(50.6, abs=0.2)
@@ -76,7 +76,7 @@ def test_run_G2_searches_both_annuli_with_one_contrast_each():
     m = re.search(r'_bench_hi\(\s*"G2".*?\)\n', src, re.S)
     assert m, "run_G2's _bench_hi call not found"
     call = m.group(0)
-    assert "[20, 36, 66]" in call, "G2 must search the zones HD 95086 b is centred in"
+    assert "[20, 36, 66]" in call, "G2 must search the zones HD 95086 b is centered in"
     assert "1.112e-5" in call and "4.773e-6" in call, \
         "the contrasts MEASURED for these zones by scripts/calibrate_bench_contrast.py"
     assert "5.899e-9" not in call, "the pre-ff20c4b contrast must not come back"
@@ -114,7 +114,7 @@ def test_every_forced_bench_contrast_is_on_the_current_flux_axis():
     H2's 2.324e-04 was measured on the right axis but the wrong FRAMES: the calints loader's
     sigma-clip repair had median-filtered the whole PSF, and a 0.561 "optics transmission"
     anchored on the companion was hiding the damage.  1.637e-04 was the value on DQ-filled
-    frames with T_optics = 1 and the re-solved centre but with one partition per ROLL, where
+    frames with T_optics = 1 and the re-solved center but with one partition per ROLL, where
     pyKLIP's mode was degenerate (2026-09-16); 2.022e-04 is the same measurement with both
     rolls in one partition (2026-09-17).
 

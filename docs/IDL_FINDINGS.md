@@ -7,7 +7,7 @@ live products of the paired A/B run `run_20260904_174912`.
 ## 1. IDL production bug: frame-selection parameters never reach the reducer  (ACTION NEEDED)
 
 `reduce_near_2.pro` dispatches per-night reductions to persistent worker processes by
-serialising the call into a command string (`parstr`, lines 2237–2260).  That string
+serializing the call into a command string (`parstr`, lines 2237–2260).  That string
 carries `k_klip, angsep, anglemax, bin, inrad, outrad, n_ang, filter, fast, spat_mean,
 temp_mean, do_destripe`, the injections, `out_suffix`, `lean`, `klip_scan`, `nthreads`,
 `use_near2_throughput`, RDI flags and `n_min_ref` — but **not `corr_thresh`, `noise_max`
@@ -115,7 +115,7 @@ With the worker-default thresholds:
 | k=100 bin=18 amax=29 (n4)     | 0.77        | 1.09        | 0.83 |
 | eval 1353 (bin 11, k 12–40, angsep 0, amax 57–88), 5 nights | 0.49–0.64 | 1.5–2.0 | 0.97–1.14 (n4 fast: 2.4) |
 
-**Post-fix re-check (2026-09-05, `run_20260905_102602`, thresholds now honoured on both
+**Post-fix re-check (2026-09-05, `run_20260905_102602`, thresholds now honored on both
 sides, 12 products from n2/n4/n6, annulus 0–20 px):**
 
 | night | k | bin | n_ang | filter | angsep | amax | clean corr | rms IDL | rms PY | ratio | inj-diff corr | peak IDL / PY |
@@ -148,7 +148,7 @@ auto-fast n4 case, the Python residual noise is 1.3–2× higher than IDL's at t
 parameters (IDL's residual looks like Python's at roughly 1.5–2× the number of KL modes).
 Things ruled out by direct experiment: eigenvalue ordering, float32 covariance, mean
 subtraction, pre/post high-pass placement, combination weights (nwadi vs mean),
-rotation direction / true-north sign, rotation centre (`(n-1)/2` vs `n/2`), bilinear vs
+rotation direction / true-north sign, rotation center (`(n-1)/2` vs `n/2`), bilinear vs
 cubic, binning rule, frame selection, self-inclusion of the target in its basis, the
 `n_min_ref` drop.  The next diagnostic requires IDL-side intermediates: one serial
 `reduce_near_2, seq_range=[2,2], nbridges=1, cache=0, fast=0, n_min_ref=10, bin=17, k_klip=25,
@@ -167,12 +167,12 @@ with the per-target reference census.  Until that dump has been compared, Python
 scores agree in rank (Spearman 0.58, p=0.001 on 29 replayed configurations) but Python is
 systematically ~15–40 % lower in S/N on the high-k configurations that win the IDL search.
 
-### 3b. Zone-rim behaviour of IDL `rot(/interp)` (2026-09-12)
+### 3b. Zone-rim behavior of IDL `rot(/interp)` (2026-09-12)
 
 On the production images the outer 1–2 px of the padded KLIP zone (r = 21–23 px for annulus
 1) are *smoother* than the interior in IDL (std 0.0066 → 0.0059 at r 20–22 px, then 57 % NaN
 at 22–23) whereas the port showed a noisy ring there (0.0096 → 0.027 → 0.062).  A synthetic
-test reproduces IDL's profile only if the bilinear derotation treats NaN neighbours as 0
+test reproduces IDL's profile only if the bilinear derotation treats NaN neighbors as 0
 (pixels whose stencil is partly outside the zone are damped toward 0 and stay covered by every
 frame) rather than propagating NaN (few-frame coverage → noisy ring).  `klip.rotate_ccw` now
 does the former by default (`ROT_NAN_MODE = "zero"`); re-reduced evals 1826 / 3051 give rim
@@ -202,7 +202,7 @@ on 2026-10-08 (until then `klip-tpe near` / `generic` without `--blocks` ran `pa
 
 Ported exactly as IDL does it: the injection band is the annulus inset by one FWHM per edge
 (`RunConfig.inject_inset_fwhm=1`), the placement routine (`PositionSampler`, unchanged) clamps
-the inner edge to 1.5 FWHM and lays the centred ladder; for **two sources** the *caller*
+the inner edge to 1.5 FWHM and lays the centered ladder; for **two sources** the *caller*
 (`Runner._band`) collapses the band to the annulus' area-weighted mid radius
 `sqrt((r_in²+r_out²)/2)` so both land there 180° apart (`RunConfig.pair_area_midpoint=True`;
 CLI `--ladder-pair` restores the pre-2026-09-05 ladder).  One sampler object serves search,
@@ -305,7 +305,7 @@ evaluations, gives the same kind of search:
 | Python matched run | 2.21 (3.97), n = 50 | 4.00 | 6.09 | 8.17 | 0.28 | 8.17 |
 
 Warm-up (random) distributions agree — the same objective on the same data.  In the guided
-phase Python climbs slightly faster in this single realisation (one run each, so the
+phase Python climbs slightly faster in this single realization (one run each, so the
 difference is within run-to-run scatter: IDL itself needed until eval 1255 for its first
 score above 8 and reached 9.87 by eval 4747).  Python's validation: candidates at evals
 200 / 263 / 268 (search 8.17 / 8.12 / 7.91) re-validated 6.22 / 8.04 / 8.25 on fresh

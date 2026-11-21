@@ -371,7 +371,7 @@ def destripe_detector(cube: np.ndarray, center: Optional[Tuple[float, float]] = 
             blocked |= (np.abs(yy - cy) < boundary_px) | (np.abs(xx - cx) < boundary_px)
     # A line the mask empties gets NO offset, and that is worse than not destriping at all:
     # every other line loses its offset while this one keeps it, which turns a smooth
-    # gradient into a step.  The star disc and the boundary band cross at the star, so on
+    # gradient into a step.  The star disk and the boundary band cross at the star, so on
     # MASK1140 the two together covered rows 101-124 and columns 108-131 outright -- 24 of
     # each, straight through the target, and the crop is centered on exactly that.  Measured
     # on a real F1140C integration, line-to-line steps inside the 81x81 crop went from 1.87
@@ -380,7 +380,7 @@ def destripe_detector(cube: np.ndarray, center: Optional[Tuple[float, float]] = 
     # region the science comes from.
     #
     # So where the full mask leaves a line too thin to measure, that line falls back to the
-    # star disc alone: the ~200 rows away from the boundary keep their glow-stick protection,
+    # star disk alone: the ~200 rows away from the boundary keep their glow-stick protection,
     # and the ones crossing it are still corrected.
     per_axis = {}
     for axis in (1, 0):
@@ -1144,7 +1144,7 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
                 f"{len(done) - n_need} have, and there is no background pointing among the "
                 f"files to fix it with. Stacking them into one KLIP library mixes two sky "
                 f"levels -- on MIRI that is a ~19 MJy/sr pedestal plus the 4QPM glow sticks "
-                f"in some frames and not others. Fetch the programme's *-BACKGROUND "
+                f"in some frames and not others. Fetch the program's *-BACKGROUND "
                 f"exposures (scripts/fetch_jwst_ar.py gets them), or pass background=False "
                 f"to stack them anyway and say why.")
         else:
@@ -1241,7 +1241,7 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
                 f"search box or not a maximum -- and those frames were left UNSHIFTED rather "
                 f"than moved by the highest corner of the box. Integrations of a single "
                 f"exposure at a fixed pointing have no offset to measure, so this is expected "
-                f"for them; if you expected a dither, pass align=False and centre on "
+                f"for them; if you expected a dither, pass align=False and center on "
                 f"star_center= instead of trusting this.")
 
     hdr = fits.getheader(sci[0], "SCI")
@@ -1250,7 +1250,7 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
         cx, cy = float(star_center[0]), float(star_center[1])
     else:
         cx, cy = hdr["CRPIX1"] - 1, hdr["CRPIX2"] - 1
-        log(f"  calints: centring on CRPIX ({cx:.2f}, {cy:.2f}) -- the APERTURE reference "
+        log(f"  calints: centering on CRPIX ({cx:.2f}, {cy:.2f}) -- the APERTURE reference "
             f"point, not a measured star position; pass star_center= if you have one")
     H = int(half_px)
     n = 2 * H + 1                                        # ODD: see the docstring
@@ -1338,7 +1338,7 @@ def load_calints(files: Sequence[str], science_target: Optional[str] = None, hal
     # points at pixels nothing downstream ever sees.
     if fcrop > 0.05 and rmode != "none":
         log(f"  calints: that is {100 * fcrop:.0f}% of every returned frame replaced by an "
-            f"interpolation of its neighbours. Those pixels carry no independent "
+            f"interpolation of its neighbors. Those pixels carry no independent "
             f"information but do enter the KLIP basis; consider repair=False (the built-in "
             f"reducers treat NaN as missing) and check the result against this one.")
     if left > 0:

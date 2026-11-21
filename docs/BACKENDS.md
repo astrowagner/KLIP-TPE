@@ -131,13 +131,13 @@ things to them before KLIP sees them, each one recorded:
   is refused.  The usual cause is two processings of one data set in one tree — MAST's
   `mastDownload/` beside a re-reduction from `uncal` — found together by a recursive search.
   Point the loader at one of them.
-* **Background.** The blank-sky median of the programme's dedicated background pointings is
+* **Background.** The blank-sky median of the program's dedicated background pointings is
   subtracted from whichever frames the pipeline did not already do (`S_BKDSUB`): an archive
   download mixes the two, because science targets get the step and PSF references usually do
   not.  A mixture with no background pointing to fix it is refused.
 * **Static hot pixels** (`hot_pixels=None`, the default: whenever there are background
   pointings).  A pixel that stands above (or below) both the median of its seven row
-  neighbours and the median of its seven column neighbours on the blank sky, by more than
+  neighbors and the median of its seven column neighbors on the blank sky, by more than
   `max(10 × robust σ, 5)` MJy/sr, is flagged in every science and reference frame and
   repaired like a DQ pixel.  The AND keeps the 4QPM glow sticks, which stand out along one
   axis only, off the list (where two sticks cross, under the star, the crossing is flagged);
@@ -162,7 +162,7 @@ anything cached from one (a companion fit, say).
 
 Rebuilding a finished run (`scripts/library_ablation.py`, `paper_runs/miri_fig.py`) repairs
 hot pixels exactly when the run did; a run from before the repair existed stays unrepaired on
-its own frames (recognised by the pixel scale it recorded) and gets the loader's default on
+its own frames (recognized by the pixel scale it recorded) and gets the loader's default on
 anyone else's.  `--hot-pixels on|off` overrides.
 
 #### STPSF off-axis PSFs

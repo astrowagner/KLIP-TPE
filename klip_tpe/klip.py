@@ -1707,7 +1707,7 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
 
     def _fm_eig(R, Z, lam, V):
         # The basis' decomposition, handed to klip_fm_zone so it is not made twice.  The FM
-        # decomposes the raw frames, so only without centring, and it takes the basis' modes
+        # decomposes the raw frames, so only without centering, and it takes the basis' modes
         # only where its eigenvalue cut keeps the same ones (they differ at lambda == tol).
         if lam is None or p.spat_mean or p.temp_mean:
             return None

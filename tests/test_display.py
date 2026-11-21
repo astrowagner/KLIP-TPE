@@ -519,7 +519,7 @@ def test_image_panels_are_north_up_east_left():
         draw_image(ax, img, ad, "t", flatten=False)
         x0, x1 = ax.get_xlim()
         assert x1 > x0, "the x axis must increase to the right (East is already -x)"
-        # the bright pixel must land left of centre in data coordinates
+        # the bright pixel must land left of center in data coordinates
         im = ax.images[0]
         ext = im.get_extent()
         col = int(np.argmax(img.sum(axis=0)))

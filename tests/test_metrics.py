@@ -63,7 +63,7 @@ def test_nanmedian_even():
 # ----------------------------------------------------------------------------
 def test_radprof_removes_azimuthal_profile():
     yy, xx = _grid()
-    rr = np.hypot(xx - N / 2.0, yy - N / 2.0)      # IDL centre convention (nx/2, ny/2)
+    rr = np.hypot(xx - N / 2.0, yy - N / 2.0)      # IDL center convention (nx/2, ny/2)
     prof = 100.0 * np.exp(-rr / 10.0)
     out = radprof(prof)
     assert np.abs(out).max() < 0.1 * prof.max()
@@ -101,7 +101,7 @@ def test_declip_removes_hot_pixel_keeps_gaussian(noise):
 
 
 def test_declip_clips_peak_of_very_bright_gaussian(noise):
-    """Documented behaviour, not a requirement: a FWHM=4 px Gaussian whose peak
+    """Documented behavior, not a requirement: a FWHM=4 px Gaussian whose peak
     exceeds ~40x the noise has a 3x3-median residual above 6 sigma and its peak
     pixel is replaced.  The matched filter afterwards smooths this, but it is a
     flux bias for bright sources worth knowing about."""
@@ -116,7 +116,7 @@ def test_gaussian_kernel_unit_sum_and_size():
     assert k.sum() == pytest.approx(1.0)
     assert k[6, 6] == k.max()
     assert np.allclose(k, k.T) and np.allclose(k, k[::-1, ::-1])
-    # half maximum at FWHM/2 = 2 px from the centre
+    # half maximum at FWHM/2 = 2 px from the center
     assert k[6, 8] / k[6, 6] == pytest.approx(0.5, abs=1e-3)
     assert k[8, 6] / k[6, 6] == pytest.approx(0.5, abs=1e-3)
     assert gaussian_kernel(FWHM, size=7).shape == (7, 7)
@@ -209,7 +209,7 @@ def test_mawet_peak_snr_penalty_modes_and_nan_pixels(noise):
     assert np.isfinite(mawet_peak_snr(img2, 1.0, 30.0, PX, FWHM)[0])
     # source itself inside a NaN hole: no finite peak pixel is found, the nominal
     # position is scored on the zero-filled matched-filter image -> ~0, not NaN
-    # (documented behaviour; a NaN would drop the source from the aggregate instead)
+    # (documented behavior; a NaN would drop the source from the aggregate instead)
     img3 = img.copy()
     img3[int(ys[0]) - 3:int(ys[0]) + 4, int(xs[0]) - 3:int(xs[0]) + 4] = np.nan
     s3, det3 = mawet_peak_snr(img3, 1.0, 30.0, PX, FWHM, declip_nsig=None, return_details=True)
@@ -289,7 +289,7 @@ def test_radial_profile_subtraction_is_off_by_default_everywhere():
 
 def test_runner_products_follow_the_metric_not_a_separate_knob():
     """The saved stitches used to flatten whatever the metric did, so the FITS on disk
-    could differ from the image that was optimised.  They now follow the metric."""
+    could differ from the image that was optimized.  They now follow the metric."""
     from klip_tpe.runner import Runner
 
     class _R:

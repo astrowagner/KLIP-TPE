@@ -28,7 +28,7 @@ is the entire public archive.  That is how a coronagraphy census came back as 33
 observations in 1,943 programs, and the same number three times over for three
 "different" exposure types.  Coronagraphy lives in ``instrument_name`` instead
 ("NIRCAM/CORON", "MIRI/CORON"), and :func:`_check_fields` now refuses to run a query
-whose columns MAST does not recognise, so a skipped filter can never again be read as
+whose columns MAST does not recognize, so a skipped filter can never again be read as
 an answer.
 """
 from __future__ import annotations
@@ -104,7 +104,7 @@ def _coron(public_only=True, **extra):
     """Every public JWST coronagraphic observation, optionally narrowed by ``extra``.
 
     ``extra`` overrides the defaults rather than colliding with them, so a target can ask
-    for one instrument of a mixed programme -- GO 1386 is the ERS and holds both NIRCam and
+    for one instrument of a mixed program -- GO 1386 is the ERS and holds both NIRCam and
     MIRI coronagraphy of HIP 65426, and pulling the whole thing to get the MIRI half is a
     large download of mostly the wrong data.
     """
@@ -145,7 +145,7 @@ def census(public_only=True):
     if n_planned:
         planned_progs = sorted({prog[k] for k in range(len(t)) if k not in set(live)})
         print(f"  excluded {n_planned} PLANNED observations in {len(planned_progs)} "
-              f"programme(s) -- listed in CAOM, no products behind them "
+              f"program(s) -- listed in CAOM, no products behind them "
               f"(e.g. {planned_progs[:4]})")
     print(f"\nTOTAL public coronagraphy: {len(live)} delivered observations "
           f"across {len(progs)} programs")
@@ -182,7 +182,7 @@ def _planned(obs_id: str, instrument: str = "") -> bool:
 # coronagraphy target list, which is more than anyone would guess: BKG, BCKG, BCKGR, BGND,
 # BG, BACK, and BACKGOUND (a typo in GO 1277 that MAST serves as written).  Matching only
 # "bkg" and "background" left GO 1241's REF-51-ERI--BCKGR and GO 2538's PSF-HD21997
-# classified as science -- so the listing reported three programmes with a PSF reference
+# classified as science -- so the listing reported three programs with a PSF reference
 # when several more have one, on a column offered as "where RDI is possible".
 _BKG = {"bkg", "bg", "bgnd", "bckg", "bckgr", "bcgr", "back", "background", "backgound"}
 _REF = {"ref", "ref2", "psf", "psfref", "reference", "psfreference"}
@@ -197,7 +197,7 @@ def _role(target: str) -> str:
     rows of public MIRI coronagraphy, thirty-one were background or reference pointings.
 
     A name heuristic, and target names are free text, so it is a guide to reading the
-    listing rather than an authority.  What a programme actually contains is settled by
+    listing rather than an authority.  What a program actually contains is settled by
     downloading it and seeing what ``load_calints`` finds.  Background wins over
     reference, because the background OF a reference pointing is still blank sky.
     """
@@ -214,9 +214,9 @@ def _role(target: str) -> str:
 def _rows(t):
     """(program, target, filter, instrument) tuples, de-duplicated.
 
-    Sorted by programme NUMERICALLY.  ``proposal_id`` is a string, so the default sort put
-    programme 10758 between 1046 and 1193 -- which looks like a listing bug and makes a
-    programme's rows non-contiguous.
+    Sorted by program NUMERICALLY.  ``proposal_id`` is a string, so the default sort put
+    program 10758 between 1046 and 1193 -- which looks like a listing bug and makes a
+    program's rows non-contiguous.
     """
     keys = ("proposal_id", "target_name", "filters", "instrument_name")
     out = {tuple(str(r[k]) for k in keys) for r in t}
@@ -228,7 +228,7 @@ def miri_list(public_only=True, limit=60, filt_only=None, science_only=False):
 
     ``science_only`` drops background and PSF-reference pointings from the listing; the
     count of each is still reported, because a target with no reference pointing in its
-    programme has no RDI library and that is worth knowing before choosing it.
+    program has no RDI library and that is worth knowing before choosing it.
     """
     t = _coron(public_only=public_only)
     t = t[[str(v).upper().startswith(MIRI_PREFIX) for v in t["instrument_name"]]]
@@ -240,7 +240,7 @@ def miri_list(public_only=True, limit=60, filt_only=None, science_only=False):
     n_ref = sum(1 for v in roles.values() if v == "ref")
     n_bkg = sum(1 for v in roles.values() if v == "bkg")
     shown = [r for r in rows if roles[r] == "sci"] if science_only else rows
-    # which programmes have a reference pointing at all -- i.e. where RDI is possible
+    # which programs have a reference pointing at all -- i.e. where RDI is possible
     with_ref = {r[0] for r in rows if roles[r] == "ref"}
     print(f"{'program':>8}  {'role':4s} {'target':30s} {'filter':14s} RDI")
     for r in shown[:limit]:
@@ -250,7 +250,7 @@ def miri_list(public_only=True, limit=60, filt_only=None, science_only=False):
     print(f"\n{len(rows)} distinct (program, target, filter) combinations "
           f"({n_ref} reference, {n_bkg} background, {len(rows) - n_ref - n_bkg} science); "
           f"showing {min(limit, len(shown))}")
-    print(f"{len(with_ref)} programmes include a PSF-reference pointing, so RDI is possible "
+    print(f"{len(with_ref)} programs include a PSF-reference pointing, so RDI is possible "
           f"in those; elsewhere the search has ADI only.")
     return rows
 
@@ -270,7 +270,7 @@ def find(name, public_only=True):
 
 
 def fetch(name, outdir, download=False, products=("CALINTS", "ASN"), target_only=False):
-    """Download a target's coronagraphy -- and, by default, its whole programme.
+    """Download a target's coronagraphy -- and, by default, its whole program.
 
     The science target on its own is not a reduction.  The PSF-reference pointing IS the
     RDI library, and on MIRI the thermal background is strong and structured enough that
@@ -280,13 +280,13 @@ def fetch(name, outdir, download=False, products=("CALINTS", "ASN"), target_only
     reduction, reported only as one word in a log line.
 
     So the query widens to ``proposal_id`` whenever the spec carries one; ``target_only``
-    restores the narrow behaviour.  The roles that came back are counted, and a programme
+    restores the narrow behavior.  The roles that came back are counted, and a program
     with no reference pointing is called out before anything is downloaded rather than
     after.
     """
     spec = dict(TARGETS[name])
     pid = spec.get("proposal_id")
-    # Widening to the programme means dropping the TARGET restriction -- the thing that
+    # Widening to the program means dropping the TARGET restriction -- the thing that
     # excludes the references and backgrounds -- not dropping every other constraint.
     # Rebuilding the criteria as {"proposal_id": pid} also threw away instrument_name, so
     # hip65426_miri would have pulled the whole ERS, NIRCam included, to get its MIRI half.
@@ -294,7 +294,7 @@ def fetch(name, outdir, download=False, products=("CALINTS", "ASN"), target_only
     if pid and not target_only:
         crit.pop("target_name", None)
     print(f"\n=== {name}: {crit}"
-          + ("" if target_only or not pid else "   (whole programme: science + reference + background)"))
+          + ("" if target_only or not pid else "   (whole program: science + reference + background)"))
     t = _coron(**crit)
     if not len(t):
         print("  no matches -- try --find with part of the name, or drop target_name and "
@@ -319,12 +319,12 @@ def fetch(name, outdir, download=False, products=("CALINTS", "ASN"), target_only
               f"delivered (e.g. {planned[0]})")
     if len(planned) == len(t):
         raise SystemExit(
-            f"  every observation in programme {pid} is a planned one: the obs_id carries "
+            f"  every observation in program {pid} is a planned one: the obs_id carries "
             f"the 'xx' visit placeholder and the bare instrument name instead of a\n"
             f"  detector. MAST lists these in CAOM with dataRights already set from the\n"
             f"  planned release date, but there are no products behind them -- so this\n"
             f"  would download nothing and leave an empty directory.\n"
-            f"  Nothing to fix here; the data does not exist yet. Pick another programme:\n"
+            f"  Nothing to fix here; the data does not exist yet. Pick another program:\n"
             f"    python3 {os.path.basename(__file__)} --miri --science-only --limit 0")
     if not download:
         print("  (--download to pull the products)")
@@ -359,8 +359,8 @@ def fetch(name, outdir, download=False, products=("CALINTS", "ASN"), target_only
             raise SystemExit(
                 f"  no products for any of the {len(t)} observations (calib_level {lvl}).\n"
                 f"  The observations exist and are marked public, so this is MAST declining "
-                f"the product query rather than an empty programme.\n"
-                f"  Check whether the download path works at all on an older programme:\n"
+                f"the product query rather than an empty program.\n"
+                f"  Check whether the download path works at all on an older program:\n"
                 f"    python3 {os.path.basename(__file__)} --targets mwc758 --download\n"
                 f"  and look at one row by hand:\n"
                 f"    from astroquery.mast import Observations\n"
@@ -381,7 +381,7 @@ def fetch(name, outdir, download=False, products=("CALINTS", "ASN"), target_only
               + ", ".join(f"{k}({v})" for k, v in sorted(have.items())))
         missing = [p for p in products if p not in have]
         if missing:
-            print(f"  NOTE: asked for {missing}, which this programme does not have. "
+            print(f"  NOTE: asked for {missing}, which this program does not have. "
                   f"Override with --products, e.g. --products {' '.join(sorted(have)[:3])}")
     keep = Observations.filter_products(prod, productSubGroupDescription=list(products))
     if not len(keep):
@@ -409,9 +409,9 @@ def main():
     ap.add_argument("--download", action="store_true")
     ap.add_argument("--products", nargs="*", default=["CALINTS", "ASN"], metavar="G",
                     help="productSubGroupDescription values to pull (default CALINTS ASN); "
-                         "the download lists what the programme actually has")
+                         "the download lists what the program actually has")
     ap.add_argument("--target-only", action="store_true",
-                    help="fetch just the named target, without its programme's reference "
+                    help="fetch just the named target, without its program's reference "
                          "and background pointings. The reference pointing is the RDI "
                          "library, so this gives an ADI-only reduction")
     ap.add_argument("--all-rights", action="store_true",

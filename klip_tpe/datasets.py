@@ -1,35 +1,35 @@
-"""Public example data sets for the tutorials (downloaded on first use, cached).
+"""Public example data sets for the tutorials, downloaded on first use and cached.
 
-* ``naco_betapic`` -- VLT/NACO L' ADI sequence of beta Pictoris (61 frames, 101x101 px,
-  0.02719"/px) with an off-axis PSF and derotation angles, the VIP tutorial data set
-  (Absil et al. 2013).  beta Pic b sits at ~0.45", PA ~210 deg in this epoch.
-* ``sphere_sao206462`` -- VLT/SPHERE IRDIS sequence of SAO 206462 with a *reference-star*
-  cube (RDI / ARDI), from the same repository.
-* ``nircam_pds70_f480m`` / ``nircam_pds70_f187n`` -- JWST/NIRCam PDS 70 roll images with
-  PA arrays (VIP tutorial data; two frames only -- an illustration of the JWST path, not
-  an optimization test case).
-* ``sphere_hd95086`` -- VLT/SPHERE IRDIS DB_K12 sequence of HD 95086 (2019-04-13, ESO
-  1100.C-0481, 63 frames x 2 channels, 241x241 px crops, 33.8 deg of rotation) with the
-  unsaturated flux frames; HD 95086 b at 0.62", PA ~145 deg.  Reduced with K. Wagner's
-  IDL SPHERE pipeline; distributed from the klip-tpe GitHub release ``tutorial-data``.
-* ``lbti_ales_mwc758`` -- LBTI/ALES integral-field cubes of MWC 758 from the two nights of
-  Wagner et al. (2023, Nature Astronomy 7, 1208), 2019 Jan 5 and Nov 14 (583 frames of 1.48 s
-  and 1594 of 2.46 s, 71 and 127 deg of rotation, 62x62 spaxels of an assumed 0.0345", star at
-  the centre), as 20 wavelength groups over 2.90-4.15 um with the same edges on both nights:
-  per night one ``(frame, y, x)`` cube per group (the mean of its channels) and a meta file (a
-  template per group, the angles, the frame, group and channel tables).  Registered and cleaned
-  with K. Wagner's IDL ALES pipeline.  The frames are those with the star at the centre.
-  MWC 758c sits at 0.603", PA 228.5 deg in the Nov 14 data (Wagner et al. 2023).
-  From the klip-tpe GitHub release ``tutorial-data``.  Read it with
+* ``naco_betapic``, a VLT/NACO L' ADI sequence of beta Pictoris (61 frames, 101x101 px,
+  0.02719"/px) with an off-axis PSF and derotation angles, the VIP tutorial data set (Absil et al.
+  2013).  beta Pic b sits at about 0.45", PA 210 deg, in this epoch.
+* ``sphere_sao206462``, a VLT/SPHERE IRDIS sequence of SAO 206462 with a *reference-star* cube (RDI
+  and ARDI), from the same repository.
+* ``nircam_pds70_f480m`` and ``nircam_pds70_f187n``, JWST/NIRCam PDS 70 roll images with PA arrays
+  (VIP tutorial data, two frames only), an illustration of the JWST path rather than an optimization
+  test case.
+* ``sphere_hd95086``, a VLT/SPHERE IRDIS DB_K12 sequence of HD 95086 (2019-04-13, ESO 1100.C-0481,
+  63 frames x 2 channels, 241x241 px crops, 33.8 deg of rotation) with the unsaturated flux frames,
+  HD 95086 b at 0.62", PA 145 deg.  It was reduced with K. Wagner's IDL SPHERE pipeline and is
+  distributed from the klip-tpe GitHub release ``tutorial-data``.
+* ``lbti_ales_mwc758``, LBTI/ALES integral-field cubes of MWC 758 from the two nights of Wagner et
+  al. (2023, Nature Astronomy 7, 1208), 2019 Jan 5 and Nov 14 (583 frames of 1.48 s and 1594 of
+  2.46 s, 71 and 127 deg of rotation, 62x62 spaxels of an assumed 0.0345", the star at the center).
+  They come as 20 wavelength groups over 2.90-4.15 um with the same edges on both nights, per night
+  one ``(frame, y, x)`` cube per group (the mean of its channels) and a meta file (a template per
+  group, the angles, the frame, group and channel tables).  They were registered and cleaned with
+  K. Wagner's IDL ALES pipeline, and the frames are those with the star at the center.  MWC 758c
+  sits at 0.603", PA 228.5 deg, in the Nov 14 data (Wagner et al. 2023).  The set comes from the
+  klip-tpe GitHub release ``tutorial-data`` and reads with
   :func:`klip_tpe.instruments.ales.load_release`.
-* ``lbti_ales_mwc758_20191113`` -- a third night in the same layout and group grid, 2019 Nov 13
-  (959 frames of 2.46 s, 109 deg of rotation), which the paper does not use.  Merged with the
-  two nights' files, ``load_release`` reads all three (``n1`` to ``n3`` in date order).
+* ``lbti_ales_mwc758_20191113``, a third night in the same layout and group grid, 2019 Nov 13 (959
+  frames of 2.46 s, 109 deg of rotation), which the paper does not use.  Merged with the two nights'
+  files, ``load_release`` reads all three (``n1`` to ``n3`` in date order).
 
-The VIP files come from https://github.com/vortex-exoplanet/VIP_extras (data distribution
-of the VIP project); see that repository for provenance.  The cache directory is
-``$KLIP_TPE_DATA`` or ``~/.klip_tpe/data``; ``KLIP_TPE_DATA_URL`` overrides the base URL
-of the klip-tpe-hosted sets (e.g. a local mirror).
+The VIP files come from https://github.com/vortex-exoplanet/VIP_extras, the VIP project's data
+distribution, whose repository gives their provenance.  The cache directory is ``$KLIP_TPE_DATA`` or
+``~/.klip_tpe/data``, and ``KLIP_TPE_DATA_URL`` overrides the base URL of the sets klip-tpe hosts,
+such as a local mirror.
 """
 from __future__ import annotations
 
@@ -110,17 +110,17 @@ INSTRUMENT = {
 
 #: Absolute stellar photometry for the sets that HAVE some, in the science frames' own
 #: units: ``starphot`` = the star's flux inside ``aperture_px`` of the distributed template's
-#: centre.  Feed it to :func:`klip_tpe.instruments.generic.star_flux_from_aperture_photometry`
+#: center.  Feed it to :func:`klip_tpe.instruments.generic.star_flux_from_aperture_photometry`
 #: with the template to get the ``star_flux`` :class:`TemplatePSF` wants; without it the
 #: contrast axis is in template units, not contrast.
 #:
-#: ``naco_betapic``: the distributed ``naco_betapic_psf.fits`` is NORMALISED -- its flux
+#: ``naco_betapic``: the distributed ``naco_betapic_psf.fits`` is NORMALIZED -- its flux
 #: inside r = 2.000 px is 1.000000000 to 2e-9 -- so its own counts say nothing about beta
 #: Pic's brightness, and ``star_flux`` left unset (= the stamp's sum, 4.349) puts the axis
 #: 7.65e5 away from a real contrast.  VIP's metrics tutorial publishes ``starphot = 764939.6``
 #: for this very cube, "obtained from the non-coronagraphic PSF before normalization and
 #: after rescaling to the integration time used in the coronagraphic observations", i.e. in
-#: the aperture the template is normalised in.  CHECKED, not assumed: with it, beta Pic b
+#: the aperture the template is normalized in.  CHECKED, not assumed: with it, beta Pic b
 #: measures dL' = 7.81 +/- 0.08 against the 8.01 +/- 0.16 Absil et al. (2013) published from
 #: these same data -- 1.1 sigma.  See ``scripts/check_betapic_contrast.py`` and docs/FLUX_CALIBRATION.md.
 #:
@@ -132,9 +132,9 @@ INSTRUMENT = {
 #: is given as a FLUX DENSITY and the frames' own MJy/sr calibration converts it
 #: (:func:`klip_tpe.stpsf_psf.star_flux_from_flux_density`).  0.4026 Jy is synthetic
 #: photometry of a Planck spectrum at Carter et al. (2023)'s Teff = 8600 K through the F444W
-#: bandpass, normalised to 2MASS Ks = 6.771 (A2V, J = 6.826, J-K = 0.055); +/- 3%, of which
+#: bandpass, normalized to 2MASS Ks = 6.771 (A2V, J = 6.826, J-K = 0.055); +/- 3%, of which
 #: 1.9% is Ks and <2% the unknown detail of the system response shape.  Ks and F444W are both
-#: in the Rayleigh-Jeans tail, and the JWST flux calibrators are A dwarfs too, so the colour
+#: in the Rayleigh-Jeans tail, and the JWST flux calibrators are A dwarfs too, so the color
 #: term against the standards is negligible.
 PHOTOMETRY = {
     "naco_betapic": {
@@ -146,7 +146,7 @@ PHOTOMETRY = {
     "hip65426_f444w": {
         "flux_density_jy": 0.40259, "flux_density_err_frac": 0.03, "filter": "F444W",
         "ref": "synthetic photometry: Planck(Teff=8600 K, Carter et al. 2023) through the "
-               "STPSF F444W bandpass, normalised to 2MASS Ks = 6.771",
+               "STPSF F444W bandpass, normalized to 2MASS Ks = 6.771",
         # Transmissive losses of the coronagraphic optics that the model PSF does not carry
         # (COM sapphire substrate, BaF2 Lyot substrate): NONE are left to supply.  PHOTMJSR
         # for PUPIL=MASKRND (2.486, against ~0.4 for CLEAR imaging in the same filter) is
@@ -163,7 +163,7 @@ PHOTOMETRY = {
         # and 0.561 = 1/1.9 was what hid it.  With the repair fixed and 1.0 here, HIP 65426 b
         # measures dF444W = 8.796 +/- 0.092 against Carter et al. (2023)'s 8.703 +/- 0.055 --
         # 1.0 sigma, with nothing tuned -- an INDEPENDENT check of the whole axis (S, PIXAR_SR,
-        # EE, T(rho), centring, recovery).  See scripts/check_hip65426_contrast.py and
+        # EE, T(rho), centering, recovery).  See scripts/check_hip65426_contrast.py and
         # docs/FLUX_CALIBRATION.md.  (It read 8.74 until 2026-09-22, when the injector stopped
         # rotating the template by the source's azimuth; that moved it +0.056 mag, away from the
         # published value but well inside the combined error, and the physics decided it, not
@@ -173,7 +173,7 @@ PHOTOMETRY = {
         # GEOMETRY rather than photometry, but it lives here because it is the same
         # per-programme calibration block and the flux check depends on it.  CRPIX
         # (149.2, 173.6) is the APERTURE reference point -- identical in every file of the
-        # programme, dithers included -- and misses the star by 0.78 px, which puts the
+        # program, dithers included -- and misses the star by 0.78 px, which puts the
         # companion inside its own separation and mismatches its KLIP throughput against
         # the fakes injected to calibrate it.  Solved from the companion's position in each
         # roll against Carter et al. (2023)'s F444W astrometry (820 mas, 149.9 deg; see
@@ -208,7 +208,7 @@ PHOTOMETRY = {
     **{f"hip65426_{f.lower()}": {
         "flux_density_jy": s, "flux_density_err_frac": 0.05, "filter": f,
         "ref": "synthetic photometry: Planck(Teff=8600 K, Carter et al. 2023 PHOENIX fit) "
-               "through the STPSF bandpass, normalised to 2MASS Ks = 6.771, ratio-anchored "
+               "through the STPSF bandpass, normalized to 2MASS Ks = 6.771, ratio-anchored "
                "to the F444W entry above",
         "optics_transmission": 1.0,
         "optics_transmission_source": "PHOTMJSR of the coronagraphic mode already carries its optics",
@@ -220,14 +220,14 @@ PHOTOMETRY = {
     # A&A 686, A33).  Computed from scratch rather than anchored, because this star has an
     # INDEPENDENT check available and passing it is worth more than the anchor: those authors
     # interpolate the stellar flux density at 15.5 um from WISE and AKARI photometry and get
-    # 154.2 mJy, and Planck(7600 K) through the F1550C bandpass normalised to 2MASS
+    # 154.2 mJy, and Planck(7600 K) through the F1550C bandpass normalized to 2MASS
     # Ks = 5.240 gives 155.8 -- agreement to 1.0%, with nothing in common between the two
     # routes.  Over Teff = 7200-7800 K the F1550C value moves 159.6 -> 154.0 mJy, so the
     # agreement also pins the inputs: an error in Ks would scale the answer straight through.
     **{f"hr8799_{f.lower()}": {
         "flux_density_jy": s, "flux_density_err_frac": 0.04, "filter": f,
         "ref": "synthetic photometry: Planck(Teff=7600 K, A5V) through the STPSF bandpass, "
-               "normalised to 2MASS Ks = 5.240",
+               "normalized to 2MASS Ks = 5.240",
         "optics_transmission": 1.0,
         "optics_transmission_source": "PHOTMJSR of the coronagraphic mode already carries its optics",
         "check": "F1550C 155.8 mJy against Boccaletti et al. (2024, A&A 686, A33) 154.2 mJy "
@@ -237,16 +237,48 @@ PHOTOMETRY = {
 
 
 def data_dir() -> str:
+    """Return the cache directory of the data sets, made when missing.
+
+    It is ``$KLIP_TPE_DATA``, else ``~/.klip_tpe/data``.
+
+    Returns
+    -------
+    path : str
+        The directory.
+    """
     d = os.environ.get("KLIP_TPE_DATA") or os.path.join(os.path.expanduser("~"), ".klip_tpe", "data")
     os.makedirs(d, exist_ok=True)
     return d
 
 
 def fetch(name: str, quiet: bool = False, roles=None) -> Dict[str, str]:
-    """Download (once) the files of data set ``name`` and return ``{role: local path}``
-    (roles: ``cube``, ``angles``, and ``psf`` / ``ref_cube`` when the set has them, and for the
-    ALES release ``meta_<date>`` and ``gNN_<date>``).  ``roles`` limits the download to those
-    roles, e.g. a few wavelength groups of the ALES set."""
+    """Download the files of a data set once and return their local paths.
+
+    A file missing or shorter than one FITS block is downloaded again.  Each download goes to a scratch
+    file of its own, is made durable and is renamed into place, so two fetches at once against a cold
+    cache never write the same partial file, and a crash never leaves a name on data that did not reach
+    the disk.
+
+    Parameters
+    ----------
+    name : str
+        The data set, a key of :data:`DATASETS`.
+    quiet : bool, default False
+        Whether to download without a line on stderr per file.
+    roles : sequence of str or None, default None
+        The roles to download, such as a few wavelength groups of the ALES set, None for all.
+
+    Returns
+    -------
+    paths : dict
+        Each role's local path.  The roles are ``cube``, ``angles``, and ``psf`` or ``ref_cube`` where the
+        set has them, and for the ALES release ``meta_<date>`` and ``gNN_<date>``.
+
+    Raises
+    ------
+    KeyError
+        If the data set is unknown or lacks a role asked for.
+    """
     if name not in DATASETS:
         raise KeyError(f"unknown data set {name!r}; known: {sorted(DATASETS)}")
     items = DATASETS[name]

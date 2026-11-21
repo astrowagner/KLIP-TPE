@@ -25,8 +25,8 @@ def _speckle_cube(n, ny=32, nx=32, seed=0, scale=1.0, common=None):
 
 
 def test_similarity_ranks_the_frames_that_actually_look_alike():
-    """A library frame built from the target's own speckle realisation must rank above
-    one built from an unrelated realisation -- otherwise the ranking is noise and the
+    """A library frame built from the target's own speckle realization must rank above
+    one built from an unrelated realization -- otherwise the ranking is noise and the
     whole selection is a lottery."""
     common = np.random.default_rng(1).normal(0, 1, (32, 32))
     target, _ = _speckle_cube(4, seed=2, common=common)

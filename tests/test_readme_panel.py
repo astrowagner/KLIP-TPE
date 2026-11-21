@@ -64,7 +64,7 @@ def test_the_three_annuli_touch_and_the_crop_holds_them():
     r_px = rx.PLANET[0] / rx.PXSCALE
     e = rx.annulus_edges(r_px, rx.FWHM_PX, extra=2)
     assert len(e) == 4
-    assert 0.5 * (e[0] + e[1]) == pytest.approx(r_px), "the first annulus is centred on the companion"
+    assert 0.5 * (e[0] + e[1]) == pytest.approx(r_px), "the first annulus is centered on the companion"
     widths = [e[k + 1] - e[k] for k in range(3)]
     assert widths == pytest.approx([4 * rx.FWHM_PX] * 3)
     assert [round(v * rx.PXSCALE, 3) for v in e] == [0.198, 0.582, 0.966, 1.349]

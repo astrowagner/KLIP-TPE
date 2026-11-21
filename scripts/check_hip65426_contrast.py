@@ -5,14 +5,14 @@
 
 The JWST set is the one case where the star's brightness cannot be measured off the frames
 at all -- HIP 65426 sits behind MASK335R in every exposure and the reference star (phi Cen)
-is behind it too, so there is no off-axis stellar image anywhere in the programme.  It has
+is behind it too, so there is no off-axis stellar image anywhere in the program.  It has
 to be imported, and the import has three parts, each of which can be wrong on its own:
 
   S        the star's flux density in F444W [Jy], by synthetic photometry of a stellar model
-           normalised to 2MASS Ks (scripts/hip65426_star_flux.py);
+           normalized to 2MASS Ks (scripts/hip65426_star_flux.py);
   units    the frames are MJy/sr with the NRC_CORON flux calibration, so a point source of
            flux density S deposits S / (1e6 * PIXAR_SR) summed over its pixels;
-  EE       only the fraction inside the injection model's normalisation radius is the
+  EE       only the fraction inside the injection model's normalization radius is the
            `flux_unit` -- from the UNOCCULTED-through-the-Lyot-stop PSF, because that is the
            configuration the pipeline's PHOTMJSR refers to.
 
@@ -49,7 +49,7 @@ from klip_tpe.metrics import Source, mawet_peak_snr, radprof
 from klip_tpe.reducer import ReductionRequest
 
 PUB_DMAG = 8.703                     # Carter et al. 2023, Table 3, F444W (+/- 0.015 stat, 0.055 total)
-PUB_REF = "Carter et al. 2023, ApJL 951, L20 -- the same programme (ERS 1386)"
+PUB_REF = "Carter et al. 2023, ApJL 951, L20 -- the same program (ERS 1386)"
 PUB = 10.0 ** (-0.4 * PUB_DMAG)
 
 RHO, PA = 0.820, 149.9               # Carter et al. 2023 Table 3, F444W (820 +/- 6 mas, 149.9 +/- 0.4 deg)
@@ -85,14 +85,14 @@ def solve_star_center(dsets, info, log):
     """The star's detector position, from where the companion lands in each roll.
 
     CRPIX is the aperture reference point and misses the star; there is no off-axis stellar
-    image in the programme to centroid; and the coronagraphic residual is too speckle-
-    dominated for a 180-degree symmetry fit (it moved the centre by 2 px between the two
+    image in the program to centroid; and the coronagraphic residual is too speckle-
+    dominated for a 180-degree symmetry fit (it moved the center by 2 px between the two
     rolls of these very data).  What IS well determined is the companion: derotation about a
-    centre that is wrong by ``delta`` puts it at ``u + R(PA_k) . delta`` in roll ``k``, so
+    center that is wrong by ``delta`` puts it at ``u + R(PA_k) . delta`` in roll ``k``, so
     each roll gives ``delta = R(-PA_k) . (measured - expected)`` independently, and the two
     have to agree.
 
-    This uses the companion's PUBLISHED astrometry to fix the centre, so it is not an
+    This uses the companion's PUBLISHED astrometry to fix the center, so it is not an
     astrometric measurement -- it is the geometry the photometry needs, and the roll-to-roll
     agreement is what says whether it is trustworthy.
     """
@@ -153,7 +153,7 @@ def main(verbose=True):
         center = tuple(stored)
     dsets, info = sk.load_calints(files, science_target="HIP65426", star_center=center,
                                   log=lambda s: None)
-    log(f"   centred on ({center[0]:.2f}, {center[1]:.2f})")
+    log(f"   centered on ({center[0]:.2f}, {center[1]:.2f})")
 
     phot = datasets.PHOTOMETRY["hip65426_f444w"]
     grid = stpsf_psf.offaxis_grid("NIRCam", info["filter"], image_mask="MASK335R",
@@ -165,7 +165,7 @@ def main(verbose=True):
     if "anchored" in str(phot.get("optics_transmission_source", "")):
         log("  NOTE: optics_transmission is anchored on this very companion, so the number "
             "below is a CALIBRATION, not an independent check.  What it still tests is "
-            "everything else -- the units, the EE, T(rho), the centring and the recovery.")
+            "everything else -- the units, the EE, T(rho), the centering and the recovery.")
     model = stpsf_psf.library(grid, star_flux=sf)
     log(f"  occulter transmission at {RHO}\": {model.throughput(RHO):.4f}   "
         f"(NOT in flux_unit -- it multiplies it)")

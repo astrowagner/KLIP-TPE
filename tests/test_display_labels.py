@@ -7,7 +7,7 @@ from klip_tpe.display import StepImages, render_step
 
 def test_library_counts_get_distinct_labels():
     """``nkeep_altroll`` and ``nkeep_psfref`` used to abbreviate to the same ``nkeep_`` (a
-    bare six-character cut), so the importance panel showed two bars both labelled
+    bare six-character cut), so the importance panel showed two bars both labeled
     ``nkeep_`` and the config tables could not say which pool a number belonged to."""
     from klip_tpe.display import _abbrev, _abbrev_unique
     assert _abbrev("nkeep_altroll") == "nkalt" and _abbrev("nkeep_psfref") == "nkref"

@@ -422,7 +422,7 @@ def figure(path, imgs, snr):
             s.set_linewidth(0.6)
     fig.suptitle("MWC 758, LBTI/ALES 2019-11-14: the Wagner et al. (2023) setup on the tutorial-7 release "
                  "(c circled, 0.603\", PA 228.5°)", fontsize=11, color=ink, x=0.01, ha="left")
-    fig.text(0.01, 0.005, "North up, east left; axes in arcsec.  Grey scale linear from 0 (negatives black) to "
+    fig.text(0.01, 0.005, "North up, east left; axes in arcsec.  Gray scale linear from 0 (negatives black) to "
              "each image's 99.5th percentile of |value| at 6-26 px.  S/N: klip-tpe MawetPeakSNR, as tutorial 7.",
              fontsize=7.5, color=muted, ha="left")
     fig.tight_layout(rect=(0, 0.02, 1, 0.95))

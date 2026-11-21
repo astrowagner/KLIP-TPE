@@ -425,7 +425,7 @@ def test_lmircam_is_a_science_stage_with_its_own_driver():
     sh = _text("rerun_paper.sh")
     assert "SCIENCE=(A2 B2 C D2 I2)" in sh
     assert "run_rxj0534.py" in sh                        # it keeps its companion-ring guards
-    assert 'I2) echo "$RXJ_OUT"' in sh                   # so a finished one is recognised
+    assert 'I2) echo "$RXJ_OUT"' in sh                   # so a finished one is recognized
 
 
 def test_the_science_group_covers_all_four_instruments():
@@ -573,7 +573,7 @@ def test_the_driver_refuses_a_second_instance_and_a_live_directory():
     assert 'a run is LIVE in $d' in sh
     i_live = sh.index('a run is LIVE in $d')
     i_retire = sh.index('mv "$d" "$keep"')
-    assert i_live < i_retire, "a live directory must be recognised before anything could retire it"
+    assert i_live < i_retire, "a live directory must be recognized before anything could retire it"
     assert "tail -f rerun_paper.log" in sh[:sh.index("set -uo pipefail")], "the header says how to follow a nohup'd run"
 
 

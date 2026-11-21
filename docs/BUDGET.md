@@ -151,7 +151,7 @@ fresh draws — a few percent of a 300-evaluation search.  There is no reason to
 ## The search number and the validation number are different statistics
 
 Do not read a validated score below the search best as the answer getting worse.  The search
-maximises `score_search`, which subtracts a one-sided speckle term at each injection site
+maximizes `score_search`, which subtracts a one-sided speckle term at each injection site
 (`s_inj − max(s_clean, 0)`); validation deliberately reports `score_raw = s_inj`.  Measured
 on these data that term is worth **+0.84 S/N**, so validation sits about 0.8 *above* the
 search scale for the same configuration, while the reported search maximum sits ~1.5 *above*
@@ -166,7 +166,7 @@ validated scores.
 | smoke test (does it run?) | 5 | 10 | 1 | 1 | 1 |
 | β Pic tutorial | 40 | 300 | 6 | 8 | 3 |
 | a real answer on a small space | 60 | 400 | 6 | 8 | 3 |
-| production (NEAR, JWST programmes) | 100–200 | 1000–3000 | 6–8 | 8–12 | 3 |
+| production (NEAR, JWST programs) | 100–200 | 1000–3000 | 6–8 | 8–12 | 3 |
 
 A smoke test is for checking that the plumbing works and produces a `winner.json`.  Its
 score means nothing; do not report it.
@@ -178,7 +178,7 @@ single core across eight runs, with no display, when each of a trial's three dra
 reduced its own clean image.  Since 2026-10-08 the draws share one clean reduction, four
 reductions per trial instead of six: the same search (seed 1) took 2.48 minutes instead of
 3.34, with an identical history, so expect about three quarters of the times here.  The spread
-is real and not a timing artefact: the optimizer drifts toward configurations that are more
+is real and not a timing artifact: the optimizer drifts toward configurations that are more
 expensive to reduce (less temporal binning, more KL modes), so the cost per evaluation
 roughly tripled between the start and the end of a run, and two 1200-evaluation searches on
 the same data took 14.7 and 35.5 minutes.  Estimate from the trial count, not from the first

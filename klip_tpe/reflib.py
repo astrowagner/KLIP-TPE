@@ -1,38 +1,37 @@
 """Reference libraries whose composition the optimizer searches.
 
-Port of the reference-frame selection in the IDL ``optimize_mwc_tpe.pro`` /
-``reduce_nircam_coro.pro`` pair, generalized from two hard-coded groups to any number.
+It ports the reference-frame selection of the IDL predecessor's ``optimize_mwc_tpe.pro`` and
+``reduce_nircam_coro.pro``, generalized from two hard-coded groups to any number.
 
-The IDL scheme, for the record
-------------------------------
-MWC 758 F430M (JWST/NIRCam GO 4014) is reduced in ARDI: the reference library for a given
-science frame is drawn from the *other* science roll plus the dedicated reference star
-HD 36575.  ``reduce_nircam_coro`` restores a precomputed similarity matrix and then, **for
-each science frame independently**, ranks each of those two pools by similarity to that
-frame and keeps the best ``nkalt`` alternate-roll frames and the best ``nkpsf`` HD 36575
-frames.  Both counts are searched dimensions (``nkalt`` in [0, 25], ``nkpsf`` in [1, 25]),
-and ``k_klip`` is clamped to their sum.  Frames from a target's *own* roll are never
-eligible, because a science frame contains the companion and would subtract it.
+The IDL predecessor's scheme
+----------------------------
+MWC 758 F430M (JWST/NIRCam GO 4014) is reduced in ARDI.  The reference library of a science frame is
+drawn from the *other* science roll and the dedicated reference star HD 36575.
+``reduce_nircam_coro`` restores a precomputed similarity matrix and then, **for each science frame on
+its own**, ranks each of those two pools by similarity to that frame and keeps the best ``nkalt``
+frames of the other roll and the best ``nkpsf`` frames of HD 36575.  Both counts are searched
+dimensions (``nkalt`` in [0, 25], ``nkpsf`` in [1, 25]), and ``k_klip`` is clamped to their sum.
+Frames from a target's *own* roll are never eligible, because a science frame contains the companion
+and would subtract it.
 
 What is general here
 --------------------
-* Any number of named :class:`ReferenceGroup` s, each with its own searched count.
-* A group may be science data (then it carries a ``partition`` label per frame and the
-  same-partition exclusion applies) or an external star (no exclusion, never a target).
-* A science group of one continuously rotating sequence has no label to exclude by: with
-  ``rotation=True`` it is the ADI rule that decides, per target and per annulus (the
-  references must have turned the planet by ``angsep`` and by no more than ``anglemax``,
-  :func:`klip_tpe.klip.reference_mask`), the label on top of it when there is more than
-  one.  With every eligible frame kept and no other pool, that is plain ADI to the bit.
-* Two similarity metrics, both measured where it matters -- inside the optimized annulus,
-  after the same high-pass filter the reduction uses.  ``cc`` is a peak normalized
-  cross-correlation (higher is better); ``ssr`` is the residual of a per-pair scale +
-  offset fit (lower is better).  Which one ranks references better is itself a question
-  worth searching, so the metric is selectable.
+* Any number of named :class:`ReferenceGroup` objects, each with its own searched count.
+* A group may be science data, with a ``partition`` label per frame and the same-partition exclusion,
+  or an external star, never excluded and never a target.
+* A science group of one continuously rotating sequence has no label to exclude by.  With
+  ``rotation=True`` the ADI rule decides, per target and per annulus, with the label on top of it when
+  there is more than one.  The references must have turned the planet by ``angsep`` and by no more
+  than ``anglemax`` (:func:`klip_tpe.klip.reference_mask`).  With every eligible frame kept and no
+  other pool, that is plain ADI to the bit.
+* Two similarity metrics, both measured where it matters, inside the optimized annulus and after the
+  high-pass filter the reduction uses.  ``cc`` is a peak normalized cross-correlation, higher better.
+  ``ssr`` is the residual of a scale and offset fit per pair, lower better.  Which one ranks references
+  better is itself a question worth searching, so the metric is selectable.
 
-The expensive part -- the similarity matrix -- depends only on the data and the filter
-width, never on the searched counts, so it is computed once per (annulus, filter) and
-cached.  Selecting a library for one frame is then an ``argsort`` over a row.
+The expensive part, the similarity matrix, depends only on the data and the filter width, never on the
+searched counts, so it is computed once per annulus and filter and cached.  Selecting a library for one
+frame is then an ``argsort`` over a row.
 """
 from __future__ import annotations
 
@@ -51,6 +50,24 @@ METRICS = {"cc": True, "ssr": False}
 
 def _annulus_mask(shape: Tuple[int, int], inrad: float, outrad: float,
                   center: Optional[Tuple[float, float]] = None) -> np.ndarray:
+    """Return the mask of the annulus ``inrad <= r <= outrad`` about the frame's center or a given one.
+
+    Parameters
+    ----------
+    shape : tuple of 2 int
+        The frame's shape, ``(ny, nx)``.
+    inrad : float
+        Inner radius, in pixels.
+    outrad : float
+        Outer radius, in pixels.
+    center : tuple of 2 float or None, default None
+        The center, ``(x, y)`` in pixels, None for ``((nx - 1)/2, (ny - 1)/2)``.
+
+    Returns
+    -------
+    mask : ndarray of bool, shape (ny, nx)
+        True inside the annulus.
+    """
     ny, nx = shape
     cx, cy = ((nx - 1) / 2.0, (ny - 1) / 2.0) if center is None else center
     yy, xx = np.mgrid[0:ny, 0:nx]
@@ -59,12 +76,25 @@ def _annulus_mask(shape: Tuple[int, int], inrad: float, outrad: float,
 
 
 def _prep(cube: np.ndarray, mask: np.ndarray, filt: float) -> np.ndarray:
-    """High-pass each frame, take the annulus pixels, mean-subtract, unit-normalise.
+    """Return each frame high-passed, cut to the annulus, mean-subtracted and normalized to unit length.
 
-    Normalising here means the correlation of two prepared rows is their dot product and
-    the whole matrix is one ``@``; it also makes ``cc`` independent of the frames' overall
-    brightness, which for a coronagraphic sequence varies with pointing and is not a
-    similarity of the speckle field.
+    Normalized so, the correlation of two rows is their dot product and the whole matrix is one product.
+    It also makes ``cc`` independent of the frames' overall brightness, which in a coronagraphic sequence
+    varies with pointing and is no similarity of the speckle field.
+
+    Parameters
+    ----------
+    cube : ndarray, shape (n, ny, nx)
+        The frames.
+    mask : ndarray of bool, shape (ny, nx)
+        The annulus.
+    filt : float
+        Width of the high-pass filter, in pixels, 0 for none.
+
+    Returns
+    -------
+    rows : ndarray, shape (n, npix)
+        Each frame's annulus pixels with NaN set to 0, a frame of zero norm left unnormalized.
     """
     out = np.empty((cube.shape[0], int(mask.sum())), float)
     for i, im in enumerate(cube):
@@ -82,19 +112,48 @@ def similarity_matrix(target_cube: np.ndarray, library_cube: np.ndarray, *,
                       inrad: float, outrad: float, filt: float = 0.0,
                       metric: str = "cc", center: Optional[Tuple[float, float]] = None,
                       shift_px: int = 1) -> np.ndarray:
-    """``(n_library, n_target)`` similarity, measured in the annulus after high-pass.
+    """Return each library frame's similarity to each target frame, in the annulus after the high-pass.
 
-    ``cc`` is the normalized cross-correlation maximised over integer shifts within
-    ``+/-shift_px`` -- the "peak" of the IDL's peak cross-correlation.  JWST coronagraphic
-    frames are co-registered to a fraction of a pixel, so the search is a robustness
-    measure rather than a registration: at ``shift_px=0`` it is the plain zero-lag
-    correlation and costs one matrix product.
+    ``cc`` is the normalized cross-correlation maximized over integer shifts within ``+/-shift_px``, the
+    "peak" of the IDL predecessor's peak cross-correlation.  JWST coronagraphic frames are co-registered
+    to a fraction of a pixel, so the shifts make the measure robust rather than register the frames, and
+    at ``shift_px=0`` it is the plain correlation at zero lag, one matrix product.  ``ssr`` fits
+    ``target ~ a reference + b`` per pair by least squares and returns the mean squared residual.
 
-    ``ssr`` fits ``target ~ a * reference + b`` per pair by least squares and returns the
-    mean squared residual.  On unit-normalised, mean-subtracted rows that reduces to
-    ``1 - cc**2``, which is a monotone function of ``cc`` -- so the two metrics rank
-    identically at zero lag and differ only through the shift search.  Kept distinct
-    because the IDL writes both and a caller may want the residual's scale.
+    Parameters
+    ----------
+    target_cube : ndarray, shape (n_target, ny, nx)
+        The target frames.
+    library_cube : ndarray, shape (n_library, ny, nx)
+        The library frames.
+    inrad : float
+        The annulus' inner radius, in pixels.
+    outrad : float
+        Its outer radius, in pixels.
+    filt : float, default 0.0
+        Width of the high-pass filter, in pixels, 0 for none.
+    metric : {"cc", "ssr"}, default "cc"
+        The similarity.
+    center : tuple of 2 float or None, default None
+        The star's position, ``(x, y)`` in pixels, None for the frame's center.
+    shift_px : int, default 1
+        Largest shift searched, in pixels.
+
+    Returns
+    -------
+    similarity : ndarray, shape (n_library, n_target)
+        The similarity, larger better for ``cc`` and smaller better for ``ssr``.
+
+    Raises
+    ------
+    ValueError
+        If the metric is unknown or the annulus holds no pixel.
+
+    Notes
+    -----
+    On unit-normalized, mean-subtracted rows ``ssr`` reduces to ``1 - cc**2``, which falls as a positive
+    ``cc`` grows, so the two rank alike at zero lag and differ only through the shift search.  They are
+    kept apart because the IDL predecessor writes both and a caller may want the residual's scale.
     """
     if metric not in METRICS:
         raise ValueError(f"unknown similarity metric {metric!r}; have {sorted(METRICS)}")
@@ -114,12 +173,41 @@ def similarity_matrix(target_cube: np.ndarray, library_cube: np.ndarray, *,
 
 @dataclass
 class ReferenceGroup:
-    """One pool of candidate reference frames with its own searched count.
+    """One pool of candidate reference frames, with its own searched count.
 
-    ``partition`` is per-frame and only meaningful for a group taken from the science data
-    itself: a target frame never draws references carrying its own label, which is what
-    keeps a roll from subtracting its own companion.  An external reference star leaves it
-    ``None`` and every one of its frames is always eligible.
+    A group from the science data carries a ``partition`` label per frame, and a target frame never draws
+    references with its own label, which keeps a roll from subtracting its own companion.  An external
+    reference star leaves the labels None, and every one of its frames is always eligible.
+
+    Attributes
+    ----------
+    name : str
+        The group's name, which names its parameter ``nkeep_<name>``.
+    rows : ndarray of int, shape (n,)
+        Its frames' rows in the combined library cube.
+    partition : ndarray, shape (n,), default None
+        Each frame's label, None for an external star.
+    min_keep : int, default 0
+        Fewest frames kept.
+    max_keep : int, default None
+        Most frames kept, None for every frame a target can reach.
+    rotation : bool, default False
+        Whether the frames are science frames of a rotating sequence.  A target's eligible rows are then
+        those the ADI rule admits (``angsep`` and ``anglemax`` over the library's angles), never itself.
+    scales : ndarray, shape (n,), default None
+        Each row's scale factor ``lambda_target / lambda_row``, for frames of other wavelength groups
+        magnified about the star, None otherwise.  A target's eligible rows are then those whose
+        displacement of the planet, by rotation and scaling together, reaches the arc ``angsep`` asks for
+        (:func:`klip_tpe.rescale.displacement_px`), with ``|dPA| <= anglemax`` as for ADI.
+    n_labels : int
+        Number of distinct labels, 0 without them, set at construction.
+
+    Notes
+    -----
+    A partitioned pool's reachable size is not its row count, since a target only sees the rows with
+    another label.  For two rolls of 25 frames the ceiling is 25, not 50, and a bound of 50 would leave
+    half the searched range describing ties with keeping every eligible frame.  With one label and the
+    rotation rule every other frame can be eligible, so the ceiling is the count less the target.
     """
     name: str
     rows: np.ndarray                              # indices into the combined library cube
@@ -136,6 +224,14 @@ class ReferenceGroup:
     scales: Optional[np.ndarray] = None
 
     def __post_init__(self):
+        """Check the group and bound its counts by what a target can reach.
+
+        Raises
+        ------
+        ValueError
+            If the labels or the scales are not one per frame, or the group has both the rotation rule and
+            scales.
+        """
         self.rows = np.asarray(self.rows, int)
         self.n_labels = 0
         if self.scales is not None:
@@ -172,16 +268,36 @@ class ReferenceGroup:
 
     @property
     def param_name(self) -> str:
+        """The name of the group's searched count, ``nkeep_<name>``.
+        """
         return f"nkeep_{self.name}"
 
 
 @dataclass
 class ReferenceLibrary:
-    """Named groups over one library cube, plus the similarity that ranks them.
+    """Named groups of reference frames over one library cube, and the similarity that ranks them.
 
-    ``similarity`` is ``(n_library, n_target)``; ``better_is_larger`` says which end of it
-    a good reference sits at.  :meth:`select` is called once per target frame per
-    evaluation, so it does no arithmetic beyond an ``argsort`` of the eligible rows.
+    :meth:`select` is called once per target frame per evaluation, so it does no arithmetic beyond an
+    ``argsort`` of the eligible rows.
+
+    Attributes
+    ----------
+    groups : list of ReferenceGroup
+        The groups, their names distinct.
+    similarity : ndarray, shape (n_library, n_target)
+        Each library frame's similarity to each target frame (:func:`similarity_matrix`).
+    target_partition : ndarray, shape (n_target,), default None
+        Each target frame's label, None without labels.
+    metric : {"cc", "ssr"}, default "cc"
+        The similarity's metric, which says which end of it a good reference sits at.
+    n_min_ref : int, default 2
+        Fewest references a configuration may keep (:meth:`project`).
+    angles : ndarray, shape (n_library,), default None
+        The binned parallactic angle in degrees of each library row that is a science frame, of the
+        target's group or rescaled from another, which a group with ``rotation`` or ``scales`` needs.
+    mid_px : float, default None
+        The annulus' mid radius in pixels, where a scaled group's displacement rule is measured, as the ADI
+        arc rule is (:func:`klip_tpe.klip.arcdist_deg`).
     """
     groups: List[ReferenceGroup]
     similarity: np.ndarray
@@ -197,6 +313,14 @@ class ReferenceLibrary:
     mid_px: Optional[float] = None
 
     def __post_init__(self):
+        """Check the library against its groups.
+
+        Raises
+        ------
+        ValueError
+            If two groups share a name, a ruled group lacks the library's angles or an angle for one of its
+            rows, or a scaled group lacks ``mid_px``.
+        """
         self.similarity = np.asarray(self.similarity, float)
         names = [g.name for g in self.groups]
         if len(set(names)) != len(names):
@@ -216,18 +340,31 @@ class ReferenceLibrary:
 
     @property
     def better_is_larger(self) -> bool:
+        """Whether a larger similarity is a better reference, True for ``cc``.
+        """
         return METRICS[self.metric]
 
     @property
     def n_target(self) -> int:
+        """The number of target frames.
+        """
         return int(self.similarity.shape[1])
 
     @property
     def max_total(self) -> int:
+        """The most references the groups can keep together.
+        """
         return int(sum(g.max_keep for g in self.groups))
 
     def params(self):
-        """One integer :class:`~klip_tpe.space.Param` per group, for the search space."""
+        """Return one integer search parameter per group, its count of frames kept.
+
+        Returns
+        -------
+        params : list of Param
+            The parameters ``nkeep_<group>``, each from the group's ``min_keep`` to its ``max_keep``, the
+            latter their default.
+        """
         from .space import Param
         return [Param(name=g.param_name, lo=float(g.min_keep), hi=float(g.max_keep),
                       kind="int", default=float(g.max_keep), role="reduction",
@@ -236,21 +373,49 @@ class ReferenceLibrary:
                 for g in self.groups]
 
     def keep_from_config(self, cfg: Dict) -> Dict[str, int]:
-        """Pull ``nkeep_<group>`` out of a decoded config, defaulting to the full pool."""
+        """Return each group's count from a decoded configuration, the full pool where it has none.
+
+        Parameters
+        ----------
+        cfg : dict
+            The decoded configuration.
+
+        Returns
+        -------
+        keep : dict
+            Each group's name and count.
+        """
         return {g.name: int(round(float(cfg.get(g.param_name, g.max_keep)))) for g in self.groups}
 
     def eligible(self, target: int, group: ReferenceGroup, angsep_deg: float = 0.0,
                  anglemax: float = 360.0, census: bool = False) -> np.ndarray:
-        """Rows of ``group`` this target may use: never its own label (unless the group
-        rotates under one label), and, for a ``rotation`` group, only the rows the ADI rule admits
-        (``angsep_deg <= |dPA| <= anglemax``, itself never).  When that leaves fewer than
-        4 rows the group falls back to every row but the target, as ``klip_annular`` does
-        without a library (``multiklip``'s fallback).  ``census`` asks for the count
-        before that fallback, which is what the starved-target rule reads.  A group with
-        ``scales`` (rescaled frames of other wavelength groups) admits the rows whose
-        displacement at the annulus' mid radius, by rotation and scaling together, is at
-        least the arc ``angsep_deg`` stands for, within ``anglemax`` of rotation, and has
-        no fallback: a target the rule leaves no SDI reference simply has none."""
+        """Return the rows of a group a target frame may use.
+
+        A target never uses its own label, unless the group rotates under one label.  A ``rotation`` group
+        admits only the rows the ADI rule admits, ``angsep_deg <= |dPA| <= anglemax``, never the target, and
+        when that leaves fewer than 4 rows it falls back to every row but the target, as ``klip_annular``
+        does without a library (``multiklip``'s fallback).  A group with ``scales`` admits the rows whose
+        displacement of the planet at the annulus' mid radius, by rotation and scaling together, is at least
+        the arc ``angsep_deg`` stands for, within ``anglemax`` of rotation, with no fallback.
+
+        Parameters
+        ----------
+        target : int
+            The target frame's index.
+        group : ReferenceGroup
+            The group.
+        angsep_deg : float, default 0.0
+            The least rotation in degrees, the arc of the ADI rule at the annulus' mid radius.
+        anglemax : float, default 360.0
+            The most rotation, in degrees.
+        census : bool, default False
+            Whether to count before the fallback, as the starved-target rule reads it.
+
+        Returns
+        -------
+        rows : ndarray of int
+            The rows, in the group's order.  A target the displacement rule leaves no SDI reference has none.
+        """
         rows = group.rows
         if group.partition is not None and self.target_partition is not None \
                 and not (group.rotation and group.n_labels < 2):
@@ -278,12 +443,30 @@ class ReferenceLibrary:
 
     def select(self, target: int, keep: Dict[str, int], angsep_deg: float = 0.0,
                anglemax: float = 360.0, census: bool = False) -> np.ndarray:
-        """Library rows for one target frame: the best ``keep[name]`` of each group.
+        """Return the library rows of one target frame, the best ``keep[name]`` of each group.
 
-        Ranking is per target, which is the whole point -- a frame taken in poor pointing
-        is best matched by different references than the frame after it, and averaging
-        that choice over the sequence is what a fixed library does.  ``angsep_deg`` and
-        ``anglemax`` reach the groups that apply the rotation rule.
+        The ranking is per target, which is the point of it.  A frame taken in poor pointing is best matched
+        by other references than the frame after it, and a fixed library averages that choice over the
+        sequence.  A group kept whole keeps every eligible row, which makes a rotating sequence's full pool
+        plain ADI, and any other group drops a row whose similarity is not finite.
+
+        Parameters
+        ----------
+        target : int
+            The target frame's index.
+        keep : dict
+            Each group's count, the full pool for a group missing.
+        angsep_deg : float, default 0.0
+            The least rotation for the groups with the rotation rule, in degrees.
+        anglemax : float, default 360.0
+            The most rotation, in degrees.
+        census : bool, default False
+            Whether the rotation groups count before their fallback (:meth:`eligible`).
+
+        Returns
+        -------
+        rows : ndarray of int
+            The rows, sorted and unique, empty when no group gives one.
         """
         out: List[np.ndarray] = []
         for g in self.groups:
@@ -310,11 +493,23 @@ class ReferenceLibrary:
         return np.unique(np.concatenate(out))
 
     def is_plain_adi(self, keep: Dict[str, int]) -> bool:
-        """Do these counts make the library plain ADI: one rotation group under one label
-        kept whole, every other pool at zero?  ``klip_annular`` then reduces without the
-        library at all, so that point of the space IS the ADI reduction, shortcuts and all
-        (its shared basis when nothing is excluded, its cap on ``k``), rather than a
-        per-target rendering of it."""
+        """Tell whether these counts make the library plain ADI.
+
+        They do with one rotation group under one label kept whole and every other pool at zero.
+        ``klip_annular`` then reduces without the library at all, so that point of the space *is* the ADI
+        reduction, shortcuts and all (its shared basis when nothing is excluded, its cap on ``k``), rather
+        than a per-target rendering of it.
+
+        Parameters
+        ----------
+        keep : dict
+            Each group's count.
+
+        Returns
+        -------
+        plain : bool
+            True for plain ADI.
+        """
         rot = [g for g in self.groups if g.rotation]
         if len(rot) != 1 or rot[0].n_labels > 1:
             return False
@@ -330,20 +525,51 @@ class ReferenceLibrary:
 
     def mask(self, target: int, keep: Dict[str, int], n_library: int, angsep_deg: float = 0.0,
              anglemax: float = 360.0) -> np.ndarray:
+        """Return a target frame's library rows (:meth:`select`) as a mask.
+
+        Parameters
+        ----------
+        target : int
+            The target frame's index.
+        keep : dict
+            Each group's count.
+        n_library : int
+            Number of library frames.
+        angsep_deg : float, default 0.0
+            The least rotation, in degrees.
+        anglemax : float, default 360.0
+            The most rotation, in degrees.
+
+        Returns
+        -------
+        mask : ndarray of bool, shape (n_library,)
+            True on the rows kept.
+        """
         m = np.zeros(int(n_library), bool)
         m[self.select(target, keep, angsep_deg, anglemax)] = True
         return m
 
     def project(self, cfg: Dict) -> Dict:
-        """Feasibility projection: enough references to build a basis, and ``k_klip``
-        no larger than the number retained.
+        """Return a configuration made feasible, with enough references and ``k_klip`` no larger than their number.
 
-        This is the ``nref_eff`` clamp of ``optimize_mwc_tpe.pro`` -- asking for 30 KL
-        modes from a 12-frame library is not a worse configuration, it is not a
-        configuration, and letting the search spend evaluations discovering that is the
-        kind of waste the guard exists to prevent.  Raising counts rather than lowering
-        ``k_klip`` would change what the user asked for, so the total is only raised when
-        it is below ``n_min_ref``, and then from the largest pool first.
+        The total is raised only when it is below ``n_min_ref``, and then from the largest pool first, since
+        raising the counts to fit ``k_klip`` would change what the search asked for.
+
+        Parameters
+        ----------
+        cfg : dict
+            The decoded configuration.
+
+        Returns
+        -------
+        cfg : dict
+            A copy, each group's count and ``k_klip`` set.
+
+        Notes
+        -----
+        It is the ``nref_eff`` clamp of the IDL predecessor's ``optimize_mwc_tpe.pro``.  Asking for 30 KL
+        modes from a 12-frame library is not a worse configuration, it is no configuration, and a search left
+        to discover that spends evaluations the guard exists to save.
         """
         cfg = dict(cfg)
         keep = self.keep_from_config(cfg)
@@ -373,14 +599,50 @@ def science_and_reference_library(science: np.ndarray, partition: Sequence,
                                   rotation: bool = False, angles: Optional[Sequence[float]] = None):
     """Build the MWC 758 arrangement for any data set.
 
-    ``science`` is the target cube with a ``partition`` label per frame (roll, night,
-    channel); it becomes one group whose same-label frames are excluded per target.  Each
-    entry of ``external`` is a cube of reference-star frames and becomes a group of its
-    own, always eligible.  ``rotation`` with the frames' ``angles`` makes the science group
-    one the ADI rule selects from (a rotating sequence with no label to exclude by).
-    Returns ``(library_cube, ReferenceLibrary)`` where the library cube is the science
-    frames followed by each external cube in turn, so the group row indices address it
-    directly.
+    The science cube becomes one group whose same-label frames are excluded per target, and each external
+    cube of reference-star frames a group of its own, always eligible.
+
+    Parameters
+    ----------
+    science : ndarray, shape (n, ny, nx)
+        The target frames.
+    partition : sequence
+        Each target frame's label, its roll, night or channel.
+    external : dict or None, default None
+        Each reference star's name and frames, shape ``(m, ny, nx)``.
+    inrad : float
+        The annulus' inner radius, in pixels.
+    outrad : float
+        Its outer radius, in pixels.
+    filt : float, default 0.0
+        Width of the high-pass filter the similarity is measured after, in pixels.
+    metric : {"cc", "ssr"}, default "cc"
+        The similarity.
+    shift_px : int, default 1
+        Largest shift the similarity searches, in pixels.
+    n_min_ref : int, default 2
+        Fewest references a configuration keeps.
+    science_group : str, default "altroll"
+        The science group's name.
+    min_keep : dict or None, default None
+        Fewest frames kept, by group name.
+    rotation : bool, default False
+        Whether the science group selects by the ADI rule, as for a rotating sequence with no label to
+        exclude by.
+    angles : sequence of float or None, default None
+        The science frames' parallactic angles in degrees, which ``rotation`` needs.
+
+    Returns
+    -------
+    library : ndarray, shape (n + sum(m), ny, nx)
+        The science frames followed by each external cube in turn, which the groups' rows address.
+    reflib : ReferenceLibrary
+        The library.
+
+    Raises
+    ------
+    ValueError
+        If an external cube's frames do not have the science frames' shape.
     """
     science = np.asarray(science, float)
     cubes = [science]

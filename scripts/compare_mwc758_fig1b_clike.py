@@ -17,7 +17,7 @@ reach c.  A run made with ``--disk-mask`` is measured with its mask (RUN_DIR/dis
 noise samples, and the ring's positions that fall on it are not counted as empty; ``--disk-mask none`` or
 another file overrides it (files ``_nodm`` / ``_dm``), and the mask's outline is drawn on every panel.  The
 panels are shown as Fig. 1b is (a unit-peak Gaussian of FWHM lambda/D at 3.97 um, zero within
-6 and beyond 22 px, the published colour map), each with its own stretch, -1 to +5 robust sigma of its ring.
+6 and beyond 22 px, the published color map), each with its own stretch, -1 to +5 robust sigma of its ring.
 Writes OUT/fig1b_clike.png and OUT/fig1b_clike.json (OUT defaults to RUN_DIR/fig1b_comparison).  Only reads
 RUN_DIR, the paper's products and the release."""
 import os
@@ -166,7 +166,7 @@ try:
     from compare_mwc758_paper_figure import Published            # noqa: E402
     cmap = Published(a.published).cmap()
 except Exception as exc:                                         # no capture at hand: a stand-in map
-    print(f"(published colour map unavailable: {exc!r}; using inferno)")
+    print(f"(published color map unavailable: {exc!r}; using inferno)")
     cmap = "inferno"
 xc, yc = (v[0] for v in source_xy(RHO, PA, red.pxscale, 30.5, 30.5))
 yy, xx = np.mgrid[0:62, 0:62]

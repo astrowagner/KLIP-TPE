@@ -4,7 +4,7 @@ companion's flux against their Table 3 by injection.
 
     TQDM_DISABLE=1 STPSF_PATH=... python scripts/check_hip65426_fig3.py [--out DIR] [--sigma]
 
-Same data, same recipe: the frames are cleaned by filling DQ pixels from their neighbours
+Same data, same recipe: the frames are cleaned by filling DQ pixels from their neighbors
 (spaceKLIP's method) and registered to the median science frame; pyKLIP runs with ONE
 annulus and ONE subsection over the whole image in ADI (2 modes), RDI (18) and ADI+RDI (20)
 -- "the maximum number of KLIP PCA modes", as in their figure; the panels are shown on their
@@ -91,7 +91,7 @@ def det_xy(rho, pa_sky, pa_frame, px):
 
 
 def place(template, xy, phi_ccw_deg, shape):
-    """Template (source at centre, star along -x) rotated so its +x points along phi, at xy."""
+    """Template (source at center, star along -x) rotated so its +x points along phi, at xy."""
     from scipy import ndimage
     t = ndimage.rotate(template, -phi_ccw_deg, reshape=False, order=3)   # scipy's + is clockwise
     t[t < 0] = 0.0
@@ -185,7 +185,7 @@ def main(argv=None):
     nc = stpsf.NIRCam(); nc.filter = "F444W"; nc.pupil_mask = "MASKRND"; nc.image_mask = None
     nc.detector = "NRCA5"; nc.detector_position = (150, 173)
     L = float(np.asarray(nc.calc_psf(fov_pixels=121, oversample=2, nlambda=5)["DET_SAMP"].data).sum())
-    amp = F_b / pixar_sr / L                     # the slice is normalised at the entrance pupil; L is the Lyot stop's share
+    amp = F_b / pixar_sr / L                     # the slice is normalized at the entrance pupil; L is the Lyot stop's share
     log(f"STPSF: Lyot-stop throughput L = {L:.3f}, occulter transmission at {CARTER['rho']}\" = {sl.sum()/L:.3f}; "
         f"injected peak {amp*sl.max():.1f} MJy/sr")
     inj = Sx.astype(float).copy()

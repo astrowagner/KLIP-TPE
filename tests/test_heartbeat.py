@@ -2,7 +2,7 @@
 
 The failure this exists for: a 4-partition RX J0534 search stopped after evaluation 13 and
 nothing in the run directory could say whether it was wedged, killed, or inside one slow
-reduction -- its neighbour was legitimately taking 479 s for single evaluations at the time.
+reduction -- its neighbor was legitimately taking 479 s for single evaluations at the time.
 """
 from __future__ import annotations
 

@@ -6,7 +6,7 @@ that ``default_config`` never set, and the metric's exclusion was point-source o
 
 Measured on the default reduction of that cube, so the paper can be specific:
 
-* the azimuthal excess across the annulus peaks at PA 28-38 and 208-222 -- the catalogued
+* the azimuthal excess across the annulus peaks at PA 28-38 and 208-222 -- the cataloged
   near-edge-on axis -- and the two bands carry ~+0.2 sigma of median excess over the rest of
   the ring, while covering ~22% of it;
 * at the innermost injection radius (12.7 px) the disk supplies 26% of the ring scatter,
@@ -58,7 +58,7 @@ def test_no_bands_masks_nothing():
     assert not pa_wedge_mask((51, 51), []).any()
 
 
-# ------------------------------------------------- the noise ring actually honours the mask
+# ------------------------------------------------- the noise ring actually honors the mask
 
 def _planted(shape=(101, 101), bands=((29.0, 20.0),), amp=50.0, seed=0):
     """A frame whose only structure is a bright wedge -- the disk, idealised."""
@@ -211,7 +211,7 @@ def test_pinned_dimensions_do_not_warn_on_identical_axis_limits():
     lo, hi = D._widen_flat(np.array([0.0, 5.0, -3.0]), np.array([1.0, 5.0, -3.0]))
     assert (hi > lo).all(), list(zip(lo, hi))
     assert lo[0] == 0.0 and hi[0] == 1.0, "an honest range must be left alone"
-    assert abs(0.5 * (lo[1] + hi[1]) - 5.0) < 1e-9, "the pinned value stays centred"
+    assert abs(0.5 * (lo[1] + hi[1]) - 5.0) < 1e-9, "the pinned value stays centered"
 
     n = 3
     ad = D.AnnulusData(

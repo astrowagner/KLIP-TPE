@@ -84,7 +84,7 @@ def test_a_trial_filters_each_image_once(monkeypatch):
     real = ndimage.correlate                           # the matched filter correlates
 
     def counting(a, k, *args, **kw):
-        if np.shape(k) == (KD, KD):                    # not the declip's 3x3 neighbour count
+        if np.shape(k) == (KD, KD):                    # not the declip's 3x3 neighbor count
             calls.append(1)
         return real(a, k, *args, **kw)
     monkeypatch.setattr(ndimage, "correlate", counting)

@@ -4,7 +4,7 @@
     python scripts/check_betapic_contrast.py          # ~4 min, downloads the VIP data once
 
 The NACO L' set is the one case in the tutorials where the star's flux has to be *imported*:
-the distributed ``naco_betapic_psf.fits`` is a normalised template (flux 1.000000000 inside
+the distributed ``naco_betapic_psf.fits`` is a normalized template (flux 1.000000000 inside
 r = 2.000 px) and the science frames are AGPM coronagraphic, so neither file says how bright
 beta Pictoris is.  ``datasets.PHOTOMETRY`` carries VIP's published ``starphot`` for this very
 cube, measured off the non-coronagraphic PSF and rescaled to the coronagraphic integration
@@ -16,7 +16,7 @@ Method -- throughput-matched, with no model of the throughput anywhere:
   1. reduce clean with the DEFAULT parameters;
   2. at each test azimuth, reduce again with ONE injected source of known contrast at beta
      Pic b's own separation, and measure it in ``inj - clean``, where the speckle field has
-     cancelled and only the fake is left;
+     canceled and only the fake is left;
   3. measure the planet in the clean image with the same matched filter;
   4. contrast(beta Pic b) = c_inj * peak_planet / peak_inj.
 
@@ -79,16 +79,16 @@ def main(verbose=True):
                              phot["aperture_px"])
     sf = generic.star_flux_from_aperture_photometry(tpl, phot["starphot"], phot["aperture_px"])
     log(f"template {tpl.shape}: sum {tpl.sum():.6g}, flux inside r={phot['aperture_px']} px "
-        f"= {a:.9f}  <- normalised, so its own counts are not beta Pic")
+        f"= {a:.9f}  <- normalized, so its own counts are not beta Pic")
     log(f"starphot {phot['starphot']:.1f} in that aperture ({phot['ref']})")
-    log(f"  -> star_flux = {sf:.6g} in the template's total-flux normalisation")
+    log(f"  -> star_flux = {sf:.6g} in the template's total-flux normalization")
 
     red = generic.make_reducer({"betapic": ds}, star_flux=sf, max_workers="auto",
                                log=lambda s: None, **inst)
     space = generic.make_space(red, k_klip_max=30)
     space.project = generic.make_guard(red, k_max=30)
     from klip_tpe.metrics import pa_wedge_mask
-    pmask = pa_wedge_mask(ds.cube.shape[-2:], [(29.0, 20.0), (209.0, 20.0)])   # disc ansae
+    pmask = pa_wedge_mask(ds.cube.shape[-2:], [(29.0, 20.0), (209.0, 20.0)])   # disk ansae
 
     p0 = dict(space.decode(space.default_vector()).params, inrad=INRAD, outrad=OUTRAD)
     clean = red.reduce(ReductionRequest(params=p0)).image

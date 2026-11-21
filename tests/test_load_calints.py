@@ -95,7 +95,7 @@ def test_a_bad_partition_mode_is_refused(two_rolls):
 
 
 def test_the_science_target_selects_by_targprop_not_by_order(two_rolls):
-    """The reference star is first alphabetically in some programmes; the split must come
+    """The reference star is first alphabetically in some programs; the split must come
     from TARGPROP rather than from whichever file sorted first."""
     ds, info = load_calints(two_rolls, science_target="REFSTAR", half_px=20, align=False,
                             partition="all", log=lambda *_: None)
@@ -108,7 +108,7 @@ def test_background_pointings_are_kept_out_of_the_rdi_library(tmp_path):
     lands in the RDI basis: blank sky used to model the star's diffraction.
 
     It contributes nothing to subtract with and dilutes the frames that do.  On MIRI
-    programme 11225 the background pointings outnumber the real references.
+    program 11225 the background pointings outnumber the real references.
     """
     f = [write(tmp_path / "s_calints.fits", "AU_MIC", roll=0.0, seed=1),
          write(tmp_path / "r_calints.fits", "AU_MIC_PSF_REFERENCE", roll=0.0, seed=2),
@@ -127,11 +127,11 @@ def test_background_pointings_are_kept_out_of_the_rdi_library(tmp_path):
 def test_a_reference_named_after_its_target_stays_in_the_library(tmp_path):
     """The science match is ``startswith``, so "HIP65426" finds "HIP-65426".
 
-    A programme that names its reference after its target defeats that:
-    ``AU_Mic_psf_reference`` normalises to AUMICPSFREFERENCE and starts with AUMIC, so it
+    A program that names its reference after its target defeats that:
+    ``AU_Mic_psf_reference`` normalizes to AUMICPSFREFERENCE and starts with AUMIC, so it
     was classified as SCIENCE -- its frames derotated and stacked with the target's, and
     the RDI library empty.  Silently, since the only symptom is a science frame count
-    nobody checks against the programme.
+    nobody checks against the program.
     """
     f = [write(tmp_path / "s_calints.fits", "AU_Mic", roll=0.0, seed=1),
          write(tmp_path / "r_calints.fits", "AU_Mic_psf_reference", roll=0.0, seed=2)]
@@ -191,7 +191,7 @@ def test_the_crop_is_odd_so_the_star_lands_on_the_centre_pixel(two_rolls):
 
 def test_star_center_overrides_crpix(tmp_path):
     """CRPIX is the aperture reference point, not a measured star position -- identical in
-    every file of a programme, dithers included."""
+    every file of a program, dithers included."""
     off = (60.0, 44.0)
     f = [write(tmp_path / "s_calints.fits", "T", roll=0.0, star=off, seed=5)]
     half = 15
@@ -204,7 +204,7 @@ def test_star_center_overrides_crpix(tmp_path):
     mid = half
     a = np.asarray(ds_c["roll1"].cube[0], float)
     b = np.asarray(ds_s["roll1"].cube[0], float)
-    # with the true centre the star's peak is at the middle of the crop; with CRPIX it is not
+    # with the true center the star's peak is at the middle of the crop; with CRPIX it is not
     assert np.unravel_index(np.nanargmax(b), b.shape) == (mid, mid)
     assert np.unravel_index(np.nanargmax(a), a.shape) != (mid, mid)
 
@@ -244,7 +244,7 @@ def test_a_mixed_filter_set_is_refused_rather_than_stacked(tmp_path):
     frame, so a directory holding more than one filter was stacked into a single dataset
     at a single lambda -- different masks, different lambda/D, no error.
 
-    A whole programme downloaded at once is exactly that: GO 1386 holds HIP 65426 in
+    A whole program downloaded at once is exactly that: GO 1386 holds HIP 65426 in
     F1140C and F1550C and HD 141569A in all three, together.
     """
     f = [write(tmp_path / "a_calints.fits", "T", roll=0.0, filt="F1140C", seed=1),
@@ -282,7 +282,7 @@ def test_a_single_filter_set_still_needs_no_argument(tmp_path):
 
 def test_a_large_dq_fraction_is_called_out_not_just_counted(tmp_path):
     """Flagged pixels inside the returned stamp are a smooth interpolation of their
-    neighbours: no independent information, but they do enter the KLIP basis, where smooth
+    neighbors: no independent information, but they do enter the KLIP basis, where smooth
     and large is what the leading components are made of."""
     ny = nx = 60
     many = tuple((y, x) for y in range(10, 40) for x in range(10, 40))   # 900 of 3600 = 25%
@@ -291,7 +291,7 @@ def test_a_large_dq_fraction_is_called_out_not_just_counted(tmp_path):
     ds, info = load_calints(f, science_target="T", half_px=20, align=False,
                             partition="all", log=msgs.append)
     assert info["repaired_fraction"] == pytest.approx(0.25, abs=0.01)
-    assert info["repaired_fraction_crop"] > 0.25            # the block is centred on the star
+    assert info["repaired_fraction_crop"] > 0.25            # the block is centered on the star
     assert any("over the whole subarray" in m for m in msgs)
     assert any("no independent information" in m for m in msgs)
 
@@ -409,7 +409,7 @@ def _load(files, msgs, **kw):
 # ------------------------------------ the dedicated background, and the mixture in an archive
 
 def _bkg_set(tmp_path, sci_done, ref_done, with_bkg=True, level=20.0):
-    """A programme whose science target got a dedicated background and whose PSF reference
+    """A program whose science target got a dedicated background and whose PSF reference
     did not -- which is the ordinary case, not a corner one."""
     f = [write(tmp_path / "s_calints.fits", "T", roll=0.0, seed=1,
                bkgsub=sci_done, level=0.0 if sci_done else level),
@@ -424,7 +424,7 @@ def _bkg_set(tmp_path, sci_done, ref_done, with_bkg=True, level=20.0):
 def test_the_reference_gets_the_background_the_science_already_had_removed(tmp_path):
     """The mixture an archive download hides, and why it cannot be stacked.
 
-    A programme's SCIENCE targets get dedicated background pointings and Image2 subtracts
+    A program's SCIENCE targets get dedicated background pointings and Image2 subtracts
     them (S_BKDSUB='COMPLETE'); its pure PSF REFERENCE stars usually do not get one, so the
     step never runs on them.  On ERS 1386 at F1140C that is 14 of 16 reference files arriving
     with a ~19 MJy/sr sky pedestal and the 4QPM glow sticks, against science frames with
@@ -546,10 +546,10 @@ def test_destripe_is_nan_safe_and_leaves_empty_rows_alone():
 
 
 def test_destripe_leaves_no_line_uncorrected_through_the_star():
-    """The bug this guards: the star disc and the 4QPM boundary band cross AT the star, so
+    """The bug this guards: the star disk and the 4QPM boundary band cross AT the star, so
     together they emptied 24 rows and 24 columns outright on MASK1140 -- rows 101-124 and
-    columns 108-131, straight through the target, and the crop is centred on exactly that.
-    A line with no offset estimate keeps its offset while every neighbour loses theirs, which
+    columns 108-131, straight through the target, and the crop is centered on exactly that.
+    A line with no offset estimate keeps its offset while every neighbor loses theirs, which
     turns a gradient into a step: measured on a real F1140C integration, line-to-line steps
     inside the 81x81 crop went from 1.87 raw to 4.05 'destriped'.  The global sky scatter
     never noticed (1.826 against 1.827), because the damage sat only where the science is.
@@ -623,7 +623,7 @@ def test_destripe_recovers_the_injected_offset_off_the_glow_stick():
     assert np.std(res) < inj / 3.0, f"residual sd {np.std(res):.3f} against injected {inj:.3f}"
 
     # and row by row, away from the glow stick, essentially nothing survives.  This is the
-    # assertion that fails if the star disc and the boundary band are ever again allowed to
+    # assertion that fails if the star disk and the boundary band are ever again allowed to
     # empty a line between them: those 24 rows sat at |y - cy| up to 12, i.e. right here.
     off = np.abs(idx - cy) > 8
     worst = float(np.max(np.abs(res[off] - np.median(res[off]))))

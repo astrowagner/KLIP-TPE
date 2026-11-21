@@ -14,7 +14,7 @@ Inputs (all read-only):
                channels in four chunks) and angles_bin15.npy
   --release    tutorial 7's release (mwc758_ales_20191114_meta.fits and _g09.._g19.fits)
   --published  a capture of the published Fig. 1 (springernature.com, 41550_2023_2028_Fig1_HTML.png,
-               shown at 1400 px wide); its colour bar gives the colour map
+               shown at 1400 px wide); its color bar gives the color map
 What it runs (cached in OUT/cache, so a rerun only redraws):
   1. ADI-KLIP of channels 4-89 (2.9-4.2 um): bin 15, high-pass 11, 15 modes in 6 sectors of 5-27 px.
   2. the disk setup of Fig. 1a: 5 modes, the whole annulus, channels 31-84 (3.39-4.14 um).
@@ -59,7 +59,7 @@ COLS = ["a", "b", "d", "e", "f"]
 
 # ------------------------------------------------------------------ the published figure
 # capture boxes (x0, y0, x1, y1) and fitted geometry (capture px per data px; capture position of data
-# pixel (31, 31)), data y up.  Fitted by maximising the rank correlation with the rows that match.
+# pixel (31, 31)), data y up.  Fitted by maximizing the rank correlation with the rows that match.
 BOX = {"a": (0, 25, 462, 489), "b": (464, 25, 928, 489), "d": (0, 491, 466, 851),
        "e": (467, 491, 933, 851), "f": (934, 491, 1400, 851)}
 GEOM = {"a": (7.549, 233.0, 254.2), "b": (7.523, 698.9, 255.1), "d": (7.501, 234.0, 673.0),
@@ -81,7 +81,7 @@ class Published:
         from PIL import Image
         self.rgb = np.asarray(Image.open(path).convert("RGB"))
         self.L = (0.299 * self.rgb[..., 0] + 0.587 * self.rgb[..., 1] + 0.114 * self.rgb[..., 2]).astype(float)
-        bar = self.rgb[110:467, 1336:1344].astype(float).mean(axis=1)[::-1] / 255.0     # colour bar of panel c
+        bar = self.rgb[110:467, 1336:1344].astype(float).mean(axis=1)[::-1] / 255.0     # color bar of panel c
         self.lut = np.vstack([np.linspace([0.0, 0.0, 0.0], bar[0], 24, endpoint=False), bar])  # + black below
 
     def cmap(self):
@@ -109,7 +109,7 @@ class Published:
         return float(stats.spearmanr(ndimage.map_coordinates(self.L, [py[ok], px[ok]], order=1), img[ok]).correlation)
 
     def fit_stretch(self, col, img, rlo=7.5, rhi=21.0):
-        """(vmin, vmax, rms): the linear map onto the colour map that best reproduces the panel's colours
+        """(vmin, vmax, rms): the linear map onto the color map that best reproduces the panel's colors
         from img (least squares in RGB over the ring; white overlays and c's circle excluded)."""
         from scipy import ndimage, optimize
         ok, px, py = self._grid(col, rlo, rhi)
@@ -171,7 +171,7 @@ _G = {}
 
 
 def _init(d):
-    """Worker initialiser: the shared arrays arrive once per worker (fork or spawn alike)."""
+    """Worker initializer: the shared arrays arrive once per worker (fork or spawn alike)."""
     _G.update(d)
 
 
@@ -534,7 +534,7 @@ def side_by_side(path, pub, rows, disp, match, snr, stretch):
     fig.text(0.008, 1 - 0.62 / H, "Rows 2 and 3 are the same reduction as the published panels; rows 4-6 are not.  "
              "Panel b shows the 3.8-4.14 µm half of the 2022-02-11 run, although the caption gives 3.4-4.14 µm.",
              fontsize=9, color=muted, ha="left", va="center")
-    fig.text(0.008, 0.2 / H, "North up, east left; 62 x 62 px at 0.0345\"/px; d-f cropped as published.  Published colour map (from panel c's bar); "
+    fig.text(0.008, 0.2 / H, "North up, east left; 62 x 62 px at 0.0345\"/px; d-f cropped as published.  Published color map (from panel c's bar); "
              "one linear stretch per column, fitted to the published panel.  b, d-f smoothed by a unit-peak Gaussian of FWHM lambda/D, "
              "as published; a not.  Circle: c at 0.603\", PA 228.5.  S/N: Mawet et al. 2014, lambda/D aperture, unsmoothed, this night only "
              "(the paper's 5.7 combines all LBTI data).  match: rank correlation with the published panel at 7-21 px.",
@@ -603,7 +603,7 @@ def identity_figure(path, pub, ident, W54, pairs):
                 axi.set_title(t, fontsize=9, color=ink, loc="left")
     fig.text(0.062, 0.065, "Same input: MWC758_cube_cen_clean.fits, frames sorted by angle and averaged 15 at a time.  What is left is at the "
              "level of IDL's single-precision arithmetic (e.g. SMOOTH's running sums), not a different step.", fontsize=7.4, color=muted, ha="left")
-    fig.text(0.062, 0.03, "Images: the published colour map and stretch; b and the public-script row smoothed by lambda/D as in Fig. 1.  "
+    fig.text(0.062, 0.03, "Images: the published color map and stretch; b and the public-script row smoothed by lambda/D as in Fig. 1.  "
              "Differences: (port - paper) x 100 on a diverging map spanning half the column's range.", fontsize=7.4, color=muted, ha="left")
     fig.savefig(path, dpi=150, facecolor=surf)
     plt.close(fig)

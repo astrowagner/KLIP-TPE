@@ -3,7 +3,7 @@
 What must hold for a data set in the layout of ``datasets.fetch("lbti_ales_mwc758")``:
 
 * ``ales.load_release`` makes one partition per night and group, ``<label>_<group>``, the
-  nights labelled ``n1``, ``n2``, ... in date order, each partition with its night's angles
+  nights labeled ``n1``, ``n2``, ... in date order, each partition with its night's angles
   (plus the 180 deg of the header's convention, once), its night's template and wavelength,
   and the night and date in its provenance.
 * Nights can be picked by date or by label, a night loaded alone keeps its label, and the

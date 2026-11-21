@@ -310,7 +310,7 @@ def companion_snr(reduce_fn: Callable[[Optional[Sequence[Source]]], np.ndarray],
     """Return the forward-model S/N of a known companion in one configuration.
 
     The signal is the matched-filter peak, within ``search_px`` of the position, of the companion's own
-    reduced image ``clean - removed``, where ``removed`` is the reduction with the companion cancelled by
+    reduced image ``clean - removed``, where ``removed`` is the reduction with the companion canceled by
     a negative injection at (``rho``, ``pa``, ``contrast``), the values :func:`fit_negative_companion`
     returns.  The noise is :func:`ring_sigma` of ``removed`` at the companion's separation.
 

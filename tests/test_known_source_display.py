@@ -130,7 +130,7 @@ def test_a_known_companion_is_circled_on_every_image():
 
 
 def test_it_cannot_be_mistaken_for_an_injection():
-    """Distinct colour, so a reader never reads a real companion as a test source."""
+    """Distinct color, so a reader never reads a real companion as a test source."""
     ad = _ad(known=[(0.5, 120.0)])
     circles, _, mc = _circles(ad, _planted(ad, 0.5, 120.0), sources=[(0.5, 300.0, 1e-4)])
     known = [c for c in circles if np.allclose(c[0], mc.to_rgba(D.KNOWN_COLOR))]
@@ -140,7 +140,7 @@ def test_it_cannot_be_mistaken_for_an_injection():
     assert known[0][1] > inj[0][1], "the known circle is not distinguishable by size either"
     r, g, b, _ = mc.to_rgba(D.KNOWN_COLOR)
     r2, g2, b2, _ = mc.to_rgba(D.SRC_COLOR)
-    assert abs(r - r2) + abs(g - g2) + abs(b - b2) > 0.8, "the two colours are too close"
+    assert abs(r - r2) + abs(g - g2) + abs(b - b2) > 0.8, "the two colors are too close"
 
 
 def test_its_snr_is_printed_when_the_caller_has_one():

@@ -44,7 +44,7 @@ def test_draws_average_and_the_last_one_supplies_the_positions():
 def test_a_failed_draw_is_dropped_from_the_mean_not_counted_as_zero():
     """A reduction that failed is missing information, not a score of zero -- counting it as
     one would make any configuration that fails intermittently look catastrophic and teach
-    the optimizer to avoid a neighbourhood for the wrong reason."""
+    the optimizer to avoid a neighborhood for the wrong reason."""
     out = Runner._combine_draws([_rec(4.0), _rec(None), _rec(8.0)], _rec(8.0))
     assert out.score == pytest.approx(6.0)
     assert out.meta["draw_failed"] == 1
@@ -297,7 +297,7 @@ def test_draw_ranges_labels_the_draw_count_and_sits_under_the_points():
 
 
 def test_each_bar_takes_its_own_point_colour():
-    """The bars belong to their points, so they carry the phase colour rather than one grey
+    """The bars belong to their points, so they carry the phase color rather than one gray
     band across every phase."""
     from klip_tpe.plots import draw_ranges
 
@@ -306,8 +306,8 @@ def test_each_bar_takes_its_own_point_colour():
                     colors=["#111111", "#222222", "#111111"])
     assert n == 3
     colls = [c for c in ax.collections if hasattr(c, "get_segments")]
-    # grouped by colour: two calls for two distinct colours, not one per trial
-    assert len(colls) == 2, f"expected one vlines per distinct colour, got {len(colls)}"
+    # grouped by color: two calls for two distinct colors, not one per trial
+    assert len(colls) == 2, f"expected one vlines per distinct color, got {len(colls)}"
     from matplotlib.colors import to_hex
     got = {}
     for c in colls:
@@ -328,7 +328,7 @@ def test_the_legend_gets_one_neutral_entry_not_one_per_phase():
 
 
 def test_a_short_colour_list_does_not_misalign_the_bars():
-    """Defensive: the caller builds colours from phases and draws from meta independently."""
+    """Defensive: the caller builds colors from phases and draws from meta independently."""
     from klip_tpe.plots import draw_ranges
 
     ax = _axes()

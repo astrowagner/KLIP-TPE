@@ -333,11 +333,11 @@ def test_inclusion_matches_the_selection(tmp_path):
 
 def test_elite_points_are_kept_whole_only_while_they_fit():
     """Every top-gamma point is kept when they fit, and thinned -- never eliminated, and
-    never at the expense of the grey background -- when they do not.
+    never at the expense of the gray background -- when they do not.
 
     This test originally asserted that *all* elite points survive at any size.  That is
     what produced the reported bug: past ~6,000 elite rows the rule spent the whole budget
-    on them and the grey cloud vanished from the panel.  Keeping the result visible is the
+    on them and the gray cloud vanished from the panel.  Keeping the result visible is the
     requirement; keeping every single elite marker is not.
     """
     rng = np.random.default_rng(3)
@@ -372,7 +372,7 @@ def test_one_population_is_thinned_evenly_not_sliced_by_score():
 
     Keeping the highest-scoring slice instead would draw only the good region and make a
     wide search look like one that never explored -- the same information loss as dropping
-    the grey points, arrived at from the other direction.
+    the gray points, arrived at from the other direction.
     """
     y = np.linspace(0, 1, 20_000)
     top = np.ones(20_000, bool)                          # no gamma cut at all
@@ -461,7 +461,7 @@ def test_the_faint_background_survives_a_long_run():
 
     The regression: with a quarter of rows in the top-gamma set, a six-night run past 7000
     evaluations has ~12,000 elite rows on its own.  An elite-first budget spent the whole
-    allowance on them and drew *no* grey points -- so the panel stopped showing the warm-up
+    allowance on them and drew *no* gray points -- so the panel stopped showing the warm-up
     trials and everything the optimizer tried and rejected, which is half of what a
     landscape is for.
     """
@@ -473,16 +473,16 @@ def test_the_faint_background_survives_a_long_run():
 
     keep = D._corner_subsample(y, top, D.CORNER_MAX_POINTS)
     assert keep is not None
-    assert (~top[keep]).sum() > 0, "every grey point was dropped"
-    assert top[keep].sum() > 0, "every coloured point was dropped"
+    assert (~top[keep]).sum() > 0, "every gray point was dropped"
+    assert top[keep].sum() > 0, "every colored point was dropped"
     # and neither population is a token handful
-    for label, count in (("grey", (~top[keep]).sum()), ("coloured", top[keep].sum())):
+    for label, count in (("gray", (~top[keep]).sum()), ("colored", top[keep].sum())):
         assert count >= 0.2 * len(keep), f"{label} points are only {count} of {len(keep)}"
 
 
 def test_thinning_roughly_preserves_the_balance_between_the_two():
     """A reader judges density, so the two populations should be thinned by similar
-    factors rather than one being favoured."""
+    factors rather than one being favored."""
     n = 40_000
     rng = np.random.default_rng(2)
     y = rng.random(n)
@@ -583,7 +583,7 @@ def test_the_panel_plots_that_partitions_rows_not_the_pooled_ones(tmp_path):
             assert "pooled" in seen["title"], seen["title"]
 
 
-# ------------------------------------------------- what the landscape's colours mean
+# ------------------------------------------------- what the landscape's colors mean
 def _corner_collections(ad, warm, top=None):
     """The point collections of one off-diagonal cell.
 
@@ -608,25 +608,25 @@ def _corner_collections(ad, warm, top=None):
 
 
 def test_every_point_is_coloured_by_its_score():
-    """Colour means the score, for all of them.
+    """Color means the score, for all of them.
 
-    It used to mean membership of the top-gamma set, with everything else grey.  During
-    warm-up that left a handful of points coloured among grey ones that were no different
+    It used to mean membership of the top-gamma set, with everything else gray.  During
+    warm-up that left a handful of points colored among gray ones that were no different
     in kind -- nothing had guided any of them -- which read as though those few were
-    special.  The colourmap already says which scores are good, continuously.
+    special.  The colormap already says which scores are good, continuously.
     """
     ad = _annulus(n=200, npart=3, nbase=3)
     cols, n_warm, n = _corner_collections(ad, warm=[False])
     mapped = [c for c in cols if c.get_array() is not None or
               len(np.unique(np.asarray(c.get_facecolor()), axis=0)) > 1 or
               len(np.unique(np.asarray(c.get_edgecolor()), axis=0)) > 1]
-    assert mapped, "no collection carries per-point colour"
+    assert mapped, "no collection carries per-point color"
     drawn = sum(len(c.get_offsets()) for c in cols)
     assert drawn == n, f"{drawn} of {n} points drawn"
 
 
 def test_fill_means_phase_not_score():
-    """Filled = guided, open = warm-up.  Both halves keep their score colour."""
+    """Filled = guided, open = warm-up.  Both halves keep their score color."""
     ad = _annulus(n=120, npart=3, nbase=3)
     cols, n_warm, n = _corner_collections(ad, warm=[True, False, False])   # a third warm
     assert len(cols) == 2, f"expected one filled and one open collection, got {len(cols)}"
@@ -636,9 +636,9 @@ def test_fill_means_phase_not_score():
     assert np.asarray(open_c.get_facecolor()).size == 0 or \
         np.allclose(np.asarray(open_c.get_facecolor())[:, 3], 0.0), "warm-up points are filled"
     assert np.asarray(filled_c.get_facecolor())[:, 3].max() > 0.5, "guided points are not filled"
-    # and the open ones still carry score colour, not one flat grey
+    # and the open ones still carry score color, not one flat gray
     edges = np.asarray(open_c.get_edgecolor())
-    assert len(np.unique(edges, axis=0)) > 1, "warm-up points were drawn in a single colour"
+    assert len(np.unique(edges, axis=0)) > 1, "warm-up points were drawn in a single color"
 
 
 def test_an_all_warm_up_panel_is_all_hollow_and_still_coloured():
@@ -650,11 +650,11 @@ def test_an_all_warm_up_panel_is_all_hollow_and_still_coloured():
     assert len(c.get_offsets()) == n
     fc = np.asarray(c.get_facecolor())
     assert fc.size == 0 or np.allclose(fc[:, 3], 0.0), "some warm-up points were filled"
-    assert len(np.unique(np.asarray(c.get_edgecolor()), axis=0)) > 1, "all one colour"
+    assert len(np.unique(np.asarray(c.get_edgecolor()), axis=0)) > 1, "all one color"
 
 
 def test_no_point_is_drawn_in_flat_grey_any_more():
-    """The grey cloud is gone: nothing should be drawn in the neutral colour."""
+    """The gray cloud is gone: nothing should be drawn in the neutral color."""
     ad = _annulus(n=100, npart=3, nbase=3)
     import matplotlib.colors
     grey = matplotlib.colors.to_rgba(D._grey())
@@ -664,4 +664,4 @@ def test_no_point_is_drawn_in_flat_grey_any_more():
                 continue
             opaque = arr[arr[:, 3] > 0.1] if arr.ndim == 2 and arr.shape[1] == 4 else arr
             if opaque.size:
-                assert not np.allclose(opaque, np.array(grey)), "a flat grey cloud is still drawn"
+                assert not np.allclose(opaque, np.array(grey)), "a flat gray cloud is still drawn"

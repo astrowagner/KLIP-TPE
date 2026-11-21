@@ -32,7 +32,7 @@ panel has a fixed size as well, whatever the width of the notebook.  `klip-tpe v
 the same way.  Every evaluation renders one frame (`steps/stepNNNN.png`), on a worker thread
 so the evaluation loop never waits for it.
 
-**Top row — images** (KLIP image, σ-stretch, image colour map)
+**Top row — images** (KLIP image, σ-stretch, image color map)
 
 | cell | content |
 |---|---|
@@ -58,7 +58,7 @@ FWHM stands in for a measured kernel.
 noise from a band widened past the mask, and the cell names those radii in its lower right
 corner.  Circles mark the injected positions
 with `raw/corr` S/N: *raw* is the S/N in the injected image, *corr* the clean-subtracted
-score (`s_inj − max(s_clean, 0)`) the optimizer maximises.  The panel title carries the
+score (`s_inj − max(s_clean, 0)`) the optimizer maximizes.  The panel title carries the
 evaluation's score, `orig / corr`.  A draw scores the median of its sources' values (the mean
 of two), and the title names that statistic when a draw has more than one source (`Best median
 S/N`).  Under `--n-remeasure` an evaluation scores the mean of its draws, and the images and
@@ -70,7 +70,7 @@ own score in the labels' `raw/corr` form (`shown: draw 3 of 3, 2.8/1.5`).
 
 | cell | content |
 |---|---|
-| TPE convergence | score per evaluation: warm-up / explore grey, TPE blue, local white; SMA20 (green) and SMA50 (yellow) moving averages, dashed = the random-phase SMA20 baseline, the incumbent circled, the vertical dotted line = end of warm-up. The axis starts at 0, or at the lowest score when one is below 0, and a draw bar that reaches below it is cut there and ends in a small triangle |
+| TPE convergence | score per evaluation: warm-up / explore gray, TPE blue, local white; SMA20 (green) and SMA50 (yellow) moving averages, dashed = the random-phase SMA20 baseline, the incumbent circled, the vertical dotted line = end of warm-up. The axis starts at 0, or at the lowest score when one is below 0, and a draw bar that reaches below it is cut there and ends in a small triangle |
 | S/N dist | histogram of scores (rotated, shares the y axis) |
 | KLIP-FM model (best) | the forward-modelled response of the incumbent to its injected companions, and on the finished annulus's frame of the winner to the injections in its best cells (built-in engine only; symlog) |
 | injected PSF (best) | the injected PSF model of the same injections, derotated to North-up |
@@ -79,17 +79,17 @@ own score in the labels' `raw/corr` form (`shown: draw 3 of 3, 2.8/1.5`).
 
 | cell | content |
 |---|---|
-| night inclusion (colour = SNR) | one column per evaluation, one row per partition; a filled cell = partition included, colour = that evaluation's score; the axis grows with the evaluations done (single-partition runs show **parameter importance**, \|corr\| of each parameter with the score, instead) |
-| SNR = 5 contrast (inj-calibrated) | the 5σ contrast curve of the incumbent (white), of this evaluation (grey dashed) and the KLIP-FM cross-check (green dashed); validated winners of earlier annuli stay on the plot |
+| night inclusion (color = SNR) | one column per evaluation, one row per partition; a filled cell = partition included, color = that evaluation's score; the axis grows with the evaluations done (single-partition runs show **parameter importance**, \|corr\| of each parameter with the score, instead) |
+| SNR = 5 contrast (inj-calibrated) | the 5σ contrast curve of the incumbent (white), of this evaluation (gray dashed) and the KLIP-FM cross-check (green dashed); validated winners of earlier annuli stay on the plot |
 
 **Right column**
 
 | block | content |
 |---|---|
 | BEST / TEST | the incumbent's and this evaluation's parameter vectors: separation / PA / contrast of the injections, then each searched parameter, one value when it is global and a value per partition when it has a slot per partition (`[k1 k2 …]`, and past 8 partitions each value once with its count, `14 x11, - x9`), to two significant digits and the correlation cut to 4 decimals (`corr 0.9933`, since the search's cuts lie within 0.990-0.997), the k each partition used (`k used`), and `parts`, the partitions kept without the prefix they share, runs merged, with how many of how many (`g00 g02 g10 g12-g19 (11/20)`). Each line is fitted to its column as measured and cut with `...` when it does not fit. When two columns do not hold the lines, each takes a line of its own |
-| S/N landscape | the corner plot of everything sampled so far (colour = score, grey = warm-up, best boxed, current circled); the marginals share the row's axis. With a slot per partition for some reduction parameter it shows one partition at a time, cycling. With global reduction parameters it pools the one landscape (a partition's selection flag alone does not count) |
+| S/N landscape | the corner plot of everything sampled so far (color = score, gray = warm-up, best boxed, current circled); the marginals share the row's axis. With a slot per partition for some reduction parameter it shows one partition at a time, cycling. With global reduction parameters it pools the one landscape (a partition's selection flag alone does not count) |
 | Elapsed / ETA(ann) / ETA(full) / Est. total / done / avg / last / 1 done every | wall time so far; time left for this annulus and for the run (remaining evaluations at the current completion rate + measured calibration and validation time per annulus + a reserve for pending re-calibrations); elapsed + remaining; the projected wall-clock finish; a trial's own time over the last 50 trials (`avg`) and for the newest (`last`), `eval` from its dispatch until it was processed and `reduce` until its last reduction was back; the interval between two finished evaluations and the trials in flight (`--batch`), which is the throughput and sets both ETAs |
-| night effect | per partition: median score with it included (white) vs excluded (grey) |
+| night effect | per partition: median score with it included (white) vs excluded (gray) |
 | S/N vs # nights | score against the number of partitions kept |
 | legend | warm-up / TPE / best / valid / final markers |
 

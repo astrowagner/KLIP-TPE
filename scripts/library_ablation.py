@@ -35,7 +35,7 @@ library, expressed in the engine's own terms):
   carter_published_annuli  the same reduction over the annulus' own zone
   default   the run's own seeded default
 
-Every injected reduction is scored twice: ``score_search`` (what the search maximised,
+Every injected reduction is scored twice: ``score_search`` (what the search maximized,
 ``s_inj - max(s_clean, 0)``) and ``score_raw`` (what validation reports).  HIP 65426 b's S/N
 is measured in each configuration's clean image where its zone contains the planet.
 
@@ -226,7 +226,7 @@ def hot_pixels_for_rebuild(setup: dict, data: str, override=None, log=None):
     * ``override`` (True / False) wins.
     * A run that recorded its frames rebuilds the way it ran: repaired if it repaired.
     * A run from before the repair existed (no record) rebuilt on ITS OWN frames stays
-      unrepaired, or the rebuild would not reproduce it.  Its own frames are recognised by
+      unrepaired, or the rebuild would not reproduce it.  Its own frames are recognized by
       the pixel scale it recorded, which a re-reduction by another pipeline version does
       not share; frames that are not its own get the loader's default.  With only the
       ``config`` part of a setup to go on there is no scale to compare, and the run is
@@ -254,7 +254,7 @@ def hot_pixels_for_rebuild(setup: dict, data: str, override=None, log=None):
 
 
 def central(img, h: int = 40) -> np.ndarray:
-    """The central (2h+1)x(2h+1) px of a larger odd image, the star kept at the centre."""
+    """The central (2h+1)x(2h+1) px of a larger odd image, the star kept at the center."""
     img = np.asarray(img, float)
     c = (img.shape[-1] - 1) // 2
     return img[..., c - h:c + h + 1, c - h:c + h + 1]
@@ -357,9 +357,9 @@ def _args_for(run_setup: dict, data: str, workers, backend: str = "pyklip", hot_
 
 # ------------------------------------------------------------------ the live view
 _SURFACE, _INK, _INK2, _MUTED, _GRID, _AXIS = "#1a1a19", "#ffffff", "#c3c2b7", "#898781", "#2c2c2a", "#383835"
-#: a configuration's ROLE carries the colour, not its name (nine names would outrun any
+#: a configuration's ROLE carries the color, not its name (nine names would outrun any
 #: palette): dark-surface categorical slots 1-2 of the reference palette, validated all-pairs
-#: with slot 3 (the other run's winner); baselines in neutral grey
+#: with slot 3 (the other run's winner); baselines in neutral gray
 _ROLE_COLOR = {"winner": "#3987e5", "library": "#d95926", "baseline": "#898781"}
 _VERSUS_COLOR = "#199e70"
 _ENGINE_NAME = {"pyklip": "pyKLIP", "klip": "built-in"}
@@ -718,7 +718,7 @@ def _x_from_params(space, params: dict, fallback) -> np.ndarray:
 
 
 def _vec(runner, x, **over):
-    """``x`` with named entries replaced, then sanitised and projected through the run's own
+    """``x`` with named entries replaced, then sanitized and projected through the run's own
     guard by the runner itself (``runner.ia`` must already be the annulus) -- the path every
     searched vector took, so a modified configuration is feasible in the same sense."""
     space = runner.space

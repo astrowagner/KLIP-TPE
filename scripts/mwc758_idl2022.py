@@ -13,7 +13,7 @@ Sources (read-only):
                             scaled by 1/sqrt(eigenvalue), eigenvalues below 5e-3 zeroed
   nw_ang_comb.pro           sphere-tools, 2019-10-22: inverse-variance combination (Bottom et al. 2017)
   angmask.pro, dist_circle.pro (astrolib), reduce_matrix.pro, psf_gaussian.pro and convolve.pro (astrolib)
-IDL behaviour the port relies on, each checked against IDL output:
+IDL behavior the port relies on, each checked against IDL output:
   ROT(img, a, mag, /INTERP): clockwise by a, about ((n-1)/2, (n-1)/2), bilinear, nearest edge pixel
       outside -- against MWC758_xyln_derot.fits (IDL, 2023), 63 frames x 3 channels, to 4e-5.
   SMOOTH(img, w): pixels within w//2 of the edge copied unchanged; with /NAN the mean of the finite
@@ -53,7 +53,7 @@ def wave_index(limit):
 
 def idl_rot(img, angle, mag=1.0):
     """ROT(img, angle, mag, /INTERP): output pixel p takes the input at c + R(angle)(p - c)/mag,
-    c = ((n-1)/2, (n-1)/2), R clockwise on the displayed (y up) image; bilinear (NaN neighbours,
+    c = ((n-1)/2, (n-1)/2), R clockwise on the displayed (y up) image; bilinear (NaN neighbors,
     even at zero weight, propagate), the nearest edge pixel outside the array."""
     ny, nx = img.shape
     xc, yc = (nx - 1) / 2.0, (ny - 1) / 2.0
@@ -262,7 +262,7 @@ def band_select(waves, lo, hi):
 
 
 def psf_gaussian_peak1(npix, fwhm):
-    """psf_Gaussian(NPIX=npix, FWHM=[fwhm, fwhm]) / max: a unit-peak Gaussian centred at (npix-1)/2."""
+    """psf_Gaussian(NPIX=npix, FWHM=[fwhm, fwhm]) / max: a unit-peak Gaussian centered at (npix-1)/2."""
     sd = fwhm / (2.0 * np.sqrt(2.0 * np.log(2.0)))
     x = np.arange(npix) - (npix - 1) / 2.0
     g = np.exp(-x ** 2 / (2.0 * sd * sd))

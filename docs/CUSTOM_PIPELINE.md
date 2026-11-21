@@ -90,7 +90,7 @@ A model may also provide `throughput(rho_as)` (coronagraphic transmission) and
 ## 4. Frame-quality tags (optional)
 
 If you supply `tags`, three searched dimensions select frames before subtraction:
-`corrs >= corr_thresh`, `noises <= noise_max`, `coronoise <= coronoise_max`, normalised so
+`corrs >= corr_thresh`, `noises <= noise_max`, `coronoise <= coronoise_max`, normalized so
 that 1 = median and the searched multipliers range 0.3–3. Any three per-frame quality
 numbers work (PSF correlation, background rms, fit residual, FWHM, …). Without tags,
 build the space with `opt_framesel=False`.

@@ -1,25 +1,25 @@
 """VIP backend (https://vip.readthedocs.io).
 
-:class:`VIPReducer` runs ``vip_hci.psfsub.pca_annular`` (default), ``pca`` (full-frame)
-or ``median_sub`` (classical ADI) on the optimizer's pre-processed cube.  VIP derotates
-(CCW by ``angle_list``, same convention as this package) and collapses internally.
-Parameter mapping (searched -> VIP):
+:class:`VIPReducer` runs ``vip_hci.psfsub.pca_annular`` (the default), ``pca`` (full frame) or
+``median_sub`` (classical ADI) on the optimizer's pre-processed cube.  VIP derotates, counterclockwise
+by ``angle_list`` as in this package, and combines the frames itself.  The searched parameters map to
+VIP's as follows:
 
 ==============  ==============================================================
-``k_klip``       ``ncomp``  (k-scan: one call per k -- VIP's tuple ``ncomp`` means
-                 per-annulus values, not a scan)
-``n_ang``        ``n_segments``            (``pca_annular``; ``median_sub`` has no segments and
-                 uses ``nframes = 2 k`` closest-in-angle references)
-``inrad/outrad`` ``radius_int`` / ``asize = outrad - inrad`` (one annulus; ``n_annuli``
-                 splits it)
-``angsep``       ``delta_rot = angsep * (lambda/D) / FWHM``  (VIP counts in FWHM)
-``anglemax``     not available in VIP (ignored; leave it out of the space)
-``comb_type``    ``collapse`` (``'median'`` | ``'mean'``; ``'nwadi'`` -> ``'median'``)
+``k_klip``       ``ncomp`` (k-scan: one call per k, since VIP's tuple ``ncomp`` means
+                 values per annulus, not a scan)
+``n_ang``        ``n_segments`` (``pca_annular``, while ``median_sub`` has no segments and
+                 uses ``nframes = 2 k`` references closest in angle)
+``inrad/outrad`` ``radius_int`` and ``asize = outrad - inrad`` (one annulus, which
+                 ``n_annuli`` splits)
+``angsep``       ``delta_rot = angsep * (lambda/D) / FWHM`` (VIP counts in FWHM)
+``anglemax``     not available in VIP (ignored, so best left out of the space)
+``comb_type``    ``collapse`` (``'median'`` or ``'mean'``, ``'nwadi'`` -> ``'median'``)
 ==============  ==============================================================
 
-Extra defaults: ``algo`` (``'pca_annular'`` | ``'pca'`` | ``'median_sub'``), ``n_annuli``,
-``svd_mode``, ``imlib`` / ``interpolation`` (VIP rotation library), ``min_frames_lib``,
-``max_frames_lib``, ``nproc``.  RDI/ARDI: ``Dataset.ref_cube`` is passed as ``cube_ref``.
+The extra defaults are ``algo`` (``'pca_annular'``, ``'pca'`` or ``'median_sub'``), ``n_annuli``,
+``svd_mode``, ``imlib`` and ``interpolation`` (VIP's rotation library), ``min_frames_lib``,
+``max_frames_lib`` and ``nproc``.  For RDI and ARDI ``Dataset.ref_cube`` goes to VIP as ``cube_ref``.
 """
 from __future__ import annotations
 
@@ -33,6 +33,13 @@ __all__ = ["VIPReducer"]
 
 
 def _require_vip():
+    """Check that VIP imports.
+
+    Raises
+    ------
+    ImportError
+        If ``vip_hci`` is not installed.
+    """
     try:
         import vip_hci  # noqa: F401
     except ImportError as exc:  # pragma: no cover
@@ -40,6 +47,38 @@ def _require_vip():
 
 
 class VIPReducer(KLIPReducer):
+    """Reducer that runs VIP's PSF subtraction on the optimizer's pre-processed cube.
+
+    It takes the searched parameters as the module maps them and VIP's own as extra defaults, added under
+    the caller's, and emulates the k-scan with one VIP call per k.  Making one checks that VIP imports.
+
+    Parameters
+    ----------
+    data : Dataset
+        The data set.
+    pxscale : float
+        Pixel scale, in arcseconds per pixel.
+    lam_m : float
+        Wavelength, in meters.
+    diam_m : float
+        Telescope diameter, in meters.
+    kw : dict
+        The other keywords of :class:`~klip_tpe.reducer.KLIPReducer`.
+
+    Attributes
+    ----------
+    name : str
+        ``"vip"``.
+    supports_kscan : bool
+        True, the scan emulated.
+    supports_fm : bool
+        False, since VIP gives this package no forward model.
+
+    Raises
+    ------
+    ImportError
+        If ``vip_hci`` is not installed.
+    """
     name = "vip"
     supports_kscan = True          # emulated: one VIP call per k
     supports_fm = False
@@ -52,6 +91,36 @@ class VIPReducer(KLIPReducer):
             self.defaults.setdefault(k, v)
 
     def _one(self, bcube, bang, kp: KLIPParams, p, ncomp: int, cube_ref):
+        """Return one VIP reduction of a binned cube at ``ncomp`` components.
+
+        The angles take the true-north offset, the annulus is ``radius_int`` with ``asize`` per annulus of
+        ``n_annuli``, and ``delta_rot`` is ``angsep`` in FWHM, as VIP counts.
+
+        Parameters
+        ----------
+        bcube : ndarray, shape (nb, ny, nx)
+            The binned cube.
+        bang : ndarray, shape (nb,)
+            Parallactic angle of each frame, in degrees.
+        kp : KLIPParams
+            The KLIP settings.
+        p : dict
+            The request's parameters with VIP's defaults.
+        ncomp : int
+            Number of principal components, or for ``median_sub`` half the references.
+        cube_ref : ndarray or None
+            The reference cube for RDI or ARDI, None for ADI.
+
+        Returns
+        -------
+        image : ndarray, shape (ny, nx)
+            The derotated, combined image.
+
+        Raises
+        ------
+        ValueError
+            If ``algo`` is unknown.
+        """
         import warnings
         from vip_hci.psfsub import median_sub, pca, pca_annular
         ang = np.asarray(bang, float) + self.truenorth
@@ -83,6 +152,43 @@ class VIPReducer(KLIPReducer):
         raise ValueError(f"VIPReducer: unknown algo {algo!r}")
 
     def _subtract(self, bcube, bang, kp: KLIPParams, p, filt, req, mcube, ref_basis, fm_ref, meta):
+        """Subtract the PSF with VIP, one image per number of KL modes in a k-scan.
+
+        With ``use_rdi`` the reference cube goes to VIP as ``cube_ref``, the science frames added to it for
+        ARDI.  The image is cut to the zone, as the base class cuts it.
+
+        Parameters
+        ----------
+        bcube : ndarray, shape (nb, ny, nx)
+            The prepared frames, injected, selected, high-passed and binned.
+        bang : ndarray, shape (nb,)
+            Parallactic angle of each frame, in degrees.
+        kp : KLIPParams
+            The KLIP settings.
+        p : dict
+            The request's parameters.
+        filt : int
+            Width of the high-pass box in pixels, which picks the reference cube.
+        req : ReductionRequest
+            The request, unused.
+        mcube : ndarray or None
+            The KLIP-FM model cube, unused.
+        ref_basis : ndarray or None
+            Reference frames for the basis, unused.
+        fm_ref : ndarray or None
+            The planet model in ``ref_basis``, unused.
+        meta : dict
+            The reduction's notes.
+
+        Returns
+        -------
+        image : ndarray, shape (ny, nx) or (k_klip, ny, nx)
+            The image, or one per number of KL modes with ``kp.k_scan``, NaN outside the zone.
+        fm_image : None
+            No KLIP-FM image.
+        info : dict
+            ``backend`` and ``algo``.
+        """
         cube_ref = None
         if p["use_rdi"]:
             ref = self._reference_cube(filt, meta)
@@ -104,6 +210,13 @@ class VIPReducer(KLIPReducer):
         return img, None, {"backend": "vip", "algo": p["algo"]}
 
     def describe(self) -> Dict[str, Any]:
+        """Return the reducer's settings with ``backend``, for a run's record.
+
+        Returns
+        -------
+        info : dict
+            The base settings and ``backend``, ``"vip"``.
+        """
         d = super().describe()
         d.update(backend="vip")
         return d

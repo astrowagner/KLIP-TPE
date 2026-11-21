@@ -38,9 +38,25 @@ _UNSUPPORTED = {errno.EINVAL, errno.ENOSYS, errno.ENOTSUP, getattr(errno, "EOPNO
 
 
 def fsync_fd(fd: int, full: bool = False) -> bool:
-    """fsync an open descriptor.  ``full`` adds ``F_FULLFSYNC`` on macOS, so the drive
-    empties its cache too.  Returns False when the file system does not support fsync.  A
-    real failure (``EIO``, ``ENOSPC``) raises."""
+    """Make an open descriptor's data durable.
+
+    Parameters
+    ----------
+    fd : int
+        The descriptor.
+    full : bool, default False
+        Whether to add ``F_FULLFSYNC`` on macOS, so the drive empties its cache too.
+
+    Returns
+    -------
+    synced : bool
+        False when the file system does not support fsync.
+
+    Raises
+    ------
+    OSError
+        On a real failure, such as ``EIO`` or ``ENOSPC``.
+    """
     try:
         os.fsync(fd)
     except OSError as exc:
@@ -56,9 +72,20 @@ def fsync_fd(fd: int, full: bool = False) -> bool:
 
 
 def fsync_file(path: str) -> bool:
-    """Make everything written to ``path`` so far durable, for a log that another call
-    appended to and closed.  Never raises.  Returns False when the file is gone or cannot
-    be synced."""
+    """Make everything written to a file so far durable, for a log another call appended to and closed.
+
+    It never raises.
+
+    Parameters
+    ----------
+    path : str
+        The file.
+
+    Returns
+    -------
+    synced : bool
+        False when the file is gone or cannot be synced.
+    """
     # read-only first (enough everywhere but Windows, which wants a writable descriptor)
     for flags in (os.O_RDONLY, os.O_WRONLY | os.O_APPEND):
         try:
@@ -75,8 +102,20 @@ def fsync_file(path: str) -> bool:
 
 
 def fsync_dir(path: str) -> bool:
-    """Make the entries of directory ``path`` durable (a file renamed into it or created in
-    it).  Never raises.  Returns False where a directory cannot be synced, as on Windows."""
+    """Make a directory's entries durable, a file renamed or created in it.
+
+    It never raises.
+
+    Parameters
+    ----------
+    path : str
+        The directory.
+
+    Returns
+    -------
+    synced : bool
+        False where a directory cannot be synced, as on Windows.
+    """
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     except OSError:
@@ -91,13 +130,24 @@ def fsync_dir(path: str) -> bool:
 
 
 def write(path: str, data: Union[str, bytes], keep: Optional[str] = None) -> None:
-    """Replace ``path`` with ``data`` so that, whenever the machine stops, the file holds
-    either the old contents or all of the new.
+    """Replace a file with new contents so that, whenever the machine stops, it holds the old or all of the new.
 
-    ``keep`` names where the version being replaced goes first, so the save before the
-    newest stays on disk as well.  The move comes after the new data are durable, so a
-    crash always leaves one complete version.  In the instant between the two renames
-    ``path`` is missing and ``keep`` holds the old one.
+    The data are made durable before the rename, and the directory after it.
+
+    Parameters
+    ----------
+    path : str
+        The file.
+    data : str or bytes
+        The new contents.
+    keep : str or None, default None
+        Where the version being replaced goes first, so the save before the newest stays on disk as well,
+        None for nowhere.
+
+    Notes
+    -----
+    The move to ``keep`` comes after the new data are durable, so a crash always leaves one complete
+    version.  In the instant between the two renames ``path`` is missing and ``keep`` holds the old one.
     """
     d = os.path.dirname(os.path.abspath(path))
     if not os.path.isdir(d):
@@ -126,10 +176,19 @@ def write(path: str, data: Union[str, bytes], keep: Optional[str] = None) -> Non
 
 
 def append_line(path: str, line: str) -> None:
-    """Append ``line`` to a log on a line of its own.  A crash can leave a log ending in
-    half a line, or in zeros, and a line written straight after it would fuse with it and
-    be lost to every reader.  Starting a new line first confines the damage to the half
-    line."""
+    """Append a line to a log, on a line of its own.
+
+    A crash can leave a log ending in half a line, or in zeros, and a line written straight after it
+    would fuse with it and be lost to every reader.  Starting a new line first confines the damage to the
+    half line.
+
+    Parameters
+    ----------
+    path : str
+        The log.
+    line : str
+        The line, without its newline or with it.
+    """
     with open(path, "ab+") as f:
         sep = b""
         if f.seek(0, os.SEEK_END) > 0:
@@ -141,12 +200,20 @@ def append_line(path: str, line: str) -> None:
 
 def repair_tail(path: str) -> str:
     """Cut a torn last line off an append-only log, everything after its last newline.
-    Returns a phrase for the log, or "" when the file ended cleanly.
 
-    Only for logs whose lines a checkpoint counts and which were fsynced before that
-    checkpoint was written (:func:`fsync_file`).  Their torn tail then always lies beyond
-    the last line any checkpoint counted, in an evaluation the resumed search runs and
-    logs again.
+    It is only for logs whose lines a checkpoint counts and which were made durable before that
+    checkpoint was written (:func:`fsync_file`).  Their torn tail then always lies beyond the last line
+    any checkpoint counted, in an evaluation the resumed search runs and logs again.
+
+    Parameters
+    ----------
+    path : str
+        The log.
+
+    Returns
+    -------
+    note : str
+        A phrase for the run's log, empty when the file ended cleanly or is missing.
     """
     try:
         size = os.path.getsize(path)

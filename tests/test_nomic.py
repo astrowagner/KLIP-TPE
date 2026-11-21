@@ -12,7 +12,7 @@ from klip_tpe.injection import AiryPSF
 from klip_tpe.instruments import nomic
 
 QUIET = (lambda s: None)
-NF, NX = 60, 200          # frames, frame size (star registered at the frame centre)
+NF, NX = 60, 200          # frames, frame size (star registered at the frame center)
 
 
 def _airy(xy, amp, sx, sy, off, p, x0, y0, e=0.11):
@@ -62,7 +62,7 @@ def pynomic_dir(tmp_path_factory):
 
 
 def test_airy_matches_pynomic_model():
-    """AiryPSF(c*amp) == pyNOMIC airy_disk(c*amp) after our unit-flux normalisation."""
+    """AiryPSF(c*amp) == pyNOMIC airy_disk(c*amp) after our unit-flux normalization."""
     m = AiryPSF(sigmax=12.0, sigmay=11.0, p=0.3, amp=1000.0)
     st, (cx, cy), ok = m.stamp(0.5)
     n = st.shape[0]
@@ -81,7 +81,7 @@ def test_load_pynomic_partitions_and_tags(pynomic_dir):
     assert np.isclose(np.median(a.tags["noises"]), 1.0) and np.isclose(np.median(a.tags["coronoise"]), 1.0)
     assert a.meta["airy"].shape == (7,) and np.isclose(a.meta["airy"][1], 12.0)
     assert np.allclose(a.angles, np.linspace(-25, 25, NF)[::2])
-    # crop geometry: frame centre (99.5, 99.5) -> crop centre (39.5, 39.5), i.e. rows/cols 60:140
+    # crop geometry: frame center (99.5, 99.5) -> crop center (39.5, 39.5), i.e. rows/cols 60:140
     raw = fits.getdata(os.path.join(pynomic_dir, "masked", "frame_00000.fits")).astype(np.float32)
     exp = raw[60:140, 60:140].copy()
     exp[~np.isfinite(exp)] = 0.0
@@ -139,7 +139,7 @@ def test_frame_psf_injects_each_frames_own_star():
         comp = inj[j]
         iy, ix = np.unravel_index(np.argmax(comp), comp.shape)
         star = cube[j]
-        # peak ratio equals contrast (same normalisation: the star's own peak x c)
+        # peak ratio equals contrast (same normalization: the star's own peak x c)
         assert np.isclose(comp.max(), 1e-2 * star.max(), rtol=2e-2)
         # width matches THIS frame's width: second moment of the companion vs star core
         w = np.hypot(xx - ix, yy - iy) <= 12

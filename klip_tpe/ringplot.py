@@ -80,8 +80,8 @@ def phase_from_stack(skip: int = 2, depth: int = 80) -> Optional[str]:
     return None
 
 
-#: what became of a ring aperture -> (label, face colour, edge colour, line style, filled).
-#: Okabe-Ito colours, and fill and line style besides, so no status is told by colour alone.
+#: what became of a ring aperture -> (label, face color, edge color, line style, filled).
+#: Okabe-Ito colors, and fill and line style besides, so no status is told by color alone.
 STATUS_STYLE: Dict[str, Tuple[str, str, str, str, bool]] = {
     "used": ("noise aperture used", "#0072B2", "#0072B2", "-", True),
     "used, known": ("used: a companion's, fewer than 4 others", "#0072B2", "#CC79A7", "-", True),

@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased — 2026-11-21 (the election's z at 2, US spelling, eight more modules documented)
+
+- **The election's default z is 2** (`FinalGridConfig.z`, `--fg-z`, `klip-tpe elect --z`), from 1.
+  A finalist now replaces an annulus' winner only when its mean paired gain is more than twice its
+  standard error.  At 1, a finalist no better than the winner clears the bar about one time in six,
+  and more often among many finalists.  In NEAR2's s7g, z = 1 changed 8 of 10 annuli, and three of
+  those changes gained only 0.02 to 0.05 in S/N on the held-out points.  A run saved before keeps
+  its own z when it resumes.  From NEAR2's note of 2026-11-17, at Kevin's decision.
+- **US spelling** in the printed messages, the docstrings, the comments, the docs, the tests'
+  messages and the tutorials: center, color, gray, normalized, program, neighbor and the like.
+  Identifiers and one-word strings, such as keys and color names, are unchanged, and so is this
+  file's history.  `docs/CLI.md` is generated again (`scripts/gen_cli_doc.py`).
+- **Documented to the rule** (`tests/test_docstrings.py`): `bench.py`, `param_verify.py`,
+  `plots.py`, `reflib.py`, `version.py`, `datasets.py`, `backends/vip.py` and `durable.py`.  Only
+  their docstrings and comments change.
+
 ## Unreleased — 2026-11-17 (the main process' steps: the panels' own process, the TPE's growth, a line per annulus)
 
 From NEAR2's note of 2026-11-16 on s7e, "the main process paces the large-bin searches, and

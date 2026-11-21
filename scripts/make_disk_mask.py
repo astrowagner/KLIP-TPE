@@ -7,7 +7,7 @@ then keeps out of its noise estimate and its injections (``default_config(disk_m
           [--min-beams 2] [--grow-fwhm 1] [--smooth-fwhm 1] [--neg-nsig S [--neg-reach-fwhm 2]]
           [--protect RHO,PA ...] [--pxscale AS] [--band RHO ...] [--preview PNG] [--ext N]
 
-IMAGE is a disk-preserving reduction with the star at the frame centre, north up and east left as the
+IMAGE is a disk-preserving reduction with the star at the frame center, north up and east left as the
 reducers' images are (a 2-D FITS; ``--ext`` picks the HDU; a cube is collapsed by its median).  ``--fwhm`` is
 the PSF FWHM in pixels, in which the smoothing, the piece size and the growth are counted.  ``--neg-nsig S``
 adds the disk's ADI negatives: the troughs S robust sigma deep that come within ``--neg-reach-fwhm`` FWHM of the

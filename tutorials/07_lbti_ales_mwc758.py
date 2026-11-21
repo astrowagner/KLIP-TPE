@@ -729,7 +729,7 @@ plt.legend(fontsize=7); plt.grid(alpha=.3); plt.title("MWC 758, 2019 Nov 14, ALE
 # * **A third night.** `datasets.fetch("lbti_ales_mwc758_20191113")` is 2019 November 13 (959
 #   frames of 2.46 s, 109° of rotation), which the paper does not use, in the same layout and
 #   group grid. `ales.load_release({**files, **datasets.fetch("lbti_ales_mwc758_20191113")})`
-#   loads it with November 14, the nights labelled in date order.
+#   loads it with November 14, the nights labeled in date order.
 # * **Your own disk mask.** `metrics.disk_mask_from_image(img, fwhm_px, nsig=2, nsig_neg=2,
 #   r_range=(6, 26), protect=[(RHO, PA)], pxscale=red.pxscale)` builds the mask of section 3 from
 #   any disk-preserving image, and `scripts/make_disk_mask.py` does it from a FITS file with a

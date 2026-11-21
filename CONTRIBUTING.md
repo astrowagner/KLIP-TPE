@@ -3,7 +3,7 @@
 Issues and pull requests are welcome at https://github.com/astrowagner/KLIP-TPE.
 
 * **Setup**: `pip install -e ".[all]"`, then `python -m pytest -q` (≈3 min, synthetic data
-  only; no downloads).  New behaviour comes with a test in `tests/`.
+  only; no downloads).  New behavior comes with a test in `tests/`.
 * **Adapters** for other instruments go in `klip_tpe/instruments/` (see `generic.py` for
   the minimum: `load_*` → `Dataset`, `make_reducer`, `make_space`, `make_guard`,
   `default_config`); other PSF-subtraction engines in `klip_tpe/backends/` (subclass

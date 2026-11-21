@@ -144,7 +144,7 @@ def test_cropping_keeps_the_companion_and_the_star(tree):
     for pid, ds in cropped.items():
         assert ds.cube.shape[1:] == (41, 41), ds.cube.shape
         assert ds.cube.shape[0] == full[pid].cube.shape[0], "cropping dropped frames"
-        # the star stays centred, which is what the annulus radii are measured from
+        # the star stays centered, which is what the annulus radii are measured from
         med = np.nanmedian(ds.cube, axis=0)
         assert np.unravel_index(np.argmax(med), med.shape) == (20, 20)
 
@@ -560,7 +560,7 @@ def test_the_source_count_is_adjustable(big_tree, tmp_path):
     """Two must also land on the companion's ring.
 
     NEAR's two-source convention collapses the band to the annulus' *area-weighted* mid
-    radius, which for a band centred on the companion sits ~4 px outside it -- so choosing
+    radius, which for a band centered on the companion sits ~4 px outside it -- so choosing
     --n-sources 2 would silently move the injections off the ring.  This run turns that
     convention off, because its band is already collapsed onto that ring deliberately.
     """

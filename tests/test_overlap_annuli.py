@@ -1,9 +1,9 @@
 """Overlapping annuli, ``--ann-extra`` (NEAR2 s6 note, section 5).
 
-Annuli beside those of ``ann_edges`` may overlap them.  All are numbered by centre radius and
+Annuli beside those of ``ann_edges`` may overlap them.  All are numbered by center radius and
 searched, validated and verified over their own zones.  Where two overlap, the stitch takes each
-radius from the annulus with the nearest centre: the tile boundary is the midpoint between the
-centres, with the 2 px blend an edge between annuli has.  The run's stitch, its per-night cubes,
+radius from the annulus with the nearest center: the tile boundary is the midpoint between the
+centers, with the 2 px blend an edge between annuli has.  The run's stitch, its per-night cubes,
 the param maps, the seam patching, the contrast curve, ``rereduce`` and ``fit-chain`` all stitch
 by the tiles, and ``final_results.json`` and ``klip_stitched_params.txt`` record them.  A run
 without ``ann_extra`` has tiles equal to its zones and every product as before.
@@ -55,7 +55,7 @@ def test_without_extra_annuli_the_tiles_are_the_zones():
     d = RunConfig(ann_edges=[8, 30]).to_dict()
     d.pop("ann_extra")
     assert RunConfig.from_dict(d).ann_extra == [], "a run saved before the option resumes without it"
-    # unequal widths that meet: the edge, not the midpoint between the centres
+    # unequal widths that meet: the edge, not the midpoint between the centers
     assert annulus_tiles([(8, 30), (30, 45)]) == [(8.0, 30.0), (30.0, 45.0)]
     # a midpoint outside the overlap is kept inside it
     assert annulus_tiles([(0, 100), (90, 120)]) == [(0.0, 90.0), (90.0, 120.0)]
@@ -106,7 +106,7 @@ def test_a_run_stitches_by_the_tiles_and_records_them(overlap_run):
     d, r, results, logs = overlap_run
     assert [(x.inrad, x.outrad) for x in results] == [(8.0, 20.0), (14.0, 26.0), (20.0, 32.0)]
     tiles = [(8.0, 17.0), (17.0, 23.0), (23.0, 32.0)]
-    assert any("annuli by centre, zone (tile) px: 1: 8-20 (8.00-17.00), 2: 14-26 (17.00-23.00), "
+    assert any("annuli by center, zone (tile) px: 1: 8-20 (8.00-17.00), 2: 14-26 (17.00-23.00), "
                "3: 20-32 (23.00-32.00)" in ln for ln in logs), logs
     fr = json.load(open(os.path.join(d, "final_results.json")))
     assert fr["zones"] == [[8.0, 20.0], [14.0, 26.0], [20.0, 32.0]] and fr["tiles"] == [list(t) for t in tiles]

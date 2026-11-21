@@ -213,7 +213,7 @@ def test_fm_response_peak_and_contrast_curve_finite():
     # fm_response is the matched-filter peak: on a pure model image it is positive at every source
     resp = fm_response(fm.fm_image, [s.rho for s in srcs], [s.theta for s in srcs], PX, FWHM)
     assert resp.shape == (len(srcs),) and np.all(np.isfinite(resp)) and np.all(resp > 0)
-    # per-source kernel hook is honoured
+    # per-source kernel hook is honored
     calls = []
 
     def kfn(r):

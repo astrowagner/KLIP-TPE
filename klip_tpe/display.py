@@ -15,11 +15,11 @@ Two entry points share every renderer:
   run directory (``results.jsonl``, ``checkpoint.json`` / ``run_setup.json``,
   ``annulusNN/{winner,validation,calibration}.json``, ``best_*.fits``).
 
-Both paths first normalise the history into an :class:`AnnulusData` so that the
+Both paths first normalize the history into an :class:`AnnulusData` so that the
 panel code never sees a runner or a file.
 
-Labelling conventions (brief section 8.5-8.6): the search score is an upward-biased
-quantity (best of many noisy draws) and is always labelled as such; only the
+Labeling conventions (brief section 8.5-8.6): the search score is an upward-biased
+quantity (best of many noisy draws) and is always labeled as such; only the
 validated winner (raw metric on fresh injections) is marked as the result; and the
 S/N *maps* are a display diagnostic with a different noise convention from the
 score -- every map carries that caption.  Nothing here ever raises out of a callback.
@@ -147,7 +147,7 @@ _RC = {"axes.spines.top": True, "axes.spines.right": True, "axes.grid": False,
        "grid.linewidth": 0.5, "font.size": 8, "axes.titlesize": 8.5, "axes.labelsize": 8,
        "xtick.labelsize": 7, "ytick.labelsize": 7, "legend.fontsize": 7, "legend.frameon": False,
        "axes.titlepad": 3, "axes.labelpad": 2, "xtick.major.pad": 2, "ytick.major.pad": 2,
-       # Every colour _RC_DARK touches is pinned light here, so the package style is a
+       # Every color _RC_DARK touches is pinned light here, so the package style is a
        # complete theme rather than a patch on whatever is in rcParams (a user's own dark
        # matplotlibrc included).  That is not what keeps the two threads apart, though: the
        # live panel renders on a worker thread inside _rc(idl=True, dark=True) while the
@@ -195,7 +195,7 @@ def _rc(idl: bool = False, dark: bool = False):
 
 
 def _fg() -> str:
-    """Foreground colour of the active rc (white on the dark live panel, else black)."""
+    """Foreground color of the active rc (white on the dark live panel, else black)."""
     return matplotlib.rcParams.get("text.color", "black")
 
 
@@ -263,7 +263,7 @@ def _phase_color(p: str) -> str:
 
 
 # ----------------------------------------------------------------------------
-# normalised history
+# normalized history
 # ----------------------------------------------------------------------------
 @dataclass
 class ParamInfo:
@@ -649,7 +649,7 @@ def _per_annulus(val, ia: int) -> int:
 
 
 def _cfg_zones(cfg: Dict[str, Any]) -> Optional[List[Tuple[float, float]]]:
-    """A saved run's zones by centre when it has annuli beside its edges (``ann_extra``, as
+    """A saved run's zones by center when it has annuli beside its edges (``ann_extra``, as
     :attr:`klip_tpe.runner.RunConfig.zones` orders them), else None."""
     extra = (cfg or {}).get("ann_extra") or []
     if not extra:
@@ -669,7 +669,7 @@ def annulus_from_records(records: Sequence[Dict[str, Any]], space: Dict[str, Any
                          known: Sequence[Tuple[float, float]] = (),
                          pixel_mask: Optional[np.ndarray] = None,
                          rules: Optional[Dict[str, Any]] = None) -> AnnulusData:
-    """Normalise ``results.jsonl``-style records (one annulus, one restart segment).
+    """Normalize ``results.jsonl``-style records (one annulus, one restart segment).
     ``pixel_mask``: the run's, which the S/N maps leave out of their noise
     (``extra['pixel_mask']``).  ``rules``: the run's noise-ring rules
     (:func:`~klip_tpe.metrics.ring_rules`, ``extra['rules']``), which the known companions'
@@ -699,7 +699,7 @@ def annulus_from_records(records: Sequence[Dict[str, Any]], space: Dict[str, Any
     outrad = float(edges[ia + 1]) if len(edges) > ia + 1 else (float(edges[0]) if edges else 0.0)
     nann = max(len(edges) - 1, 1)
     zs = _cfg_zones(cfg)
-    if zs:                                    # overlapping annuli (RunConfig.ann_extra), numbered by centre
+    if zs:                                    # overlapping annuli (RunConfig.ann_extra), numbered by center
         inrad, outrad = zs[min(ia, len(zs) - 1)]
         nann = len(zs)
     return AnnulusData(
@@ -1064,8 +1064,8 @@ def draw_image(ax, img: Optional[np.ndarray], ad: AnnulusData, title: str, cmap:
                flatten: bool = False, vrange: Optional[Tuple[float, float]] = None, edges: bool = False,
                scale: str = "linear", known_labels=None):
     """One image cell: robust ``-1..5 sigma`` stretch of the image (or a fixed
-    ``-3..8`` stretch for S/N maps), arcsec axes centred on the star, injected
-    sources circled (0.9 FWHM) and labelled with their per-source metric value.
+    ``-3..8`` stretch for S/N maps), arcsec axes centered on the star, injected
+    sources circled (0.9 FWHM) and labeled with their per-source metric value.
 
     ``flatten=False`` by default, matching the metrics: the panel shows the image the
     run actually scored.  The robust stretch is measured on whatever it is handed, so
@@ -1121,7 +1121,7 @@ def draw_image(ax, img: Optional[np.ndarray], ad: AnnulusData, title: str, cmap:
                 if lab:
                     ax.text(x + 1.2 * rad, y, lab, color=SRC_COLOR, fontsize=7, va="center")
     # A known companion is never injected and never scored, so it appears in no other list.
-    # Circle it on every image -- in its own colour, so it cannot be read as an injection --
+    # Circle it on every image -- in its own color, so it cannot be read as an injection --
     # and label it with its measured S/N where the caller has one (the clean reductions).
     for q, k in enumerate(getattr(ad, "known", None) or []):
         kx, ky = _src_arcsec([(float(k[0]), float(k[1]), 0.0)], ad.angle_convention)
@@ -1187,7 +1187,7 @@ def _snr_map(img: Optional[np.ndarray], ad: AnnulusData, sources=None,
 # panel primitives
 # ----------------------------------------------------------------------------
 def panel_trace(ax, ad: AnnulusData, current: Optional[int] = None, compact: bool = True):
-    """near2m_show convergence trace: score vs evaluation coloured by phase, running
+    """near2m_show convergence trace: score vs evaluation colored by phase, running
     best (search), seeded default level, validated winner if known, failed as x."""
     n = ad.n
     ax.set_title(f"search score vs evaluation  [{ad.metric_name}]", loc="left")
@@ -1209,7 +1209,7 @@ def panel_trace(ax, ad: AnnulusData, current: Optional[int] = None, compact: boo
         _ds = [(d or {}).get("draw_scores") if isinstance(d, dict) else None
                for d in (_dw + [None] * max(0, n - len(_dw)))][:n]
         # _phase_color, not the marker facecolor: random phases draw open markers, so the
-        # edge is the colour the eye reads for them.
+        # edge is the color the eye reads for them.
         if draw_ranges(ax, ev, _ds, colors=[_phase_color(p) for p in ad.phases], floor=lo):
             flat = [float(v) for d in _ds for v in (d or []) if v is not None and np.isfinite(v)]
             dlo, dhi = (min(flat), max(flat)) if flat else (np.inf, -np.inf)
@@ -1417,7 +1417,7 @@ def _evtick(n: int) -> int:
 
 
 def panel_inclusion(ax, ad: AnnulusData, colorbar: bool = True):
-    """near2m_nspanel / nightmap top: inclusion matrix eval x partition, cells coloured
+    """near2m_nspanel / nightmap top: inclusion matrix eval x partition, cells colored
     by the eval's search score (failed = hatched)."""
     ax.set_title("partition inclusion (color = search score)", loc="left")
     ax.grid(False)
@@ -1538,7 +1538,7 @@ def _partition_tick_labels(names: Sequence[str]) -> Tuple[List[str], str]:
 
 def panel_partition_effect(ax, ad: AnnulusData):
     """near2m_npanel: per partition, the scores of evals that included it (dark) vs
-    excluded it (grey) with group means.
+    excluded it (gray) with group means.
 
     Past 300 valid evaluations the points are drawn small and translucent and the means
     outlined, so that the means stay visible on the clouds.  The tick labels drop the prefix
@@ -1674,7 +1674,7 @@ def _widen_flat(lo, hi):
     axis limits for every such cell of every panel.  On the 38-D beta Pic landscape that is
     thousands of "Attempting to set identical low and high xlims" lines in the stage log,
     which buries anything real.  Widening rather than silencing keeps the warning available
-    for the cases it was meant for, and the cell still draws with its one value centred.
+    for the cases it was meant for, and the cell still draws with its one value centered.
     """
     lo = np.asarray(lo, float).copy()
     hi = np.asarray(hi, float).copy()
@@ -1703,7 +1703,7 @@ def _score_norm(y: np.ndarray, crange=None):
 
 
 def _marg_hist(ax, vals, y, lo, hi, norm, cmap, best=None, cur=None, horizontal=False, nb=12):
-    """near2m_marghist: histogram whose bars are coloured by the median score in the bin."""
+    """near2m_marghist: histogram whose bars are colored by the median score in the bin."""
     g = np.isfinite(vals) & np.isfinite(y)
     ax.grid(False)
     ax.set_xticks([])
@@ -1746,11 +1746,11 @@ def _corner_subsample(y: np.ndarray, top: np.ndarray, max_points: Optional[int])
     background is thinned with a fixed seed so the picture does not shimmer between frames.
 
     The two populations are thinned *separately and in proportion*, because they say
-    different things: the faint grey cloud is where the search has been -- the warm-up
-    trials and everything the optimizer tried and rejected -- and the coloured top-gamma
+    different things: the faint gray cloud is where the search has been -- the warm-up
+    trials and everything the optimizer tried and rejected -- and the colored top-gamma
     set is where it settled.  Spending the whole budget on whichever is larger loses one of
     them completely: a six-night run past 7000 evaluations has ~12,000 top-gamma rows on
-    its own, so an elite-first rule silently drew no grey points at all and the panel
+    its own, so an elite-first rule silently drew no gray points at all and the panel
     stopped showing the exploration.  Each population also has a floor, so a small one is
     never squeezed out by a large one, and the sample is drawn with a fixed seed so the
     picture does not shimmer between frames.
@@ -1786,14 +1786,14 @@ def draw_corner(fig, cs: Dict[str, Any], ad: AnnulusData, title: str, rect=(0.06
                 cur_pt: Optional[np.ndarray] = None, cands: Sequence[Tuple[np.ndarray, bool]] = (),
                 top_mask: Optional[np.ndarray] = None, crange=None, compact: bool = False,
                 max_points: Optional[int] = None):
-    """near2m_corner: lower-triangle pairwise scatter, diagonal marginal histograms coloured
+    """near2m_corner: lower-triangle pairwise scatter, diagonal marginal histograms colored
     by the median score per bin, best (square), current (dashed cross-hairs), validation
-    candidates (triangles, winner = star) and a score colourbar.
+    candidates (triangles, winner = star) and a score colorbar.
 
-    Every point is coloured by its score; the marker is filled for a guided evaluation and
-    open for a warm-up one.  Colour therefore means one thing throughout and the fill means
-    another, rather than colour standing in for the top-gamma cut -- which during warm-up
-    left a few arbitrary points coloured among grey ones that were no different in kind.
+    Every point is colored by its score; the marker is filled for a guided evaluation and
+    open for a warm-up one.  Color therefore means one thing throughout and the fill means
+    another, rather than color standing in for the top-gamma cut -- which during warm-up
+    left a few arbitrary points colored among gray ones that were no different in kind.
     ``top_mask`` is still used to decide what survives thinning on a long run.
 
     Returns the cells' axes by ``(row, column)``, empty while collecting."""
@@ -1808,7 +1808,7 @@ def draw_corner(fig, cs: Dict[str, Any], ad: AnnulusData, title: str, rect=(0.06
     warm = np.zeros(len(y), bool) if warm is None else warm
     top = np.ones(len(y), bool) if top_mask is None else top_mask
     keep = _corner_subsample(y, top, max_points)
-    if keep is not None:                 # colour scale stays that of the full sample
+    if keep is not None:                 # color scale stays that of the full sample
         X, y, top, warm = X[keep], y[keep], top[keep], warm[keep]
     x0, y0, w, h = rect
     gs = GridSpec(d, d, left=x0, bottom=y0, right=x0 + w, top=y0 + h, wspace=0.08, hspace=0.08, figure=fig)
@@ -1827,12 +1827,12 @@ def draw_corner(fig, cs: Dict[str, Any], ad: AnnulusData, title: str, rect=(0.06
                 _marg_hist(ax, X[:, i], y, lo[i], hi[i], norm, cmap, bi_v, cu_v, horizontal=(i == d - 1))
             else:
                 ax.grid(False)
-                # One channel per thing.  Colour is the score, for every point; fill is the
-                # phase -- filled = guided, open = warm-up.  The older scheme spent colour
+                # One channel per thing.  Color is the score, for every point; fill is the
+                # phase -- filled = guided, open = warm-up.  The older scheme spent color
                 # on the top-gamma cut, so during warm-up (when every point is random) the
-                # only coloured markers were the handful above an arbitrary quantile and
-                # everything else went grey, which read as "these few were special" when
-                # nothing had guided them.  The colourmap already shows which scores are
+                # only colored markers were the handful above an arbitrary quantile and
+                # everything else went gray, which read as "these few were special" when
+                # nothing had guided them.  The colormap already shows which scores are
                 # good, and continuously; the gamma cut needs no second encoding.
                 m = ~warm
                 if m.any():
@@ -1878,7 +1878,7 @@ def draw_corner(fig, cs: Dict[str, Any], ad: AnnulusData, title: str, rect=(0.06
                 else:
                     ax.set_xlim(lo[i], hi[i])
     sm = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
-    if compact:      # IDL live panel: title over a centred colourbar, no legend line
+    if compact:      # IDL live panel: title over a centered colorbar, no legend line
         cax = fig.add_axes([x0 + 0.22 * w, y0 + h + 0.022, 0.56 * w, 0.011])
         fig.colorbar(sm, cax=cax, orientation="horizontal")
         cax.tick_params(labelsize=6, pad=1)
@@ -1990,8 +1990,8 @@ def draw_kde_corner(fig, cs: Dict[str, Any], title: str, rect=(0.06, 0.06, 0.90,
 
 
 def draw_walk(fig, cs: Dict[str, Any], ad: AnnulusData, title: str, rect=(0.07, 0.06, 0.90, 0.86)):
-    """near2m_pnwalk: chronological parameter walk per pair, random segments grey and
-    guided segments in the TPE colour; the running-best path overlaid in orange."""
+    """near2m_pnwalk: chronological parameter walk per pair, random segments gray and
+    guided segments in the TPE color; the running-best path overlaid in orange."""
     names, lo, hi, X = cs["names"], cs["lo"], cs["hi"], cs["X"]
     lo, hi = _widen_flat(lo, hi)          # pinned dimensions: no "identical xlims" warnings
     ev = cs["eval"]
@@ -2126,7 +2126,7 @@ def parhist_figsize(d: int) -> Tuple[float, float]:
 
 def _parhist_page(fig, ad: AnnulusData, cs: Dict[str, Any], title: str, current: Optional[int] = None):
     """near2m_parhist_page: one row per parameter -- history (value vs eval), distribution,
-    score vs value; best value red, current dashed grey.  Parameters run down a block and
+    score vs value; best value red, current dashed gray.  Parameters run down a block and
     then into the next block to the right, so the page stays roughly landscape."""
     names, lo, hi, X, y, ev = cs["names"], cs["lo"], cs["hi"], cs["X"], cs["y"], cs["eval"]
     lo, hi = _widen_flat(lo, hi)          # pinned dimensions: no "identical xlims" warnings
@@ -2223,7 +2223,7 @@ def _fit_suptitle(fig, run_name: str, what: str, fontsize: float = 9.0, min_font
                   width: float = 0.98):
     """``fig.suptitle`` of ``"<run name> <what>"`` that fits the figure's width: on one line
     when it fits at ``fontsize``, else the run name over ``what``, both smaller until the
-    wider line fits (down to ``min_fontsize``).  A run name is one long token, and a centred
+    wider line fits (down to ``min_fontsize``).  A run name is one long token, and a centered
     one-line title wider than the figure lost both its ends.  Needs a canvas on ``fig``."""
     renderer = fig.canvas.get_renderer()
     limit = width * fig.bbox.width
@@ -2274,7 +2274,7 @@ def render_nightmap(ad: AnnulusData, out: str) -> str:
 
 def render_kbook(ad: AnnulusData, out_pdf: str) -> str:
     """k-klip book (near2m_kklip_book without scans): page 1 score vs k (per partition),
-    page 2 the k history per partition coloured by phase."""
+    page 2 the k history per partition colored by phase."""
     with _rc(), PdfPages(out_pdf) as pdf:
         fig = Figure(figsize=(7.0, 5.0))
         FigureCanvasAgg(fig)
@@ -2365,7 +2365,7 @@ def render_validation(ad: AnnulusData, table: List[Dict[str, Any]], out: str, in
                       final: Optional[Dict[str, Any]] = None) -> str:
     """Validation panel: per candidate the search score (hollow) vs the validated
     median (filled) with the trial spread; committed winner thumbnails (the injected
-    one labelled with the committed trial's raw per-source S/N) and, when the KLIP-FM
+    one labeled with the committed trial's raw per-source S/N) and, when the KLIP-FM
     cross-check ran, the forward-model response image.  ``fresh = (median, election median,
     n)``: the winner's median on ``n`` fresh draws, its validated score, drawn as a star.
     ``final``: the final round's record (``AnnulusResult.final_round``), its medians on
@@ -2789,7 +2789,7 @@ def _box(fig, x0, y0, x1, y1):
 
 
 def _sq_box(fig, x0, y0, x1, y1):
-    """Axes of the largest square (in figure inches) centred in the box (IDL keep_aspect)."""
+    """Axes of the largest square (in figure inches) centered in the box (IDL keep_aspect)."""
     fw, fh = fig.get_figwidth(), fig.get_figheight()
     w_in, h_in = (x1 - x0) * fw, (y1 - y0) * fh
     side = min(w_in, h_in)
@@ -2870,7 +2870,7 @@ def _below_note(ax, color) -> None:
 
 
 def panel_convergence_idl(ax, ad: AnnulusData, current: Optional[int] = None):
-    """IDL convergence panel: grey hollow = warm-up/explore, TPE / local filled, running
+    """IDL convergence panel: gray hollow = warm-up/explore, TPE / local filled, running
     best (fg), SMA20/SMA50 of the guided evals, SMA20 of the random ones, best circled."""
     n = ad.n
     y = ad.y
@@ -2945,7 +2945,7 @@ def panel_convergence_idl(ax, ad: AnnulusData, current: Optional[int] = None):
     ax.set_xlabel("evaluation")
     nsrc = len(ad.sources[-1]) if (n and ad.sources and ad.sources[-1]) else 0
     ax.set_ylabel(f"{'mean' if nsrc == 2 else 'median'} S/N")
-    # colour-coded flowing legend (IDL): one word per series
+    # color-coded flowing legend (IDL): one word per series
     x = 0.01
     series = [("warm-up/explore ", "#9a9a9a"), ("TPE ", c_tpe), ("local ", c_loc), ("SMA20 ", c_s20),
               ("SMA50 ", c_s50), ("random SMA20", "#9a9a9a")]
@@ -2966,7 +2966,7 @@ def panel_convergence_idl(ax, ad: AnnulusData, current: Optional[int] = None):
 
 def panel_snrhist_h(ax, ad: AnnulusData, yr):
     """IDL ``near2m_snrhist_h``: rotated marginal score histogram sharing the convergence
-    panel's y-range; grey = random, colour = TPE / local, Gaussian fits."""
+    panel's y-range; gray = random, color = TPE / local, Gaussian fits."""
     ax.set_title("S/N dist", fontsize=7.5)
     v = ad.valid
     ax.set_ylim(*yr)
@@ -3278,7 +3278,7 @@ def _fit_prop(fig, renderer, s: str, width: float, fs: float) -> str:
 
 
 class _RhsText:
-    """A block of lines in the panel's upper-right region (elapsed / ETA), centred in its box."""
+    """A block of lines in the panel's upper-right region (elapsed / ETA), centered in its box."""
 
     def __init__(self, fig, lines: Sequence[str], fs: float = 7.0, gid: str = "rhs:eta"):
         self.fig, self.fs = fig, fs
@@ -3774,7 +3774,7 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
             fig.text(lx0, 0.985, step_label, fontsize=8, va="top", color="#00d000")
         pitch, fs = 0.0185, 6.4
         xlab, xc1, xc2, xr = hx0 + 0.008, hx0 + 0.118, hx0 + 0.238, hx1 - 0.003
-        # the corner's grid, and its title over its colourbar, which the blocks stay above
+        # the corner's grid, and its title over its colorbar, which the blocks stay above
         crect = (hx0, 0.035, hx1 - hx0, 0.635)
         c_title_top = crect[1] + crect[3] + 0.040 + 1.3 * 7.5 / 72.0 / fig.get_figheight()
         blocks = []
@@ -4069,8 +4069,8 @@ def render_importance(ad: AnnulusData, out_pdf: str) -> str:
 
 
 def render_paracoord(ad: AnnulusData, out_pdf: str, max_lines: int = 3000) -> str:
-    """IDL ``eval_paracoord``: parallel coordinates (parameters normalised to [0, 1]),
-    lines coloured by score, best in red; one page per partition."""
+    """IDL ``eval_paracoord``: parallel coordinates (parameters normalized to [0, 1]),
+    lines colored by score, best in red; one page per partition."""
     from matplotlib.backends.backend_pdf import PdfPages
     from matplotlib import cm
     with _rc(), PdfPages(out_pdf) as pdf:
@@ -4106,7 +4106,7 @@ def render_paracoord(ad: AnnulusData, out_pdf: str, max_lines: int = 3000) -> st
 
 def render_rank(ad: AnnulusData, out_pdf: str) -> str:
     """IDL ``eval_rank``: the two most important parameters (top eta^2) against each
-    other, colour = score rank; one page per partition."""
+    other, color = score rank; one page per partition."""
     from matplotlib.backends.backend_pdf import PdfPages
     with _rc(), PdfPages(out_pdf) as pdf:
         for label, cs in _pages(ad):
@@ -4219,7 +4219,7 @@ def render_verify_books(run_dir: str, ia: int, out_dir: Optional[str] = None,
                         run: Optional[Dict[str, Any]] = None, n_boot: int = 200) -> Dict[str, str]:
     """IDL ``verify_limits`` / ``verify_subsets_inj`` for one annulus, recomputed from
     the saved per-partition stacks (``best_*_partitions.fits``) and the winner's
-    injections: (1) contrast limit vs separation per TAP, colour = FAP; (2) combined
+    injections: (1) contrast limit vs separation per TAP, color = FAP; (2) combined
     clean image + night-STIM map, and the five subset combines around every injection.
     The combined image is the annulus' own (``best_clean.fits`` / ``best_inj.fits``), as
     in the annulus' verify report."""
@@ -5244,7 +5244,7 @@ class LiveDisplay(RunCallback):
         image arrays alive.
 
         The gate belongs here, before the panel is promised, rather than on the queue.  A panel that was
-        never requested costs nothing, whereas cancelling one already promised would leave a hole in
+        never requested costs nothing, whereas canceling one already promised would leave a hole in
         ``steps/`` that the progress movie and the resumed history both read.
         """
         from .parallel import run_idle_hooks
