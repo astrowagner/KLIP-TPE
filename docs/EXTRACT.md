@@ -132,8 +132,9 @@ The later stages have panels of their own:
 They take the corner plot's place, which keeps as many of its pairs as there is room for.
 
 `--display-every N` asks for a panel every N trials (default 1), and `--no-display` draws none.  The
-display adds no reductions.  A panel takes 1 to 2 s to draw, so a fast fit gets one every few trials.
-The `--quick` check on beta Pic b, about 960 reductions of 0.02 s each, drew 47 panels.
+display adds no reductions.  A panel takes about half a second to draw on an idle core, and longer
+beside a busy fit, so a fast fit gets one every few trials.  The `--quick` check on beta Pic b, about
+960 reductions of 0.02 s each, drew 47 panels.
 
 From a script, give `extract_companion` (or `fit_companion`) the display as its `progress`:
 

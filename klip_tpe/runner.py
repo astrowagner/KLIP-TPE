@@ -500,6 +500,13 @@ class RunConfig:
     #: rings and the score.  Only the positive injections are ever scored; the known-source
     #: exclusions still apply, to the residual.  Empty (the default) changes nothing.
     subtract_known: List[Tuple[float, float, float]] = field(default_factory=list)
+    #: Fewest of the frames that must hold data at a sky position for a source to be injected there and
+    #: for the noise to sample it, as a fraction, when the frames hold NaN (``Reducer.has_nan``), such
+    #: as beyond a detector's edge.  The run writes ``coverage.fits``, the fraction at each pixel of the
+    #: final image (:func:`klip_tpe.klip.coverage_map`), and the pixels below this join the metric's
+    #: ``pixel_mask`` and the sampler's ``forbidden_mask``, so the final grid leaves those position
+    #: angles out too.  0 masks only where no frame holds data, and frames without NaN change nothing.
+    min_coverage: float = 0.5
     #: What the frames are, when they are not the instrument's default: ``cube_name`` (the
     #: cube file read for each night), ``dropped_frames`` (``{"n4": [551], ...}``, frames left
     #: out of a night at load, by their index in its cube), ``subtracted_sources`` (``[[rho,
@@ -1212,6 +1219,7 @@ class Runner:
         self.callbacks: List[RunCallback] = list(callbacks)
         self._last_images: Dict[str, Any] = {}
         os.makedirs(run_dir, exist_ok=True)
+        self._install_coverage()
         if self.cfg.seed is None:
             self.cfg.seed = int(time.time()) % (2 ** 31)
         self.rng = np.random.default_rng(self.cfg.seed)
@@ -1956,6 +1964,92 @@ class Runner:
         if hasattr(smp, "sidelobes"):
             smp.sidelobes = rule
 
+    def _install_coverage(self) -> None:
+        """``RunConfig.min_coverage`` onto the metric and the sampler, for frames that hold NaN.
+
+        The coverage map, the fraction of the frames that hold data at each pixel of the final image
+        (:meth:`klip_tpe.reducer.Reducer.coverage_map`), is read from the run's ``coverage.fits`` or
+        computed and written there, and kept as :attr:`coverage`.  The pixels below ``min_coverage``
+        join the metric's ``pixel_mask`` and the sampler's ``forbidden_mask``, so no source is injected
+        there and no noise sample is taken there, and become the metric's ``coverage_mask``, which the
+        rings count apart (:func:`klip_tpe.metrics.mawet_peak_snr`).  Frames without NaN leave them alone,
+        and so does a run that began without them, which resumes as it began.
+        """
+        self.coverage = None
+        if not bool(getattr(self.reducer, "has_nan", False)):
+            return
+        path = os.path.join(self.run_dir, "coverage.fits")
+        if (os.path.exists(os.path.join(self.run_dir, "results.jsonl")) and not os.path.exists(path)
+                and self.resume_mode != "never"):
+            # a run started before the masks keeps scoring as it began, and its directory is only read
+            self.log("  coverage: this run began without the coverage masks, so it goes on without them")
+            return
+        cov = None
+        try:
+            from astropy.io import fits
+            if os.path.exists(path):
+                cov = np.asarray(fits.getdata(path), np.float32)
+        except Exception:                     # noqa: BLE001 - computed again below
+            cov = None
+        if cov is None:
+            t0 = time.time()
+            try:
+                cov = self.reducer.coverage_map(threads=int(max(1, min(os.cpu_count() or 1, 8))))
+            except Exception as exc:          # noqa: BLE001 - the run goes on without the masks
+                self.log(f"  coverage: not computed ({exc!r}), so nothing is masked for it")
+                return
+            if cov is None:
+                return
+            cov = np.asarray(cov, np.float32)
+            try:
+                from astropy.io import fits
+                fits.writeto(path, cov, overwrite=True)
+                self._durable_later(path)
+            except Exception as exc:          # noqa: BLE001 - the masks do without the file
+                self.log(f"  coverage.fits not written ({exc!r})")
+            self.log(f"  coverage: the fraction of the frames with data at each pixel, in {time.time() - t0:.0f} s")
+        self.coverage = cov
+        thr = float(getattr(self.cfg, "min_coverage", 0.5) or 0.0)
+        low = (cov <= 0.0) if thr <= 0.0 else (cov < thr)
+        ny, nx = cov.shape
+        yy, xx = np.mgrid[0:ny, 0:nx]
+        r = np.hypot(xx - (nx - 1) / 2.0, yy - (ny - 1) / 2.0)
+        part = r[cov < 1.0 - 1e-6]
+        full = float(part.min()) if part.size else float(r.max())
+        some = r[~low]
+        reach = float(some.max()) if some.size else 0.0
+        pxs = float(self.pxscale)
+        self.log(f"  coverage: every frame holds data within {full:.0f} px ({full * pxs:.2f}\"), and at least "
+                 f"{thr:g} of them out to {reach:.0f} px ({reach * pxs:.2f}\") at some position angles.  "
+                 f"{100 * float(low[(r >= full) & (r <= reach)].mean()) if reach > full else 0.0:.0f}% of the "
+                 f"pixels between are masked for the injections and the noise (coverage.fits, min_coverage {thr:g})")
+        m = getattr(self.objective, "metric", None)
+        if m is not None and hasattr(m, "coverage_mask"):
+            m.coverage_mask = low.copy()
+        if m is not None and hasattr(m, "pixel_mask"):
+            pm = getattr(m, "pixel_mask", None)
+            if pm is None:
+                m.pixel_mask = low.copy()
+            elif np.shape(pm) == low.shape:
+                m.pixel_mask = np.asarray(pm, bool) | low
+            else:
+                self.log(f"  coverage: the metric's pixel_mask {np.shape(pm)} is not the image's {low.shape}, "
+                         f"so it does not take the coverage")
+        smp = getattr(self.sampler, "base", None) or self.sampler
+        if hasattr(smp, "forbidden_mask"):
+            fm = getattr(smp, "forbidden_mask", None)
+            if fm is None:
+                smp.forbidden_mask = low.copy()
+                smp.mask_angle_convention = str(getattr(m, "angle_convention", None)
+                                                or getattr(self.reducer, "angle_convention", "pa"))
+            elif np.shape(fm) == low.shape:
+                smp.forbidden_mask = np.asarray(fm, bool) | low
+            else:
+                self.log(f"  coverage: the sampler's forbidden_mask {np.shape(fm)} is not the image's {low.shape}, "
+                         f"so it does not take the coverage")
+            if not getattr(smp, "mask_pxscale", None):
+                smp.mask_pxscale = pxs
+
     def _install_fmmf_turn(self) -> None:
         """``RunConfig.fmmf_turn``, ``fmmf_fm_apertures`` and ``fmmf_correlate`` on a
         forward-modelled metric (:class:`klip_tpe.fmmf.FMMFSNR`): whether its noise samples take
@@ -2127,6 +2221,8 @@ class Runner:
                 mkw = dict(known=self._known(), excl_fwhm=float(getattr(m, "excl_fwhm", 1.5) or 1.5),
                            pixel_mask=getattr(m, "pixel_mask", None), inner_fwhm=self._inner_fwhm(),
                            angle_convention=conv, **kw)
+                if getattr(m, "coverage_mask", None) is not None:
+                    mkw["coverage_mask"] = m.coverage_mask
                 if rule is not None:
                     from dataclasses import replace as _replace
                     from .metrics import sidelobe_snr
@@ -2473,6 +2569,8 @@ class Runner:
                           declip_nsig=mget("declip_nsig", 6.0), band_fwhm=float(mget("band_fwhm", 0.6)),
                           penalty=str(mget("penalty", "geometric")), pixel_mask=mget("pixel_mask", None),
                           inner_fwhm=float(mget("inner_fwhm", 1.0)))
+                if mget("coverage_mask", None) is not None:
+                    kw["coverage_mask"] = mget("coverage_mask", None)
                 img = radprof(img) if flat else img
                 cln = None if clean is None else (radprof(np.asarray(clean, float)) if flat else np.asarray(clean, float))
             snr, det = sidelobe_snr(img, [rho], [theta], pxscale, fwhm, rule, img_clean=cln, known=geo["known"],
@@ -2494,7 +2592,7 @@ class Runner:
                                       band_fwhm=float(mget("band_fwhm", 0.6)), min_ring=geo["min_ring"],
                                       penalty=str(mget("penalty", "geometric")), pixel_mask=mget("pixel_mask", None),
                                       inner_fwhm=float(mget("inner_fwhm", 1.0)), angle_convention=geo["conv"],
-                                      return_details=True, excl_arcs=arcs)
+                                      return_details=True, excl_arcs=arcs, coverage_mask=mget("coverage_mask", None))
         return float(snr[0]), dict(det[0])
 
     def _contrast_grid(self, ia: int, cfg: Config, zone: Tuple[float, float],

@@ -1981,6 +1981,7 @@ def _protocol_config(a) -> dict:
                 **({"edge_padding": a.edge_padding} if getattr(a, "edge_padding", None) else {}),
                 **({"n_sources": ns} if ns is not None else {}),
                 **({"min_r_fwhm": rmin} if rmin is not None else {}),
+                **({"min_coverage": float(a.min_coverage)} if getattr(a, "min_coverage", None) is not None else {}),
                 **({"ann_extra": extra} if extra else {}),
                 **({"score_floor": _score_floor(sf)} if sf is not None else {}),
                 **({"verify_snr": a.verify_snr} if getattr(a, "verify_snr", None) else {}),
@@ -3206,6 +3207,10 @@ def _add_run_args(p):
                    help="how the final grid's curve is read: the contrast grid's S/N (grid, the default, the IDL "
                         "predecessor's aperture photometry unless --cg-snr says otherwise), the stitched verify's "
                         "(path_a), or no curve (off)")
+    p.add_argument("--min-coverage", type=float, default=None, metavar="F",
+                   help="for frames that hold NaN, such as beyond a detector's edge: the fewest of the frames, as a "
+                        "fraction, that must hold data at a position for a source to be injected there and for the "
+                        "noise to sample it (default 0.5, RunConfig.min_coverage). The run writes coverage.fits")
     p.add_argument("--sidelobes", default=None, choices=["farthest", "clean", "off"],
                    help="the noise rings of the search, calibration, validation, verify and candidates. off (the "
                         "default) skips the apertures within 1.5 FWHM of each injected source and known companion, "

@@ -923,12 +923,13 @@ def dead_zone_pixel_mask(shape: Tuple[int, int], pxscale: float, angles,
 # ------------------------------------------------------------------------------ loading
 def apply_quadrant_mask(datasets, min_throughput: float = 0.30, filter: Optional[str] = None,
                         log: Callable[[str], None] = print):
-    """Set the dead zones of every MIRI dataset to NaN, for reductions without a high-pass.
+    """Set the dead zones of every MIRI dataset to NaN, pixels without data.
 
-    Do not put this in front of the reducer.  Its high-pass spreads each NaN over the filter's box, so
-    at the default 12 px every frame is dropped as empty, and :func:`dead_zone_pixel_mask` is the tool
-    for the noise statistic.  It is kept for reductions with ``filter <= 1`` and for inspecting the
-    mask's geometry.
+    The reducer takes NaN as no data since 2026-11-21.  Its high-pass leaves NaN out when the frames
+    hold any, KLIP keeps them NaN and the run masks where too few frames hold data
+    (``RunConfig.min_coverage``).  Before, the high-pass spread each NaN over the filter's box and every
+    frame was dropped as empty.  :func:`dead_zone_pixel_mask` keeps the dead zones' pixels in the frames
+    and out of the noise instead, as the MIRI runs have done.
 
     Parameters
     ----------
@@ -977,9 +978,9 @@ def load_miri(cube, angles, filter: Optional[str] = None, name: str = "miri",
 
     It does what :func:`klip_tpe.instruments.generic.load_cube` does, and takes the filter from
     ``header["FILTER"]`` when not given and the pixel scale from the STPSF model.  With
-    ``mask_quadrants`` the dead zones are set to NaN, which the default high-pass (``hp_nan_aware``
-    False) spreads over every frame (see :func:`apply_quadrant_mask`).  Such a reduction wants
-    ``mask_quadrants=False`` and :func:`dead_zone_pixel_mask` instead.
+    ``mask_quadrants`` the dead zones are set to NaN, pixels without data (see
+    :func:`apply_quadrant_mask`).  ``mask_quadrants=False`` with :func:`dead_zone_pixel_mask` keeps them
+    in the frames and out of the noise instead, as the MIRI runs have done.
 
     Parameters
     ----------

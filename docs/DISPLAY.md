@@ -115,6 +115,7 @@ the calibration trials are shown
 run_dir/
   run_setup.json / run_setup.txt      configuration, space, instrument
   pixel_mask.fits                     the metric's pixel mask (the disk), which every ring and map leaves out
+  coverage.fits                       for frames that hold NaN: the fraction of the frames with data at each pixel
   results.txt / results.jsonl         one row per evaluation (annulus, index, phase, x, k used, score, raw, wall)
   checkpoint.json                     written after every evaluation -> klip-tpe resume
   checkpoint.prev.json                the save before it (a crash of the machine leaves one of the two)

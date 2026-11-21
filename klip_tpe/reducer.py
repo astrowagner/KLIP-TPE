@@ -29,8 +29,9 @@ import numpy as np
 from .injection import (InjectionModel, _check_float32_headroom, add_crop, cube_peak, inject_frames,
                         place_source, prepare_sources)
 from .klip import (BLOCK_BYTES, KLIPParams, _highpass_frames, arcdist_deg, bin_by_groups, bin_frames,
-                   bin_groups, bin_values, bins_with_data, derotate, destripe, frame_blocks, frame_selection_mask, group_bounds,
-                   group_mean, highpass_stack, klip_annular, nw_ang_comb, run_blocks)
+                   bin_groups, bin_values, bins_with_data, coverage_map, derotate, destripe, frame_blocks,
+                   frame_selection_mask, group_bounds, group_mean, highpass_stack, klip_annular, nw_ang_comb,
+                   run_blocks)
 from .metrics import Source
 from .space import Config
 
@@ -352,6 +353,24 @@ class Reducer:
         """
         return None
 
+    #: whether the frames hold NaN, pixels without data such as those beyond a detector's edge
+    has_nan = False
+
+    def coverage_map(self, threads: int = 1) -> Optional[np.ndarray]:
+        """Return the fraction of the frames that hold data at each pixel of the final image.
+
+        Parameters
+        ----------
+        threads : int, default 1
+            Number of threads.
+
+        Returns
+        -------
+        coverage : ndarray or None
+            The fractions, from 0 to 1, or None when the reducer cannot tell.
+        """
+        return None
+
     def matched_filter_kernel(self, rho_as: float):
         """Return a measured matched filter for the metric, or None for its Gaussian.
 
@@ -629,6 +648,25 @@ def _flag(v) -> bool:
     return bool(v)
 
 
+def _holds_nan(cube) -> bool:
+    """Tell whether a cube holds a NaN pixel, a frame at a time.
+
+    Parameters
+    ----------
+    cube : ndarray, shape (n, ny, nx)
+        The frames.
+
+    Returns
+    -------
+    nan : bool
+        True at the first frame with a NaN pixel.  An integer cube holds none.
+    """
+    cube = np.asarray(cube)
+    if not np.issubdtype(cube.dtype, np.floating):
+        return False
+    return any(bool(np.isnan(f).any()) for f in cube)
+
+
 def _zone_ext(p: Dict[str, Any]) -> Tuple[float, float]:
     """Return how far a request's KLIP zone reaches inside and outside the annulus.
 
@@ -755,7 +793,11 @@ class KLIPReducer(Reducer):
     ``hp_nan_aware``
         False by default, the predecessor's ``smooth`` without ``/nan``, under which a frame with a
         NaN pixel comes out NaN all over.  True leaves each NaN pixel NaN and filters the rest, for
-        frames with NaN at their registration edges, such as ALES's.
+        frames with NaN at their registration edges, such as ALES's, or beyond a detector's edge, such
+        as NOMIC's.  Frames that hold NaN turn it on unless ``defaults`` names it (:attr:`has_nan`).
+    ``keep_target_nan``
+        True unless given, a target frame's NaN pixels NaN in its residuals
+        (:attr:`klip_tpe.klip.KLIPParams.keep_nan`).  False keeps the zero-filled residuals there.
     ``prep_fused``
         True by default, the fused path.  False runs a whole cube per step, the reference the fused
         path is tested against.
@@ -832,6 +874,11 @@ class KLIPReducer(Reducer):
                          "fm_selfsub": True, "hp_nan_aware": False, "prep_fused": True,
                          "klip_gram": "target"}
         self.defaults.update(defaults or {})
+        #: whether the frames hold NaN, pixels without data beyond a detector's or a registration's edge
+        self.has_nan = _holds_nan(data.cube)
+        if self.has_nan and "hp_nan_aware" not in (defaults or {}):
+            # without it, the high-pass spreads each NaN over its frame and every frame is dropped
+            self.defaults["hp_nan_aware"] = True
         self._inj_cache: Dict[Tuple, _FrameCache] = {}
         self._fm_cache: Dict[Tuple, _FrameCache] = {}
         #: the fused path's stamps, per kind: the injected sources and the KLIP-FM model's
@@ -886,6 +933,24 @@ class KLIPReducer(Reducer):
             The tags of ``data``.
         """
         return self.data.tags
+
+    def coverage_map(self, threads: int = 1) -> Optional[np.ndarray]:
+        """Return the fraction of the frames that hold data at each pixel of the north-up image.
+
+        Each frame turns by its angle and its true north, as the residuals do
+        (:func:`klip_tpe.klip.coverage_map`).
+
+        Parameters
+        ----------
+        threads : int, default 1
+            Number of threads.
+
+        Returns
+        -------
+        coverage : ndarray, shape (ny, nx)
+            The fractions, from 0 to 1.
+        """
+        return coverage_map(self.data.cube, self.data.angles, self.injection_north(), threads=threads)
 
     def partition_weight(self, pid=None) -> float:
         """Return the dataset's weight, the square root of its exposure time.
@@ -1873,9 +1938,9 @@ class KLIPReducer(Reducer):
             raise ValueError(
                 f"every frame was dropped as empty after filtering and binning "
                 f"(filter={filt}, bin={bin_}); {100 * nan_frac:.0f}% of the input pixels are "
-                f"NaN. A high-pass filter spreads NaN across the whole frame, so a padded or "
-                f"masked cube must be cropped to its finite region before it reaches the "
-                f"reducer.")
+                f"NaN. A high-pass filter spreads NaN across the whole frame unless hp_nan_aware "
+                f"is on (hp_nan_aware={hp_nan}), so crop a padded or masked cube to its finite "
+                f"region or turn hp_nan_aware on.")
         return PreparedFrames(p, k, bin_, filt, inrad, outrad, dth, keep, bcube, bang, grp, bkeep, mcube,
                               hp_nan, hp_binned, nth, meta, ann=(ann_in, ann_out),
                               bnorth=self.binned_north(keep, grp, bkeep, bin_))
@@ -2397,7 +2462,8 @@ class KLIPReducer(Reducer):
                         threads=int(max(getattr(req, "threads", 1), 1)),
                         ref_lib=ref_lib, ref_keep=ref_keep, gram=str(p.get("klip_gram", "target") or "target"),
                         arc_radii=ann if widened else None, zone_center=_zone_center(p),
-                        zone_angles=str(p.get("zone_angles") or "ccw"))
+                        zone_angles=str(p.get("zone_angles") or "ccw"),
+                        keep_nan=_flag(p.get("keep_target_nan", True)))
         if widened:
             meta["annulus"] = [ann[0], ann[1]]
         fm_img = nosub = cadi = None
@@ -2889,6 +2955,39 @@ class PartitionedReducer(Reducer):
             The tags.
         """
         return self.reducers[pid].frame_tags()
+
+    @property
+    def has_nan(self) -> bool:
+        """Whether any partition's frames hold NaN."""
+        return any(bool(getattr(r, "has_nan", False)) for r in self.reducers.values())
+
+    def coverage_map(self, threads: int = 1) -> Optional[np.ndarray]:
+        """Return the fraction of all the partitions' frames that hold data at each pixel of the combined image.
+
+        It is the partitions' maps averaged with their numbers of frames as weights.
+
+        Parameters
+        ----------
+        threads : int, default 1
+            Number of threads.
+
+        Returns
+        -------
+        coverage : ndarray or None
+            The fractions, from 0 to 1, or None when a partition cannot tell or the maps differ in shape.
+        """
+        maps, w = [], []
+        for pid, r in self.reducers.items():
+            fn = getattr(r, "coverage_map", None)
+            m = fn(threads=threads) if callable(fn) else None
+            if m is None:
+                return None
+            ang = self.frame_angles(pid)
+            maps.append(np.asarray(m, float))
+            w.append(float(np.size(ang)) if ang is not None else 1.0)
+        if not maps or len({m.shape for m in maps}) > 1:
+            return None
+        return (np.tensordot(np.asarray(w), np.stack(maps), axes=1) / max(sum(w), 1e-30)).astype(np.float32)
 
     def partition_weight(self, pid) -> float:
         """Return a partition's weight in the combination.

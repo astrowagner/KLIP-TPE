@@ -70,7 +70,12 @@ def test_the_documented_inputs_and_outputs():
         assert res.dtype == np.float32 and res.shape == (n, ny, nx)
         kept = ~np.asarray(info["dropped"], bool)
         assert kept.any() and np.isnan(res[:, ~inside]).all()
-        assert np.isfinite(res[kept][:, inside]).all(), "finite inside the zones, where the input was NaN too"
+        fin = np.isfinite(cube[kept][:, inside])
+        assert np.isfinite(res[kept][:, inside][fin]).all(), "finite inside the zones, where the target has data"
+        assert np.isnan(res[kept][:, inside][~fin]).all(), "NaN where the target was NaN (keep_nan)"
+        assert info["nan_target_px"] == int((~np.isfinite(cube[:, inside])).sum())
+        old, _ = klip_annular(cube, ang, KLIPParams(**{**p.__dict__, "keep_nan": False}), 4.0)
+        assert np.isfinite(old[kept][:, inside]).all(), "zero-filled, finite where the input was NaN too"
         assert np.isnan(res[~kept]).all()
         assert DOCUMENTED <= set(info), DOCUMENTED - set(info)
         assert info["n_frames"] == n and np.asarray(info["nref"]).shape == (n,)

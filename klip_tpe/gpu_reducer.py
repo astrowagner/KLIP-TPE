@@ -299,7 +299,7 @@ class GPUKLIPReducer(KLIPReducer):
                                     arc_radii=(ann_in, ann_out) if widened else None, zone_center=_zone_center(p),
                                     zone_angles=str(p.get("zone_angles") or "ccw"), eigh_mode=self.eigh_mode,
                                     compact=self.compact, rr=self.rr, batch_sectors=self.batch_sectors,
-                                    zone_cache=self._zones)
+                                    zone_cache=self._zones, keep_nan=_flag(p.get("keep_target_nan", True)))
         del bc
         lap("klip")
         # ---- the residuals' high-pass, the derotation, the combination

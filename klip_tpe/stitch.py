@@ -785,8 +785,8 @@ def write_contrast_curve(path: str, curves: Sequence[Optional[Dict[str, Any]]], 
         names the annuli of each method.
     final_curve : dict or None, default None
         The final-image grid's curve (:meth:`klip_tpe.final_grid.FinalGrid.curve`), measured on the
-        stitch and so not trimmed, which takes the main section's place for every annulus, with a seam
-        line per annulus after it.
+        stitch and so not trimmed, which takes the main section's place for every annulus, with the
+        position angles each separation settled, tested and laid out, and a seam line per annulus.
 
     Returns
     -------
@@ -854,6 +854,16 @@ def write_contrast_curve(path: str, curves: Sequence[Optional[Dict[str, Any]]], 
     L.append("# separation_arcsec   contrast_snr5")
     for i in o:
         L.append(f"{R[i]:10.3f}   {C[i]:12.4E}")
+    if fin and fin.get("n") and fin.get("n_pos"):
+        # how many position angles each separation used: a known companion's keep-out, or too few
+        # frames with data there (RunConfig.min_coverage), leaves the others out
+        L.append("# position angles per separation: settled, tested and laid out (the rest excluded)")
+        L.append("# sep_arcsec   n_settled   n_tested   n_laid_out")
+        laid = fin.get("n_all") or [None] * len(fin["n"])
+        for r_, n_, t_, a_ in zip(fin["r_as"], fin["n"], fin["n_pos"], laid):
+            if r_ is not None:
+                L.append(f"# {float(r_):8.3f}   {int(n_):9d}   {int(t_):8d}   "
+                         + ("-" if a_ is None else f"{int(a_):10d}"))
     for sm in (fin or {}).get("seams") or []:
         def _r(v, kind):
             return (("-" if v is None else f"{float(v):.2f}")

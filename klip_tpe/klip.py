@@ -23,7 +23,7 @@ from scipy import ndimage
 
 __all__ = ["frame_selection_mask", "bin_frames", "bin_groups", "bin_by_groups", "bin_angles", "bin_values",
            "highpass", "highpass_stack", "destripe", "rotate_ccw", "rotate_ccw_many", "derotate",
-           "group_mean", "group_bounds", "bins_with_data", "rotation_backend", "set_rotation_backend",
+           "coverage_map", "group_mean", "group_bounds", "bins_with_data", "rotation_backend", "set_rotation_backend",
            "rotation_info",
            "nw_ang_comb", "nw_ang_comb_ref", "klip_basis", "zone_indices", "klip_annular", "klip_fm_zone",
            "arcdist_deg", "reference_mask", "KLIPParams"]
@@ -1000,6 +1000,70 @@ def derotate(cube: np.ndarray, angles: np.ndarray, truenorth=0.0, threads: int =
     return out
 
 
+#: Most frames of a sequence :func:`coverage_map` turns, spread evenly over the sequence
+COVERAGE_FRAMES = 180
+
+
+def coverage_map(cube: np.ndarray, angles: np.ndarray, truenorth=0.0, threads: int = 1,
+                 max_frames: Optional[int] = COVERAGE_FRAMES) -> np.ndarray:
+    """Return the fraction of the frames that hold data at each pixel of the north-up image.
+
+    A frame holds data at a pixel when its finite pixels reach that pixel once it is turned north up
+    as :func:`derotate` turns it, which is where the frame's derotated residuals are finite.  Frames
+    whose edge lies within the field, such as NOMIC's beyond 3", cover the outer circles only in part,
+    and each sky pixel there is covered by some frames and not by others.
+
+    Parameters
+    ----------
+    cube : ndarray, shape (n, ny, nx)
+        The n frames, ny by nx pixels each, NaN where they hold no data.
+    angles : ndarray, shape (n,)
+        Parallactic angle of each frame, in degrees.
+    truenorth : float or ndarray, default 0.0
+        True-north offset added to each frame's angle, in degrees.  One value, or one per frame.
+    threads : int, default 1
+        Number of threads the frames are spread over.
+    max_frames : int or None, default COVERAGE_FRAMES
+        Most frames turned, spread evenly over the sequence.  The edge moves little from one frame to
+        the next, so a sample gives the fractions to about ``1 / max_frames``.  None turns every frame.
+
+    Returns
+    -------
+    coverage : ndarray, shape (ny, nx)
+        The fraction of the frames, from 0 to 1, in float32.  The corners a square frame turns away
+        from are below 1 even for frames without NaN.
+
+    Raises
+    ------
+    ValueError
+        If ``truenorth`` has one value per frame but not n of them.
+    """
+    cube = np.asarray(cube)
+    n, ny, nx = cube.shape
+    if n == 0:
+        return np.zeros((ny, nx), np.float32)
+    per = np.ndim(truenorth) > 0
+    tn = np.asarray(truenorth, float).ravel() if per else None
+    if per and tn.shape[0] != n:
+        raise ValueError(f"coverage_map: {tn.shape[0]} true-north values for {n} frames")
+    idx = np.arange(n)
+    if max_frames is not None and n > int(max_frames):
+        idx = np.unique(np.round(np.linspace(0, n - 1, int(max_frames))).astype(int))
+    blocks = frame_blocks(idx.size, threads)
+    part = np.zeros((len(blocks), ny, nx), np.int32)
+    slot = {b: k for k, b in enumerate(blocks)}
+
+    def block(lo, hi):
+        acc = part[slot[(lo, hi)]]
+        for j in range(lo, hi):
+            i = int(idx[j])
+            mask = np.where(np.isfinite(cube[i]), 1.0, np.nan)
+            turned = rotate_ccw(mask, float(angles[i]) + (float(tn[i]) if per else float(truenorth)))
+            acc += np.isfinite(turned)
+    run_blocks(block, blocks, threads)
+    return (part.sum(axis=0) / float(idx.size)).astype(np.float32)
+
+
 # ----------------------------------------------------------------------------
 # noise-weighted ADI combination (nw_ang_comb.pro)
 # ----------------------------------------------------------------------------
@@ -1406,6 +1470,10 @@ class KLIPParams:
     zone_angles : {"ccw", "getzone2015"}, default "ccw"
         Axis the sector azimuths are counted from.  "ccw" counts counter-clockwise from +x, and
         "getzone2015" counter-clockwise from -x.
+    keep_nan : bool, default True
+        Whether a target frame's NaN pixels come out NaN.  The projection takes them as 0, which
+        leaves minus the PSF model there, and True puts NaN back, so a pixel without data stays without
+        data through the combination.  False keeps the zero-filled residuals, as before 2026-11-21.
 
     Notes
     -----
@@ -1443,6 +1511,8 @@ class KLIPParams:
     arc_radii: Optional[Tuple[float, float]] = None
     #: how the sectors' angles are measured about ``zone_center`` (:func:`zone_indices`)
     zone_angles: str = "ccw"
+    #: whether a target's NaN pixels come out NaN rather than as minus the PSF model
+    keep_nan: bool = True
 
 
 _FM_TOL = 1e-6                   # eigenvalue tolerance of get_klip_basis_new / the FM block
@@ -1554,8 +1624,8 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
     ----------
     cube : ndarray, shape (n, ny, nx)
         The n science frames, ny by nx pixels each, not derotated, with the star at
-        ``((nx-1)/2, (ny-1)/2)``.  NaN pixels enter the PSF model as 0, so their residuals come
-        out finite.
+        ``((nx-1)/2, (ny-1)/2)``.  NaN pixels enter the PSF model as 0, and with ``p.keep_nan`` a
+        target's NaN pixels come out NaN.
     angles : ndarray, shape (n,)
         Parallactic angle of each frame, in degrees.  Only the differences matter, so a constant
         offset such as true north can be left out.
@@ -1583,7 +1653,8 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
     -------
     residuals : ndarray, shape (n, ny, nx) or (k_klip, n, ny, nx)
         Residual frames in float32, with a first axis over the number of KL modes when
-        ``p.k_scan``.  Pixels outside the zone, and frames dropped for too few references, are NaN.
+        ``p.k_scan``.  Pixels outside the zone, frames dropped for too few references and, with
+        ``p.keep_nan``, the target's own NaN pixels are NaN.
     info : dict
         How the subtraction ran.  Its keys are listed under Notes.
     fm_residuals : ndarray, shape (n, ny, nx)
@@ -1603,7 +1674,8 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
     ``k_capped``), each target's reference count before and after the fallback to all frames
     (``nref``, ``nref_used``) and the frames dropped (``dropped``, ``n_dropped``).  The per-target
     path also reports ``n_starved`` and ``drop_enabled``, and a searched library ``ref_keep`` and
-    ``ref_metric``.
+    ``ref_metric``.  With ``p.keep_nan``, ``nan_target_px`` counts the target pixels in the zones that
+    went back to NaN.
 
     The per-target path (``p.fast`` False) drops targets with fewer than ``p.n_min_ref``
     references, unless that would leave fewer than ``max(n_min_ref, ceil(n/4))`` targets, and falls
@@ -1726,6 +1798,24 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
     def _zero_nan(A):
         return np.where(np.isfinite(A), A, 0.0)
 
+    def _nan_back():
+        # a target pixel without data came out as minus the PSF model: put its NaN back
+        if not getattr(p, "keep_nan", True):
+            return
+        nbad = 0
+        for idx in zones:
+            bad = ~np.isfinite(flat[:, idx])
+            if not bad.any():
+                continue
+            nbad += int(bad.sum())
+            for arr in ([out[kk] for kk in range(out.shape[0])] if p.k_scan else [out]) + \
+                    ([fm_out] if fm_out is not None else []):
+                o = arr.reshape(n, ny * nx)
+                sub = o[:, idx]
+                sub[bad] = np.nan
+                o[:, idx] = sub
+        info["nan_target_px"] = nbad
+
     if fast:
         nbasis = ref_flat.shape[0] if rdi else n
         info["nref"] = np.full(n, nbasis - (0 if rdi else 1))
@@ -1762,6 +1852,7 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
                     Mref = None                                   # RDI without a ref model: no self-sub
                 fo = fm_out.reshape(n, ny * nx)
                 fo[:, idx] = klip_fm_zone(R, Mref, T, Mtar, k, fm_selfsub, eig=_fm_eig(R, Z, lam, V))
+        _nan_back()
         return (out, info, fm_out) if do_fm else (out, info)
 
     # ---- per-target (slow) path -------------------------------------------
@@ -1918,4 +2009,5 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
     info["n_dropped"] = int(dropped.sum())
     info["nref_used"] = nref_used
     info["dropped"] = dropped
+    _nan_back()
     return (out, info, fm_out) if do_fm else (out, info)

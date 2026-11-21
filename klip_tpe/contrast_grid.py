@@ -483,13 +483,15 @@ def summarize(positions: Sequence[GridPosition], seps: Sequence[float], pxscale:
     Returns
     -------
     curve : dict
-        ``r_as``, ``curve``, ``p16``, ``p84``, ``n`` (settled), ``n_pos`` (tested), ``n_blocked``,
-        ``sidelobe_deg``, the settings (``mode``, ``n_pa``, ``n_samples``, ``target_snr``, ``precision``,
-        ``snr``, ``sidelobe``), ``n_reductions`` and ``n_excluded``, with None for NaN.
+        ``r_as``, ``curve``, ``p16``, ``p84``, ``n`` (settled), ``n_pos`` (tested), ``n_all`` (laid out,
+        the excluded too), ``n_blocked``, ``sidelobe_deg``, the settings (``mode``, ``n_pa``,
+        ``n_samples``, ``target_snr``, ``precision``, ``snr``, ``sidelobe``), ``n_reductions`` and
+        ``n_excluded``, with None for NaN.
     """
     seps = np.asarray(seps, float)
-    med, p16, p84, n, npos, nblk = [], [], [], [], [], []
+    med, p16, p84, n, npos, nblk, nall = [], [], [], [], [], [], []
     for j in range(seps.size):
+        nall.append(int(sum(p.sep_index == j for p in positions)))
         here = [p for p in positions if p.sep_index == j and p.status != "excluded"]
         v = np.array([p.contrast for p in here if p.status in STATUS_DONE and p.contrast is not None], float)
         med.append(float(np.median(v)) if v.size else float("nan"))
@@ -502,7 +504,7 @@ def summarize(positions: Sequence[GridPosition], seps: Sequence[float], pxscale:
     def js(a):
         return [None if not np.isfinite(x) else float(x) for x in a]
     return {"r_as": js(seps * pxscale), "curve": js(med), "p16": js(p16), "p84": js(p84), "n": n, "n_pos": npos,
-            "n_blocked": nblk, "sidelobe_deg": js(sidelobe_deg), "mode": str(cfg.mode), "n_pa": int(cfg.n_pa),
+            "n_all": nall, "n_blocked": nblk, "sidelobe_deg": js(sidelobe_deg), "mode": str(cfg.mode), "n_pa": int(cfg.n_pa),
             "n_samples": int(cfg.n_samples), "target_snr": float(cfg.target_snr), "precision": float(cfg.precision),
             "snr": str(cfg.snr), "sidelobe": str(cfg.sidelobe), "n_reductions": int(n_reductions),
             "n_excluded": int(sum(p.status == "excluded" for p in positions))}

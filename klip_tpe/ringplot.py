@@ -92,6 +92,7 @@ STATUS_STYLE: Dict[str, Tuple[str, str, str, str, bool]] = {
     "arc": ("skipped: in a sidelobe arc", "none", "#D55E00", "-", False),
     "masked": ("skipped: on the pixel mask", "none", "#009E73", "-", False),
     "off": ("skipped: off the data", "none", "#9a9a9a", ":", False),
+    "uncovered": ("skipped: too few frames hold data", "none", "#9a9a9a", "--", False),
 }
 
 

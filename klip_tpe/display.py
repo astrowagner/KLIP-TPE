@@ -800,7 +800,7 @@ def _run_rules(setup: Dict[str, Any], pixel_mask: Optional[np.ndarray] = None) -
     if not isinstance(m, dict) or "excl_fwhm" not in m:
         return None
     # a saved None is a rule too: declip_nsig None keeps the spikes
-    out: Dict[str, Any] = {k: m[k] for k in RING_RULE_KEYS if k in m and k != "pixel_mask"
+    out: Dict[str, Any] = {k: m[k] for k in RING_RULE_KEYS if k in m and k not in ("pixel_mask", "coverage_mask")
                            and (m[k] is not None or k == "declip_nsig")}
     if m.get("mf_fwhm"):
         fw = float(m["mf_fwhm"])
@@ -1028,7 +1028,7 @@ def known_snr(ad: AnnulusData, img) -> Optional[List[float]]:
         r = ex.get("rules") or {}
         pm = r.get("pixel_mask", ex.get("pixel_mask"))
         pm = pm if (pm is not None and np.shape(pm) == np.shape(img)) else None
-        kw = {k: v for k, v in r.items() if k in RING_RULE_KEYS and k != "pixel_mask"}
+        kw = {k: v for k, v in r.items() if k in RING_RULE_KEYS and k not in ("pixel_mask", "coverage_mask")}
         # the metric's kernel, which it takes at the companions' median separation
         ka = r.get("kernel_at")
         kmed = ka(float(np.nanmedian([float(k[0]) for k in known]))) if callable(ka) else None

@@ -77,7 +77,7 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--fg-pa N] [--fg-step FWHM] [--fg-cover FWHM]
                         [--fg-z Z] [--fg-sweeps N] [--fg-finalists N]
                         [--fg-entrants-from [RUN ...]]
-                        [--fg-curve {grid,path_a,off}]
+                        [--fg-curve {grid,path_a,off}] [--min-coverage F]
                         [--sidelobes {farthest,clean,off}] [--global-block]
                         [--no-framesel] [--no-selection] [--max-drop MAX_DROP]
                         [--tag TAG] [--from-idl-setup RUN_SETUP_TXT]
@@ -385,6 +385,12 @@ options:
                         grid's S/N (grid, the default, the IDL predecessor's
                         aperture photometry unless --cg-snr says otherwise),
                         the stitched verify's (path_a), or no curve (off)
+  --min-coverage F      for frames that hold NaN, such as beyond a detector's
+                        edge: the fewest of the frames, as a fraction, that
+                        must hold data at a position for a source to be
+                        injected there and for the noise to sample it (default
+                        0.5, RunConfig.min_coverage). The run writes
+                        coverage.fits
   --sidelobes {farthest,clean,off}
                         the noise rings of the search, calibration,
                         validation, verify and candidates. off (the default)
@@ -737,7 +743,7 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--fg-pa N] [--fg-step FWHM] [--fg-cover FWHM] [--fg-z Z]
                      [--fg-sweeps N] [--fg-finalists N]
                      [--fg-entrants-from [RUN ...]]
-                     [--fg-curve {grid,path_a,off}]
+                     [--fg-curve {grid,path_a,off}] [--min-coverage F]
                      [--sidelobes {farthest,clean,off}] [--global-block]
                      [--no-framesel] [--no-selection] [--max-drop MAX_DROP]
                      [--tag TAG] [--from-idl-setup RUN_SETUP_TXT]
@@ -1043,6 +1049,12 @@ options:
                         grid's S/N (grid, the default, the IDL predecessor's
                         aperture photometry unless --cg-snr says otherwise),
                         the stitched verify's (path_a), or no curve (off)
+  --min-coverage F      for frames that hold NaN, such as beyond a detector's
+                        edge: the fewest of the frames, as a fraction, that
+                        must hold data at a position for a source to be
+                        injected there and for the noise to sample it (default
+                        0.5, RunConfig.min_coverage). The run writes
+                        coverage.fits
   --sidelobes {farthest,clean,off}
                         the noise rings of the search, calibration,
                         validation, verify and candidates. off (the default)

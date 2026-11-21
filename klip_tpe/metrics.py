@@ -31,7 +31,7 @@ from scipy import ndimage
 __all__ = ["radprof", "declip", "gaussian_kernel", "source_xy", "mawet_peak_snr",
            "injection_difference_snr", "aperture_mawet_snr", "clip0", "MawetPeakSNR",
            "InjectionDifferenceSNR", "Objective", "Source", "nanmedian_even", "pa_wedge_mask", "line_mask",
-           "disk_mask_from_image", "why_failed", "WHY_GUARD", "WHY_RING", "WHY_NOISE", "Sidelobes",
+           "disk_mask_from_image", "why_failed", "WHY_GUARD", "WHY_RING", "WHY_NOISE", "WHY_COVERAGE", "Sidelobes",
            "sidelobe_snr", "RingRecorder", "ring_role", "ring_rules", "rule_kwargs", "matched_filter",
            "VERIFY_IDL", "verify_idl"]
 
@@ -949,6 +949,7 @@ def _in_arcs(x, y, regions, cx: float, cy: float):
 WHY_GUARD = "inside the inner guard"
 WHY_RING = "fewer than 5 apertures on its ring"
 WHY_NOISE = "no noise samples on its ring or band"
+WHY_COVERAGE = "fewer than min_ring noise apertures where the frames hold data"
 
 
 def turn_kernel(k: np.ndarray, dphi: float, *, order: int = 3) -> np.ndarray:
@@ -1237,7 +1238,7 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                    exclude_xy: Sequence[Tuple[float, float]] = (), mfmap: Optional[np.ndarray] = None,
                    turn: Any = None,
                    templates_at: Optional[Sequence[Optional[Callable[[float, float], Optional[np.ndarray]]]]] = None,
-                   correlate: bool = True):
+                   correlate: bool = True, coverage_mask: Optional[np.ndarray] = None):
     """Measure the matched-filter detection S/N of each source (Mawet et al. 2014).
 
     The image is despiked and correlated with ``kernel``, the template as a source looks.  Each
@@ -1314,16 +1315,24 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
         Whether the matched filter correlates the image with the kernel, so a source shaped like it
         gives its own amplitude.  False convolves, which turns the template 180 deg first, as FMMF
         runs saved before 2026-11-04 measured.
+    coverage_mask : ndarray of bool or None, default None
+        Pixels where too few frames hold data, True to exclude, such as the run's coverage map below
+        ``RunConfig.min_coverage``.  A ring sample there, or off the image's data, is no noise sample
+        and no aperture of the ring: the geometric penalty counts the apertures that fall on data, and
+        a ring that keeps fewer than ``min_ring`` samples for want of data gives no S/N rather than
+        the radial band's.  None leaves the rings as they were.
 
     Returns
     -------
     snr : ndarray
         S/N of each source.  It may be negative, a peak below the ring mean, or NaN, for a source
-        inside the inner guard, on a ring of fewer than 5 apertures or without noise samples.
+        inside the inner guard, on a ring of fewer than 5 apertures, without noise samples or, with
+        ``coverage_mask``, short of samples with data.
     details : list of dict
         [return_details=True] Each source's ``x``, ``y``, ``r``, ``nap``, ``peak``, ``sigma``,
-        ``bg``, ``nclean``, ``n_left``, ``min_ring``, ``ring_used`` and ``sd_band``, and for a NaN
-        ``why`` (:data:`WHY_GUARD`, :data:`WHY_RING`, :data:`WHY_NOISE`).
+        ``bg``, ``nclean``, ``n_left``, ``min_ring``, ``ring_used``, ``sd_band`` and ``n_uncovered``
+        (the ring samples without data), and for a NaN ``why`` (:data:`WHY_GUARD`, :data:`WHY_RING`,
+        :data:`WHY_NOISE`, :data:`WHY_COVERAGE`).
 
     Raises
     ------
@@ -1408,6 +1417,10 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
     finite = prep["finite"]
     if pixel_mask is not None:
         finite = finite & ~np.asarray(pixel_mask, bool)
+    cov = None
+    if coverage_mask is not None and np.shape(coverage_mask) == (ny, nx):
+        cov = np.asarray(coverage_mask, bool)
+        finite = finite & ~cov
     arcs = _arc_regions(excl_arcs, pxscale, fwhm, cx, cy, angle_convention)
     arc_px = _in_arcs(xx, yy, arcs, cx, cy) if arcs else None
     isr = int(np.ceil(search_px))
@@ -1455,6 +1468,7 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
             continue
         th0 = np.arctan2(py - cy, px - cx)
         vals, valok = [], []
+        n_unc = 0
         ring: Optional[List[List[Any]]] = [] if recording else None
         # each sample with the forward model of a source there (templates_at), or with the
         # source's template turned to the azimuth it is taken at (turn)
@@ -1472,6 +1486,12 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
             if ex.size and np.any(np.hypot(xk - ex, yk - ey) < exr):
                 if ring is not None:
                     ring.append([xk, yk, "excluded"])
+                continue
+            if cov is not None and (not (0 <= xk < nx and 0 <= yk < ny) or not prep["finite"][yk, xk]
+                                    or cov[yk, xk]):
+                n_unc += 1                    # no data there: neither a sample nor an aperture of the ring
+                if ring is not None:
+                    ring.append([xk, yk, "uncovered"])
                 continue
             if not (0 <= xk < nx and 0 <= yk < ny) or not finite[yk, xk]:
                 if ring is not None:
@@ -1544,10 +1564,16 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
         # the quantity a source-count rule has to respect -- recorded so it can be checked.
         det["nclean"], det["min_ring"], det["n_left"] = int(nclean), int(min_ring), int(vals.size)
         det["ring_used"] = bool(nclean >= min_ring and sd_ring > 0)
-        if sd > 0:
+        det["n_uncovered"] = int(n_unc)
+        if cov is not None and n_unc and nclean < min_ring:
+            # the ring falls off the data: no S/N, as the IDL predecessor's contrast curve leaves a
+            # blocked position angle out, rather than the radial band's
+            det["why"] = WHY_COVERAGE
+            sd = -1.0
+        elif sd > 0:
             if sd_band > 0:
                 sd = max(sd, sd_band)
-            n_pen = max(nap, 3) if penalty == "geometric" else max(nclean, 1)
+            n_pen = max(nap - n_unc, 3) if penalty == "geometric" else max(nclean, 1)
             snr[s] = (A[py, px] - bg) / (sd * np.sqrt(1.0 + 1.0 / n_pen))
         else:
             det["why"] = WHY_NOISE
@@ -1625,7 +1651,7 @@ def _ring_rec(fn: str, shape, cx: float, cy: float, det: Dict[str, Any], fwhm: f
 #: the keywords of :func:`mawet_peak_snr` a run's metric sets, which every ring S/N of the run
 #: takes (:func:`ring_rules`): the search's, the verify's and the candidate search's
 RING_RULE_KEYS = ("search_px", "excl_fwhm", "declip_nsig", "band_fwhm", "min_ring", "penalty", "pixel_mask",
-                  "inner_fwhm")
+                  "inner_fwhm", "coverage_mask")
 
 #: the rules of a run that measures as before 2026-11-01 (``RunConfig.verify_snr = "idl"``): the
 #: verify and the candidate search take the S/N of the IDL predecessor's verify
@@ -1696,7 +1722,7 @@ def rule_kwargs(rules: Optional[Dict[str, Any]], rho: float, shape) -> Dict[str,
     rho : float
         Separation of the source, in arcsec, where the kernel is taken.
     shape : tuple of int
-        Shape of the image, ``(ny, nx)``.  A pixel mask of another shape is dropped.
+        Shape of the image, ``(ny, nx)``.  A pixel or coverage mask of another shape is dropped.
 
     Returns
     -------
@@ -1704,9 +1730,10 @@ def rule_kwargs(rules: Optional[Dict[str, Any]], rho: float, shape) -> Dict[str,
         The keywords, with ``kernel`` the kernel at ``rho``.
     """
     kw = {k: v for k, v in (rules or {}).items() if k in RING_RULE_KEYS}
-    m = kw.get("pixel_mask")
-    if m is not None and np.shape(m) != tuple(shape):
-        kw.pop("pixel_mask")
+    for key in ("pixel_mask", "coverage_mask"):
+        m = kw.get(key)
+        if m is not None and np.shape(m) != tuple(shape):
+            kw.pop(key)
     ka = (rules or {}).get("kernel_at")
     if callable(ka):
         kw["kernel"] = ka(float(rho))
@@ -2434,6 +2461,10 @@ class MawetPeakSNR(Metric):
         Count in the small-sample penalty (:func:`mawet_peak_snr`).
     pixel_mask : ndarray of bool or None, default None
         Pixels left out of the noise samples, True to exclude.
+    coverage_mask : ndarray of bool or None, default None
+        Pixels where too few frames hold data, True to exclude (:func:`mawet_peak_snr`).  The
+        :class:`~klip_tpe.runner.Runner` sets it from the run's coverage map for frames that hold NaN,
+        and puts it in ``pixel_mask`` too.
     flatten : bool, default False
         Whether to subtract the azimuthal mean profile (:func:`radprof`) before scoring.
     angle_convention : {"pa", "math"}, default "pa"
@@ -2471,6 +2502,7 @@ class MawetPeakSNR(Metric):
     angle_convention: str = "pa"
     name: str = "mawet_peak"
     inner_fwhm: float = 1.0
+    coverage_mask: Optional[np.ndarray] = None
 
     def kernel(self, rho) -> np.ndarray:
         """Return the matched filter for sources at the given separations.
@@ -2520,6 +2552,8 @@ class MawetPeakSNR(Metric):
         kw = dict(kernel=self.kernel(rho), search_px=self.search_px, excl_fwhm=self.excl_fwhm,
                   declip_nsig=self.declip_nsig, band_fwhm=self.band_fwhm, penalty=self.penalty,
                   pixel_mask=self.pixel_mask, inner_fwhm=self.inner_fwhm)
+        if self.coverage_mask is not None:
+            kw["coverage_mask"] = self.coverage_mask
         if sidelobes is not None:
             cln = None if img_clean is None else (radprof(img_clean) if self.flatten else np.asarray(img_clean, float))
             snr, det = sidelobe_snr(img, rho, theta, self.pxscale, self.fwhm, sidelobes, img_clean=cln,
@@ -2550,6 +2584,7 @@ class MawetPeakSNR(Metric):
                 # a masked noise estimate is not comparable with an unmasked one, so the
                 # run's own setup record has to say whether one was in force
                 "pixel_mask_px": None if self.pixel_mask is None else int(np.count_nonzero(self.pixel_mask)),
+                "coverage_mask_px": None if self.coverage_mask is None else int(np.count_nonzero(self.coverage_mask)),
                 "flatten": self.flatten}
 
 

@@ -876,7 +876,8 @@ def klip_annular(be: Backend, bc_dev, bang: np.ndarray, *, k: int, inrad: float,
                  angsep: float, anglemax: float, n_min_ref: int, lam_over_d_px: float,
                  arc_radii: Optional[Tuple[float, float]] = None, zone_center=None, zone_angles: str = "ccw",
                  fast: bool = False, eigh_mode: str = "xbatched64", compact: int = 0, rr: bool = False,
-                 batch_sectors: bool = True, zone_cache: Optional[Dict[Any, Any]] = None) -> Tuple[Any, Dict[str, Any]]:
+                 batch_sectors: bool = True, zone_cache: Optional[Dict[Any, Any]] = None,
+                 keep_nan: bool = True) -> Tuple[Any, Dict[str, Any]]:
     """Run annular KLIP on one binned, high-passed cube on the device, in the Gram-matrix formulation.
 
     The reference sets are per target, as ``klip_annular``'s slow path makes them.  Pixels outside the
@@ -928,6 +929,8 @@ def klip_annular(be: Backend, bc_dev, bang: np.ndarray, *, k: int, inrad: float,
         Whether the padded path batches the sectors.
     zone_cache : dict or None, default None
         Cache of the sectors' pixel indices, shared between calls.
+    keep_nan : bool, default True
+        Whether a target's NaN pixels come out NaN, as ``klip_annular``'s ``KLIPParams.keep_nan``.
 
     Returns
     -------
@@ -975,6 +978,8 @@ def klip_annular(be: Backend, bc_dev, bang: np.ndarray, *, k: int, inrad: float,
         n_modes.append(nm)
         tmp = xp.full((M, idx_d.size), xp.nan, xp.float64)
         tmp[keep_t] = res
+        if keep_nan:
+            tmp[~xp.isfinite(flat[:, idx_d])] = xp.nan          # a pixel without data stays without
         out[:, idx_d] = tmp.astype(xp.float32)
 
     if k_eff == 0:

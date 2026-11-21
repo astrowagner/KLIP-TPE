@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased — 2026-11-21 (frames that hold NaN beyond their edge, the outer regions only some frames cover)
+
+From the NOMIC archive session's note of 2026-11-21, "outer regions not covered by every frame", on
+NOMIC's Procyon_4, whose detector edge lies 2.9-3.1" from the star.
+
+- **NaN means no data, from the frames to the image.**  A reducer whose frames hold NaN turns the
+  NaN-aware high-pass on unless its defaults name it (`KLIPReducer.has_nan`).  The IDL predecessor's
+  boxcar carried each NaN along its row and column, and with NOMIC's edge on the left every frame was
+  dropped as empty.
+- **KLIP keeps a target's NaN pixels NaN** (`KLIPParams.keep_nan`, the reducer's `keep_target_nan`,
+  True by default), on the GPU path too.  The projection takes them as 0, which left minus the PSF
+  model there to be combined as data.  This changes the images of any data with NaN where a target had
+  none, such as ALES's registered edges, and `keep_target_nan=False` in the reducer's defaults keeps the
+  old residuals.
+- **The coverage map** (`klip.coverage_map`, `Reducer.coverage_map`), the fraction of the frames that
+  hold data at each pixel of the final image.  A run on such frames writes it as `coverage.fits` and
+  logs how far every frame, and some position angles, hold data.
+- **`RunConfig.min_coverage`** (`--min-coverage`, 0.5).  The pixels where fewer of the frames hold data
+  join the metric's pixel mask and the sampler's forbidden mask, so no source is injected there, no
+  noise sample is taken there and the final grid leaves those position angles out.  In the rings the
+  metric's `coverage_mask` counts them apart.  The small-sample penalty counts only the apertures on
+  data, and a ring left with fewer than `min_ring` samples for want of data gives no S/N
+  (`WHY_COVERAGE`) rather than the radial band's.  A run that began before resumes without the masks
+  and leaves its directory as it was.
+- **`contrast_curve.txt` lists the position angles per separation**, settled, tested and laid out
+  (`contrast_grid.summarize`'s `n_all`).
+- `docs/RUNNING.md`, "Frames that hold NaN beyond their edge", and the MIRI quadrant mask's docs.
+  `docs/EXTRACT.md` says a dashboard panel takes about half a second.
+
 ## Unreleased — 2026-11-21 (a live dashboard for `klip-tpe extract`)
 
 From a user's note of 2026-11-21, "a live display for `klip-tpe extract`, and the per-group

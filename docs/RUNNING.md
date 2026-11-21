@@ -613,6 +613,46 @@ values are not needed) and writes the fitted values as `line_fitted.txt`, ready 
 shape held fixed (`per_night.json`), which says whether the line follows something that
 changes from night to night.
 
+## Frames that hold NaN beyond their edge (`--min-coverage`)
+
+Frames whose detector ends inside the field hold NaN where they have no data, as NOMIC's do
+beyond 3".  On the sky the edge turns with the frames, so a pixel of the outer circles is covered
+by some frames and not by others.  Since 2026-11-21 (the NOMIC note of that day) NaN means no data
+from the frames to the image:
+
+- **The high-pass** leaves NaN out of its box when the frames hold any.  `hp_nan_aware` comes on by
+  itself unless the reducer's defaults name it.  The IDL predecessor's boxcar carried each NaN along
+  its row and column, and with an edge on the left or the bottom every frame came out NaN and was
+  dropped as empty.
+- **KLIP** takes NaN as 0 in the projection, and a target's NaN pixels come out NaN again
+  (`KLIPParams.keep_nan`, the reducer's `keep_target_nan`, on the GPU path too).  Before, they came
+  out as minus the PSF model and were combined as data.
+- **The combination** takes each sky pixel from the frames that hold data there.  The noise-weighted
+  combination, the mean and the median all leave NaN out, and a pixel no frame covers is NaN.
+- **The coverage map.**  The run writes `coverage.fits`, the fraction of the frames that hold data at
+  each pixel of the final image (`klip.coverage_map`, from at most 180 frames of each partition
+  spread over the sequence).  The log gives the radius within which every frame holds data and how
+  far some position angles reach.
+- **Injections and noise.**  The pixels where fewer than `--min-coverage` of the frames (default 0.5,
+  `RunConfig.min_coverage`) hold data join the metric's pixel mask and the sampler's forbidden mask.
+  No source is injected there, and no noise sample is taken there.  The noise rings count those
+  positions apart (the metric's `coverage_mask`): the small-sample penalty counts only the apertures
+  on data, and a ring left with fewer than `min_ring` samples for want of data gives no S/N rather
+  than the radial band's.
+- **The final grid and the curve** leave out the position angles where the sampler places no source,
+  and `contrast_curve.txt` lists, per separation, the position angles settled, tested and laid out.
+  The IDL predecessor's curve of Procyon_4 had 12 of 20 at 4.0".
+
+A run that began before these masks resumes without them and leaves its directory as it was.
+Frames without NaN change nothing.  The frame tags `generic.quality_tags` computes take the finite
+pixels alone.
+
+The IDL predecessor (`reduce_nomic.pro`) set NaN to 0 first and took a pixel that came out of KLIP
+exactly 0 as having no data.  Zeros then entered the high-pass near the edge, a pixel off the
+detector in the target but on it in some references kept minus the model, and the contrast curve's
+noise apertures that were partly off the data stayed in with their zeros.  Here none of that
+happens.
+
 ## A finished run's winners on other frames (`klip-tpe rereduce`)
 
 `klip-tpe rereduce --run-dir RUN` reduces each annulus' winning configuration again and
