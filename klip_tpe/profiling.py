@@ -1,22 +1,22 @@
 """Where the run's main thread spends its time, sampled inside the run itself.
 
-A pipelined search keeps several trials in flight, and once the workers keep up, the main
-thread sets the pace.  Scoring, the TPE proposal, the result files, the checkpoint and the
-display all run there, one after another.  Setting ``KLIP_TPE_PROFILE_MAIN=S`` in the
-environment of a run (or a resume) starts a daemon thread that looks at the main thread's
-stack every few milliseconds.  Every ``S`` seconds it rewrites ``main_thread_profile.txt``
-in the run directory with two tables, each for the last ``S`` seconds and since the start:
+A pipelined search keeps several trials in flight, and once the workers keep up, the main thread sets
+the pace.  Scoring, the TPE proposal, the result files, the checkpoint and the display all run there,
+one after another.  ``KLIP_TPE_PROFILE_MAIN=S`` in the environment of a run or a resume starts a daemon
+thread that looks at the main thread's stack every few milliseconds.  Every ``S`` seconds it rewrites
+``main_thread_profile.txt`` in the run directory with two tables, each for the last ``S`` seconds and
+since the start:
 
-* inclusive: the share of the time each function was on the stack;
-* where the stack ended: the innermost function, with waits (a lock, a queue, ``select``)
-  counted together as ``(waiting)``, so the idle share of the thread is one number.
+* **inclusive**, the share of the time each function was on the stack,
+* **where the stack ended**, the innermost function, with the waits on a lock, a queue or ``select``
+  counted together as ``(waiting)``, so the thread's idle share is one number.
 
-Each sample counts for the time since the one before.  The sampling thread needs the GIL
-to look, and gets it less often while the main thread runs Python than while it waits, so
-equal weights would overstate the waits (a half-busy loop read as 22% busy).
+Each sample counts for the time since the one before.  The sampling thread needs the GIL to look, and
+gets it less often while the main thread runs Python than while it waits, so equal weights would
+overstate the waits (a half-busy loop read as 22 % busy).
 
-It needs no extra package and costs about one stack walk per sample.  Without the variable
-nothing starts.
+It needs no other package and costs about one stack walk per sample.  Without the variable nothing
+starts.
 """
 from __future__ import annotations
 
@@ -28,7 +28,9 @@ from typing import Callable, Optional
 
 __all__ = ["MainThreadSampler", "sampler_from_env", "ENV"]
 
+#: the environment variable that starts the sampler, the seconds between two reports
 ENV = "KLIP_TPE_PROFILE_MAIN"
+#: the report's name, in the run directory
 FILENAME = "main_thread_profile.txt"
 
 #: innermost Python frames that mean the thread is waiting, not working
@@ -39,7 +41,18 @@ _WAITS = {("threading.py", "wait"), ("threading.py", "_wait_for_tstate_lock"), (
 
 
 def _where(code) -> str:
-    """``package/module.py:function`` for a code object."""
+    """Return where a code object lives, as ``module.py:function``.
+
+    Parameters
+    ----------
+    code : code object
+        The code object.
+
+    Returns
+    -------
+    where : str
+        Such as ``klip_tpe/runner.py:_reduce``, with the folder kept for klip-tpe's own modules.
+    """
     path = code.co_filename
     parts = path.replace("\\", "/").split("/")
     short = "/".join(parts[-2:]) if len(parts) > 1 and parts[-2] in ("klip_tpe", "instruments") else parts[-1]
@@ -47,9 +60,27 @@ def _where(code) -> str:
 
 
 class MainThreadSampler:
-    """Sample the main thread's stack every ``period_s`` seconds and write the report to
-    ``path`` every ``every_s`` seconds.  ``status`` returns a phrase for the report header
-    (where the run is, e.g. the evaluation count)."""
+    """Sample the main thread's stack and rewrite the report every so often.
+
+    Parameters
+    ----------
+    path : str
+        Path of the report.
+    every_s : float
+        Seconds between two reports, at least 1.
+    period_s : float, default 0.005
+        Seconds between two samples.
+    status : callable or None, default None
+        Function that returns a phrase for the report's header, such as where the run is.
+
+    Attributes
+    ----------
+    total : dict
+        The samples since the start: ``n``, ``w`` (their seconds), ``incl`` and ``leaf`` (seconds by
+        function).
+    window : dict
+        The same since the last report.
+    """
 
     def __init__(self, path: str, every_s: float, period_s: float = 0.005,
                  status: Optional[Callable[[], str]] = None):
@@ -64,12 +95,26 @@ class MainThreadSampler:
         self.win_status = self._status()
 
     def _status(self) -> str:
+        """Return the status phrase, empty without a status function or when it fails.
+
+        Returns
+        -------
+        phrase : str
+            The phrase.
+        """
         try:
             return self.status() if self.status else ""
         except Exception:
             return ""
 
     def start(self) -> "MainThreadSampler":
+        """Start the sampling thread, once.
+
+        Returns
+        -------
+        sampler : MainThreadSampler
+            This sampler.
+        """
         if self._th is None:
             self._th = threading.Thread(target=self._run, name="klip-tpe-profile", daemon=True)
             self._th.start()
@@ -84,7 +129,13 @@ class MainThreadSampler:
         self.write()
 
     def sample(self, weight: float = 1.0) -> None:
-        """Record the main thread's stack as it is now, for ``weight`` seconds."""
+        """Record the main thread's stack as it is now.
+
+        Parameters
+        ----------
+        weight : float, default 1.0
+            Seconds the sample counts for.
+        """
         f = sys._current_frames().get(self.main)
         if f is None:
             return
@@ -103,6 +154,10 @@ class MainThreadSampler:
             acc["leaf"][lk] = acc["leaf"].get(lk, 0.0) + weight
 
     def _run(self) -> None:
+        """Sample until stopped, and rewrite the report every ``every_s`` seconds.
+
+        A failure is passed over, since a profile never stops a run.
+        """
         t_prev = time.perf_counter()
         while not self._stop.wait(self.period_s):
             try:
@@ -117,6 +172,17 @@ class MainThreadSampler:
                 pass                       # a profile never stops a run
 
     def write(self, top: int = 40) -> None:
+        """Rewrite the report from the samples so far.
+
+        Parameters
+        ----------
+        top : int, default 40
+            Number of functions per table.
+
+        Notes
+        -----
+        The report goes to a temporary file that is then moved over the old one.  An error leaves the old one.
+        """
         win, tot = self.window, self.total
         now = time.time()
 
@@ -143,7 +209,22 @@ class MainThreadSampler:
 
 def sampler_from_env(run_dir: str, status: Optional[Callable[[], str]] = None,
                      log: Optional[Callable[[str], None]] = None) -> Optional[MainThreadSampler]:
-    """A started sampler when ``KLIP_TPE_PROFILE_MAIN`` holds a number of seconds, else None."""
+    """Return a started sampler when ``KLIP_TPE_PROFILE_MAIN`` holds a number of seconds.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run's directory, where the report goes.
+    status : callable or None, default None
+        Function that returns a phrase for the report's header.
+    log : callable or None, default None
+        Function that takes a line for the run's log.
+
+    Returns
+    -------
+    sampler : MainThreadSampler or None
+        The sampler, None when the variable is unset, not a number or not positive.
+    """
     v = os.environ.get(ENV, "").strip()
     if not v:
         return None

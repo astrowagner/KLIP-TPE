@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — 2026-11-21 (seven more modules documented)
+
+- **Documented to the rule** (`tests/test_docstrings.py`): `animate.py`, `backends/custom.py`,
+  `heartbeat.py`, `idl_replay.py`, `profiling.py`, `rescale.py` and `viewer.py`.  Only their
+  docstrings and comments change, and `backends/custom.py`'s `SubtractFn` and `viewer.py`'s
+  `PANEL_GLOBS` notes now read without semicolons.
+
 ## Unreleased — 2026-11-21 (the rest step split, the CPU workers' idle time, the seam steps)
 
 From NEAR2's note of 2026-11-17 on s7e, s7f and s7g.

@@ -1,6 +1,9 @@
-"""Assemble the step PNGs into a progress movie (``near2m_makegif`` without
-ImageMagick): GIF via imageio (PIL fallback) and MP4 via imageio's ffmpeg backend
-when one is available.  Frames are downsampled to ``width`` pixels."""
+"""Assemble the step panels into a progress movie, a GIF and an MP4.
+
+It ports the IDL predecessor's ``near2m_makegif`` without ImageMagick.  The GIF goes through imageio,
+with Pillow as the fallback, and the MP4 through imageio's ffmpeg backend when one is installed.  The
+frames are resized to ``width`` pixels.
+"""
 from __future__ import annotations
 
 import os
@@ -12,6 +15,13 @@ __all__ = ["load_frames", "make_movie", "thin"]
 
 
 def _pil():
+    """Return Pillow's ``Image`` module.
+
+    Returns
+    -------
+    image : module or None
+        ``PIL.Image``, None when Pillow is missing.
+    """
     try:
         from PIL import Image
         return Image
@@ -20,7 +30,25 @@ def _pil():
 
 
 def load_frames(paths: Sequence[str], width: int = 900) -> List[np.ndarray]:
-    """RGB uint8 frames resized to ``width`` (even dimensions, for the video codecs)."""
+    """Read images as RGB frames of one width, with even sides for the video codecs.
+
+    Parameters
+    ----------
+    paths : sequence of str
+        The images.
+    width : int, default 900
+        The frames' width, in pixels.
+
+    Returns
+    -------
+    frames : list of ndarray, shape (h, w, 3)
+        The frames, uint8, each cropped by a pixel where a side is odd.
+
+    Raises
+    ------
+    RuntimeError
+        If Pillow is not installed.
+    """
     Image = _pil()
     if Image is None:
         raise RuntimeError("Pillow is required (pip install pillow)")
@@ -40,7 +68,20 @@ def load_frames(paths: Sequence[str], width: int = 900) -> List[np.ndarray]:
 
 
 def thin(paths: Sequence[str], max_frames: int) -> List[str]:
-    """At most ``max_frames`` of ``paths``, evenly spaced, always keeping the last one."""
+    """Return at most ``max_frames`` paths, evenly spaced, the last always kept.
+
+    Parameters
+    ----------
+    paths : sequence of str
+        The paths.
+    max_frames : int
+        Number of paths at most, 0 or less for all.
+
+    Returns
+    -------
+    kept : list of str
+        The paths kept, in order.
+    """
     paths = list(paths)
     if max_frames and len(paths) > max_frames > 0:
         idx = np.unique(np.round(np.linspace(0, len(paths) - 1, int(max_frames))).astype(int))
@@ -51,11 +92,40 @@ def thin(paths: Sequence[str], max_frames: int) -> List[str]:
 def make_movie(paths: Sequence[str], out_gif: str, out_mp4: Optional[str] = None, intro: Optional[str] = None,
                width: int = 900, fps: float = 5.0, intro_frames: int = 8, hold_last: int = 6,
                max_frames: int = 400) -> List[str]:
-    """Write ``out_gif`` (and ``out_mp4`` if an ffmpeg backend exists) from ``paths``.
-    ``intro`` (a PNG) is repeated ``intro_frames`` times at the start, the last frame
-    ``hold_last`` times.  Long runs are thinned to ``max_frames`` evenly spaced frames
-    (the last one always kept) so a 10 000-eval annulus stays a few hundred MB of memory
-    and a watchable GIF.  Returns the list of files written."""
+    """Write a progress movie from step panels.
+
+    Parameters
+    ----------
+    paths : sequence of str
+        The panels, in order.  Missing ones are skipped.
+    out_gif : str
+        Path of the GIF.
+    out_mp4 : str or None, default None
+        Path of the MP4, None for none.  It is written only when imageio has an ffmpeg backend.
+    intro : str or None, default None
+        An image shown first, None for none.
+    width : int, default 900
+        The frames' width, in pixels.
+    fps : float, default 5.0
+        Frames per second.
+    intro_frames : int, default 8
+        Number of frames the intro is shown for.
+    hold_last : int, default 6
+        Number of frames the last panel is held for.
+    max_frames : int, default 400
+        Number of panels at most, evenly spaced with the last kept, so a 10,000-evaluation annulus
+        stays a few hundred MB of memory and a watchable GIF.
+
+    Returns
+    -------
+    written : list of str
+        The files written, empty without panels.
+
+    Notes
+    -----
+    An MP4 that fails part way is removed.  Without imageio-ffmpeg, imageio hands ``.mp4`` to its TIFF
+    writer, which used to leave a broken file behind.
+    """
     paths = [p for p in paths if os.path.exists(p)]
     if not paths:
         return []

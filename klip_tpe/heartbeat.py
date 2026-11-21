@@ -1,32 +1,31 @@
-"""Proof of life for a long run: ``heartbeat.json`` in the run directory.
+"""Proof of life for a long run, ``heartbeat.json`` in the run directory.
 
-A search runs for days, on a machine doing other things, and the only record of it was
-``results.jsonl`` -- which advances once per *completed* evaluation.  That is a poor clock.
-An evaluation on a busy machine takes anything from six seconds to eight minutes (measured:
-a 147-D RX J0534 evaluation ran 479 s while its neighbors took 6 s, with four searches and
-a benchmark sharing the cores), so a run that has written nothing for an hour is either
-grinding through one slow reduction or dead, and the files cannot tell the two apart.  The
-question "is it stuck or is it gone?" then has no answer short of hunting for the pid.
+A search runs for days on a machine doing other things, and its only record was ``results.jsonl``,
+which advances once per finished evaluation.  That is a poor clock.  An evaluation on a busy machine
+takes anything from six seconds to eight minutes (a 147-D RX J0534 evaluation ran 479 s while its
+neighbors took 6 s, with four searches and a benchmark sharing the cores).  A run that has written
+nothing for an hour is then either grinding through one slow reduction or dead, and its files cannot
+tell the two apart.
 
 So a daemon thread stamps this file every few seconds for as long as the process lives:
 
-* file fresh          -> the process is alive, whatever the rest of the directory shows
-* file stale, pid up  -> alive but wedged at the OS level (swapping, stopped, deadlocked)
-* file stale, no pid  -> it died; ``klip-tpe resume`` picks up from the last checkpoint
+* a fresh file means the process is alive, whatever the rest of the directory shows,
+* a stale file with the process still up means it is alive but stuck at the system level, swapping,
+  stopped or deadlocked,
+* a stale file without the process means it died, and ``klip-tpe resume`` carries on from the last
+  checkpoint.
 
-The thread is what makes the first line true.  Running this from the main loop instead
-would only report where the main thread last *reached*, which is exactly what goes quiet
-when a reduction is slow -- the thing we are trying to distinguish.
+The thread is what makes the first true.  Stamps from the main loop would report only where the main
+thread last reached, which is what goes quiet when a reduction is slow.
 
-Alongside the clock it carries what the run is doing (``stage``, and when that stage
-started), so a stale file also says what it was doing when it stopped, and a fresh one says
-whether an hour in a single stage is the reduction or the display.  ``stall_after`` lets the
-run state a duration past which the current stage is worth a line in the log -- scaled to
-what that run's own evaluations cost, since no fixed number fits both a 6 s benchmark and a
-479 s night stack.
+Beside the clock the file carries what the run is doing (``stage``, and when that stage started), so a
+stale file also says where the run stopped, and a fresh one whether an hour in one stage is the
+reduction or the display.  ``stall_after`` lets the run give a duration past which its stage is worth a
+line in the log, scaled to what its own evaluations cost, since no fixed number fits both a 6 s
+benchmark and a 479 s night stack.
 
-Best-effort throughout: every write is guarded, the file is rewritten atomically so a reader
-never sees half of one, and nothing here can interrupt a search.
+Every write is guarded and atomic, so a reader never sees half a file, and nothing here can interrupt a
+search.
 """
 from __future__ import annotations
 
@@ -50,10 +49,19 @@ FRESH_FOR = 30.0
 
 
 class Heartbeat:
-    """Stamps ``run_dir/heartbeat.json`` every ``period`` seconds from a daemon thread.
+    """Stamp ``heartbeat.json`` in a run directory from a daemon thread.
 
-    ``stage()`` names what the run is doing and restarts the stage clock; ``update()``
-    revises the details without restarting it.  Neither blocks and neither raises.
+    :meth:`stage` names what the run is doing and restarts the stage's clock, and :meth:`update` changes
+    the details without restarting it.  Neither blocks and neither raises.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run's directory.
+    log : callable or None, default None
+        Function that takes a line for the run's log, for the stall warning.
+    period : float, default 5.0
+        Seconds between two stamps, at least 0.2.
     """
 
     def __init__(self, run_dir: str, log=None, period: float = PERIOD):
@@ -74,7 +82,13 @@ class Heartbeat:
 
     # -- lifecycle ---------------------------------------------------------------------
     def start(self) -> "Heartbeat":
-        """Begin stamping.  Idempotent; safe to call on a resumed run."""
+        """Start stamping, once, a resumed run's heartbeat included.
+
+        Returns
+        -------
+        hb : Heartbeat
+            This heartbeat.
+        """
         if self._thread is not None:
             return self
         self.write()
@@ -87,10 +101,17 @@ class Heartbeat:
         return self
 
     def stop(self, stage: Optional[str] = None) -> None:
-        """Last stamp, then no more.  The file stays: it is the record of how this run
-        ended, and a reader distinguishes it from a live one by the stage and the age.
-        ``stage=None`` keeps whatever stage the run stopped in -- which is the useful thing
-        to read when it stopped because of a Ctrl-C or an exception."""
+        """Stamp a last time and stop.
+
+        The file stays as the record of how the run ended, and a reader tells it from a live one by its stage
+        and its age.
+
+        Parameters
+        ----------
+        stage : str or None, default None
+            The last stage, None to keep the stage the run stopped in, which is the one to read after a
+            Ctrl-C or an exception.
+        """
         self._stop.set()
         if stage is None:
             self.write()
@@ -101,20 +122,33 @@ class Heartbeat:
             t.join(timeout=self.period + 1.0)
 
     def _loop(self) -> None:
+        """Stamp the file and look for a stall every ``period`` seconds until stopped.
+        """
         while not self._stop.wait(self.period):
             self.write()
             self._check_stall()
 
     # -- what the run is doing ---------------------------------------------------------
     def stage(self, stage: str, write: bool = True, **kw: Any) -> None:
-        """Name the current stage and restart its clock (and so its stall warning).
+        """Name the current stage and restart its clock, and with it the stall warning.
 
-        ``write=False`` is for stages that change every step -- one per evaluation, one per
-        validation trial: the new stage is live at once for the stall check, and reaches the
-        file with the thread's next stamp, at most ``period`` later.  Written immediately,
-        a fast run (~1 s evaluations) rewrote this file faster than a synced folder uploads
-        it, and Dropbox answered with a "conflicted copy" every few seconds (115 in 20 min
-        on H2K, 2026-09-23).  Changes of phase still write at once."""
+        Parameters
+        ----------
+        stage : str
+            What the run is doing.
+        write : bool, default True
+            Whether to write the file at once.  False leaves it to the thread's next stamp, at most
+            ``period`` later, while the stall check sees the new stage at once.
+        kw : dict
+            Other details to record, such as ``annulus`` and ``eval``.
+
+        Notes
+        -----
+        ``write=False`` is for stages that change every step, one per evaluation or validation trial.
+        Written each time, a fast run of about 1 s evaluations rewrote the file faster than a synced folder
+        uploads it, and Dropbox made a "conflicted copy" every few seconds (115 in 20 minutes on H2K,
+        2026-09-23).  Changes of phase still write at once.
+        """
         with self._lock:
             self._state["stage"] = str(stage)
             self._state["stage_t0"] = time.time()
@@ -124,20 +158,39 @@ class Heartbeat:
             self.write()
 
     def update(self, **kw: Any) -> None:
-        """Revise the details without restarting the stage clock."""
+        """Change the details without restarting the stage's clock.
+
+        Parameters
+        ----------
+        kw : dict
+            The details.
+        """
         with self._lock:
             self._state.update(kw)
 
     def stall_after(self, seconds: Optional[float]) -> None:
-        """Log a line once the current stage passes ``seconds`` (then at each doubling).
-        ``None`` (or a non-positive number) turns the warning off.  Scale it to the run's
-        own evaluation cost -- see :attr:`klip_tpe.runner.Runner.STALL_FACTOR`."""
+        """Log a line once the current stage passes a duration, then at each doubling.
+
+        Parameters
+        ----------
+        seconds : float or None
+            The duration, None or not positive to turn the warning off.  Scale it to the run's own
+            evaluation cost (:attr:`klip_tpe.runner.Runner.STALL_FACTOR`).
+        """
         with self._lock:
             s = None if seconds is None else float(seconds)
             self._stall_after = s if (s is not None and s > 0) else None
 
     # -- the file ----------------------------------------------------------------------
     def snapshot(self) -> Dict[str, Any]:
+        """Return the state as the file holds it.
+
+        Returns
+        -------
+        state : dict
+            The state, with ``t``, ``stage_s`` (seconds in the stage) and ``elapsed_s`` (seconds since the
+            start) added.
+        """
         with self._lock:
             st = dict(self._state)
         st["t"] = time.time()
@@ -146,8 +199,10 @@ class Heartbeat:
         return st
 
     def write(self) -> None:
-        """Atomic, guarded.  A reader never sees a partial file, and a full disk or a
-        vanished directory never touches the search."""
+        """Write the file atomically, never raising.
+
+        A reader never sees a partial file, and a full disk or a vanished directory never touches the search.
+        """
         st = self.snapshot()
         tmp = f"{self.path}.{os.getpid()}.tmp"
         try:
@@ -162,6 +217,11 @@ class Heartbeat:
                 pass
 
     def _check_stall(self) -> None:
+        """Log a line when the current stage has run past its stall limit.
+
+        The first line comes at ``stall_after`` and each next one once the stage's time has doubled since the
+        last.
+        """
         with self._lock:
             after, warned = self._stall_after, self._warned
             stage, t0 = self._state.get("stage"), self._state.get("stage_t0") or time.time()
@@ -179,6 +239,18 @@ class Heartbeat:
 
 
 def _dur(s: float) -> str:
+    """Return a duration as a short text.
+
+    Parameters
+    ----------
+    s : float
+        The duration, in seconds.
+
+    Returns
+    -------
+    text : str
+        Such as ``42s``, ``12m`` or ``3.4h``.
+    """
     if s < 90:
         return f"{s:.0f}s"
     if s < 5400:
@@ -187,8 +259,20 @@ def _dur(s: float) -> str:
 
 
 def read(run_dir: str) -> Optional[Dict[str, Any]]:
-    """The run's heartbeat, with ``age`` and ``fresh`` added, or ``None`` if there is none
-    (a run from before this version, or one that never got as far as writing it)."""
+    """Return a run's heartbeat, with its age and freshness.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run's directory.
+
+    Returns
+    -------
+    hb : dict or None
+        The file's contents with ``age`` (seconds since its last stamp) and ``fresh`` (younger than
+        30 s) added, None without a readable file, as for a run from before the heartbeat or one that
+        never got as far as writing it.
+    """
     p = os.path.join(run_dir, FILENAME)
     try:
         with open(p) as f:
@@ -209,7 +293,18 @@ def read(run_dir: str) -> Optional[Dict[str, Any]]:
 
 
 def describe(hb: Optional[Dict[str, Any]]) -> str:
-    """One phrase for a table or a log line."""
+    """Return a heartbeat's stage and its time so far as one phrase.
+
+    Parameters
+    ----------
+    hb : dict or None
+        The heartbeat (:func:`read`).
+
+    Returns
+    -------
+    text : str
+        Such as ``search (12m)``, empty without a heartbeat.
+    """
     if not hb:
         return ""
     stage = hb.get("stage") or "?"

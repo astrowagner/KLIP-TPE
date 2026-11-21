@@ -1,24 +1,22 @@
-"""A live window that cannot freeze: an attachable viewer for a running optimization.
+"""A live window that cannot freeze, an attachable viewer for a running optimization.
 
-The optimizer's own window (``LiveDisplay(show=True)``) renders off-thread and only
-*blits* a finished PNG, but the blit and the GUI event loop still belong to the main
-thread -- and the main thread spends most of its life inside NumPy/LAPACK.  On macOS the
-WindowServer marks a process that has not serviced events for a couple of seconds as
-unresponsive, stops compositing it, and leaves the last painted frame on screen (a
-beachball on hover).  The run is fine and the panels keep being written to
-``steps/stepNNNN.png``; only the window is stale.
+The run's own window (``LiveDisplay(show=True)``) has its panels drawn elsewhere and only shows a
+finished image, but the showing and the GUI's event loop still belong to the run's main thread, which
+spends most of its time in NumPy and LAPACK.  On macOS the WindowServer marks a process that has not
+serviced its events for a couple of seconds as unresponsive, stops drawing it and leaves the last
+frame on screen, with a beachball on hover.  The run is fine and its panels keep being written to
+``steps/stepNNNN.png``.  Only the window is stale.
 
-This module is the guarantee.  ``klip-tpe view --run-dir <dir>`` is a *separate process*
-whose main thread does nothing but pump the event loop and blit whichever panel is newest
-on disk.  It has no computation to block on, so it can never be starved -- and because it
-talks to the run only through files it can be attached to, detached from and restarted
-around a run that is already going, without touching it.
+``klip-tpe view --run-dir <dir>`` is a separate process whose main thread does nothing but pump the
+event loop and show whichever panel is newest on disk.  It has no computation to block on, so it is
+never starved.  It talks to the run only through files, so it can be attached, detached and restarted
+around a run that is going, without touching it::
 
-    klip-tpe view --run-dir runs/run_001          # attach to a running (or finished) run
-    klip-tpe view --root /data/NEAR_py            # newest run under <root>/comb/opt
+    klip-tpe view --run-dir runs/run_001          # attach to a running or finished run
+    klip-tpe view --root /data/NEAR_py            # the newest run under <root>/comb/opt
 
-It also reports what the run is doing (evaluation count, rate, the age of the newest
-panel), so a genuinely stuck run is distinguishable from a merely stale window.
+It also reports what the run is doing, with the evaluation count, the rate and the age of the newest
+panel, so a stuck run can be told from a stale window.
 """
 from __future__ import annotations
 
@@ -30,16 +28,36 @@ from typing import Any, Dict, List, Optional, Tuple
 
 __all__ = ["newest_panel", "run_status", "find_run", "view"]
 
-#: panels the viewer will show, newest first.  The calibration trials' clean | injected panels
-#: count: an annulus calibrates its contrast for minutes before the search draws its first
-#: panel, and the window was black for all of it.  ``intro.png`` does not (another size).
+#: panels the viewer shows, newest first.  The calibration trials' clean and injected panels
+#: count, since an annulus calibrates its contrast for minutes before the search draws its
+#: first panel, and the window was black for all of it.  ``intro.png`` does not, being another size.
 PANEL_GLOBS = ("steps/step*.png", "steps/calib_ann*_trial*.png", "annulus*/step_display_white.png",
                "annulus*/*_panel.png")
 
 
 def find_run(run_dir: Optional[str] = None, root: Optional[str] = None) -> str:
-    """The run directory to watch: ``run_dir`` as given, ``last``/``latest`` or a bare run
-    name resolved under ``<root>/comb/opt``, or the newest run under ``root``."""
+    """Return the run directory to watch.
+
+    It is ``run_dir`` when that is a directory, a run's bare name under ``<root>/comb/opt``, or the newest
+    run under ``root`` (the current directory without it) for None, ``last`` or ``latest``.
+
+    Parameters
+    ----------
+    run_dir : str or None, default None
+        The run's directory, its name, ``last`` or ``latest``.
+    root : str or None, default None
+        Where to look for runs, as ``comb/opt/run_*``, ``runs/run_*`` and ``run_*``.
+
+    Returns
+    -------
+    run_dir : str
+        The run's directory, absolute.
+
+    Raises
+    ------
+    SystemExit
+        If no run directory is found.
+    """
     if run_dir and run_dir not in ("last", "latest") and os.path.isdir(run_dir):
         return os.path.abspath(run_dir)
     cands: List[str] = []
@@ -58,7 +76,18 @@ def find_run(run_dir: Optional[str] = None, root: Optional[str] = None) -> str:
 
 
 def newest_panel(run_dir: str) -> Optional[Tuple[str, float]]:
-    """``(path, mtime)`` of the most recently written panel PNG, or None."""
+    """Return a run's most recently written panel.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run's directory.
+
+    Returns
+    -------
+    newest : tuple of (str, float) or None
+        The panel's path and modification time, None when there is none yet.
+    """
     best: Optional[Tuple[str, float]] = None
     for pat in PANEL_GLOBS:
         for p in glob.glob(os.path.join(run_dir, pat)):
@@ -72,8 +101,23 @@ def newest_panel(run_dir: str) -> Optional[Tuple[str, float]]:
 
 
 def run_status(run_dir: str, prev: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """What the run is doing, from its files alone: evaluation count, the annulus, the
-    age of ``results.jsonl`` and of the newest panel, and a rate in evaluations/minute."""
+    """Return what a run is doing, from its files alone.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run's directory.
+    prev : dict or None, default None
+        An earlier status, for the rate.
+
+    Returns
+    -------
+    status : dict
+        ``t``, ``n_eval`` (the lines of ``results.jsonl``), ``annulus`` (counted from 0, from its last
+        line), ``results_age`` and ``panel_age`` (seconds since each was written), ``rate`` (evaluations a
+        minute since ``prev``) and ``alive`` (whether either was written in the last 300 s), None where
+        unknown.
+    """
     now = time.time()
     out: Dict[str, Any] = {"t": now, "n_eval": None, "annulus": None, "results_age": None,
                            "panel_age": None, "rate": None, "alive": None}
@@ -115,6 +159,18 @@ def run_status(run_dir: str, prev: Optional[Dict[str, Any]] = None) -> Dict[str,
 
 
 def _fmt_age(s: Optional[float]) -> str:
+    """Return an age as a short text.
+
+    Parameters
+    ----------
+    s : float or None
+        The age, in seconds.
+
+    Returns
+    -------
+    text : str
+        Such as ``42s``, ``3.5m`` or ``2.1h``, and ``--`` for None.
+    """
     if s is None:
         return "--"
     if s < 90:
@@ -125,6 +181,21 @@ def _fmt_age(s: Optional[float]) -> str:
 
 
 def status_line(run_dir: str, st: Dict[str, Any]) -> str:
+    """Return the status line the viewer shows under the panel.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run's directory, whose name leads the line.
+    st : dict
+        The run's status (:func:`run_status`).
+
+    Returns
+    -------
+    line : str
+        The run, its evaluation count and annulus, the rate, the ages, and a warning when nothing was
+        written in the last 300 s.
+    """
     bits = [os.path.basename(run_dir)]
     if st.get("n_eval") is not None:
         a = st.get("annulus")
@@ -140,11 +211,35 @@ def status_line(run_dir: str, st: Dict[str, Any]) -> str:
 
 def view(run_dir: Optional[str] = None, root: Optional[str] = None, interval: float = 1.0,
          scale: float = 1.0, once: bool = False, log=print) -> int:
-    """Watch ``run_dir`` and show whichever panel is newest, refreshing every ``interval``
-    seconds.  Returns 0 when the window is closed or the user interrupts.
+    """Watch a run and show whichever panel is newest, until the window closes.
 
-    This call owns the main thread and does nothing but service the GUI and swap in a new
-    image, so the window stays responsive no matter what the optimizer is doing.
+    The call owns the main thread and does nothing but serve the GUI and swap in a new image, so the
+    window stays responsive whatever the run is doing.
+
+    Parameters
+    ----------
+    run_dir : str or None, default None
+        The run's directory or name, as :func:`find_run` takes it.
+    root : str or None, default None
+        Where to look for runs, as :func:`find_run` takes it.
+    interval : float, default 1.0
+        Seconds between two looks at the run's files.
+    scale : float, default 1.0
+        The panel's scale on screen, lowered to fit the screen.
+    once : bool, default False
+        Whether to print the status once and return, without a window.
+    log : callable, default print
+        Function that takes a line.
+
+    Returns
+    -------
+    status : int
+        0, once the window is closed or the user interrupts.
+
+    Raises
+    ------
+    SystemExit
+        If no run directory is found.
     """
     d = find_run(run_dir, root)
     log(f"klip-tpe view: watching {d}")

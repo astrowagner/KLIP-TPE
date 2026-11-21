@@ -36,6 +36,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 #: the modules brought up to the rule, checked here.  The list grows module by module.
 DONE = [
+    "klip_tpe/animate.py",
+    "klip_tpe/backends/custom.py",
     "klip_tpe/backends/spaceklip.py",
     "klip_tpe/backends/vip.py",
     "klip_tpe/bench.py",
@@ -48,6 +50,8 @@ DONE = [
     "klip_tpe/extract.py",
     "klip_tpe/final_grid.py",
     "klip_tpe/fmmf.py",
+    "klip_tpe/heartbeat.py",
+    "klip_tpe/idl_replay.py",
     "klip_tpe/injection.py",
     "klip_tpe/instruments/ales.py",
     "klip_tpe/instruments/generic.py",
@@ -65,15 +69,18 @@ DONE = [
     "klip_tpe/plots.py",
     "klip_tpe/positions.py",
     "klip_tpe/products.py",
+    "klip_tpe/profiling.py",
     "klip_tpe/reducer.py",
     "klip_tpe/refine.py",
     "klip_tpe/reflib.py",
+    "klip_tpe/rescale.py",
     "klip_tpe/space.py",
     "klip_tpe/stitch.py",
     "klip_tpe/stpsf_psf.py",
     "klip_tpe/synthetic.py",
     "klip_tpe/verify.py",
     "klip_tpe/version.py",
+    "klip_tpe/viewer.py",
     "tests/test_docstrings.py",
     "tests/test_klip_annular_doc.py",
 ]
