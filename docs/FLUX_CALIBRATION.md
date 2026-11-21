@@ -2,13 +2,13 @@
 
 A contrast is a ratio, and the denominator has to come from somewhere. This document says,
 for every observation the package ships or the paper uses, exactly what PSF is injected,
-what the star flux is, over what aperture the two are normalised, and therefore what the
-contrast axis means. It also names the places where a normalisation is *assumed* rather
+what the star flux is, over what aperture the two are normalized, and therefore what the
+contrast axis means. It also names the places where a normalization is *assumed* rather
 than measured.
 
 The optimizer barely needs any of this: it compares S/N between configurations, and the
 calibration scales the injected contrast until the default configuration scores S/N ≈ 5,
-so a star flux that is off by a modest factor only relabels the axis. It stops cancelling
+so a star flux that is off by a modest factor only relabels the axis. It stops canceling
 when it is off by orders of magnitude: the contrast the calibration needs then lies above
 its cap (`CalibrationConfig.max_contrast = 0.1`), the injections stay invisible, and the
 search ranks noise. Short of that it matters for one thing only — the absolute contrast
@@ -22,7 +22,7 @@ axis — which is why it can be wrong for a long time without anything looking w
 amp = s.contrast * m.flux_unit * model.throughput(s.rho)
 ```
 
-`stamp()` is normalised to unit flux **within some aperture**, `flux_unit` is the star's
+`stamp()` is normalized to unit flux **within some aperture**, `flux_unit` is the star's
 flux **in that same aperture and in the science frames' units**, and `throughput(rho)` is
 the coronagraph's transmission at that separation. Get the aperture pairing wrong and the
 contrast axis is wrong by the ratio of encircled to total energy. Get `flux_unit` wrong and
@@ -34,7 +34,7 @@ it is wrong by that factor.
 in raw detector units and nothing in the file says so — `runner.py` heads it
 "injection-calibrated 5-sigma contrast" either way.
 
-## Normalisation apertures in play
+## Normalization apertures in play
 
 Four different ones, and the `star_flux` has to match whichever the model used:
 
@@ -42,7 +42,7 @@ Four different ones, and the `star_flux` has to match whichever the model used:
 |---|---|
 | `GaussianPSF` | the whole 41×41 stamp |
 | `TemplatePSF` | the whole stamp when `ee_radius_px is None`, else that circular aperture |
-| `LibraryPSF` | `ee_radius_px` about the stamp centre |
+| `LibraryPSF` | `ee_radius_px` about the stamp center |
 | `AiryPSF`, `FramePSF` | a core aperture (`2.5σ`, `1.5 λ/D`) |
 
 `generic.make_reducer` leaves `ee_radius_px=None`, so the generic path is whole-stamp.
@@ -54,7 +54,7 @@ interchangeable and nothing checks them against each other.
 
 ### β Pic — VLT/NACO L′ (tutorials 01 and 04; paper runs A, A2, B, B2, E, E2, F, F2)
 
-* **Template**: `naco_betapic_psf.fits`, an off-axis PSF, as a `TemplatePSF` normalised to
+* **Template**: `naco_betapic_psf.fits`, an off-axis PSF, as a `TemplatePSF` normalized to
   unit **total** flux (4.3491 counts in the file).
 * **Star flux**: `3.3268e6`, from
   `generic.star_flux_from_aperture_photometry(psf, 764939.6, 2.0)`.
@@ -66,25 +66,25 @@ interchangeable and nothing checks them against each other.
 * **Why the template's own counts are not the star.** Two things about these files, both
   checked rather than assumed:
   1. The science frames are **AGPM coronagraphic, not saturated.** The median frame's
-     radial profile *rises* outward from the centre — 1006, 1427, 1979, 2275 counts at
+     radial profile *rises* outward from the center — 1006, 1427, 1979, 2275 counts at
      r = 0, 1, 2, 3 px, peaking at r = 3 and falling beyond — which is an occulted core,
      not a clipped one. So the star cannot be read off the science frames.
-  2. The template is **normalised**: its flux inside r = 2.000 px is 1.000000000 (to 2e-9,
-     exact-aperture photometry). Its total, 4.3491, is that normalisation expressed over
+  2. The template is **normalized**: its flux inside r = 2.000 px is 1.000000000 (to 2e-9,
+     exact-aperture photometry). Its total, 4.3491, is that normalization expressed over
      the whole stamp and says nothing about β Pictoris. The files carry no headers — no
      `EXPTIME`, no DIT, no ND keyword — so nothing in the distribution records the scale.
 
   Left unset, `flux_unit` becomes 4.3491 and the axis is off by 3.3268e6 / 4.3491 =
-  **7.65 × 10⁵**: β Pic b then measures 586 instead of 7.7e-4. A normalised template is the
+  **7.65 × 10⁵**: β Pic b then measures 586 instead of 7.7e-4. A normalized template is the
   easiest way to get an axis that looks plausible and means nothing.
 
 * **Where the number comes from.** VIP's own metrics tutorial publishes
   `starphot = 764939.6` for this very cube, "obtained from the non-coronagraphic PSF before
   normalization and after rescaling to the integration time used in the coronagraphic
   observations" — i.e. the star's flux in the science frames' units, in the same 2 px
-  aperture the template is normalised in.
+  aperture the template is normalized in.
   `star_flux_from_aperture_photometry` rescales it from that aperture into the whole-stamp
-  normalisation `TemplatePSF` uses: `764939.6 × 4.3491 / 1.0 = 3.3268e6`.
+  normalization `TemplatePSF` uses: `764939.6 × 4.3491 / 1.0 = 3.3268e6`.
 
   This is an import, and the β Pic b check above is what makes it more than an assumption:
   two independent quantities — VIP's photometry of the star and Absil's photometry of the
@@ -95,7 +95,7 @@ interchangeable and nothing checks them against each other.
   equally bright*, because KLIP is not linear in the source (a fake 4× the planet loses a
   further 30% of itself; the script prints the curve). The contrast is therefore solved as a
   fixed point: inject, measure, re-inject at the answer. Six azimuths clear of both debris-
-  disc ansae; the disc contributes ≤ 5% at the planet's position (its NE ansa peaks at 0.33
+  disk ansae; the disk contributes ≤ 5% at the planet's position (its NE ansa peaks at 0.33
   in matched-filter units against the planet's 6.40).
 
 * **What used to be here.** `star_flux_from_halo` scaled the template to the science
@@ -110,7 +110,7 @@ interchangeable and nothing checks them against each other.
 ### HD 95086 — VLT/SPHERE IRDIS DB_K12 (tutorial 02; paper runs C, G2)
 
 * **Template**: `hd95086_irdis_{K1,K2}_psf.fits`, the unsaturated flux frames, per channel,
-  as `TemplatePSF` normalised to unit total flux.
+  as `TemplatePSF` normalized to unit total flux.
 * **Star flux**: the flux frame's own sum, `float(psf[psf > 0].sum())`, **and nothing
   else**. These products already carry the DIT ratio and the ND transmission.
 * **Throughput**: none is supplied, though the data are coronagraphic. The 30–70 px
@@ -139,7 +139,7 @@ interchangeable and nothing checks them against each other.
 ### HIP 65426 — JWST/NIRCam F444W (tutorial 03; paper runs D, H2)
 
 * **Template**: `stpsf_psf.library(grid)` — the STPSF off-axis PSF of MASK335R on a ladder
-  of separations, as a `LibraryPSF` normalised to unit flux inside `ee_radius_px = 16.5 px`,
+  of separations, as a `LibraryPSF` normalized to unit flux inside `ee_radius_px = 16.5 px`,
   with the grid's measured mask throughput as `throughput(ρ)`.
 * **Star flux**: `3.042e6` (MJy/sr summed inside that radius), from
   `stpsf_psf.star_flux_from_flux_density(grid, 0.40259, PIXAR_SR)` — `optics_transmission`
@@ -158,7 +158,7 @@ interchangeable and nothing checks them against each other.
   "contrast" of 77; `run_H2`'s forced calibration contrast of `5.270e1` is the same tell —
   a contrast of 52.7 is not a contrast). **The runs themselves still have to be redone**:
   the input frames (see "the repair that ate the planet" below), the flux scale and the
-  star centre all changed since they were made.
+  star center all changed since they were made.
 
 There is no off-axis stellar image anywhere in ERS 1386 — HIP 65426 and the reference star
 φ Cen are both behind MASK335R in every exposure — so the star has to be imported, and with
@@ -166,7 +166,7 @@ a coronagraph that import has four terms that are easy to confuse:
 
 | term | value | where it comes from | what gets it wrong |
 |---|---|---|---|
-| `S` | 0.40259 Jy | synthetic photometry: Planck(8600 K) through the F444W bandpass, normalised to 2MASS Ks = 6.771 | ±3%, of which 1.9% is Ks and <2% the system-response shape |
+| `S` | 0.40259 Jy | synthetic photometry: Planck(8600 K) through the F444W bandpass, normalized to 2MASS Ks = 6.771 | ±3%, of which 1.9% is Ks and <2% the system-response shape |
 | units | `S / (10⁶·PIXAR_SR)` = 4.372e6 | `BUNIT = MJy/sr`, `PIXAR_SR` from the SCI header | using `PIXAR_A2`, or forgetting the 10⁶ |
 | `EE` | 0.6960 at 16.5 px | `unocculted_ee` — the model PSF **unocculted through the Lyot stop** | using an *imaging* PSF (EE 0.928 — counts the Lyot stop twice), or a stamp-sized field (the EE is still climbing at 5″) |
 | `T_optics` | 1.0 | nothing left to supply — see below | putting the median-filter damage to the companion here and calling it optics (0.561, until 2026-09-16) |
@@ -176,7 +176,7 @@ transmission `T(ρ) = 0.778` at 0.826″, which multiplies it inside `inject_sou
 it into the star flux, or applying it twice, is the classic coronagraphic error.
 
 * **Why there is no fourth term.** STPSF's `calc_psf` defaults to `normalize='first'`,
-  which normalises at the *entrance pupil* and then propagates "ignoring any reflective or
+  which normalizes at the *entrance pupil* and then propagates "ignoring any reflective or
   transmissive losses from mirrors or filters … and calculates only the diffractive losses
   from slits and stops" (Perrin, `webbpsf#112`). That default is exactly what makes the
   grid's `transmission` a real measurement of the occulter — `normalize='last'` would
@@ -202,17 +202,17 @@ it into the star flux, or applying it twice, is the classic coronagraphic error.
   companion alike, median-filtered. Fakes are injected *after* the repair, so they kept their
   cores while the companion's had been flattened to 39% of its peak (7.3 vs 18.6 MJy/sr):
   the companion looked 1.9× too faint relative to the fakes, and 0.561 = 1/1.9. The repair
-  now fills DQ pixels from their neighbours (spaceKLIP's method, `fill_dq_neighbours`) and
-  touches nothing else; `repair='sigma'` keeps the old behaviour reachable, with a warning, for
+  now fills DQ pixels from their neighbors (spaceKLIP's method, `fill_dq_neighbours`) and
+  touches nothing else; `repair='sigma'` keeps the old behavior reachable, with a warning, for
   reproducing old runs. With that fixed and `T_optics = 1`, the check passes with nothing
   tuned — which is what makes it a check.
 * **The star is not at CRPIX.** `CRPIX` is the aperture reference point — identical in every
-  file of the programme, dithers included — and misses HIP 65426 by **0.78 px**, which puts
+  file of the program, dithers included — and misses HIP 65426 by **0.78 px**, which puts
   the companion 0.8 px inside its own separation and mismatches its KLIP throughput against
   the fakes injected to calibrate it. Two other routes failed: there is no off-axis stellar
-  image to centroid, and a 180° symmetry fit to the coronagraphic residual moved the centre
+  image to centroid, and a 180° symmetry fit to the coronagraphic residual moved the center
   by 2 px between the two rolls of these very data. What works is the companion itself:
-  derotation about a centre wrong by `δ` puts it at `u + R(PA_k)·δ` in roll `k`, so each roll
+  derotation about a center wrong by `δ` puts it at `u + R(PA_k)·δ` in roll `k`, so each roll
   gives `δ = R(−PA_k)·(measured − expected)` independently, against Carter et al.'s F444W
   astrometry (820 mas, 149.9°). The two rolls agree to 0.12 px: (149.65, 172.96). The value
   used until 2026-09-16, (150.54, 172.98), was the same solve on median-filtered frames, whose
@@ -235,7 +235,7 @@ it into the star flux, or applying it twice, is the classic coronagraphic error.
   all four frames; 18.4 from roll 1 alone, 18.9 from roll 2 — against 9.2 / 5.3 through the old
   repair). `scripts/check_hip65426_psf_shape.py` and the
   figures `hip65426_b_stamps.png` / `hip65426_reference_feature.png` are retired; their
-  "findings" were artefacts of the input.
+  "findings" were artifacts of the input.
 
   What survives of that work: the raw-frame checks (the four frames land within a pixel of
   each other after derotation; the stellar speckles move by exactly the 10.08° roll), the
@@ -245,7 +245,7 @@ it into the star flux, or applying it twice, is the classic coronagraphic error.
   a property of the observing geometry and the reason Carter et al. quote forward-modelled
   photometry. `load_calints(repair=False)` still breaks the pyKLIP RDI path (NaNs reach the
   library prep); `repair='dq'` is the default and the right choice.
-* **The "RDI election" of the earlier runs was two artefacts, not a result.** pyKLIP keeps
+* **The "RDI election" of the earlier runs was two artifacts, not a result.** pyKLIP keeps
   every reference frame with `moves >= movement`, so at `angsep = 0` (movement 0) the target
   frame sat in its own KL basis and ADI / ADI+RDI annihilated everything (companion peak 3e-7
   / 2e-6 against 2.8 in RDI); and with one partition per roll the other roll was never in the
@@ -278,7 +278,7 @@ So the JWST analogue of a DIT is `EFFINTTM`, and one plane of a calints cube is 
 of them. **There is nothing below it to recover.** The 8 frames of each group were averaged
 in hardware before downlink, and the 15 groups are cumulative samples of a single charge
 accumulation, not independent exposures — sub-ramp fitting would produce images that are
-strongly correlated, share the same speckle realisation, and carry no new PSF diversity.
+strongly correlated, share the same speckle realization, and carry no new PSF diversity.
 Total: 4 × 307.884 s = 1231.5 s on HIP 65426, 18 × 40.623 s = 731.2 s on φ Cen. The temporal
 diversity available to KLIP is 2 integrations per roll; the *PSF* diversity comes from the
 reference star's 18, which is the point of the 9-point dither.
@@ -314,7 +314,7 @@ Two bookkeeping notes for the paper's observation table:
 ### α Cen — VLT/NEAR (`instruments/near.py`; `scripts/run_near2_production.sh`)
 
 * **Template**: the measured off-axis AGPM-N4 library `n4_psf_cube_EEnorm.fits`, a
-  `LibraryPSF` normalised to unit encircled energy within 1 λ/D, injected with
+  `LibraryPSF` normalized to unit encircled energy within 1 λ/D, injected with
   `refpa_deg = -93.9`.
 * **Star flux**: `template_flux_unit(PSF_ACenB.fits) = (129/57) × EE_B(1 λ/D)` — the
   measured encircled energy of the α Cen **B** template inside 1 λ/D, scaled to **A** by a
@@ -325,17 +325,17 @@ Two bookkeeping notes for the paper's observation table:
   α Cen A — conditional on two things that are assumptions, not measurements from these
   data: the `129/57` constant, and the B template already being on the science frames'
   flux scale (no exposure-time or ND correction appears anywhere in the NEAR path).
-* Minor: the library normalises inside `(LAMBDAD/1000)/0.0453 = 6.25` library px while
+* Minor: the library normalizes inside `(LAMBDAD/1000)/0.0453 = 6.25` library px while
   `template_flux_unit` integrates inside `lam_over_d_px = 6.206` science px — 0.7 % in
   radius, and the library stamps are injected into 0.0456″/px data without resampling.
 
 ### RX J0534 — LBT/LMIRCam (`scripts/run_rxj0534.py`)
 
-* **Template**: the median of the unsaturated PSFs, each normalised to unit sum first, as a
+* **Template**: the median of the unsaturated PSFs, each normalized to unit sum first, as a
   `TemplatePSF` with unit total flux.
 * **Star flux**: `mean over nights of (sum of the raw unsaturated PSF) × t_sci / t_un`.
 * **Throughput**: none (`T ≡ 1`).
-* **Status**: **measured and aperture-consistent** — total-sum normalisation on both sides,
+* **Status**: **measured and aperture-consistent** — total-sum normalization on both sides,
   which is what `TemplatePSF`'s default wants. Assumes the data are in counts rather than
   counts/s, and detector linearity between the two exposure times. This is the cleanest of
   the generic-path calibrations and the one to copy.
@@ -390,7 +390,7 @@ Closed on 2026-09-15: β Pic's absolute photometry (`star_flux = 3.3268e6` from 
 published `starphot`, checked against β Pic b at 1.1 σ) and HIP 65426's, which had none at
 all. Closed on 2026-09-16: the last assumed number in the HIP 65426 table — the 0.561
 "optics transmission" anchored on the companion was the calints loader's median filter
-damaging the companion and not the fakes; with the repair fixed, the star centre re-solved on
+damaging the companion and not the fakes; with the repair fixed, the star center re-solved on
 clean frames and no anchor, HIP 65426 b measures ΔF444W = 8.796 ± 0.092 against Carter et al.'s
 8.703 ± 0.055 (8.735 before the templates stopped being rotated). What remains:
 
@@ -419,7 +419,7 @@ clean frames and no anchor, HIP 65426 b measures ΔF444W = 8.796 ± 0.092 agains
    `flux_unit == 1.0` that the axis is not a contrast.
 5. **`star_flux` is silently ignored when `injection_model` is passed**
    (`spaceklip.make_reducer`). No call site passes both any more, but nothing stops one.
-6. **The aperture pairing is a convention nothing enforces.** Four different normalisation
+6. **The aperture pairing is a convention nothing enforces.** Four different normalization
    apertures are in use and a `star_flux` has to match whichever the model used. A check
    comparing the model's aperture with the provenance of the star flux would catch this
    class of error at construction rather than in a contrast curve.
@@ -432,6 +432,6 @@ clean frames and no anchor, HIP 65426 b measures ΔF444W = 8.796 ± 0.092 agains
    quarter of its flux, and the loss *grows* as the contrast falls, so the recovered S/N
    stops being proportional to the contrast and every curve derived from it bends. This
    never bites when `star_flux` is the star's real flux (the amplitudes are then of order
-   1e2–1e3 counts) and it did not affect any paper run, but it is exactly what a normalised
+   1e2–1e3 counts) and it did not affect any paper run, but it is exactly what a normalized
    template's `flux_unit` of 4.35 walks into. `_check_float32_headroom` now raises a
    `RuntimeWarning` below 32 ULP. A cleaner fix is to keep float64 cubes in float64.

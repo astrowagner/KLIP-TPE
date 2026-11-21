@@ -117,7 +117,7 @@ def test_routine_saves_are_held_and_flushed(tmp_path, monkeypatch):
 
 
 def test_a_held_save_says_what_it_said_when_taken(tmp_path, monkeypatch):
-    """A routine save is serialised only when it is written: ``json.dumps`` of the whole
+    """A routine save is serialized only when it is written: ``json.dumps`` of the whole
     history after every evaluation took longer as the history grew, on the thread that sets a
     pipelined search's pace (NEAR2, 2026-10-12).  Written later, it is still the state of
     the moment it was taken, not of the moment it is written."""

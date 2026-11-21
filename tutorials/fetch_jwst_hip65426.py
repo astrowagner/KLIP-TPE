@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download the public JWST/NIRCam coronagraphy of HIP 65426 (ERS programme 1386,
+"""Download the public JWST/NIRCam coronagraphy of HIP 65426 (ERS program 1386,
 Carter et al. 2023) used by tutorial 3: the F444W / MASK335R science exposures (two
 rolls) and the reference star HIP 68245 (9-point small-grid dither) as stage-2
 ``calints`` products, plus the F300M set when ``--filters`` includes it.
@@ -9,7 +9,7 @@ rolls) and the reference star HIP 68245 (9-point small-grid dither) as stage-2
 
 Files (~10-60 MB each, 320x320 SUB320A335R) come from MAST; no login needed.  The
 tutorial repairs and registers them itself; ``klip_tpe.backends.spaceklip.load_calints``
-does the same in one call.  spaceKLIP's ImageTools products (better centring and cleaning)
+does the same in one call.  spaceKLIP's ImageTools products (better centering and cleaning)
 load with ``load_spaceklip`` instead.
 """
 import argparse

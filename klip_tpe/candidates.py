@@ -15,7 +15,7 @@ Conventions as in :mod:`klip_tpe.verify` (``[y, x]`` images, star at
 Deliberate deviations / omissions:
 
 * The cross-annulus metric cache (``cache`` / ``r_freeze_px``, candidates
-  249-272, 322-330) is a run-time optimisation of the IDL "running" pass; the
+  249-272, 322-330) is a run-time optimization of the IDL "running" pass; the
   port always recomputes (metrics are deterministic, so results are identical).
 * The S/N map is built with :func:`klip_tpe.products.snr_map` on the
   ``radprof``-flattened image when not supplied (the IDL reads the pre-computed
@@ -89,7 +89,7 @@ def detect_peaks(snrmap: np.ndarray, snrmin: float, sep: float, iwa: float, owa:
                  nmax: int = 400) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Iterative local-maximum extraction: mask non-finite pixels and ``r < iwa``,
     ``r > owa``; repeatedly take the global maximum (stop below ``snrmin`` or
-    after ``nmax`` peaks) and suppress the disc of radius ``sep`` around it.
+    after ``nmax`` peaks) and suppress the disk of radius ``sep`` around it.
     Returns integer ``(px, py, snr)`` arrays."""
     m = np.asarray(snrmap, float)
     ny, nx = m.shape
@@ -113,9 +113,9 @@ def detect_peaks(snrmap: np.ndarray, snrmin: float, sep: float, iwa: float, owa:
 # PSF-likeness  (near2c_psfcorr, candidates 57-72)
 # ----------------------------------------------------------------------------
 def psf_correlation(img: np.ndarray, px: int, py: int, fwhm: float) -> float:
-    """Normalised cross-correlation in ``[-1, 1]`` of the median-subtracted stamp
+    """Normalized cross-correlation in ``[-1, 1]`` of the median-subtracted stamp
     (half-box ``max(round(1.5 fwhm), 3)``) with a zero-mean Gaussian of
-    ``sigma = fwhm / 2.3548`` centred on the peak, over finite pixels (>= 5)."""
+    ``sigma = fwhm / 2.3548`` centered on the peak, over finite pixels (>= 5)."""
     img = np.asarray(img, float)
     ny, nx = img.shape
     hb = max(int(round(1.5 * fwhm)), 3)

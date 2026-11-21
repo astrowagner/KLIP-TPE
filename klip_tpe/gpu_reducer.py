@@ -5,7 +5,7 @@
     res = g.reduce(req)                           # ReductionResult, as KLIPReducer.reduce returns it
 
 For a request :meth:`supports` accepts (a plain reduction: no KLIP-FM pass, no k-scan, no extras,
-no reference library or SDI pool, no destriping, no centring, no explicit fast path) the chain of
+no reference library or SDI pool, no destriping, no centering, no explicit fast path) the chain of
 :mod:`klip_gpu` runs on the device and returns the night's image, with the meta keys
 ``KLIPReducer._reduce_prepared`` writes.  Any other request goes to ``KLIPReducer.reduce`` on the
 CPU, so the reducer is complete either way; the pool should route such jobs to CPU workers.

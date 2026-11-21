@@ -344,7 +344,7 @@ def star_flux_from_aperture_photometry(template: np.ndarray, starphot: float,
     a = aperture_sum(t, center[0], center[1], aperture_px)
     if not np.isfinite(a) or a <= 0:
         raise ValueError(f"the template has no flux inside {aperture_px} px of "
-                         f"{center} -- wrong centre, or the core is masked out")
+                         f"{center} -- wrong center, or the core is masked out")
     f = float(t.sum()) if ee_radius_px is None else aperture_sum(t, center[0], center[1], ee_radius_px)
     return float(starphot) * f / a
 

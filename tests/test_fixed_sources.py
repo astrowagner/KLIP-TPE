@@ -20,13 +20,13 @@ On 2026-09-13 a ``fixed_sources`` flag was added and defaulted ON, freezing the 
 on the belief that the per-evaluation redraw was a porting bug.  The evidence offered was
 real -- the same configuration on a six-night NEAR run scored 8.45, 3.17, 8.56, 6.08, 6.69,
 6.75 -- but the conclusion was wrong.  The reference accepts that variance deliberately; its
-defence is the validated election, which re-scores the top candidates at FRESH positions.
-Freezing the azimuths instead lets the optimizer tune to the speckle realisation at those
+defense is the validated election, which re-scores the top candidates at FRESH positions.
+Freezing the azimuths instead lets the optimizer tune to the speckle realization at those
 particular angles, which is precisely the gaming the comment names.  A NEAR run reached 2037
 evaluations injecting at PA 87.39 / 267.39 before it was caught.
 
-So the flag survives as an opt-in -- pairing every comparison on one realisation is a
-legitimate measurement of how much of a search's gain is realisation luck -- but the default
+So the flag survives as an opt-in -- pairing every comparison on one realization is a
+legitimate measurement of how much of a search's gain is realization luck -- but the default
 is off, and these tests say so in a way that a future "fix" cannot quietly undo.
 """
 import json
@@ -104,7 +104,7 @@ def test_a_whole_run_keeps_one_radius_set_and_many_angles(tmp_path):
 
 
 def test_repeating_one_configuration_varies_and_that_is_deliberate(tmp_path):
-    """The variance that prompted the mistake, asserted as the expected behaviour.
+    """The variance that prompted the mistake, asserted as the expected behavior.
 
     Scoring the identical vector repeatedly gives different answers because the injections
     rotate.  That is the reference's design; the validated election is what handles it.
@@ -168,7 +168,7 @@ def test_the_contrast_is_restamped_without_moving_the_frozen_sources(tmp_path):
 
 def test_the_frozen_positions_survive_a_resume(tmp_path):
     """Drawn from the run seed and the annulus index, never from the search's own rng --
-    otherwise a resumed paired run would carry on against a different realisation."""
+    otherwise a resumed paired run would carry on against a different realization."""
     r1 = _runner(tmp_path / "a", seed=7, fixed_sources=True)
     first = [(s.rho, s.theta) for s in r1.search_sources(0, 3e-5)]
     for _ in range(50):                         # advance the search rng, as a search would

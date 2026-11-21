@@ -495,7 +495,7 @@ def test_grid_search_cells_cover_axes():
     g = GridSearch(sp, budget=27, axes=["a", "b"])
     assert g.gpts == 5
     cells = np.array([g.cell(k) for k in range(25)])
-    # cell centres: (i + 0.5)/g of the span, not i/(g-1)
+    # cell centers: (i + 0.5)/g of the span, not i/(g-1)
     np.testing.assert_allclose(sorted(set(cells[:, 0])), [-0.8, -0.4, 0.0, 0.4, 0.8])
     np.testing.assert_allclose(sorted(set(cells[:, 1])), [1.0, 3.0, 5.0, 7.0, 9.0])
     assert len({tuple(c[:2]) for c in cells}) == 25            # every cell distinct

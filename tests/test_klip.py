@@ -122,7 +122,7 @@ def test_rotate_ccw_direction_and_inverse():
     back = rotate_ccw(rotate_ccw(blob, 37.0), -37.0)
     assert np.nanmax(np.abs(back - blob)[12:-12, 12:-12]) < 0.03      # bilinear smoothing only
     assert np.unravel_index(np.nanargmax(back), back.shape) == (20, 33)
-    # NaN handling: default "zero" (IDL rot as measured) mixes a NaN neighbour in as 0 and
+    # NaN handling: default "zero" (IDL rot as measured) mixes a NaN neighbor in as 0 and
     # only a stencil with no finite member is NaN; "propagate" NaNs every touching stencil
     blob[20, 33] = np.nan
     rr = rotate_ccw(blob, 30.0, cval=-5.0)
@@ -331,7 +331,7 @@ def test_klip_reducer_recovers_injected_planets_and_kscan():
     one = red.reduce(ReductionRequest({**params, "k_klip": 4}, src))
     assert scan.image.shape == (4, 64, 64)
     np.testing.assert_allclose(scan.image[3], one.image, atol=1e-3, equal_nan=True)
-    # frame-selection tags are honoured through the chain
+    # frame-selection tags are honored through the chain
     sel = red.reduce(ReductionRequest({**params, "corr_thresh": float(np.sort(ds.tags["corrs"])[10])}, None))
     assert sel.meta["n_kept"] == 30
     # NaN-aware weighted combine used by PartitionedReducer

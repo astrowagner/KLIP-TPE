@@ -6,7 +6,7 @@ brightness can be *imported* rather than measured off the frames (it cannot be m
 them -- the star is behind MASK335R).  Two numbers are needed:
 
   EE(r)   the fraction of an UNOCCULTED point source's flux that lands within the radius
-          the injection model normalises in.  Unocculted **through the Lyot stop**: the
+          the injection model normalizes in.  Unocculted **through the Lyot stop**: the
           pipeline's PHOTMJSR for NRC_CORON is derived from standards observed in this same
           coronagraphic mode, so it already carries the Lyot stop and the mask substrate,
           and the only thing left for the model to supply is (a) the PSF shape and (b) the
@@ -14,10 +14,10 @@ them -- the star is behind MASK335R).  Two numbers are needed:
           Using an IMAGING PSF here would double-count the Lyot stop's effect on the shape.
 
   S       the star's flux density in the F444W bandpass [Jy], by synthetic photometry of a
-          stellar model normalised to 2MASS Ks -- the same route Carter et al. (2023) took
+          stellar model normalized to 2MASS Ks -- the same route Carter et al. (2023) took
           (PHOENIX, Teff = 8600 +/- 200 K), reduced here to a Planck function because Ks and
           F444W are both deep in the Rayleigh-Jeans tail of an A2V star and the difference
-          is a percent-level colour term, which this script quantifies rather than assumes.
+          is a percent-level color term, which this script quantifies rather than assumes.
 
 Then, for a model whose stamps carry unit flux inside ``ee_radius_px``,
 
@@ -150,7 +150,7 @@ def main():
         if r <= min(img.shape) / 2:
             log(f"   {r:7.1f} {r * px:9.3f} {v / tot:20.5f}")
     log(f"\n   EE converges to 1 by construction inside the FOV; the number that matters is")
-    log(f"   the fraction inside the injection model's normalisation radius.")
+    log(f"   the fraction inside the injection model's normalization radius.")
 
     for r_ap in (7.5, 16.5):
         log(f"   EE({r_ap:4.1f} px = {r_ap * px:.3f}\") = {aperture_sum(img, (img.shape[1]-1)/2, (img.shape[0]-1)/2, r_ap) / tot:.5f}")
@@ -169,7 +169,7 @@ def main():
         c_ks = photon_weighted(lam, fnu, kl, kt)
         c_f4 = photon_weighted(lam, fnu, bl, bt)
         s = f_ks * c_f4 / c_ks
-        log(f"   Teff {teff:6.0f} K:  F444W/Ks colour {c_f4 / c_ks:.5f}  ->  S = {s:.5f} Jy "
+        log(f"   Teff {teff:6.0f} K:  F444W/Ks color {c_f4 / c_ks:.5f}  ->  S = {s:.5f} Jy "
             f"({-2.5 * np.log10(c_f4 / c_ks):+.4f} mag)")
     fnu = planck_fnu(lam, TEFF)
     S = f_ks * photon_weighted(lam, fnu, bl, bt) / photon_weighted(lam, fnu, kl, kt)

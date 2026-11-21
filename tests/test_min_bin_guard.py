@@ -9,7 +9,7 @@ Measured on the four-night LMIRCam RX J0534 search (484 evaluations, 4 partition
     bin    30+   n=401   median   23 s   max    34 s
 
 Three evaluations out of 484 had taken two thirds of the run's wall clock, and eval 445 ran
-3 h 26 m between neighbours of 32 s and 22 s.  ``bin`` is how many consecutive frames are
+3 h 26 m between neighbors of 32 s and 22 s.  ``bin`` is how many consecutive frames are
 mean-combined before KLIP, so the reference library and its covariance scale with
 ``nframes / bin``; at ``bin = 1`` nothing is combined and each partition carries its full
 ~1500 frames.  The generic space spans ``bin`` from 1 to ``nframes/8`` -- correct for the

@@ -156,7 +156,7 @@ def build(a, log):
         raise SystemExit(f"no jw*_calints.fits under {a.data} -- "
                          f"fetch them with scripts/fetch_jwst_ar.py")
     log(f"{len(files)} calints under {a.data}")
-    # --filter SELECTS files, it does not just relabel them.  A programme downloaded whole
+    # --filter SELECTS files, it does not just relabel them.  A program downloaded whole
     # holds several filters in one directory and a dataset has one wavelength and one mask.
     sc = tuple(a.star_center) if getattr(a, "star_center", None) else None
     dsets, info = sk.load_calints(files, science_target=a.target, half_px=a.crop,
@@ -288,7 +288,7 @@ def main(argv=None):
                                                    "other targets become the RDI library")
     ap.add_argument("--filter", default=None,
                     help="SELECT the files of this filter (not just relabel them). A "
-                         "programme downloaded whole holds several; a dataset has one "
+                         "program downloaded whole holds several; a dataset has one "
                          "wavelength and one mask, so loading them together is wrong")
     # 'all', not 'roll'.  A searched reference library needs both rolls in ONE reducer: under
     # 'roll' each partition holds only its own roll's frames and ref_cube is the reference
@@ -310,7 +310,7 @@ def main(argv=None):
                     help="crop to 2*HALF+1 px about the star (default 80 = 17.5 arcsec)")
     ap.add_argument("--star-center", type=float, nargs=2, default=None, metavar=("X", "Y"),
                     help="measured star position in the SUBARRAY, 0-based, instead of CRPIX "
-                         "(which is the aperture reference point). Measure it by maximising "
+                         "(which is the aperture reference point). Measure it by maximizing "
                          "the point symmetry of the stacked frame -- a flux centroid is "
                          "biased by the four-quadrant residual and comes out on the wrong "
                          "side. On GO 1386 F1140C, CRPIX is good to 0.39 px (45 mas), both "
@@ -484,7 +484,7 @@ def main(argv=None):
                 f"more than angsep at the outer radius, and a single roll reduced ADI-only "
                 f"has none. Check the '{len(dsets)} partition(s)' and mode lines above -- "
                 f"'pyklip ADI' where you expected 'ADI+RDI' means the reference files were "
-                f"not recognised (--target selects the science TARGPROP; everything else "
+                f"not recognized (--target selects the science TARGPROP; everything else "
                 f"becomes the library).")
         log(f"injection model: {model.name}  azimuth_dependent="
             f"{getattr(model, 'azimuth_dependent', False)}")

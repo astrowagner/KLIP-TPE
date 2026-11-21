@@ -10,7 +10,7 @@ different set of pixels was rewritten in every frame (so the residual looked rol
 and was mistaken for a speckle), and because fakes are injected AFTER the repair they kept
 their cores while the companion lost 1.9x -- which a 0.561 "optics transmission" then hid.
 
-The repair now fills DQ pixels from their neighbours (spaceKLIP's method) and touches
+The repair now fills DQ pixels from their neighbors (spaceKLIP's method) and touches
 nothing else.  These tests run on synthetic frames so they need no data files.
 """
 from __future__ import annotations
@@ -56,7 +56,7 @@ def test_fill_dq_neighbours_touches_only_the_flagged_pixels():
     assert np.isfinite(out).all(), "every flagged pixel is filled"
     mask = np.zeros(im.shape, bool); mask.flat[idx] = True
     assert np.array_equal(out[~mask], im[~mask]), "an unflagged pixel changed"
-    # and the fill is a neighbourhood median: a flagged pixel on the halo stays on the halo
+    # and the fill is a neighborhood median: a flagged pixel on the halo stays on the halo
     # (a speckle core can lose its peak -- that is the price of any interpolation, and it is
     # paid on the ~1% of pixels the pipeline flagged, not on the whole PSF)
     assert np.median(np.abs(out[mask] - im[mask])) < 2.0

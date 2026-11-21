@@ -65,7 +65,7 @@ def test_pyklip_guard_keeps_k_and_maxnumbasis_live(mode, bin_, k, mnb, want_k, w
 def test_take_everything_survives_the_grid_snap():
     """Run v7's ablation asked for "all" at bin 9 and reduced with 90 of the 95 frames: the
     guard clipped maxnumbasis to the pool (95) and the sanitize after it snapped that to the
-    grid neighbour below.  Clipping to the first grid point at or above the pool keeps
+    grid neighbor below.  Clipping to the first grid point at or above the pool keeps
     "everything" reachable -- pyKLIP keeps min(maxnumbasis, pool) -- and leaves interior
     values (a winner's 25, 70) alone."""
     grid = sorted({float(v) for v in kgrid(131)} | {131.0})

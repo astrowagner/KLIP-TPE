@@ -780,7 +780,7 @@ def load_release(files: Dict[str, str], nights: Optional[Sequence[str]] = None, 
     keep = have if nights is None else [by_label.get(str(d), str(d)) for d in nights]
     unknown = [d for d in keep if d not in have]
     if unknown:
-        raise ValueError(f"nights {unknown} are not in this data set ({have}, labelled {[lab[d] for d in have]})")
+        raise ValueError(f"nights {unknown} are not in this data set ({have}, labeled {[lab[d] for d in have]})")
     datasets: Dict[str, Dataset] = {}
     lam_m: Dict[str, float] = {}
     fwhm_px: Dict[str, float] = {}

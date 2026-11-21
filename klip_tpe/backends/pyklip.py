@@ -289,7 +289,7 @@ def dataset_from_pyklip(data, crop_half: Optional[int] = None, partition_by: Opt
                         include_psflib: bool = True, wv_index: Optional[int] = None) -> Dict[str, Dataset]:
     """Convert a pyKLIP ``Data`` object into :class:`Dataset`\\ s.
 
-    Frames (``data.input``) are shifted (bilinear) so every star centre (``data.centers``)
+    Frames (``data.input``) are shifted (bilinear) so every star center (``data.centers``)
     lands on the common pixel ``((nx-1)/2, (ny-1)/2)`` of a ``2*crop_half`` cut-out
     (default: the largest square that fits); ``data.PAs`` are the parallactic angles
     (pyKLIP derotates CCW by PA, like this package).  Multi-wavelength data: pass

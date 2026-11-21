@@ -261,7 +261,7 @@ def test_distance_to_bounds_is_none_where_the_question_does_not_apply():
 
 
 # ----------------------------------------------------------------------------
-# serialisation
+# serialization
 # ----------------------------------------------------------------------------
 def test_to_dict_from_dict_round_trip(partition_space, rng):
     sp = partition_space

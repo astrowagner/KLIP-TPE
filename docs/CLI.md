@@ -232,7 +232,7 @@ options:
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
                         each injected with the negative of its contrast by the
-                        injection code, so placement, true north, centre, flux
+                        injection code, so placement, true north, center, flux
                         unit and throughput are a draw's. Every reduction sees
                         the edited frames, the KLIP-FM model cube does not.
                         Recorded in the run's checkpoint, and kept on resume
@@ -267,13 +267,13 @@ options:
   --ann-extra IN:OUT [IN:OUT ...]
                         annuli beside those of --ann-edges, each IN:OUT px,
                         which may overlap them, e.g. 6.85:16.16 16.16:25.47.
-                        All are numbered by centre and searched, validated and
+                        All are numbered by center and searched, validated and
                         verified over their own zones. Where annuli overlap,
                         the stitch takes each radius from the annulus with the
-                        nearest centre (their tiles, in final_results.json and
+                        nearest center (their tiles, in final_results.json and
                         klip_stitched_params.txt). The per-annulus lists of
                         --n-iter, --n-init, --n-sources and --use-contrast
-                        follow the numbering by centre. The first three repeat
+                        follow the numbering by center. The first three repeat
                         their last entry past their end, and an annulus past
                         the end of --use-contrast is calibrated
   --n-iter N_ITER [N_ITER ...]
@@ -293,7 +293,7 @@ options:
   --contrast0 CONTRAST0
   --use-contrast USE_CONTRAST [USE_CONTRAST ...]
                         forced contrast per annulus, in the annuli's order (by
-                        centre with --ann-extra). 0 calibrates that annulus,
+                        center with --ann-extra). 0 calibrates that annulus,
                         and so does every annulus past the end of the list.
                         Unlike --n-iter, the list does not repeat its last
                         entry
@@ -371,7 +371,7 @@ options:
                         still counts toward its election, in FWHM (default
                         0.5)
   --fg-z Z              how many standard errors a finalist's mean paired gain
-                        must exceed to replace the winner (default 1)
+                        must exceed to replace the winner (default 2)
   --fg-sweeps N         sweeps of the election at most, inner to outer and
                         back (default 2)
   --fg-finalists N      each run's finalists per annulus, its winner and its
@@ -545,7 +545,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         partition names (default: cube file stems)
   --star-flux STAR_FLUX [STAR_FLUX ...]
                         star flux per cube, in the science frames' own units
-                        and in the template's normalisation aperture; omit it
+                        and in the template's normalization aperture; omit it
                         and the contrast axis is in template units
   --pxscale PXSCALE     arcsec / px. generic: the cubes' scale. near: the
                         plate scale the pixel constants follow (lambda/D, the
@@ -561,7 +561,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         crop to 2h+1 px around --center (generic default: full
                         frame; nomic default: 75)
   --center CENTER CENTER
-                        star pixel (x y); default: array centre
+                        star pixel (x y); default: array center
   --wv-index WV_INDEX   channel of a 4-d IFS cube
   --no-tags             no data-derived frame-quality tags (no frame
                         selection)
@@ -658,7 +658,7 @@ pyNOMIC (--instrument nomic):
   --truenorth TRUENORTH
   --fwhm-px FWHM_PX     override the FWHM (default: Airy fit / 1.028 l/D)
   --name NAME           partition-name prefix (default: --obj)
-  --r-ee R_EE           core radius (px) for the frame PSF normalisation (1.5
+  --r-ee R_EE           core radius (px) for the frame PSF normalization (1.5
                         l/D)
   --groups GROUPS [GROUPS ...]
                         image groups as partitions: 'auto' (pyNOMIC's star-
@@ -890,7 +890,7 @@ options:
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
                         each injected with the negative of its contrast by the
-                        injection code, so placement, true north, centre, flux
+                        injection code, so placement, true north, center, flux
                         unit and throughput are a draw's. Every reduction sees
                         the edited frames, the KLIP-FM model cube does not.
                         Recorded in the run's checkpoint, and kept on resume
@@ -925,13 +925,13 @@ options:
   --ann-extra IN:OUT [IN:OUT ...]
                         annuli beside those of --ann-edges, each IN:OUT px,
                         which may overlap them, e.g. 6.85:16.16 16.16:25.47.
-                        All are numbered by centre and searched, validated and
+                        All are numbered by center and searched, validated and
                         verified over their own zones. Where annuli overlap,
                         the stitch takes each radius from the annulus with the
-                        nearest centre (their tiles, in final_results.json and
+                        nearest center (their tiles, in final_results.json and
                         klip_stitched_params.txt). The per-annulus lists of
                         --n-iter, --n-init, --n-sources and --use-contrast
-                        follow the numbering by centre. The first three repeat
+                        follow the numbering by center. The first three repeat
                         their last entry past their end, and an annulus past
                         the end of --use-contrast is calibrated
   --n-iter N_ITER [N_ITER ...]
@@ -951,7 +951,7 @@ options:
   --contrast0 CONTRAST0
   --use-contrast USE_CONTRAST [USE_CONTRAST ...]
                         forced contrast per annulus, in the annuli's order (by
-                        centre with --ann-extra). 0 calibrates that annulus,
+                        center with --ann-extra). 0 calibrates that annulus,
                         and so does every annulus past the end of the list.
                         Unlike --n-iter, the list does not repeat its last
                         entry
@@ -1029,7 +1029,7 @@ options:
                         still counts toward its election, in FWHM (default
                         0.5)
   --fg-z Z              how many standard errors a finalist's mean paired gain
-                        must exceed to replace the winner (default 1)
+                        must exceed to replace the winner (default 2)
   --fg-sweeps N         sweeps of the election at most, inner to outer and
                         back (default 2)
   --fg-finalists N      each run's finalists per annulus, its winner and its
@@ -1203,7 +1203,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         partition names (default: cube file stems)
   --star-flux STAR_FLUX [STAR_FLUX ...]
                         star flux per cube, in the science frames' own units
-                        and in the template's normalisation aperture; omit it
+                        and in the template's normalization aperture; omit it
                         and the contrast axis is in template units
   --pxscale PXSCALE     arcsec / px. generic: the cubes' scale. near: the
                         plate scale the pixel constants follow (lambda/D, the
@@ -1219,7 +1219,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         crop to 2h+1 px around --center (generic default: full
                         frame; nomic default: 75)
   --center CENTER CENTER
-                        star pixel (x y); default: array centre
+                        star pixel (x y); default: array center
   --wv-index WV_INDEX   channel of a 4-d IFS cube
   --no-tags             no data-derived frame-quality tags (no frame
                         selection)
@@ -1316,7 +1316,7 @@ pyNOMIC (--instrument nomic):
   --truenorth TRUENORTH
   --fwhm-px FWHM_PX     override the FWHM (default: Airy fit / 1.028 l/D)
   --name NAME           partition-name prefix (default: --obj)
-  --r-ee R_EE           core radius (px) for the frame PSF normalisation (1.5
+  --r-ee R_EE           core radius (px) for the frame PSF normalization (1.5
                         l/D)
   --groups GROUPS [GROUPS ...]
                         image groups as partitions: 'auto' (pyNOMIC's star-
@@ -1510,7 +1510,7 @@ options:
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
                         each injected with the negative of its contrast by the
-                        injection code, so placement, true north, centre, flux
+                        injection code, so placement, true north, center, flux
                         unit and throughput are a draw's. Every reduction sees
                         the edited frames, the KLIP-FM model cube does not.
                         Recorded in the run's checkpoint, and kept on resume
@@ -1563,7 +1563,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         partition names (default: cube file stems)
   --star-flux STAR_FLUX [STAR_FLUX ...]
                         star flux per cube, in the science frames' own units
-                        and in the template's normalisation aperture; omit it
+                        and in the template's normalization aperture; omit it
                         and the contrast axis is in template units
   --pxscale PXSCALE     arcsec / px. generic: the cubes' scale. near: the
                         plate scale the pixel constants follow (lambda/D, the
@@ -1579,7 +1579,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         crop to 2h+1 px around --center (generic default: full
                         frame; nomic default: 75)
   --center CENTER CENTER
-                        star pixel (x y); default: array centre
+                        star pixel (x y); default: array center
   --wv-index WV_INDEX   channel of a 4-d IFS cube
   --no-tags             no data-derived frame-quality tags (no frame
                         selection)
@@ -1676,7 +1676,7 @@ pyNOMIC (--instrument nomic):
   --truenorth TRUENORTH
   --fwhm-px FWHM_PX     override the FWHM (default: Airy fit / 1.028 l/D)
   --name NAME           partition-name prefix (default: --obj)
-  --r-ee R_EE           core radius (px) for the frame PSF normalisation (1.5
+  --r-ee R_EE           core radius (px) for the frame PSF normalization (1.5
                         l/D)
   --groups GROUPS [GROUPS ...]
                         image groups as partitions: 'auto' (pyNOMIC's star-
@@ -1867,7 +1867,7 @@ options:
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
                         each injected with the negative of its contrast by the
-                        injection code, so placement, true north, centre, flux
+                        injection code, so placement, true north, center, flux
                         unit and throughput are a draw's. Every reduction sees
                         the edited frames, the KLIP-FM model cube does not.
                         Recorded in the run's checkpoint, and kept on resume
@@ -1913,7 +1913,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         partition names (default: cube file stems)
   --star-flux STAR_FLUX [STAR_FLUX ...]
                         star flux per cube, in the science frames' own units
-                        and in the template's normalisation aperture; omit it
+                        and in the template's normalization aperture; omit it
                         and the contrast axis is in template units
   --pxscale PXSCALE     arcsec / px. generic: the cubes' scale. near: the
                         plate scale the pixel constants follow (lambda/D, the
@@ -1929,7 +1929,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         crop to 2h+1 px around --center (generic default: full
                         frame; nomic default: 75)
   --center CENTER CENTER
-                        star pixel (x y); default: array centre
+                        star pixel (x y); default: array center
   --wv-index WV_INDEX   channel of a 4-d IFS cube
   --no-tags             no data-derived frame-quality tags (no frame
                         selection)
@@ -2026,7 +2026,7 @@ pyNOMIC (--instrument nomic):
   --truenorth TRUENORTH
   --fwhm-px FWHM_PX     override the FWHM (default: Airy fit / 1.028 l/D)
   --name NAME           partition-name prefix (default: --obj)
-  --r-ee R_EE           core radius (px) for the frame PSF normalisation (1.5
+  --r-ee R_EE           core radius (px) for the frame PSF normalization (1.5
                         l/D)
   --groups GROUPS [GROUPS ...]
                         image groups as partitions: 'auto' (pyNOMIC's star-
@@ -2226,7 +2226,7 @@ options:
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
                         each injected with the negative of its contrast by the
-                        injection code, so placement, true north, centre, flux
+                        injection code, so placement, true north, center, flux
                         unit and throughput are a draw's. Every reduction sees
                         the edited frames, the KLIP-FM model cube does not.
                         Recorded in the run's checkpoint, and kept on resume
@@ -2298,7 +2298,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         partition names (default: cube file stems)
   --star-flux STAR_FLUX [STAR_FLUX ...]
                         star flux per cube, in the science frames' own units
-                        and in the template's normalisation aperture; omit it
+                        and in the template's normalization aperture; omit it
                         and the contrast axis is in template units
   --pxscale PXSCALE     arcsec / px. generic: the cubes' scale. near: the
                         plate scale the pixel constants follow (lambda/D, the
@@ -2314,7 +2314,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         crop to 2h+1 px around --center (generic default: full
                         frame; nomic default: 75)
   --center CENTER CENTER
-                        star pixel (x y); default: array centre
+                        star pixel (x y); default: array center
   --wv-index WV_INDEX   channel of a 4-d IFS cube
   --no-tags             no data-derived frame-quality tags (no frame
                         selection)
@@ -2411,7 +2411,7 @@ pyNOMIC (--instrument nomic):
   --truenorth TRUENORTH
   --fwhm-px FWHM_PX     override the FWHM (default: Airy fit / 1.028 l/D)
   --name NAME           partition-name prefix (default: --obj)
-  --r-ee R_EE           core radius (px) for the frame PSF normalisation (1.5
+  --r-ee R_EE           core radius (px) for the frame PSF normalization (1.5
                         l/D)
   --groups GROUPS [GROUPS ...]
                         image groups as partitions: 'auto' (pyNOMIC's star-
@@ -2609,7 +2609,7 @@ options:
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
                         each injected with the negative of its contrast by the
-                        injection code, so placement, true north, centre, flux
+                        injection code, so placement, true north, center, flux
                         unit and throughput are a draw's. Every reduction sees
                         the edited frames, the KLIP-FM model cube does not.
                         Recorded in the run's checkpoint, and kept on resume
@@ -2691,7 +2691,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         partition names (default: cube file stems)
   --star-flux STAR_FLUX [STAR_FLUX ...]
                         star flux per cube, in the science frames' own units
-                        and in the template's normalisation aperture; omit it
+                        and in the template's normalization aperture; omit it
                         and the contrast axis is in template units
   --pxscale PXSCALE     arcsec / px. generic: the cubes' scale. near: the
                         plate scale the pixel constants follow (lambda/D, the
@@ -2707,7 +2707,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         crop to 2h+1 px around --center (generic default: full
                         frame; nomic default: 75)
   --center CENTER CENTER
-                        star pixel (x y); default: array centre
+                        star pixel (x y); default: array center
   --wv-index WV_INDEX   channel of a 4-d IFS cube
   --no-tags             no data-derived frame-quality tags (no frame
                         selection)
@@ -2804,7 +2804,7 @@ pyNOMIC (--instrument nomic):
   --truenorth TRUENORTH
   --fwhm-px FWHM_PX     override the FWHM (default: Airy fit / 1.028 l/D)
   --name NAME           partition-name prefix (default: --obj)
-  --r-ee R_EE           core radius (px) for the frame PSF normalisation (1.5
+  --r-ee R_EE           core radius (px) for the frame PSF normalization (1.5
                         l/D)
   --groups GROUPS [GROUPS ...]
                         image groups as partitions: 'auto' (pyNOMIC's star-
@@ -3005,7 +3005,7 @@ options:
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
                         each injected with the negative of its contrast by the
-                        injection code, so placement, true north, centre, flux
+                        injection code, so placement, true north, center, flux
                         unit and throughput are a draw's. Every reduction sees
                         the edited frames, the KLIP-FM model cube does not.
                         Recorded in the run's checkpoint, and kept on resume
@@ -3114,7 +3114,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         partition names (default: cube file stems)
   --star-flux STAR_FLUX [STAR_FLUX ...]
                         star flux per cube, in the science frames' own units
-                        and in the template's normalisation aperture; omit it
+                        and in the template's normalization aperture; omit it
                         and the contrast axis is in template units
   --pxscale PXSCALE     arcsec / px. generic: the cubes' scale. near: the
                         plate scale the pixel constants follow (lambda/D, the
@@ -3130,7 +3130,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         crop to 2h+1 px around --center (generic default: full
                         frame; nomic default: 75)
   --center CENTER CENTER
-                        star pixel (x y); default: array centre
+                        star pixel (x y); default: array center
   --wv-index WV_INDEX   channel of a 4-d IFS cube
   --no-tags             no data-derived frame-quality tags (no frame
                         selection)
@@ -3227,7 +3227,7 @@ pyNOMIC (--instrument nomic):
   --truenorth TRUENORTH
   --fwhm-px FWHM_PX     override the FWHM (default: Airy fit / 1.028 l/D)
   --name NAME           partition-name prefix (default: --obj)
-  --r-ee R_EE           core radius (px) for the frame PSF normalisation (1.5
+  --r-ee R_EE           core radius (px) for the frame PSF normalization (1.5
                         l/D)
   --groups GROUPS [GROUPS ...]
                         image groups as partitions: 'auto' (pyNOMIC's star-
@@ -3425,7 +3425,7 @@ options:
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
                         each injected with the negative of its contrast by the
-                        injection code, so placement, true north, centre, flux
+                        injection code, so placement, true north, center, flux
                         unit and throughput are a draw's. Every reduction sees
                         the edited frames, the KLIP-FM model cube does not.
                         Recorded in the run's checkpoint, and kept on resume
@@ -3468,7 +3468,7 @@ options:
                         still counts toward its election, in FWHM (default
                         0.5)
   --z Z                 how many standard errors a finalist's mean paired gain
-                        must exceed to replace the winner (default 1)
+                        must exceed to replace the winner (default 2)
   --sweeps SWEEPS       sweeps of the election at most (default 2)
   --finalists N         each run's finalists per annulus, its winner and its
                         best by validated score (default 0, every
@@ -3518,7 +3518,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         partition names (default: cube file stems)
   --star-flux STAR_FLUX [STAR_FLUX ...]
                         star flux per cube, in the science frames' own units
-                        and in the template's normalisation aperture; omit it
+                        and in the template's normalization aperture; omit it
                         and the contrast axis is in template units
   --pxscale PXSCALE     arcsec / px. generic: the cubes' scale. near: the
                         plate scale the pixel constants follow (lambda/D, the
@@ -3534,7 +3534,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         crop to 2h+1 px around --center (generic default: full
                         frame; nomic default: 75)
   --center CENTER CENTER
-                        star pixel (x y); default: array centre
+                        star pixel (x y); default: array center
   --wv-index WV_INDEX   channel of a 4-d IFS cube
   --no-tags             no data-derived frame-quality tags (no frame
                         selection)
@@ -3631,7 +3631,7 @@ pyNOMIC (--instrument nomic):
   --truenorth TRUENORTH
   --fwhm-px FWHM_PX     override the FWHM (default: Airy fit / 1.028 l/D)
   --name NAME           partition-name prefix (default: --obj)
-  --r-ee R_EE           core radius (px) for the frame PSF normalisation (1.5
+  --r-ee R_EE           core radius (px) for the frame PSF normalization (1.5
                         l/D)
   --groups GROUPS [GROUPS ...]
                         image groups as partitions: 'auto' (pyNOMIC's star-
@@ -3834,7 +3834,7 @@ options:
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
                         each injected with the negative of its contrast by the
-                        injection code, so placement, true north, centre, flux
+                        injection code, so placement, true north, center, flux
                         unit and throughput are a draw's. Every reduction sees
                         the edited frames, the KLIP-FM model cube does not.
                         Recorded in the run's checkpoint, and kept on resume
@@ -3892,7 +3892,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         partition names (default: cube file stems)
   --star-flux STAR_FLUX [STAR_FLUX ...]
                         star flux per cube, in the science frames' own units
-                        and in the template's normalisation aperture; omit it
+                        and in the template's normalization aperture; omit it
                         and the contrast axis is in template units
   --pxscale PXSCALE     arcsec / px. generic: the cubes' scale. near: the
                         plate scale the pixel constants follow (lambda/D, the
@@ -3908,7 +3908,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         crop to 2h+1 px around --center (generic default: full
                         frame; nomic default: 75)
   --center CENTER CENTER
-                        star pixel (x y); default: array centre
+                        star pixel (x y); default: array center
   --wv-index WV_INDEX   channel of a 4-d IFS cube
   --no-tags             no data-derived frame-quality tags (no frame
                         selection)
@@ -4005,7 +4005,7 @@ pyNOMIC (--instrument nomic):
   --truenorth TRUENORTH
   --fwhm-px FWHM_PX     override the FWHM (default: Airy fit / 1.028 l/D)
   --name NAME           partition-name prefix (default: --obj)
-  --r-ee R_EE           core radius (px) for the frame PSF normalisation (1.5
+  --r-ee R_EE           core radius (px) for the frame PSF normalization (1.5
                         l/D)
   --groups GROUPS [GROUPS ...]
                         image groups as partitions: 'auto' (pyNOMIC's star-
@@ -4199,7 +4199,7 @@ options:
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
                         each injected with the negative of its contrast by the
-                        injection code, so placement, true north, centre, flux
+                        injection code, so placement, true north, center, flux
                         unit and throughput are a draw's. Every reduction sees
                         the edited frames, the KLIP-FM model cube does not.
                         Recorded in the run's checkpoint, and kept on resume
@@ -4251,7 +4251,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         partition names (default: cube file stems)
   --star-flux STAR_FLUX [STAR_FLUX ...]
                         star flux per cube, in the science frames' own units
-                        and in the template's normalisation aperture; omit it
+                        and in the template's normalization aperture; omit it
                         and the contrast axis is in template units
   --pxscale PXSCALE     arcsec / px. generic: the cubes' scale. near: the
                         plate scale the pixel constants follow (lambda/D, the
@@ -4267,7 +4267,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         crop to 2h+1 px around --center (generic default: full
                         frame; nomic default: 75)
   --center CENTER CENTER
-                        star pixel (x y); default: array centre
+                        star pixel (x y); default: array center
   --wv-index WV_INDEX   channel of a 4-d IFS cube
   --no-tags             no data-derived frame-quality tags (no frame
                         selection)
@@ -4364,7 +4364,7 @@ pyNOMIC (--instrument nomic):
   --truenorth TRUENORTH
   --fwhm-px FWHM_PX     override the FWHM (default: Airy fit / 1.028 l/D)
   --name NAME           partition-name prefix (default: --obj)
-  --r-ee R_EE           core radius (px) for the frame PSF normalisation (1.5
+  --r-ee R_EE           core radius (px) for the frame PSF normalization (1.5
                         l/D)
   --groups GROUPS [GROUPS ...]
                         image groups as partitions: 'auto' (pyNOMIC's star-
@@ -4565,7 +4565,7 @@ options:
                         point sources taken out of every frame once, at load:
                         one per line, rho (arcsec), PA (deg) and contrast,
                         each injected with the negative of its contrast by the
-                        injection code, so placement, true north, centre, flux
+                        injection code, so placement, true north, center, flux
                         unit and throughput are a draw's. Every reduction sees
                         the edited frames, the KLIP-FM model cube does not.
                         Recorded in the run's checkpoint, and kept on resume
@@ -4628,7 +4628,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         partition names (default: cube file stems)
   --star-flux STAR_FLUX [STAR_FLUX ...]
                         star flux per cube, in the science frames' own units
-                        and in the template's normalisation aperture; omit it
+                        and in the template's normalization aperture; omit it
                         and the contrast axis is in template units
   --pxscale PXSCALE     arcsec / px. generic: the cubes' scale. near: the
                         plate scale the pixel constants follow (lambda/D, the
@@ -4644,7 +4644,7 @@ generic cubes (--instrument generic / klip-tpe generic):
                         crop to 2h+1 px around --center (generic default: full
                         frame; nomic default: 75)
   --center CENTER CENTER
-                        star pixel (x y); default: array centre
+                        star pixel (x y); default: array center
   --wv-index WV_INDEX   channel of a 4-d IFS cube
   --no-tags             no data-derived frame-quality tags (no frame
                         selection)
@@ -4741,7 +4741,7 @@ pyNOMIC (--instrument nomic):
   --truenorth TRUENORTH
   --fwhm-px FWHM_PX     override the FWHM (default: Airy fit / 1.028 l/D)
   --name NAME           partition-name prefix (default: --obj)
-  --r-ee R_EE           core radius (px) for the frame PSF normalisation (1.5
+  --r-ee R_EE           core radius (px) for the frame PSF normalization (1.5
                         l/D)
   --groups GROUPS [GROUPS ...]
                         image groups as partitions: 'auto' (pyNOMIC's star-

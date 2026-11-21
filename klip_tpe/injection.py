@@ -1026,7 +1026,7 @@ def _check_float32_headroom(cube: np.ndarray, sources: Sequence[Source], model: 
                 f"{amp:.3e} counts, within float32 rounding of a cube whose brightest pixels reach "
                 f"{peak:.3e}: most of its flux will be lost and the recovered S/N will not "
                 f"scale with the contrast.  flux_unit is {m.flux_unit:.4g} -- if that is a "
-                f"normalised template's own sum rather than the star's flux in the science "
+                f"normalized template's own sum rather than the star's flux in the science "
                 f"frames' units, set star_flux (see "
                 f"generic.star_flux_from_aperture_photometry).",
                 RuntimeWarning, stacklevel=3)

@@ -1,27 +1,24 @@
-"""Parameter-ensemble persistence / reliability -- port of ``near2_param_verify.pro``
-and the config-selection block of the optimizer main loop (opt 7795-7850).
+"""Parameter-ensemble persistence and reliability, the IDL predecessor's ``near2_param_verify.pro``.
 
-The optimizer's top-N most *diverse* configurations of one annulus are each
-re-reduced clean and with ONE shared fixed injection set; from the per-config
-matched-filter S/N maps we form the param-STIM (mean / unbiased std across
-configs), the detection fraction (clean S/N > 3), the recovery fraction
-(injected S/N > 3), a throughput-normalised meta-combine with its S/N map and
-a null / true STIM calibration table plus a throughput-calibrated 5-sigma
-contrast curve of the meta-combine.  Products are written as FITS + txt into an
-output directory tagged ``_NN``; :func:`stitch_param_maps` merges annuli
-(``near2m_pvstitch``).
+It also ports the configuration selection of the IDL predecessor's main loop (opt 7795-7850).  The
+search's top-N most *diverse* configurations of one annulus are each reduced again, clean and with ONE
+shared fixed injection set.  Their matched-filter S/N maps give the param-STIM (the mean across the
+configurations over their unbiased standard deviation), the detection fraction (clean S/N > 3), the
+recovery fraction (injected S/N > 3), a throughput-normalized meta-combine with its S/N map, a null and
+true STIM calibration table, and a throughput-calibrated 5-sigma contrast curve of the meta-combine.
+The products are written as FITS and text into an output directory, tagged ``_NN``, and
+:func:`stitch_param_maps` merges the annuli (the IDL predecessor's ``near2m_pvstitch``).
 
-The reduction is injected through ``reduce_fn`` so this module is
-pipeline-agnostic.  Conventions as in :mod:`klip_tpe.verify`.
+The reduction comes in as ``reduce_fn``, so the module does not depend on the pipeline.  The
+conventions are those of :mod:`klip_tpe.verify`.
 
-Deliberate deviations from the IDL:
+It deviates from the IDL predecessor on purpose:
 
-* ``near2m_paramverify`` (147) and ``near2m_pvstitch`` (381) use ``cx = nx/2``;
-  the port uses ``(n-1)/2`` everywhere (brief 8.4, spec C.6).
-* ``near2m_snrmap`` is :func:`klip_tpe.products.snr_map` (per-radius MAD-floored
-  band statistics); its exact ring-index bookkeeping differs slightly but the
-  quantity is the same.
-* The PDF / PNG products and ``README.txt`` are not produced.
+* ``near2m_paramverify`` (147) and ``near2m_pvstitch`` (381) use ``cx = nx/2``, and the port uses
+  ``(n-1)/2`` everywhere (brief 8.4, spec C.6).
+* ``near2m_snrmap`` is :func:`klip_tpe.products.snr_map`, band statistics per radius with a MAD floor.
+  Its bookkeeping of the ring indices differs slightly, and the quantity is the same.
+* The PDF and PNG products and ``README.txt`` are not produced.
 """
 from __future__ import annotations
 
@@ -41,7 +38,9 @@ from .space import SearchSpace
 __all__ = ["select_configs", "fixed_injection_set", "pv_meanstd", "radial_rms", "param_stim",
            "param_verify_cubes", "param_verify", "stitch_param_maps", "PV_KINDS"]
 
+#: the maps the stage writes and stitches
 PV_KINDS = ("stim", "detfrac", "recovery", "combine", "combsnr")
+#: the phases :func:`select_configs` leaves out of its pool without ``n_init``
 _NON_TPE_PHASES = ("seed", "warmup", "random", "grid", "calib", "calibration")
 
 
@@ -50,16 +49,35 @@ _NON_TPE_PHASES = ("seed", "warmup", "random", "grid", "calib", "calibration")
 # ----------------------------------------------------------------------------
 def select_configs(history: History, space: SearchSpace, n_pv: int = 20, pv_divmin: float = 0.05,
                    n_init: Optional[int] = None, min_score: float = -9000.0) -> List[int]:
-    """Top-``n_pv`` distinct configs with a diversity floor.
+    """Return the ``n_pv`` best configurations that keep a diversity floor from each other.
 
-    Pool = TPE-phase evaluations (index ``>= n_init`` when given, else trials
-    whose ``flags['phase']`` is not a warm-up / random / seed phase) with finite
-    score ``> min_score``; falls back to all scored trials if empty (7796-7797).
-    Sorted by score descending, a config is kept when its mean normalised L1
-    distance ``d = (1/ndim_base) sum_d |x_d - x'_d| / (hi_d - lo_d)`` over the
-    base (non-partition reduction) dims to EVERY kept config is ``>= pv_divmin``
-    (7800-7810).  Returns evaluation indices (may be fewer than 2 -- callers skip
-    then)."""
+    The pool is the TPE-phase evaluations with a finite score above ``min_score``, or every such evaluation
+    when there is none (opt 7796-7797).  Best first, a configuration is kept when its mean normalized L1
+    distance to *every* configuration kept, over the base dimensions, is at least ``pv_divmin`` (opt
+    7800-7810).  The distance is ``d = (1/ndim_base) sum_d |x_d - x'_d| / (hi_d - lo_d)``, and the base
+    dimensions are the reduction dimensions of no partition.
+
+    Parameters
+    ----------
+    history : History
+        The annulus' search history.
+    space : SearchSpace
+        Its space.
+    n_pv : int, default 20
+        Most configurations kept.
+    pv_divmin : float, default 0.05
+        The diversity floor.
+    n_init : int or None, default None
+        Index of the first TPE-phase evaluation.  None takes the evaluations whose ``phase`` flag is none of
+        the warm-up, random, grid, seed and calibration phases.
+    min_score : float, default -9000.0
+        The score an evaluation must exceed.
+
+    Returns
+    -------
+    indices : list of int
+        The evaluations kept, best first, possibly fewer than 2, which callers then skip.
+    """
     y = history.y
     n = len(history)
     idx = np.arange(n)
@@ -93,11 +111,39 @@ def select_configs(history: History, space: SearchSpace, n_pv: int = 20, pv_divm
 def fixed_injection_set(nsrc: int, rlo_as: float, rhi_as: float, fwhm: float, pxscale: float,
                         rng: Optional[np.random.Generator] = None, contrast: float = 0.0,
                         known: Sequence[Tuple[float, float]] = (), sampler=None) -> List[Source]:
-    """The shared fixed injection set (``near2m_randpos``, opt 4141+): a
-    deterministic radial ladder ``rlo + (i+0.5)(rhi-rlo)/n`` with a random common
-    azimuth anchor and ``360/n`` spacing, avoiding ``known`` sources.  Delegates to
-    :class:`klip_tpe.positions.PositionSampler` (strategy ``'spread'``); pass the run's
-    own ``sampler`` so every stage injects with identical geometry (the Runner does)."""
+    """Return the shared fixed injection set, as the IDL predecessor's ``near2m_randpos`` draws it.
+
+    It is a radial ladder ``rlo + (i + 0.5)(rhi - rlo)/n`` with one random azimuth anchor and ``360/n``
+    spacing, away from the ``known`` sources (:class:`klip_tpe.positions.PositionSampler`, strategy
+    ``"spread"``, opt 4141+).  The run's own ``sampler`` makes every stage inject with the same geometry,
+    as the :class:`~klip_tpe.runner.Runner` passes it.
+
+    Parameters
+    ----------
+    nsrc : int
+        Number of sources.
+    rlo_as : float
+        Inner radius, in arcseconds.
+    rhi_as : float
+        Outer radius, in arcseconds.
+    fwhm : float
+        FWHM, in pixels.
+    pxscale : float
+        Pixel scale, in arcseconds per pixel.
+    rng : numpy.random.Generator or None, default None
+        The generator, None for one seeded with 0.
+    contrast : float, default 0.0
+        The sources' contrast.
+    known : sequence of tuple, default ()
+        Real companions to keep away from, ``(rho_arcsec, pa_deg)``, when no sampler is given.
+    sampler : PositionSampler or None, default None
+        The sampler, None for a ``"spread"`` one of this FWHM.
+
+    Returns
+    -------
+    sources : list of Source
+        The sources.
+    """
     if rng is None:
         rng = np.random.default_rng(0)
     ps = sampler if sampler is not None else PositionSampler(fwhm_as=fwhm * pxscale, strategy="spread", known=list(known))
@@ -108,9 +154,25 @@ def fixed_injection_set(nsrc: int, rlo_as: float, rhi_as: float, fwhm: float, px
 # C.4.2  primitives
 # ----------------------------------------------------------------------------
 def pv_meanstd(cube: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Per-pixel NaN-aware mean, UNBIASED (N-1) two-pass std and count over the
-    config axis (``near2m_pv_meanstd``, param_verify 44-56).  Mean / std are NaN
-    where fewer than 2 configs are finite."""
+    """Return the mean, the unbiased standard deviation and the count over a cube's configuration axis.
+
+    Each pixel's statistics skip NaN, and the standard deviation divides by N - 1 in two passes, as the
+    IDL predecessor's ``near2m_pv_meanstd`` does (param_verify 44-56).
+
+    Parameters
+    ----------
+    cube : ndarray, shape (n, ny, nx)
+        The configurations' maps.
+
+    Returns
+    -------
+    mean : ndarray, shape (ny, nx)
+        The mean, NaN where fewer than 2 configurations are finite.
+    sd : ndarray, shape (ny, nx)
+        The standard deviation, NaN there too.
+    count : ndarray, shape (ny, nx)
+        The number of finite configurations.
+    """
     cube = np.asarray(cube, float)
     fin = np.isfinite(cube)
     z = np.where(fin, cube, 0.0)
@@ -125,8 +187,20 @@ def pv_meanstd(cube: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 def param_stim(sn_cube: np.ndarray) -> np.ndarray:
-    """param-STIM ``mn / max(sd, 0.3 median(sd > 0), 1e-6)`` (param_verify 157-163
-    and 176-178), NaN where count < 2."""
+    """Return the param-STIM of a cube of S/N maps, ``mn / max(sd, 0.3 median(sd > 0), 1e-6)``.
+
+    It follows the IDL predecessor's param_verify (157-163 and 176-178).
+
+    Parameters
+    ----------
+    sn_cube : ndarray, shape (n, ny, nx)
+        The configurations' S/N maps.
+
+    Returns
+    -------
+    stim : ndarray, shape (ny, nx)
+        The map, NaN where fewer than 2 configurations are finite.
+    """
     mn, sd, cnt = pv_meanstd(sn_cube)
     g = np.isfinite(sd) & (sd > 0)
     sfloor = float(np.median(sd[g])) if g.any() else 1.0
@@ -136,8 +210,22 @@ def param_stim(sn_cube: np.ndarray) -> np.ndarray:
 
 
 def radial_rms(img: np.ndarray, reval: Sequence[float]) -> np.ndarray:
-    """Azimuthal sample std of ``img`` in ``[r-1, r+1)`` annuli at each ``reval``
-    (``near2m_pv_radrms``, param_verify 62-73); NaN with < 3 pixels."""
+    """Return the sample standard deviation of an image in the annulus ``[r - 1, r + 1)`` at each radius.
+
+    It is the IDL predecessor's ``near2m_pv_radrms`` (param_verify 62-73).
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image, centered on the star.
+    reval : sequence of float
+        The radii, in pixels.
+
+    Returns
+    -------
+    rms : ndarray, shape (len(reval),)
+        The standard deviation at each radius, NaN with fewer than 3 finite pixels.
+    """
     img = np.asarray(img, float)
     ny, nx = img.shape
     cx, cy = star_center(img.shape)
@@ -152,6 +240,22 @@ def radial_rms(img: np.ndarray, reval: Sequence[float]) -> np.ndarray:
 
 
 def _box_max(m: np.ndarray, x: float, y: float) -> float:
+    """Return the largest finite value of the 3 x 3 box around a position, the box kept off the edge.
+
+    Parameters
+    ----------
+    m : ndarray, shape (ny, nx)
+        The map.
+    x : float
+        The position's column, in pixels.
+    y : float
+        Its row, in pixels.
+
+    Returns
+    -------
+    peak : float
+        The maximum, NaN when the box holds no finite value.
+    """
     ny, nx = m.shape
     ix = int(np.clip(round(x), 1, nx - 2))
     iy = int(np.clip(round(y), 1, ny - 2))
@@ -160,7 +264,20 @@ def _box_max(m: np.ndarray, x: float, y: float) -> float:
 
 
 def _percentile_idl(v: np.ndarray, p: float) -> float:
-    """``v[sort(v)[floor(p (n-1))]]`` (param_verify 242-244)."""
+    """Return a percentile as the IDL predecessor takes it, ``v[sort(v)[floor(p (n - 1))]]``.
+
+    Parameters
+    ----------
+    v : ndarray
+        The values.
+    p : float
+        The fraction, from 0 to 1.
+
+    Returns
+    -------
+    value : float
+        The value at that rank (param_verify 242-244).
+    """
     s = np.sort(v)
     return float(s[int(np.floor(p * (s.size - 1)))])
 
@@ -175,33 +292,86 @@ def param_verify_cubes(cclean: np.ndarray, cinj: np.ndarray, wts: Sequence[float
                        flatten: bool = False, write_fits: bool = True,
                        inner_fwhm: float = 1.0, rules: Optional[Dict[str, Any]] = None,
                        known: Sequence[Tuple[float, float]] = ()) -> Dict[str, Any]:
-    """``near2m_paramverify`` (param_verify 135-249) on ``(N, ny, nx)`` clean and
-    injected cubes of the ensemble.
+    """Run the IDL predecessor's ``near2m_paramverify`` on an ensemble's clean and injected cubes.
 
-    1. ``sncl[i] = snr_map(radprof(cclean_i))``; ``snij[i]`` likewise with the
-       fixed sources excluded from the noise (153-154).
-    2. param-STIM of ``sncl`` (157-163); ``detfrac`` = fraction of configs with
-       clean S/N > ``snr_thr`` (166-167); ``recovery`` = same on ``snij`` (172).
-    3. ``true[s]`` = 3x3 max of the injected-ensemble STIM at each source
-       (176-183); ``null`` = clean STIM in ``rlo <= r <= rhi`` farther than
-       ``1.5 fwhm`` from every source (185-191; ``[0]*5`` if < 5 pixels).
-    4. Meta-combine (194-217): ``K_i`` = median over sources of the 3x3 peak of
-       ``snij_i``; ``Kmed = median(K)``; ``we_i = w_i max(K_i, 0)``;
-       ``comb = sum we_i (Kmed/K_i) cclean_i / sum we_i`` (same for ``combj``);
-       ``combsnr = snr_map(radprof(comb))``.
-    5. Contrast curve (221-229): ``ps = mawet_peak_snr(radprof(combj), sources)``;
-       ``reval = rlo + (rhi-rlo)(i+0.5)/12``; ``K_s = ps_s sigma(r_s) / ccal``;
-       ``Kc = median(K > 0)``; ``c5 = 5 sigma(r) / Kc``.  ``inner_fwhm`` is the metric's
-       inner guard (:func:`~klip_tpe.metrics.mawet_peak_snr`), the run's own.  ``rules``
-       (:func:`~klip_tpe.metrics.ring_rules`) make ``ps`` the search's S/N, its matched filter,
-       despike, band and pixel mask, and the maps leave the mask out of their noise.  The
-       ``known`` companions stay out of ``ps``' rings, as out of the search's.  Under the
-       measures of before 2026-11-01 (:data:`~klip_tpe.metrics.VERIFY_IDL`) ``ps`` takes the
-       metric's defaults and the companions stay in, as they did then.
+    The steps, numbered by the lines of the IDL predecessor's param_verify (135-249), are:
 
-    Writes ``paramverify_{stim,detfrac,recovery,combine,combsnr}_NN.fits`` and
-    ``paramverify_calib_NN.txt`` into ``out_dir`` when given.  Returns a dict
-    with the maps, ``K``, ``Kc``, ``curve`` and ``calib``.
+    1. the S/N map of each configuration's clean image, ``sncl``, and of its injected image with the fixed
+       sources left out of the noise, ``snij`` (153-154),
+    2. the param-STIM of ``sncl`` (157-163), ``detfrac``, the fraction of configurations whose clean S/N
+       exceeds ``snr_thr`` (166-167), and ``recovery``, the same on ``snij`` (172),
+    3. ``true``, the 3 x 3 maximum of the injected ensemble's STIM at each source (176-183), and ``null``,
+       the clean STIM in ``rlo <= r <= rhi`` farther than ``1.5 fwhm`` from every source, or five zeros
+       with fewer than 5 pixels (185-191),
+    4. the meta-combine (194-217), with ``K_i`` the median over the sources of the 3 x 3 peak of
+       ``snij_i``, ``Kmed = median(K)``, ``we_i = w_i max(K_i, 0)`` and
+       ``comb = sum we_i (Kmed/K_i) cclean_i / sum we_i``, ``combj`` the same of the injected cube and
+       ``combsnr`` the S/N map of ``comb``,
+    5. the contrast curve (221-229), with ``ps`` the sources' S/N in ``combj``
+       (:func:`~klip_tpe.metrics.mawet_peak_snr`), ``reval = rlo + (rhi - rlo)(i + 0.5)/12``,
+       ``K_s = ps_s sigma(r_s) / ccal``, ``Kc = median(K > 0)`` and ``c5 = 5 sigma(r) / Kc``.
+
+    ``rules`` (:func:`~klip_tpe.metrics.ring_rules`) make ``ps`` the search's S/N, with its matched filter,
+    despike, band and pixel mask, and the maps leave the mask out of their noise.  The ``known``
+    companions stay out of ``ps``' rings, as out of the search's.
+
+    Parameters
+    ----------
+    cclean : ndarray, shape (n, ny, nx)
+        The configurations' clean images.
+    cinj : ndarray, shape (n, ny, nx)
+        Their images with the fixed sources injected.
+    wts : sequence of float
+        Each configuration's weight, ones when there are not ``n``.
+    sources : sequence of Source
+        The fixed sources.
+    ccal : float
+        Their contrast, the annulus' calibrated one.
+    pxscale : float
+        Pixel scale, in arcseconds per pixel.
+    fwhm : float
+        FWHM, in pixels.
+    rlo : float
+        The annulus' inner radius, in pixels.
+    rhi : float
+        Its outer radius, in pixels.
+    out_dir : str or None, default None
+        Directory of the products, None to write none.
+    tag : str, default "01"
+        The products' tag, the annulus' number.
+    snr_thr : float, default 3.0
+        The S/N of a detection, for ``detfrac`` and ``recovery``.
+    angle_convention : str, default "pa"
+        How the sources' angles are measured (:func:`~klip_tpe.metrics.source_xy`).
+    flatten : bool, default False
+        Whether to subtract each image's radial profile (:func:`~klip_tpe.metrics.radprof`) before its maps.
+    write_fits : bool, default True
+        Whether to write the maps' FITS files into ``out_dir``.
+    inner_fwhm : float, default 1.0
+        The metric's inner guard for ``ps``, in FWHM, the run's own.
+    rules : dict or None, default None
+        The run's noise-ring rules, None for the metric's defaults.
+    known : sequence of tuple, default ()
+        Real companions, ``(rho_arcsec, pa_deg)``.
+
+    Returns
+    -------
+    result : dict
+        The maps (``stim``, ``detfrac``, ``recovery``, ``combine``, ``combsnr``, ``stim_inj``,
+        ``combine_inj``, ``snr_clean``, ``snr_inj``), ``K``, ``Kmed``, ``Kc``, ``Kcal``, ``curve``,
+        ``calib``, ``sources``, ``weights``, ``tag`` and ``files``, the products written.
+
+    Raises
+    ------
+    ValueError
+        If there are fewer than 2 configurations.
+
+    Notes
+    -----
+    With ``out_dir`` it writes ``paramverify_<kind>_NN.fits`` for each of :data:`PV_KINDS` and
+    ``paramverify_calib_NN.txt``.  Under the measures of before 2026-11-01
+    (:data:`~klip_tpe.metrics.VERIFY_IDL`) ``ps`` takes the metric's defaults and the companions stay in its
+    rings, as they did then.
     """
     cclean = np.asarray(cclean, float)
     cinj = np.asarray(cinj, float)
@@ -306,6 +476,17 @@ def param_verify_cubes(cclean: np.ndarray, cinj: np.ndarray, wts: Sequence[float
 
 
 def _write_fits(path: str, data: np.ndarray, header: Optional[Dict[str, Any]] = None) -> None:
+    """Write a map as float32 FITS, its header keywords cut to 8 characters.
+
+    Parameters
+    ----------
+    path : str
+        The file, written over.
+    data : ndarray
+        The map.
+    header : dict or None, default None
+        Keywords, any value FITS refuses written as its text.
+    """
     from astropy.io import fits
     h = fits.Header()
     for k, v in (header or {}).items():
@@ -327,38 +508,71 @@ def param_verify(history: History, space: SearchSpace, reduce_fn: Callable[..., 
                  snr_thr: float = 3.0, angle_convention: str = "pa", flatten: bool = False,
                  log: Callable[[str], None] = print, run_calls: Optional[Callable] = None,
                  inner_fwhm: float = 1.0, rules: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-    """Run the param_verify stage for one annulus (opt 7781-7935 + ``near2m_paramverify``).
+    """Run the param_verify stage for one annulus (opt 7781-7935 and ``near2m_paramverify``).
+
+    The best diverse configurations (:func:`select_configs`) are reduced again, clean and with the fixed
+    sources, and :func:`param_verify_cubes` takes their images, weighted by ``max(score, 0)`` (opt 7850).
+    A configuration whose reduction fails is dropped, as the IDL predecessor's ``continue`` drops it.
 
     Parameters
     ----------
-    history, space
-        the annulus search history and its space (for the diversity metric).
-    reduce_fn
-        ``reduce_fn(x, sources) -> (clean_image, injected_image)`` re-reduces the
-        configuration vector ``x`` clean and with ``sources`` injected.  A
-        one-argument callable ``reduce_fn(x)`` is also accepted; it must then
-        inject the ``fixed_sources`` you pass here.
-    rlo, rhi
-        annulus radii (px) -- the null zone and the radial ladder of the fixed set.
-    ccal
-        the annulus's calibrated (S/N = 5) injection contrast; used for the
-        fixed set when ``fixed_sources`` is not given and for the K calibration.
-    nsrc
-        number of fixed sources when building the set (IDL ``nsrc_a``).
-    n_init
-        index of the first TPE-phase trial (else ``flags['phase']`` decides).
-    run_calls
-        optional ``run_calls(calls) -> iterable of (i, result)`` that runs the
-        configurations' re-reductions (no-argument callables) and yields their results in
-        order, an exception standing for a failed one (:meth:`Runner._run_ordered`, which
-        keeps several in flight).  Default: one after another.
-    inner_fwhm
-        the metric's inner guard for the contrast curve's S/N (the Runner passes its own,
-        which follows the injection floor).
+    history : History
+        The annulus' search history.
+    space : SearchSpace
+        Its space, for the diversity distance.
+    reduce_fn : callable
+        Function ``reduce_fn(x, sources)`` returning the clean and the injected image of the configuration
+        vector ``x``.  A one-argument ``reduce_fn(x)`` must inject the ``fixed_sources`` given here itself.
+    fwhm : float
+        FWHM, in pixels.
+    pxscale : float
+        Pixel scale, in arcseconds per pixel.
+    rlo : float
+        The annulus' inner radius in pixels, an edge of the null zone and of the fixed set's ladder.
+    rhi : float
+        Its outer radius, in pixels.
+    out_dir : str
+        Directory of the products.
+    ccal : float
+        The annulus' calibrated injection contrast (S/N 5), for the fixed set and the K calibration.
+    tag : str, default "01"
+        The products' tag.
+    n_pv : int, default 20
+        Most configurations (:func:`select_configs`).
+    pv_divmin : float, default 0.05
+        Their diversity floor.
+    n_init : int or None, default None
+        Index of the first TPE-phase evaluation, None to let the ``phase`` flags decide.
+    nsrc : int, default 4
+        Number of fixed sources when they are drawn here, the IDL predecessor's ``nsrc_a``.
+    fixed_sources : sequence of Source or None, default None
+        The fixed sources, None to draw them (:func:`fixed_injection_set`).
+    rng : numpy.random.Generator or None, default None
+        The generator of the fixed set's anchor.
+    known : sequence of tuple, default ()
+        Real companions, ``(rho_arcsec, pa_deg)``, kept out of the fixed set and of the curve's rings.
+    snr_thr : float, default 3.0
+        The S/N of a detection.
+    angle_convention : str, default "pa"
+        How the sources' angles are measured.
+    flatten : bool, default False
+        Whether to subtract each image's radial profile before its maps.
+    log : callable, default print
+        Function taking each progress line.
+    run_calls : callable or None, default None
+        Function ``run_calls(calls)`` yielding ``(i, result)`` for the re-reductions in order, an exception
+        standing for a failed one, as :meth:`Runner._run_ordered` does with several in flight.  None runs
+        them one after another.
+    inner_fwhm : float, default 1.0
+        The metric's inner guard for the curve's S/N, which the Runner sets from the injection floor.
+    rules : dict or None, default None
+        The run's noise-ring rules.
 
-    Weights are ``max(score, 0)`` of each kept config (opt 7850).  Returns the
-    dict of :func:`param_verify_cubes` extended with ``eval_indices`` and ``X``,
-    or ``None`` when fewer than 2 configs could be selected / reduced.
+    Returns
+    -------
+    result : dict or None
+        The dict of :func:`param_verify_cubes` with ``eval_indices`` and ``X`` added, None when fewer than 2
+        configurations could be selected or reduced.
     """
     sel = select_configs(history, space, n_pv, pv_divmin, n_init)
     if len(sel) < 2:
@@ -412,13 +626,31 @@ def param_verify(history: History, space: SearchSpace, reduce_fn: Callable[..., 
 def stitch_param_maps(results: Sequence[Dict[str, Any]], zones: Sequence[Tuple[float, float]],
                       out_dir: Optional[str] = None, kinds: Sequence[str] = PV_KINDS,
                       pads: Optional[Sequence[Tuple[float, float]]] = None) -> Dict[str, np.ndarray]:
-    """Merge per-annulus maps: each annulus contributes its finite pixels in
-    ``rlo-1 <= r <= rhi+1``; overlaps (2-px seams) are averaged, elsewhere NaN.
-    ``results`` are :func:`param_verify_cubes` dicts (or ``{kind: map}``);
-    ``zones`` the matching ``(rlo, rhi)`` in px.  ``pads`` gives each zone its own
-    ``(pad_in, pad_out)`` in place of 1 px (the runner pads only where annuli meet).
-    Writes ``paramverify_<kind>_stitched.fits`` when ``out_dir`` is given.  DEVIATION:
-    star centre ``(n-1)/2`` (IDL ``n/2``)."""
+    """Merge the annuli's maps of each kind, as the IDL predecessor's ``near2m_pvstitch`` does.
+
+    Each annulus gives its finite pixels in ``rlo - 1 <= r <= rhi + 1``, the overlaps (2 px seams) are
+    averaged, and the rest is NaN.  The star is at ``(n - 1)/2``, where the IDL predecessor put it at
+    ``n/2``.
+
+    Parameters
+    ----------
+    results : sequence of dict
+        Each annulus' :func:`param_verify_cubes` dict, or ``{kind: map}``.
+    zones : sequence of tuple of 2 float
+        Each annulus' ``(rlo, rhi)``, in pixels.
+    out_dir : str or None, default None
+        Directory of ``paramverify_<kind>_stitched.fits``, None to write none.
+    kinds : sequence of str, default PV_KINDS
+        The kinds of map.
+    pads : sequence of tuple of 2 float or None, default None
+        Each zone's ``(pad_in, pad_out)`` in pixels in place of 1 px, since the runner pads only where
+        annuli meet.
+
+    Returns
+    -------
+    maps : dict
+        Each kind's stitched map, a kind no annulus has left out.
+    """
     out: Dict[str, np.ndarray] = {}
     for kind in kinds:
         acc = wgt = None

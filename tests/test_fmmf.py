@@ -1,7 +1,7 @@
 """Forward-modelled matched filter (klip_tpe.fmmf) and the STPSF PSF grid.
 
 The STPSF tests that need the package/data files are skipped when it is not installed;
-everything that only needs the *conventions* (stamp centring, cache round-trip, header
+everything that only needs the *conventions* (stamp centering, cache round-trip, header
 parsing) runs everywhere against synthetic arrays.
 """
 import json
@@ -112,7 +112,7 @@ def test_fmmf_mixes_fm_and_fallback_per_source():
     cx, cy = star_center(fm.shape)
     x0, y0 = (v[0] for v in source_xy([src[0].rho], [src[0].theta], PX, cx, cy))
     yy, xx = np.mgrid[0:fm.shape[0], 0:fm.shape[1]]
-    fm = np.where(np.hypot(xx - x0, yy - y0) < 12, fm, 0.0)   # only this source is modelled
+    fm = np.where(np.hypot(xx - x0, yy - y0) < 12, fm, 0.0)   # only this source is modeled
     m = FMMFSNR(pxscale=PX, fwhm=FWHM)
     ks = m.kernels(fm, [1.0, 1.9], [0.0, 137.0])
     assert len(ks) == 2
@@ -255,7 +255,7 @@ def test_stamp_centring_and_source_measurement():
     from klip_tpe import stpsf_psf as S
 
     big = np.zeros((61, 61))
-    big += _gauss(61, 61, 42.3, 30.0, 3.0)              # a source 12.3 px to +x of centre
+    big += _gauss(61, 61, 42.3, 30.0, 3.0)              # a source 12.3 px to +x of center
     sx, sy = S._source_center(big, (42.0, 30.0))
     assert sx == pytest.approx(42.3, abs=0.15) and sy == pytest.approx(30.0, abs=0.15)
     st = S._stamp_at(big, (sx, sy), 21)
@@ -316,7 +316,7 @@ def test_mode_from_header_reads_the_coronagraph():
 @pytest.mark.skipif(not __import__("klip_tpe.stpsf_psf", fromlist=["x"]).have_stpsf(),
                     reason="stpsf and its data files are not installed")
 def test_offaxis_grid_against_the_real_coronagraph(tmp_path, monkeypatch):
-    """One real STPSF grid: the source must land on the stamp centre and the throughput
+    """One real STPSF grid: the source must land on the stamp center and the throughput
     must rise monotonically to 1, with MASK335R's half-transmission near 0.63 arcsec."""
     from klip_tpe import stpsf_psf as S
 

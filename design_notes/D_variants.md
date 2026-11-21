@@ -107,7 +107,7 @@ Line numbers below are `file:line`. `mwc` = optimize_mwc_tpe.pro, `lmir` = optim
 
 **Instrument constants** — `hpb:1390-1393, 1455`: `obs_wl=4.77 µm`, `diam=28.8 m` (Fizeau baseline, used for KLIP λ/D and the deconvolution kernel), `ap_diam=8.4 m` for the **detection aperture** FWHM `fwhm=1.028*(obs_wl e-6/ap_diam)*206265/platescale`, `platescale=0.0107`, `truenorth=0`. Two "FWHM"s therefore coexist: the metric aperture (8.4 m) and the reducer's physics (28.8 m; `rhp:318`). Matched filter = FWHM Gaussian (`hpb_mfkern`, 91–97); the earlier empirical asymmetric FM template was removed because `convol` flips the kernel and produced negative S/N for bright sources (comment 130–134, 1671–1677).
 
-**Data layout** — one night; reducer products under `/Volumes/RAID36TB/LMIRCam/HPBoo/reduced/`: `HPBoo_cube_align_cen.fits` (+ `_lastread` master), `HPBoo_angles.sav`, `HPBoo_frametags.sav` (corrs, noises), `HPBoo_psf_inject.fits`; outputs `HPBoo_klip[_deconv][_inj][<out_suffix>].fits`. `reduce_hpboo` keeps the centred cube in `common hpboo_cache` (`rhp:344-367`) so `/reuse` calls skip I/O. `hpb_setcrop` (1206) auto-crops the working cube to the search radius per annulus.
+**Data layout** — one night; reducer products under `/Volumes/RAID36TB/LMIRCam/HPBoo/reduced/`: `HPBoo_cube_align_cen.fits` (+ `_lastread` master), `HPBoo_angles.sav`, `HPBoo_frametags.sav` (corrs, noises), `HPBoo_psf_inject.fits`; outputs `HPBoo_klip[_deconv][_inj][<out_suffix>].fits`. `reduce_hpboo` keeps the centered cube in `common hpboo_cache` (`rhp:344-367`) so `/reuse` calls skip I/O. `hpb_setcrop` (1206) auto-crops the working cube to the search radius per annulus.
 
 **Searched parameters** (`hpb:1483-1521`):
 
@@ -151,7 +151,7 @@ Line numbers below are `file:line`. `mwc` = optimize_mwc_tpe.pro, `lmir` = optim
 | λ, D, pxscale | 11.0 µm, 8.2 m, 0.0456″ | 4.30 µm, 6.5 m, 0.063″ | 3.8 µm, 8.4 m, 0.010604″ | 4.77 µm, 28.8 m (KLIP) / 8.4 m (aperture), 0.0107″ | instrument config |
 | FWHM (px) formula | `1.028 λ/D·206265/px` | same (≈2.2) | same (≈9) | same but with `ap_diam` (≈12) | core helper; allow override |
 | Matched filter | FWHM Gaussian (or measured N4 PSF) | fixed 2.0-px Gaussian | FWHM Gaussian | FWHM Gaussian | `Metric` option: kernel = gaussian(fwhm_mf) or user kernel |
-| Star centre | `(n−1)/2` | `(n−1)/2` (5599, 6370) | `(n−1)/2` (2317) | `(imnx−1)/2` (1667) | core convention |
+| Star center | `(n−1)/2` | `(n−1)/2` (5599, 6370) | `(n−1)/2` (2317) | `(imnx−1)/2` (1667) | core convention |
 | Angle convention into metric | PA E-of-N, `+90°` | PA, `+90°` | PA, `+90°` (truenorth inside reducer) | **math angle, no +90** | `Reducer`/`InjectionModel` declare the convention; metric consumes pixel (x,y) |
 | Mode | ADI (multi-night) | **ARDI** (2 rolls + RDI library, per-target refsel) | ADI (per dataset) | ADI | mode is reducer-internal; optimizer only needs param names |
 | Partitions | 6 nights, per-night blocks + drop1/drop2 | 1 dataset (2 rolls hidden) | 8 (night×side) datasets, binary flags, one global block | 1 | `SearchSpace` groups + selection dims |
@@ -178,7 +178,7 @@ Line numbers below are `file:line`. `mwc` = optimize_mwc_tpe.pro, `lmir` = optim
 | Provenance | run_setup.txt + scripts copy | same | runinfo.txt only | run_setup.txt + scripts | core |
 | Parallelism | spawned idl night-workers | spawned idl for clean+inj | IDL_IDLBridge per dataset | spawned worker pool + job files | leave to `Reducer`/executor |
 
-**Core (identical in all four, port once):** `bw` (Scott/Silverman ×1.06, floor 0.08·range), `kde` (Gaussian Parzen + 0.25 uniform prior), `propose` (γ split, per-dim jitter from a random good obs, separable log l/g argmax), warm-up, per-source Mawet MF-peak S/N + median aggregate, contrast calibration toward S/N 5 with ×0.1..×10 steps, top-N re-validation on fresh injections with the winner taken from validated scores, per-annulus loop, `(n−1)/2` centre, `radprof` flattening before scoring.
+**Core (identical in all four, port once):** `bw` (Scott/Silverman ×1.06, floor 0.08·range), `kde` (Gaussian Parzen + 0.25 uniform prior), `propose` (γ split, per-dim jitter from a random good obs, separable log l/g argmax), warm-up, per-source Mawet MF-peak S/N + median aggregate, contrast calibration toward S/N 5 with ×0.1..×10 steps, top-N re-validation on fresh injections with the winner taken from validated scores, per-annulus loop, `(n−1)/2` center, `radprof` flattening before scoring.
 
 ---
 
@@ -218,7 +218,7 @@ Line numbers below are `file:line`. `mwc` = optimize_mwc_tpe.pro, `lmir` = optim
 
 ### `Runner`
 - Protocol per annulus: `calibrate → (seed) → search → recal_revisit(optional) → validate → products`, each stage writing rows to one append-only `results.txt` with `run_tag`/`annulus`/`phase` columns and a JSON checkpoint **every evaluation** containing config + RNG state + history (NEAR/MWC only had this; LMIR/HPB have nothing — Python must have it everywhere). `resume(run_dir)` takes no other options.
-- `Calibrator(target=(4,6), aim=5, max_trials=8, step_clip=(0.1,10), ceiling=None, forced=None, n_remeasure=2, cal_overrides={'bin': 64}, warm_start_from_previous_annulus=True, recal_check=10, recal_ntop=5, recal_budget=4)` — union of all four behaviours; the honest re-measure at fixed k and recal-revisit should default on.
+- `Calibrator(target=(4,6), aim=5, max_trials=8, step_clip=(0.1,10), ceiling=None, forced=None, n_remeasure=2, cal_overrides={'bin': 64}, warm_start_from_previous_annulus=True, recal_check=10, recal_ntop=5, recal_budget=4)` — union of all four behaviors; the honest re-measure at fixed k and recal-revisit should default on.
 - `Validator(n_top=3, n_valid=8, distinct_tol=1e-4, pool='all', commit='median_trial')`.
 - Annulus handling: `AnnulusPlan(fixed_edges | adaptive(width_range, r_cap) | single_zone)`; per-annulus `n_init/n_iter` vectors (`mwc:4789`), n_sources rule by annulus radius, injection band inset by 1 FWHM, adaptive-width sources re-centred per eval (`lmir:2273-2277`).
 - k strategy flag: `k_mode ∈ {'search', 'scan_rescore'}`. In `scan_rescore` the eval costs a scan + one honest fixed-k injected reduction (LMIR 2298–2368); in `search` k is a normal dim (MWC/HPB). Both must exist because reducers without a k-cube output (MWC) can only do `search`.
@@ -251,5 +251,5 @@ Other cross-variant lessons visible in the code:
 13. `IDL 'and' is not short-circuit` workarounds (`cmax_cal=Inf`, `mwc:4842`; `resume_skip` guard, 5523) — don't port; but do keep the semantics: ceiling **off unless given** (NEAR/MWC) vs always on (LMIR/HPB) should be one explicit option with a documented default.
 14. Concurrency via files (done-flags, `out_suffix`) reappears in all four; whatever executor is used, outputs must be keyed by a unique job tag and stale outputs deleted before dispatch.
 15. Accumulating shared logs: LMIR overwrites `optimize_tpe_results.txt` in a shared root (2035); MWC copies a shared log into the run dir on resume (5239–5248). Python: one log per run directory, append-only, with `run_tag` in every row.
-16. LMIR's reset of the running best at `it==n_init` (2386–2394) and HPB's missing distinctness filter (1996–1997) are regressions relative to NEAR; adopt NEAR/MWC behaviour.
+16. LMIR's reset of the running best at `it==n_init` (2386–2394) and HPB's missing distinctness filter (1996–1997) are regressions relative to NEAR; adopt NEAR/MWC behavior.
 17. `k_eff` clamp not written back to history (MWC 6357–6358): projected values must be what is logged, otherwise replay/regression tests disagree with what was reduced.

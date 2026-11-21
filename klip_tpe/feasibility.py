@@ -254,7 +254,7 @@ class MinBinGuard:
     range is not a slightly slower configuration, it is a different order of magnitude: on
     the four-night LMIRCam RX J0534 search, evaluations at ``bin >= 10`` took a median 25 s
     and the three that drew ``bin = 1`` took a median 8300 s (worst 12371 s, between
-    neighbours of 32 s and 22 s).  Three evaluations out of 484 had consumed two thirds of
+    neighbors of 32 s and 22 s).  Three evaluations out of 484 had consumed two thirds of
     the run's wall time, and 5000 of them would have taken a fortnight.
 
     The generic search space spans ``bin`` from 1 to ``nframes / 8``, which is right for the
@@ -394,7 +394,7 @@ class PyKLIPLibraryGuard:
         # pyKLIP keeps min(maxnumbasis, pool) frames, so every value >= pool means "all of
         # them".  When the grid does not hold the pool itself -- a binned pool, 95 at bin 9 --
         # clip to the first grid point AT OR ABOVE it: clipped to the pool, the sanitize that
-        # follows snapped it to a grid neighbour below (90), and "take everything" was out of
+        # follows snapped it to a grid neighbor below (90), and "take everything" was out of
         # reach at every bin but 1.
         grid = getattr(pmn, "grid", None)
         if grid is not None and len(grid):

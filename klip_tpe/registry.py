@@ -233,7 +233,7 @@ def known_runs(root: Optional[str] = None, include_unregistered: bool = True) ->
 
 def stop_run(run_dir: str, grace: float = 10.0, log=print) -> int:
     """SIGTERM every process of ``run_dir``, then SIGKILL whatever is left.  Returns the
-    number of processes signalled."""
+    number of processes signaled."""
     pids = processes_for(run_dir)
     if not pids:
         log(f"  {os.path.basename(run_dir)}: nothing running")

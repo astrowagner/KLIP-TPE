@@ -9,7 +9,7 @@ MWC 758 data of tutorial 7, is read as one partition per night and group (sectio
 
 ## 1. The cube as wavelength groups
 
-ALES delivers 99 channels at R ~ 40-55 over 2.76-4.29 um.  Neighbouring channels share a
+ALES delivers 99 channels at R ~ 40-55 over 2.76-4.29 um.  Neighboring channels share a
 resolution element, so a channel is not the unit to switch on and off.  The adapter cuts
 the usable channels (6-88 by default) into `ngrp` groups of equal width in `ln lambda`,
 about one resolution element each at `ngrp = 15` and 0.73 at the default 20, and means each
@@ -17,18 +17,18 @@ group's channels into one `(frame, y, x)` cube.  Within a group the speckle patt
 by at most 2 % in radius, 0.2 spaxels at 0.3", far below the FWHM, so the mean loses
 nothing and the reduction costs 1/(channels per group) of a per-channel one.
 
-The rule (`ales.group_table`): a channel's edges are the midpoints to its neighbours, the
+The rule (`ales.group_table`): a channel's edges are the midpoints to its neighbors, the
 group edges are equally spaced in `ln lambda` from the lower edge of channel `c0` to the
 upper edge of `c1`, and a channel belongs to the group whose edges contain its wavelength.
 At the default 20 the groups hold from 2 channels at the blue end to 6 at the red end.  The
-realised table goes into the run's `run_setup.json` under `reducer.provenance.groups`, and
+realized table goes into the run's `run_setup.json` under `reducer.provenance.groups`, and
 each group's channels and wavelengths under `reducer.partitions.gNN.frames`.
 
 Each group is one partition of a `PartitionedReducer`, like a night or a roll:
 
 * its own wavelength `lam_m` and FWHM `1.03 lambda/D` (about 2.1 spaxels at the blue end and
   3.0 at the red end), so `angsep` in lambda/D and the Mawet apertures are right for it;
-* its own PSF template, the group mean of the per-channel template, normalised in 3
+* its own PSF template, the group mean of the per-channel template, normalized in 3
   spaxels (`ee_radius_px`).  The template is the median of the registered science frames,
   in the frames' units, so `flux_unit` is the star's flux in that group and an injected
   `contrast` is a flux ratio to the star there;
@@ -149,7 +149,7 @@ frame of group g at an annulus of mid radius r:
   `LBT_PARA + 180` deg.  The adapter adds the 180 to the angle array once
   (`angle_offset`, `--ales-angle-offset`) and keeps `truenorth = 0`.  A source therefore
   moves clockwise on the detector as the parallactic angle grows.
-* The star is at the array centre `((nx - 1) / 2, (ny - 1) / 2)` of the science cube and
+* The star is at the array center `((nx - 1) / 2, (ny - 1) / 2)` of the science cube and
   on the header's `STARX`, `STARY` of the template's larger grid.
 * 0.0345"/spaxel and the 180 deg are the reduction's assumptions, not calibrated on the
   night.  A companion's position must not be used to calibrate either.
@@ -160,8 +160,8 @@ frame of group g at an annulus of mid radius r:
 * The metric does not de-spike (`declip_nsig=None`): ALES samples the PSF at 2.1-3.0
   spaxels per FWHM, and the 6 sigma single-pixel de-spiking takes a companion's peak for a
   hot pixel.
-* The template is centred on the header's `STARX`, `STARY` (`meta['psf_center']`, which
-  `generic.make_reducer` honours).  The centroid of its peak lands within a small fraction of a
+* The template is centered on the header's `STARX`, `STARY` (`meta['psf_center']`, which
+  `generic.make_reducer` honors).  The centroid of its peak lands within a small fraction of a
   spaxel of it on every group, and the 3-spaxel flux unit differs little through the
   whole-pixel aperture.
 
@@ -274,7 +274,7 @@ space.project = ales.make_guard(red, max_excluded=20, bin_min=5)
   replaces `--root`, and `--ales-nights n2` (or a date) loads one night.  `klip-tpe resume`
   restores both options.
 
-## 8. A companion's colours, and the paper reduction's ADI step
+## 8. A companion's colors, and the paper reduction's ADI step
 
 The search scores injected sources, so it tunes for the sources it injects.  By default they
 have the star's spectrum: one contrast in every group.  A companion much redder than its star,
@@ -290,7 +290,7 @@ red = ales.make_reducer(ds, lam_m, fwhm_px, table=table,
 
 * A source of contrast `c` goes into each group at `c` times the spectrum there, over the
   spectrum at `spectrum_norm`: the representative group by default, another partition id, or
-  a wavelength in metres.  The run's calibrated contrast and its contrast curves are then the
+  a wavelength in meters.  The run's calibrated contrast and its contrast curves are then the
   contrast at that wavelength, for a source of that spectrum.
 * The spectrum is a callable of the wavelength in microns, a `(lambda_um, values)` table
   (linear in wavelength, held at its end values outside it) or `{partition: factor}`.  Every
@@ -331,7 +331,7 @@ space = ales.make_space(red, search_post_hp=True,
 klip-tpe draws its zones about `(nx / 2, ny / 2)` = (31, 31) on these 62-spaxel frames, and
 counts sector angles from +x; the 2015 `getzone` of the paper's reduction draws them about
 (30, 30) and counts from -x (atan2 + 180).  The star is at (30.5, 30.5) in both, and so is the
-centre of the derotation.  With `set_zone_center(red, (30, 30), "getzone2015")` the 5-27 spaxel
+center of the derotation.  With `set_zone_center(red, (30, 30), "getzone2015")` the 5-27 spaxel
 zone holds the paper's 2220 spaxels and each of the six sectors the paper's own.
 
 It still differs from the paper in two ways: KLIP runs on group means of 2 to 6

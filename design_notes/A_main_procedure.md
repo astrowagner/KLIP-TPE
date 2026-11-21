@@ -194,7 +194,7 @@ for `jn = 0..nnights-1` — i.e. **night-major ordering**: `bin_n1, n_ang_n1, �
 - **Every call consumes ≥1 uniform from the shared RNG stream** — important for replay.
 
 ### 3.4 Pixel convention
-Star centre `cx = (nx-1)/2., cy = (ny-1)/2.` everywhere. Source pixel: `x = cx + (rho/pxscale)*cos((theta+90)*!DTOR)`, `y = cy + (rho/pxscale)*sin((theta+90)*!DTOR)` (e.g. 6086, 6133) — i.e. PA measured from +y (north up) towards −x (east left).
+Star center `cx = (nx-1)/2., cy = (ny-1)/2.` everywhere. Source pixel: `x = cx + (rho/pxscale)*cos((theta+90)*!DTOR)`, `y = cy + (rho/pxscale)*sin((theta+90)*!DTOR)` (e.g. 6086, 6133) — i.e. PA measured from +y (north up) towards −x (east left).
 
 ### 3.5 `rho/theta/contrast` keyword override
 Only affects the NON-annular path (and the calibration's non-annular branch `randpos(nsrc_a, 0.40, 1.70, …)`). In annular mode `inj_rho/inj_theta` are always regenerated (5136) and `inj_contrast = replicate(cdef, n)`; only `contrast[0]` survives as `cdef`. With `random_position`, the initial set is drawn once at 4703 in the band 0.40–1.70".

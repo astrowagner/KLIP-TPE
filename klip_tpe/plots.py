@@ -1,13 +1,13 @@
-"""Matplotlib diagnostics driven by a run directory (the logged history only; nothing
-here talks to a reducer).  Inputs: ``results.jsonl``, ``run_setup.json``,
-``final_results.json``, ``annulusNN/winner.json``, ``annulusNN/validation.json``.
+"""Matplotlib diagnostics of a run directory, from the logged history alone.
 
-Every ``plot_*`` returns the :class:`matplotlib.figure.Figure` and, with
-``save=True``, writes a PNG under ``run_dir/plots/``.  Two conventions from the brief
-are enforced in the labelling: the **search score is upward-biased** (best of many
-noisy draws) and is never presented as the result -- the validated winner (raw metric
-on fresh injections) is what is marked as such; and axes are labelled with the actual
-metric name, never a generic "S/N map".
+Nothing here talks to a reducer.  The inputs are ``results.jsonl``, ``run_setup.json``,
+``final_results.json``, ``annulusNN/winner.json`` and ``annulusNN/validation.json``.
+
+Every ``plot_*`` returns its :class:`matplotlib.figure.Figure` and, with ``save=True``, writes a PNG
+under ``run_dir/plots/``.  The labels keep two conventions of the brief.  The **search score is biased
+upward**, the best of many noisy draws, and is never presented as the result, which is the validated
+winner (the raw metric on fresh injections), marked as such.  The axes carry the metric's own name,
+never a generic "S/N map".
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from matplotlib.figure import Figure
 __all__ = ["plot_trace", "plot_param_hist", "plot_partition_snr", "plot_contrast_curve", "plot_validation",
            "plot_testbed", "plot_bench_convergence", "plot_all", "load_run"]
 
-# Okabe-Ito (colour-blind safe): random draws grey, guided blue, local orange, explore green
+# Okabe-Ito (color-blind safe): random draws gray, guided blue, local orange, explore green
 PHASE_COLORS = {"seed": "#000000", "warmup": "#999999", "random": "#999999", "tpe": "#0072B2",
                 "local": "#E69F00", "explore": "#009E73", "grid": "#CC79A7", "resume": "#56B4E9"}
 PHASE_ORDER = ["seed", "warmup", "random", "grid", "tpe", "local", "explore", "resume"]
@@ -56,12 +56,30 @@ _RC_LOCK = threading.RLock()
 
 @contextlib.contextmanager
 def _locked_rc(rc: Dict[str, Any]):
-    """``matplotlib.rc_context(rc)``, entered under :data:`_RC_LOCK`."""
+    """Enter ``matplotlib.rc_context(rc)`` under :data:`_RC_LOCK`.
+
+    Parameters
+    ----------
+    rc : dict
+        The rc parameters.
+
+    Yields
+    ------
+    None
+        Nothing, the block runs inside the context.
+    """
     with _RC_LOCK, matplotlib.rc_context(rc):
         yield
 
 
 def _style():
+    """Return the context of the package's plot style (:data:`_STYLE`), under the rc lock.
+
+    Returns
+    -------
+    context : contextlib.AbstractContextManager
+        The context.
+    """
     return _locked_rc(_STYLE)
 
 
@@ -69,8 +87,20 @@ def _style():
 # loading
 # ----------------------------------------------------------------------------
 def _load_json(path: str) -> Optional[Any]:
-    """The file's contents, or None when it is missing or unreadable (a 0-byte file left
-    by a crash, a checkpoint caught between its two renames)."""
+    """Return a JSON file's contents, None when it is missing or unreadable.
+
+    A 0-byte file left by a crash and a checkpoint caught between its two renames are unreadable.
+
+    Parameters
+    ----------
+    path : str
+        The file.
+
+    Returns
+    -------
+    data : object or None
+        The contents.
+    """
     try:
         with open(path) as f:
             return json.load(f)
@@ -79,8 +109,20 @@ def _load_json(path: str) -> Optional[Any]:
 
 
 def load_run(run_dir: str) -> Dict[str, Any]:
-    """Everything the plots need: ``records`` (all annuli, all restarts), ``setup``,
-    ``final``, ``winners`` ``{ia: winner.json}``, ``validation`` ``{ia: table}``."""
+    """Return everything the plots need from a run directory.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run directory.
+
+    Returns
+    -------
+    run : dict
+        ``run_dir``, ``records`` (every annulus and restart, :func:`klip_tpe.bench.read_records`), ``setup``,
+        ``final``, ``checkpoint`` (read only without a setup), ``winners`` (each annulus' ``winner.json``)
+        and ``validation`` (each annulus' table).
+    """
     from .bench import read_records
     out: Dict[str, Any] = {"run_dir": run_dir, "records": read_records(run_dir, None, last_segment=False),
                            "setup": _load_json(os.path.join(run_dir, "run_setup.json")),
@@ -106,16 +148,52 @@ def load_run(run_dir: str) -> Dict[str, Any]:
 
 
 def _config(run: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a run's configuration, from its setup or else its checkpoint.
+
+    Parameters
+    ----------
+    run : dict
+        The run (:func:`load_run`).
+
+    Returns
+    -------
+    config : dict
+        The configuration, empty without either.
+    """
     src = run.get("setup") or run.get("checkpoint") or {}
     return src.get("config", {})
 
 
 def _space(run: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a run's space, from its setup or else its checkpoint.
+
+    Parameters
+    ----------
+    run : dict
+        The run (:func:`load_run`).
+
+    Returns
+    -------
+    space : dict
+        The space's dict, one without parameters when neither gives it.
+    """
     src = run.get("setup") or run.get("checkpoint") or {}
     return src.get("space", {"params": []})
 
 
 def _metric_name(run: Dict[str, Any]) -> str:
+    """Return the name of a run's metric for the axes, marked when clean-subtracted.
+
+    Parameters
+    ----------
+    run : dict
+        The run (:func:`load_run`).
+
+    Returns
+    -------
+    name : str
+        The name, ``"metric"`` when the setup does not give it.
+    """
     st = run.get("setup") or {}
     try:
         m = st["objective"]["metric"]["name"]
@@ -126,16 +204,60 @@ def _metric_name(run: Dict[str, Any]) -> str:
 
 
 def _annulus_records(run: Dict[str, Any], ia: int) -> List[Dict[str, Any]]:
+    """Return an annulus' records after its last restart.
+
+    Parameters
+    ----------
+    run : dict
+        The run (:func:`load_run`).
+    ia : int
+        The annulus, counted from 0.
+
+    Returns
+    -------
+    records : list of dict
+        The records from the last one of index 0 on.
+    """
     recs = [r for r in run["records"] if int(r.get("annulus", 0)) == ia]
     starts = [i for i, r in enumerate(recs) if int(r.get("index", 0)) == 0]
     return recs[starts[-1]:] if starts else recs
 
 
 def _annuli(run: Dict[str, Any]) -> List[int]:
+    """Return the annuli a run has records or a winner for.
+
+    Parameters
+    ----------
+    run : dict
+        The run (:func:`load_run`).
+
+    Returns
+    -------
+    annuli : list of int
+        The annuli, counted from 0, sorted.
+    """
     return sorted({int(r.get("annulus", 0)) for r in run["records"]} | set(run["winners"]))
 
 
 def _save(fig: Figure, run_dir: str, name: str, save: bool) -> Optional[str]:
+    """Write a figure into the run's ``plots/`` directory when asked.
+
+    Parameters
+    ----------
+    fig : matplotlib.figure.Figure
+        The figure.
+    run_dir : str
+        The run directory.
+    name : str
+        The file's name.
+    save : bool
+        Whether to write it.
+
+    Returns
+    -------
+    path : str or None
+        The file written, None without ``save``.
+    """
     if not save:
         return None
     d = os.path.join(run_dir, "plots")
@@ -146,16 +268,37 @@ def _save(fig: Figure, run_dir: str, name: str, save: bool) -> Optional[str]:
 
 
 def _score(r: Dict[str, Any]) -> float:
+    """Return a record's score, NaN for a failed evaluation.
+
+    Parameters
+    ----------
+    r : dict
+        The record.
+
+    Returns
+    -------
+    score : float
+        The score.
+    """
     s = r.get("score")
     return np.nan if s is None else float(s)
 
 
 def draw_scores_of(recs) -> List[Optional[List[float]]]:
-    """Per-record list of the individual draw scores, or None where a record has none.
+    """Return each record's individual draw scores, None where a record has fewer than 2.
 
-    Reads ``meta['draw_scores']``, written when ``RunConfig.n_remeasure > 1``.  Records
-    from a single-draw run simply have nothing here, which is how the callers know not to
-    draw a range they cannot measure.
+    They are ``meta['draw_scores']``, written when ``RunConfig.n_remeasure > 1``.  Records of a
+    single-draw run have none, which tells the callers not to draw a range they cannot measure.
+
+    Parameters
+    ----------
+    recs : sequence of dict or EvalRecord
+        The records.
+
+    Returns
+    -------
+    draws : list of (list of float or None)
+        Each record's finite draw scores, None with fewer than 2.
     """
     out: List[Optional[List[float]]] = []
     for r in recs:
@@ -168,28 +311,49 @@ def draw_scores_of(recs) -> List[Optional[List[float]]]:
 def draw_ranges(ax, x, draws, colors=None, color: str = "#8a8a8a", lw: float = 0.9,
                 alpha: float = 0.7, zorder: int = 2, label: Optional[str] = None,
                 floor: Optional[float] = None) -> int:
-    """Vertical min-to-max bar for every trial that was scored over more than one draw.
+    """Draw a vertical bar from the lowest to the highest draw for every trial scored over several draws.
 
-    The observed range, not a parametric interval: with three draws a +/- sd would be a
-    two-degree-of-freedom estimate dressed up as a confidence band, whereas min-max is
-    exactly what was measured.  Drawn under the points (``zorder`` below the scatter), so a
-    trial's score still reads as the datum and the bar as its uncertainty.
+    The bar is the observed range, not a parametric interval, since with three draws a standard deviation
+    is a two-degree-of-freedom estimate dressed as a confidence band, and the range is what was measured.
+    The bars go under the points, so a trial's score still reads as the datum and the bar as its
+    uncertainty.  They are grouped by color into a handful of ``vlines`` calls however many trials there
+    are, and get one legend entry on a neutral proxy handle, which says what the bars mean rather than
+    repeating the phase legend of the points.
 
-    ``colors`` gives a colour per trial -- pass the same phase colours the points use and
-    each bar belongs to its point rather than to a grey undifferentiated band.  Bars are
-    grouped by colour so this stays a handful of ``vlines`` calls however many trials there
-    are.  A single ``color`` applies to all of them.
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        The axes.
+    x : array-like
+        Each trial's position on the x axis.
+    draws : sequence of (sequence of float or None)
+        Each trial's draw scores (:func:`draw_scores_of`), a failed draw as None.
+    colors : str or sequence of str or None, default None
+        A color per trial, such as the phase colors of the points, so each bar belongs to its point.  None
+        takes ``color`` for all.
+    color : str, default "#8a8a8a"
+        The bars' color without ``colors``, and for the trials past their end.
+    lw : float, default 0.9
+        The bars' line width.
+    alpha : float, default 0.7
+        Their opacity.
+    zorder : int, default 2
+        Their drawing order, below the points'.
+    label : str or None, default None
+        The legend's entry, None for "draw range (min-max of N)" with the commonest number of draws, and an
+        empty string for none.
+    floor : float or None, default None
+        The axis' lower limit, which the caller takes from the scores alone.  A bar reaching below it is cut
+        there, with a small downward triangle at the floor.
 
-    One legend entry, on a neutral proxy handle: per-colour entries would duplicate the
-    phase legend the points already carry, and the entry is there to say what the bars MEAN,
-    not which phase any one of them came from.
+    Returns
+    -------
+    n : int
+        Number of bars drawn, 0 for a run of single draws, whose legend the caller then leaves alone.
 
-    Returns the number of bars drawn, so the caller can leave the legend alone when a run
-    had a single draw per trial and there is nothing to show.
-
-    ``floor``: the axis' lower limit, which the caller takes from the scores alone (Kevin
-    Wagner, 2026-11-01: one low draw squashed the scores).  A bar that reaches below it is cut
-    there, and a small downward triangle at the floor says the draw goes on below.
+    Notes
+    -----
+    The floor came with Kevin Wagner's note of 2026-11-01, after one low draw had squashed the scores.
     """
     xx = np.atleast_1d(x)
     if colors is None:
@@ -202,7 +366,7 @@ def draw_ranges(ax, x, draws, colors=None, color: str = "#8a8a8a", lw: float = 0
     cut: Dict[Any, List[float]] = {}
     ns: List[int] = []
     for xi, vals, c in zip(xx, draws, cols):
-        # sanitised here rather than trusted: a failed draw is recorded as None, and the
+        # sanitized here rather than trusted: a failed draw is recorded as None, and the
         # live-display caller passes meta['draw_scores'] through untouched
         v = [float(q) for q in (vals or []) if q is not None and np.isfinite(q)]
         if len(v) < 2:
@@ -237,8 +401,28 @@ def draw_ranges(ax, x, draws, colors=None, color: str = "#8a8a8a", lw: float = 0
 # trace
 # ----------------------------------------------------------------------------
 def plot_trace(run_dir: str, annulus: int = 0, save: bool = True, ax=None) -> Figure:
-    """Score vs evaluation coloured by proposal phase, with the running best of the
-    (upward-biased) search score and the validated winner marked."""
+    """Plot an annulus' scores against the evaluation, colored by how each was proposed.
+
+    The running best of the search score, biased upward, and the validated winner are marked, and each
+    trial of several draws gets its range (:func:`draw_ranges`).  The axis starts at the lower of the
+    lowest score and 0, and draws reaching below it are cut there.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run directory.
+    annulus : int, default 0
+        The annulus, counted from 0.
+    save : bool, default True
+        Whether to write ``plots/trace_annNN.png``.
+    ax : matplotlib.axes.Axes or None, default None
+        The axes to draw into, None for a new figure.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The figure.
+    """
     run = load_run(run_dir)
     recs = _annulus_records(run, annulus)
     win = run["winners"].get(annulus)
@@ -251,7 +435,7 @@ def plot_trace(run_dir: str, annulus: int = 0, save: bool = True, ax=None) -> Fi
         fin = y[np.isfinite(y)]
         # the bottom from the scores alone, 0 in a floored run, with the draws' bars cut there
         lo = min(float(fin.min()), 0.0) if fin.size else None
-        # under the points, in each point's own phase colour: what its draws spanned
+        # under the points, in each point's own phase color: what its draws spanned
         ds = draw_scores_of(recs)
         draw_ranges(ax, n, ds, colors=[PHASE_COLORS.get(p, "#333333") for p in ph], floor=lo)
         for p in PHASE_ORDER + sorted(set(ph) - set(PHASE_ORDER)):
@@ -300,6 +484,18 @@ def plot_trace(run_dir: str, annulus: int = 0, save: bool = True, ax=None) -> Fi
 # parameter histograms
 # ----------------------------------------------------------------------------
 def _param_groups(space: Dict[str, Any]) -> Dict[str, List[Tuple[int, Dict[str, Any]]]]:
+    """Return a space's dimensions grouped by base name, a replicated parameter's slots together.
+
+    Parameters
+    ----------
+    space : dict
+        The space's dict.
+
+    Returns
+    -------
+    groups : dict
+        Each base name's ``(index, param dict)`` pairs, in the space's order.
+    """
     groups: Dict[str, List[Tuple[int, Dict[str, Any]]]] = {}
     for i, p in enumerate(space.get("params", [])):
         groups.setdefault(p.get("base") or p["name"], []).append((i, p))
@@ -307,6 +503,21 @@ def _param_groups(space: Dict[str, Any]) -> Dict[str, List[Tuple[int, Dict[str, 
 
 
 def _bins_for(p: Dict[str, Any]) -> np.ndarray:
+    """Return the histogram bin edges of a parameter.
+
+    A grid parameter gets a bin about each grid value, a whole-number one a bin per value, and a float one
+    15 bins over its range.
+
+    Parameters
+    ----------
+    p : dict
+        The parameter's dict.
+
+    Returns
+    -------
+    edges : ndarray
+        The edges.
+    """
     if p.get("grid"):
         g = np.asarray(p["grid"], float)
         edges = np.concatenate([[g[0] - 0.5 * (g[1] - g[0]) if g.size > 1 else g[0] - 0.5],
@@ -319,9 +530,27 @@ def _bins_for(p: Dict[str, Any]) -> np.ndarray:
 
 
 def plot_param_hist(run_dir: str, annulus: int = 0, gamma: Optional[float] = None, save: bool = True) -> Figure:
-    """Per-parameter histograms: all evaluations vs the top-``gamma`` set (the TPE
-    "good" set), winner marked.  Replicated per-partition dims are pooled by base name
-    (one panel per base; the winner's per-partition values are all marked)."""
+    """Plot each parameter's histogram over every evaluation and over the top ``gamma`` set, the winner marked.
+
+    The top set is the TPE's good set.  A replicated parameter's slots are pooled into one panel by their
+    base name, with each of the winner's values marked.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run directory.
+    annulus : int, default 0
+        The annulus, counted from 0.
+    gamma : float or None, default None
+        Fraction of the evaluations in the top set, None for the run's own.
+    save : bool, default True
+        Whether to write ``plots/param_hist_annNN.png``.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The figure.
+    """
     run = load_run(run_dir)
     recs = _annulus_records(run, annulus)
     space = _space(run)
@@ -374,8 +603,25 @@ def plot_param_hist(run_dir: str, annulus: int = 0, gamma: Optional[float] = Non
 # per-partition S/N
 # ----------------------------------------------------------------------------
 def plot_partition_snr(run_dir: str, annulus: int = 0, save: bool = True) -> Figure:
-    """Raw per-partition score of the *included* partitions at every evaluation,
-    with the combined raw score for reference (drop-outs show as gaps)."""
+    """Plot the raw score of each included partition at every evaluation, with the combined raw score.
+
+    A partition left out of an evaluation shows as a gap.  A run made since 2026-10-25 scores the combined
+    image only, and the figure says so.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run directory.
+    annulus : int, default 0
+        The annulus, counted from 0.
+    save : bool, default True
+        Whether to write ``plots/partition_snr_annNN.png``.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The figure.
+    """
     run = load_run(run_dir)
     recs = _annulus_records(run, annulus)
     pids: List[str] = []
@@ -412,6 +658,24 @@ def plot_partition_snr(run_dir: str, annulus: int = 0, save: bool = True) -> Fig
 # contrast curve
 # ----------------------------------------------------------------------------
 def _curve_xy(cc: Dict[str, Any], rkey: str = "r_as", ckey: str = "curve") -> Tuple[np.ndarray, np.ndarray]:
+    """Return a curve's separations and values from its dict, None read as NaN, cut to equal length.
+
+    Parameters
+    ----------
+    cc : dict or None
+        The curve.
+    rkey : str, default "r_as"
+        The key of the separations.
+    ckey : str, default "curve"
+        The key of the values.
+
+    Returns
+    -------
+    r : ndarray
+        The separations.
+    c : ndarray
+        The values.
+    """
     r = np.array([np.nan if v is None else v for v in (cc or {}).get(rkey, [])], float)
     c = np.array([np.nan if v is None else v for v in (cc or {}).get(ckey, [])], float)
     n = min(r.size, c.size)
@@ -419,13 +683,28 @@ def _curve_xy(cc: Dict[str, Any], rkey: str = "r_as", ckey: str = "curve") -> Tu
 
 
 def plot_contrast_curve(run_dir: str, save: bool = True, nsigma: float = 5.0) -> Figure:
-    """Contrast curves of each annulus winner from ``winner.json``:
+    """Plot the contrast curves of each annulus' winner, from its ``winner.json``.
 
-    * ``contrast_curve`` -- the validated, injection-calibrated ``nsigma`` curve (solid)
-      with its per-sample points (``sample_r``/``sample_c``, else derived from
-      ``validation_samples`` as ``nsigma * contrast / SNR``);
-    * ``fm_curve`` -- the KLIP-FM cross-check curve when present (dashed + markers,
-      same colour), so the two calibrations can be compared per annulus.
+    The curves are:
+
+    * ``contrast_curve``, the validated, injection-calibrated ``nsigma`` curve (solid), with its samples
+      (``sample_r`` and ``sample_c``, else ``nsigma * contrast / SNR`` of ``validation_samples``),
+    * ``fm_curve``, the KLIP-FM cross-check curve where there is one (dashed, with markers, in the same
+      color), so the two calibrations compare per annulus.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run directory.
+    save : bool, default True
+        Whether to write ``plots/contrast_curve.png``.
+    nsigma : float, default 5.0
+        The curves' S/N, for the labels and the samples derived.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The figure.
     """
     run = load_run(run_dir)
     with _style():
@@ -476,8 +755,22 @@ def plot_contrast_curve(run_dir: str, save: bool = True, nsigma: float = 5.0) ->
 # validation
 # ----------------------------------------------------------------------------
 def plot_validation(run_dir: str, save: bool = True) -> Figure:
-    """Search score vs validated score of every validation candidate (all annuli);
-    the vertical bar spans the validation trials, the 1:1 line shows the optimism."""
+    """Plot each validation candidate's search score against its validated score, every annulus together.
+
+    A vertical bar spans each candidate's validation trials, and the 1:1 line shows the optimism.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run directory.
+    save : bool, default True
+        Whether to write ``plots/validation.png``.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The figure.
+    """
     run = load_run(run_dir)
     with _style():
         fig, ax = plt.subplots(figsize=(5.2, 4.6))
@@ -524,13 +817,29 @@ def plot_validation(run_dir: str, save: bool = True) -> Figure:
 # testbed / benchmark
 # ----------------------------------------------------------------------------
 def plot_testbed(results: Dict[str, Any], out_path: Optional[str] = None, title: Optional[str] = None) -> Figure:
-    """Figure for :mod:`klip_tpe.testbed` outputs.
+    """Plot the results of :mod:`klip_tpe.testbed`.
 
-    * ``compare_density_models`` result (``{mode: {"true_mean", "true_sd", "obs_mean", ...}}``):
-      bars of TRUE-at-observed-best (mean +/- sd) with the observed best marked, so the
-      optimism (observed - true) is visible per mode.
-    * ``{label: run_tpe_on_objective(...)}`` (values with ``best_obs`` / ``true_at_best``):
-      the two curves vs iteration per label.
+    The results are of either kind:
+
+    * a ``compare_density_models`` result, ``{mode: {"true_mean", "true_sd", "obs_mean", ...}}``, drawn
+      as bars of the true score at the observed best (mean and standard deviation) with the observed best
+      marked, so each mode's optimism shows,
+    * ``{label: run_tpe_on_objective(...)}``, values with ``best_obs`` and ``true_at_best``, drawn as the
+      two curves against the iteration for each label.
+
+    Parameters
+    ----------
+    results : dict
+        The results.
+    out_path : str or None, default None
+        The file to write, None for none.
+    title : str or None, default None
+        The title, None for the density models' one.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The figure.
     """
     with _style():
         fig, ax = plt.subplots(figsize=(6.5, 4.0))
@@ -570,9 +879,27 @@ def plot_testbed(results: Dict[str, Any], out_path: Optional[str] = None, title:
 
 def plot_bench_convergence(curves: Dict[str, Dict[str, Any]], out_path: Optional[str] = None,
                            title: Optional[str] = None, ax=None) -> Figure:
-    """Curves from :func:`klip_tpe.bench.bench_convergence`: per-mode mean +/- sd
-    (shaded) of the running best **search** score vs evaluation.  Upward-biased by
-    construction -- read the validated numbers from ``summarize_bench``."""
+    """Plot each mode's mean running best search score against the evaluation, its spread shaded.
+
+    The curves come from :func:`klip_tpe.bench.bench_convergence` and are biased upward by construction,
+    so the validated numbers are read from :func:`klip_tpe.bench.summarize_bench`.
+
+    Parameters
+    ----------
+    curves : dict
+        Each mode's curves (:func:`klip_tpe.bench.bench_convergence`).
+    out_path : str or None, default None
+        The file to write, None for none.
+    title : str or None, default None
+        The title, None for the default one.
+    ax : matplotlib.axes.Axes or None, default None
+        The axes to draw into, None for a new figure.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The figure.
+    """
     with _style():
         fig = ax.figure if ax is not None else plt.figure(figsize=(7.0, 4.2))
         ax = ax if ax is not None else fig.add_subplot(111)
@@ -600,10 +927,25 @@ def plot_bench_convergence(curves: Dict[str, Dict[str, Any]], out_path: Optional
 
 
 def plot_all(run_dir: str, save: bool = True, close: bool = True, books: bool = True) -> Dict[str, Any]:
-    """All per-run diagnostics for every annulus; returns ``{name: Figure}`` plus, with
-    ``books=True`` (and ``save``), the per-annulus display books written by
-    :mod:`klip_tpe.display` under ``{name: path}`` (corner, landscapes, parhist, edf,
-    partition map, k-book, calibration panel)."""
+    """Draw every diagnostic of a run, for every annulus.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run directory.
+    save : bool, default True
+        Whether to write the figures.
+    close : bool, default True
+        Whether to close the figures once drawn.
+    books : bool, default True
+        Whether to draw the annulus books of :mod:`klip_tpe.display` too (corner, landscapes, parhist,
+        EDF, partition map, k-book and calibration panel), with ``save``.
+
+    Returns
+    -------
+    figures : dict
+        Each figure's name and figure, and each book's name and path.
+    """
     run = load_run(run_dir)
     figs: Dict[str, Any] = {}
     for ia in _annuli(run):

@@ -1,10 +1,10 @@
 """The beta Pic contrast axis, and the two traps that made it wrong.
 
 The NACO L' set is the one tutorial data set whose star flux has to be *imported*: the
-science frames are AGPM coronagraphic and the distributed template is normalised, so
+science frames are AGPM coronagraphic and the distributed template is normalized, so
 neither file says how bright beta Pictoris is.  These tests pin the import, the exact
 aperture arithmetic that converts it, and the float32 floor that silently eats an injection
-whose ``flux_unit`` is a normalised template's own sum.
+whose ``flux_unit`` is a normalized template's own sum.
 
 The end-to-end check -- beta Pic b at dL' 7.81 against Absil et al. (2013)'s 8.01 +/- 0.16
 from the same data -- lives in ``scripts/check_betapic_contrast.py``; it needs a download
@@ -33,7 +33,7 @@ def test_aperture_sum_is_exact_on_a_flat_field():
     ones = np.ones((41, 41))
     for r in (0.3, 1.0, 2.0, 2.4005, 5.0, 12.0):
         assert generic.aperture_sum(ones, 20.0, 20.0, r) == pytest.approx(np.pi * r * r, rel=1e-12)
-    # off-centre, non-integer centre, and a radius that clips no edge
+    # off-centre, non-integer center, and a radius that clips no edge
     assert generic.aperture_sum(ones, 17.3, 22.9, 3.7) == pytest.approx(np.pi * 3.7 ** 2, rel=1e-12)
 
 
@@ -42,7 +42,7 @@ def test_aperture_sum_handles_edges_and_degenerate_radii():
     assert generic.aperture_sum(ones, 5.0, 5.0, 0.0) == 0.0
     assert generic.aperture_sum(ones, 5.0, 5.0, -1.0) == 0.0
     assert generic.aperture_sum(ones, -50.0, 5.0, 2.0) == 0.0          # entirely off the array
-    # centred on pixel 0, whose left half lies outside the array: the half-disc x >= 0 plus
+    # centered on pixel 0, whose left half lies outside the array: the half-disc x >= 0 plus
     # the strip -0.5 <= x <= 0, i.e. pi r^2 / 2 + 2 * int_0^0.5 sqrt(r^2 - x^2) dx
     r = 3.0
     strip = 0.5 * 0.5 * np.sqrt(r * r - 0.25) + 0.5 * r * r * np.arcsin(0.5 / r)
@@ -65,7 +65,7 @@ def test_a_whole_pixel_mask_is_not_good_enough():
 # ------------------------------------------------------------------ the conversion
 
 def test_star_flux_from_aperture_photometry_rescales_between_apertures():
-    """starphot is quoted in one aperture; TemplatePSF normalises in another.  The helper's
+    """starphot is quoted in one aperture; TemplatePSF normalizes in another.  The helper's
     whole job is that ratio, and it must agree with what TemplatePSF actually does."""
     g = np.exp(-((np.mgrid[0:41, 0:41][1] - 20.0) ** 2
                  + (np.mgrid[0:41, 0:41][0] - 20.0) ** 2) / (2 * 2.0 ** 2))
@@ -73,7 +73,7 @@ def test_star_flux_from_aperture_photometry_rescales_between_apertures():
     sf = generic.star_flux_from_aperture_photometry(g, 1000.0, 3.0)
     assert sf == pytest.approx(1000.0 * g.sum() / a, rel=1e-12)
 
-    # with ee_radius_px the target normalisation changes and so must the answer
+    # with ee_radius_px the target normalization changes and so must the answer
     sf5 = generic.star_flux_from_aperture_photometry(g, 1000.0, 3.0, ee_radius_px=5.0)
     assert sf5 == pytest.approx(1000.0 * generic.aperture_sum(g, 20.0, 20.0, 5.0) / a, rel=1e-12)
     assert sf5 < sf
@@ -145,12 +145,12 @@ def test_an_injection_below_the_float32_quantum_is_lost_and_warned_about():
     """``inject_sources`` holds the cube in float32.  A stamp whose pixels sit below the
     float32 ULP of the science pixels they land on is not faint -- it is gone, and the loss
     grows as the contrast falls, so recovered S/N stops tracking contrast.  This is what a
-    normalised template's flux_unit (order 1, against science pixels of order 1e3) walks
+    normalized template's flux_unit (order 1, against science pixels of order 1e3) walks
     into, and it is silent without the warning."""
     rng = np.random.default_rng(0)
     cube = (1000.0 + rng.normal(0, 10, (8, 61, 61))).astype(np.float32)
     ang = np.linspace(0, 40, 8)
-    model = GaussianPSF(3.5, star_flux=1.0)       # flux_unit 1, as a normalised template gives
+    model = GaussianPSF(3.5, star_flux=1.0)       # flux_unit 1, as a normalized template gives
 
     def deposited(c):
         with warnings.catch_warnings():
@@ -242,7 +242,7 @@ def test_load_calints_crops_odd_and_reports_the_centre_it_used():
     assert "n = 2 * H + 1" in src, "the crop has to be odd"
     assert "y0 + n" in src and "x0 + n" in src
     assert "star_center" in inspect.signature(sk.load_calints).parameters
-    assert "APERTURE reference" in src, "CRPIX being the wrong centre must stay documented"
+    assert "APERTURE reference" in src, "CRPIX being the wrong center must stay documented"
 
 
 def test_every_frame_carries_its_own_integration_time():
@@ -293,7 +293,7 @@ def test_the_frame_count_matches_carter_2023_table_1():
         # the gap is one reset frame per integration, give or take clock granularity
         assert (dur - eff) / (nints * tframe) == pytest.approx(1.0, abs=0.03)
 
-    # 4 science, 18 reference -- what load_calints must produce for this programme
+    # 4 science, 18 reference -- what load_calints must produce for this program
     assert 2 * 2 == 4 and 2 * 9 == 18
 
 
@@ -325,7 +325,7 @@ def test_the_jwst_call_sites_use_the_model_and_the_measured_centre():
         assert "2.324e-04" not in h2.split("\n")[0], \
             "2.324e-04 was measured on median-filtered frames (the pre-2026-09-16 repair)"
         assert "2.022e-04" in h2.split("\n")[0]
-        # the hand-rolled loader is gone in favour of the shared one
+        # the hand-rolled loader is gone in favor of the shared one
         assert "load_calints" in src
 
 

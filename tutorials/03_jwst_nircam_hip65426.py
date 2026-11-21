@@ -93,7 +93,7 @@ def read_calints(paths):
     return np.array(ims), np.array(pas)
 
 def repair(cube, maxit=20):
-    """Fill every DQ-flagged (NaN) pixel with the median of its finite 8 neighbours --
+    """Fill every DQ-flagged (NaN) pixel with the median of its finite 8 neighbors --
     spaceKLIP's treatment -- and touch nothing else.  Clusters close from the rim inward."""
     out = np.array(cube, float)
     for i, im in enumerate(out):
@@ -191,8 +191,8 @@ if HAVE_DATA:
     def crop(cube):
         # ODD size, deliberately.  The shift puts the star on the integer pixel round(cx),
         # and the crop starts H pixels before it, so the star lands on index H -- which is
-        # the array centre (n-1)/2 only when n = 2H+1.  With an even 2H crop the star sits
-        # half a pixel off the centre klip-tpe assumes in EVERY axis (0.71 px in all), and
+        # the array center (n-1)/2 only when n = 2H+1.  With an even 2H crop the star sits
+        # half a pixel off the center klip-tpe assumes in EVERY axis (0.71 px in all), and
         # every separation and position angle downstream is measured from the wrong origin.
         fx, fy = cx - round(cx), cy - round(cy)
         x0, y0 = int(round(cx)) - H, int(round(cy)) - H

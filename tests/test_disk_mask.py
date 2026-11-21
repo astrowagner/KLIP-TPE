@@ -131,7 +131,7 @@ def test_without_a_bright_disk_no_negatives_are_taken():
     assert not disk_mask_from_image(img, FWHM, nsig=6.0, r_range=(5, 38), nsig_neg=2.0).any()
 
 
-# ----------------------------------------------------------- the noise ring honours it
+# ----------------------------------------------------------- the noise ring honors it
 
 def test_masking_the_arc_lowers_the_noise_next_to_it():
     img, arc = _arc_image(amp=20.0)

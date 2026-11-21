@@ -235,7 +235,7 @@ def test_build_bars_injections_from_the_dead_sectors(tree, stub_stpsf):
     run_miri, a = _args(data=str(tree))
     *_, samp, _, _ = run_miri.build(a, log=lambda *_: None)
     assert len(samp.forbidden_pa) >= 4, list(samp.forbidden_pa)
-    # every forbidden centre is a quadrant boundary carried into sky angle by some roll
+    # every forbidden center is a quadrant boundary carried into sky angle by some roll
     for c, w in samp.forbidden_pa:
         assert w > 0
         assert min(abs(((c - b + 180) % 360) - 180) for b in (0, 10, 90, 100, 180, 190, 270, 280)) < 6
@@ -317,7 +317,7 @@ def test_check_runs_the_whole_path_and_passes(tree, stub_stpsf, tmp_path):
 
 
 def test_star_center_overrides_crpix_and_moves_the_stamp(tree, stub_stpsf):
-    """The loader tells you to pass a measured centre; the driver has to be able to.
+    """The loader tells you to pass a measured center; the driver has to be able to.
 
     CRPIX is the aperture reference point, not where the star is, and on MIRI the two differ
     by a fraction of a pixel.  Nothing here asserts which is right -- only that the flag

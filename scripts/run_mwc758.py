@@ -53,7 +53,7 @@ MWC758C = (0.607, 213.8)   # known companion: rho (arcsec), PA (deg), from the I
 #: filter and aperture give 1.025 lam/D = 2.22 px at that scale, which is the check).
 #:
 #: The trap: the 640-pixel ``_cen`` cubes are NOT oversampled.  They are the 320-pixel
-#: SUB320A335R subarray padded with NaN so the star lands on the frame centre -- only 25%
+#: SUB320A335R subarray padded with NaN so the star lands on the frame center -- only 25%
 #: of each frame is finite, in a 318 x 319 box.  The STPSF template beside them IS
 #: oversampled (642 px, PIXELSCL 0.0312, OSAMP 2), and taking ITS scale for the science
 #: data doubles every radius: the companion moves from 9.6 px to 19.4 and the annulus that
@@ -112,7 +112,7 @@ def load_psf(path, pxscale):
 
 
 def crop_to_finite(*cubes, center=None):
-    """Largest square crop, centred on the star, in which every frame of every cube is
+    """Largest square crop, centered on the star, in which every frame of every cube is
     finite.
 
     The ``_cen`` cubes are a subarray padded into a bigger grid, so three quarters of each
@@ -120,7 +120,7 @@ def crop_to_finite(*cubes, center=None):
     frame; ``np.nansum`` of an all-NaN frame is 0.0; ``bin_frames`` drops zero-sum bins; and
     the science cube arrives at the reducer with no frames at all.  Cropping first is the
     fix, and it has to be SYMMETRIC about the star, because the package puts the star at the
-    geometric centre of whatever array it is given."""
+    geometric center of whatever array it is given."""
     fin = np.ones(cubes[0].shape[-2:], bool)
     for c in cubes:
         fin &= np.isfinite(np.asarray(c)).all(axis=0)
@@ -132,7 +132,7 @@ def crop_to_finite(*cubes, center=None):
     half = int(min(cx - xs.min(), xs.max() - cx, cy - ys.min(), ys.max() - cy))
     if half < 20:
         raise SystemExit(f"the finite region is only {2 * half + 1} px across; "
-                         f"is the star really at the frame centre?")
+                         f"is the star really at the frame center?")
     y0, y1 = int(round(cy - half)), int(round(cy + half)) + 1
     x0, x1 = int(round(cx - half)), int(round(cx + half)) + 1
     out = [np.ascontiguousarray(np.asarray(c)[..., y0:y1, x0:x1]) for c in cubes]

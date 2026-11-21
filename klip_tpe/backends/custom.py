@@ -48,7 +48,7 @@ class FunctionReducer(KLIPReducer):
         frame selection, high-pass and binning and must return the **derotated,
         combined** image (north up when rotated CCW by ``angles + truenorth``).
     supports_kscan
-        whether ``subtract`` honours ``k_scan=True`` (returns ``(k, ny, nx)``); if
+        whether ``subtract`` honors ``k_scan=True`` (returns ``(k, ny, nx)``); if
         False the Runner's scan k-modes are unavailable for this reducer.
     extra_params
         defaults for parameters your function reads that the built-in reducer does not
@@ -95,7 +95,7 @@ class ExternalReducer(Reducer):
     ``request.params`` is the parameter dict for this evaluation, ``request.injections``
     the list of :class:`~klip_tpe.metrics.Source` to add (``rho`` arcsec, ``theta`` deg
     E of N, ``contrast``) or ``None`` for the clean pass, ``request.k_scan`` asks for a
-    ``(k, ny, nx)`` cube.  Return the combined, north-up image centred on the star at
+    ``(k, ny, nx)`` cube.  Return the combined, north-up image centered on the star at
     ``((nx-1)/2, (ny-1)/2)`` in ``ReductionResult(image, weight, meta)``.
     ``frame_angles()`` must return the parallactic angles (for the reference-count
     guardrail and the binning-span rule) and ``frame_tags()`` the per-frame quality tags

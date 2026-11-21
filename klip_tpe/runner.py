@@ -187,7 +187,7 @@ _SIDELOBES_DEFAULT = {"mode": "off"}
 class RunConfig:
     """Everything that defines a run except the data objects.
 
-    New protocol fields (all default to the pre-existing behaviour):
+    New protocol fields (all default to the pre-existing behavior):
 
     opt_width / width_range / r_cap
         adaptive annuli (A §3.1): ``ann_edges`` holds the first inner edge only, the
@@ -407,7 +407,7 @@ class RunConfig:
     #: None (the default): the band, as before.
     inject_rho: Optional[float] = None
     #: Freeze the search's injected sources -- radii AND azimuths -- for a whole annulus, so
-    #: every configuration is scored on one speckle realisation.  OFF by default, because it
+    #: every configuration is scored on one speckle realization.  OFF by default, because it
     #: is NOT what ``optimize_near_2_tpe`` does and it defeats something the IDL designed in
     #: deliberately.
     #:
@@ -424,15 +424,15 @@ class RunConfig:
     #:
     #: The flag was added on 2026-09-13 on a misreading: a NEAR run showed the *same*
     #: configuration scoring over a spread of 6.6 (sd ~1.0), which was taken for a porting
-    #: bug.  The variance is real, and the IDL accepts it on purpose: its defence is the
+    #: bug.  The variance is real, and the IDL accepts it on purpose: its defense is the
     #: validated election, which re-scores the top candidates at FRESH positions, not a
     #: frozen injection pattern.  Freezing the azimuths lets the optimizer tune to the
-    #: speckle realisation at those particular position angles, which is the gaming the IDL
+    #: speckle realization at those particular position angles, which is the gaming the IDL
     #: comment names -- a search score that rises without sensitivity improving.  A NEAR run
     #: spent 2037 evaluations injecting at PA 87.39 / 267.39 before this was caught.
     #:
     #: Left in place, off, because pairing is a legitimate experiment to be able to run (it
-    #: is how you measure how much of a search's gain is realisation luck); it is a
+    #: is how you measure how much of a search's gain is realization luck); it is a
     #: documented departure from the reference, never the default.
     fixed_sources: bool = False
 
@@ -451,7 +451,7 @@ class RunConfig:
     batch_mode: str = "pipeline"          # "pipeline" (a new proposal when the oldest trial is in) | "sync"
     bench_tag: str = "none"
     notes: str = ""
-    # --- protocol extensions (defaults reproduce the previous behaviour) ---
+    # --- protocol extensions (defaults reproduce the previous behavior) ---
     opt_width: bool = False
     width_range: Tuple[float, float] = (15.0, 30.0)
     r_cap: float = 70.0
@@ -525,10 +525,10 @@ class RunConfig:
 
     @property
     def zones(self) -> List[Tuple[float, float]]:
-        """Every annulus' zone ``(inner, outer)`` px, numbered by centre: those between the
+        """Every annulus' zone ``(inner, outer)`` px, numbered by center: those between the
         ``ann_edges`` and the ``ann_extra`` ones.  Refused when a zone is empty, when two are
         the same, or when one holds another (the inner edges and the outer edges must both
-        grow with the centre), and with ``opt_width``."""
+        grow with the center), and with ``opt_width``."""
         e = [float(v) for v in (self.ann_edges or [])]
         base = [(e[i], e[i + 1]) for i in range(len(e) - 1)]
         if not self.ann_extra:
@@ -554,7 +554,7 @@ class RunConfig:
     @property
     def tiles(self) -> List[Tuple[float, float]]:
         """Each annulus' tile in the stitch (:func:`klip_tpe.stitch.annulus_tiles`): where
-        annuli overlap, each radius from the annulus with the nearest centre.  Without
+        annuli overlap, each radius from the annulus with the nearest center.  Without
         ``ann_extra`` the tiles are the zones."""
         from .stitch import annulus_tiles
         return annulus_tiles(self.zones)
@@ -1265,7 +1265,7 @@ class Runner:
                              "(SearchSpace.add(Param('width', w0, w1, 'int')))")
         if self.cfg.ann_extra:
             zs, ts = self.cfg.zones, self.cfg.tiles        # refuses zones that cannot be tiled
-            self.log("annuli by centre, zone (tile) px: " + ", ".join(
+            self.log("annuli by center, zone (tile) px: " + ", ".join(
                 f"{k + 1}: {z[0]:g}-{z[1]:g}" + ("" if tuple(z) == tuple(t) else f" ({t[0]:.2f}-{t[1]:.2f})")
                 for k, (z, t) in enumerate(zip(zs, ts))))
         if self.cfg.partition_weighting and isinstance(self.reducer, PartitionedReducer):
@@ -2096,7 +2096,7 @@ class Runner:
         Only used when ``RunConfig.fixed_sources`` is on, which is NOT the default and is a
         documented departure from ``optimize_near_2_tpe`` -- see that field.  The reference
         re-draws the azimuths every evaluation on purpose; this is here for the experiment of
-        pairing every comparison on one speckle realisation, not for production.
+        pairing every comparison on one speckle realization, not for production.
 
         Drawn from a generator seeded only by the run seed and the annulus index -- never
         from ``self.rng``, whose state advances with the search.  That independence is what
@@ -5445,7 +5445,7 @@ class Runner:
 
         Follows the metric rather than being a knob of its own, so the FITS on disk is
         the image the run actually scored.  These products used to flatten
-        unconditionally, which meant a run could be optimised on one image and shipped
+        unconditionally, which meant a run could be optimized on one image and shipped
         with another -- and the header said ``radprof-flattened`` either way.
         """
         return bool(getattr(getattr(self.objective, "metric", None), "flatten", False))
@@ -5481,7 +5481,7 @@ class Runner:
             sources.extend([s.as_tuple() for s in self._best_images.get("sources", [])])
         if not cleans:
             return None
-        # the annuli done so far tile the image among themselves (nearest centre where they overlap)
+        # the annuli done so far tile the image among themselves (nearest center where they overlap)
         tiles = self._tiles(zones)
         pads = self._tile_pads(tiles, annuli=zones)
         itiles = self._image_tiles(tiles)       # the innermost and outermost annuli' whole zones
@@ -6264,7 +6264,7 @@ class Runner:
             return None
         cleans = [d["clean"] for _, d in items]
         zones = [tuple(d["zone"]) for _, d in items]
-        # the tiles: each radius from the annulus with the nearest centre where annuli overlap,
+        # the tiles: each radius from the annulus with the nearest center where annuli overlap,
         # the zones themselves where they do not (RunConfig.ann_extra)
         tiles = self._tiles(zones)
         edges = [t[0] for t in tiles] + [tiles[-1][1]]
@@ -6786,7 +6786,7 @@ class Runner:
         the same configurations and draws -- while the readers of ``results.jsonl`` keep the
         first record of each index.
 
-        Taking a save is cheap (:meth:`_checkpoint_snapshot`).  It is serialised only when
+        Taking a save is cheap (:meth:`_checkpoint_snapshot`).  It is serialized only when
         it is written: ``json.dumps`` of the whole history after every evaluation cost a
         time that grew with the history, on the thread that sets a pipelined search's pace
         (4.2 MB at 5040 evaluations of NEAR2, 2026-10-12).

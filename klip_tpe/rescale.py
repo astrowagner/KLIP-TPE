@@ -21,7 +21,7 @@ __all__ = ["rescale_frame", "rescale_frames", "scale_coordinates", "displacement
 def scale_coordinates(shape: Tuple[int, int], s: float,
                       center: Optional[Tuple[float, float]] = None) -> Tuple[np.ndarray, np.ndarray]:
     """Sample coordinates ``(ys, xs)`` that magnify a frame of ``shape`` by ``s`` about
-    ``center`` (``(x, y)``, the array centre ``((nx - 1) / 2, (ny - 1) / 2)`` by default):
+    ``center`` (``(x, y)``, the array center ``((nx - 1) / 2, (ny - 1) / 2)`` by default):
     output pixel ``(y, x)`` reads the input at ``center + (p - center) / s``."""
     ny, nx = int(shape[0]), int(shape[1])
     cx, cy = ((nx - 1) / 2.0, (ny - 1) / 2.0) if center is None else (float(center[0]), float(center[1]))

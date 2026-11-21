@@ -1419,7 +1419,7 @@ class KLIPReducer(Reducer):
             warnings.warn(f"{what}: {kept:.5f} of the sources' flux {'left' if sign < 0 else 'reached'} the frames "
                           f"(measured on {k} of {orig.shape[0]} frames), float32 rounding "
                           f"{'kept' if sign < 0 else 'lost'} the rest.  flux_unit is {self.model.flux_unit:.4g} -- if "
-                          f"that is a normalised template's own sum rather than the star's flux in the science "
+                          f"that is a normalized template's own sum rather than the star's flux in the science "
                           f"frames' units, set star_flux (see generic.star_flux_from_aperture_photometry).",
                           RuntimeWarning, stacklevel=3)
         self.data = replace(self.data, cube=cube)
@@ -2998,7 +2998,7 @@ class PartitionedReducer(Reducer):
             ref = float(fn(float(norm) * 1e6))
             at_txt = f"{float(norm) * 1e6:.3f} um"
         if not (np.isfinite(ref) and ref > 0):
-            raise ValueError(f"the spectrum is {ref!r} at its normalisation ({at_txt}); it must be > 0 there")
+            raise ValueError(f"the spectrum is {ref!r} at its normalization ({at_txt}); it must be > 0 there")
         fac = {pid: v / ref for pid, v in raw.items()}
         bad = {pid: v for pid, v in fac.items() if not (np.isfinite(v) and v >= 0)}
         if bad:

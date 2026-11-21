@@ -17,12 +17,31 @@ __all__ = ["git_commit", "describe"]
 
 
 def _package_dir() -> str:
+    """Return the directory the package is imported from.
+
+    Returns
+    -------
+    path : str
+        The directory of ``klip_tpe``.
+    """
     return os.path.dirname(os.path.abspath(__file__))
 
 
 def git_commit(package_dir: Optional[str] = None) -> Optional[str]:
-    """The short commit of the git checkout holding the package, read from ``.git`` without
-    running git.  None for an installed copy, or when it cannot be read."""
+    """Return the short commit of the git checkout that holds the package.
+
+    It reads ``.git`` without running git, worktrees, detached heads and packed refs included.
+
+    Parameters
+    ----------
+    package_dir : str or None, default None
+        The package's directory, None for this one.
+
+    Returns
+    -------
+    commit : str or None
+        The commit's first 7 characters, None for an installed copy or when it cannot be read.
+    """
     root = os.path.dirname(package_dir or _package_dir())
     git = os.path.join(root, ".git")
     try:
@@ -61,7 +80,13 @@ def git_commit(package_dir: Optional[str] = None) -> Optional[str]:
 
 
 def describe() -> str:
-    """``klip-tpe 0.1.0 (git d2fbb74) from /path/to/klip_tpe``, or ``(installed copy)`` in
-    place of the commit when the package is not in a git checkout."""
+    """Return the line that says which klip-tpe is running.
+
+    Returns
+    -------
+    line : str
+        Such as ``klip-tpe 0.1.0 (git d2fbb74) from /path/to/klip_tpe``, with ``(installed copy)`` in
+        place of the commit when the package is not in a git checkout.
+    """
     c = git_commit()
     return f"klip-tpe {__version__} ({'git ' + c if c else 'installed copy'}) from {_package_dir()}"

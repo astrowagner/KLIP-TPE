@@ -686,7 +686,7 @@ def write_params_table(path: str, rows: Sequence[Dict[str, Any]]) -> str:
          "6 significant digits."]
     if tiles:
         L.append("# inner/outer: each annulus' zone.  tile_in/tile_out: the radii the stitch takes from it "
-                 "(nearest centre where annuli overlap).")
+                 "(nearest center where annuli overlap).")
     L.append(f"{'ann':>4}  {'inner_px':>8}  {'outer_px':>8}  "
              + (f"{'tile_in':>8}  {'tile_out':>8}  " if tiles else "")
              + f"{'k':>6}  {'bin':>7}  {'n_ang':>7}  {'filter':>7}  "

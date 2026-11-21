@@ -12,7 +12,7 @@ at S/N 1.9 in it against 3.6-3.7 in the paper's images.  This search differs in 
   (lambda / 3.8 um)^alpha times the contrast quoted, which is c's at L' (``--alpha`` sets the index,
   ``--spectrum star`` is the earlier tutorial 7's flat spectrum);
 * the KLIP zone is the paper's for every evaluation (``--geometry paper``, the default): one 5-27 px
-  annulus about the paper's zone centre (30, 30) in 6 sectors, while the injections and the score stay in
+  annulus about the paper's zone center (30, 30) in 6 sectors, while the injections and the score stay in
   the 0.4-0.8" annulus round c.  ``--free-sectors`` searches the number of sectors again, and
   ``--geometry searched`` searches the zone's reach beyond the annulus as well (``zone_in``, ``zone_out``,
   0-8 px each), which is how the two-night run of 2026-10-18 ran;
@@ -457,8 +457,8 @@ if os.path.exists(setup):
         .get("defaults", {}).get("zone_center")
     zc_new = red.reducers[p0].defaults.get("zone_center")
     if (zc_old is None) != (zc_new is None) or (zc_old is not None and list(map(float, zc_old)) != list(map(float, zc_new))):
-        sys.exit(f"{run_dir} was started with its zones about {zc_old or 'the frame centre'}, this run draws them about "
-                 f"{zc_new or 'the frame centre'} (--geometry); give --run-dir for a new run")
+        sys.exit(f"{run_dir} was started with its zones about {zc_old or 'the frame center'}, this run draws them about "
+                 f"{zc_new or 'the frame center'} (--geometry); give --run-dir for a new run")
     # the checkpoint holds the run's configuration, so a resume would keep the cap it was started with
     cap_old = ((json.load(open(setup)).get("config") or {}).get("calibration") or {}).get("ceiling")
     if (cap_old is None) != (a.max_contrast is None) or (cap_old is not None and abs(cap_old - a.max_contrast) > 1e-12):

@@ -86,7 +86,7 @@ def test_dataset_from_pyklip_generic_data():
     data.filenums = np.array([0, 0, 0, 0, 1, 1, 1, 1])
     out = dataset_from_pyklip(data, crop_half=20, name="g")
     assert set(out) == {"g0", "g1"} and out["g0"].cube.shape == (4, 40, 40)
-    # the star centre (36.3, 33.8) is now at (19.5, 19.5): the bright pixel moved by the same shift
+    # the star center (36.3, 33.8) is now at (19.5, 19.5): the bright pixel moved by the same shift
     m = out["g0"].cube[0]
     iy, ix = np.unravel_index(np.argmax(m), m.shape)
     assert abs(ix - (36 - 36.3 + 19.5)) <= 1 and abs(iy - (34 - 33.8 + 19.5)) <= 1
@@ -180,7 +180,7 @@ def test_spaceklip_loader_builtin_reader(jwst_dir):
                              use_pyklip_reader=False, log=QUIET)
     assert set(ds_f) == {"miri0", "miri1"}
     assert np.isclose(a.meta["pxscale"], 0.11) and np.isclose(a.meta["wavelength_m"], 1.1315651557554e-05)
-    # star at the crop centre after re-centring
+    # star at the crop center after re-centring
     iy, ix = np.unravel_index(np.argmax(a.cube.mean(axis=0)), a.cube.shape[1:])
     assert abs(ix - 24.5) <= 1 and abs(iy - 24.5) <= 1
     # a database-like dict of tables works too

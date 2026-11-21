@@ -152,7 +152,7 @@ def test_verify_empty_field_and_report(tmp_path):
 
 
 def _odd_noise(nn, seed, n):
-    """``_noise_stack`` on an odd ``n x n`` frame, so the star sits on a pixel centre and a
+    """``_noise_stack`` on an odd ``n x n`` frame, so the star sits on a pixel center and a
     source at an integer offset sits on a pixel."""
     from scipy.ndimage import gaussian_filter
     rng = np.random.default_rng(seed)
@@ -397,7 +397,7 @@ def test_detect_peaks_and_psfcorr():
     m = np.zeros((N, N))
     cx, cy = star_center((N, N))
     m[int(cy) + 20, int(cx) + 5] = 6.0
-    m[int(cy) + 20, int(cx) + 6] = 5.0     # inside the suppression disc
+    m[int(cy) + 20, int(cx) + 6] = 5.0     # inside the suppression disk
     m[int(cy) - 25, int(cx) - 10] = 3.0
     px, py, ps = C.detect_peaks(m, 2.0, max(0.9 * FWHM, 2), 1.2 * FWHM, N / 2 - FWHM)
     assert list(ps) == [6.0, 3.0]

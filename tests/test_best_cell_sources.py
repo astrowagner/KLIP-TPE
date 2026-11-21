@@ -7,7 +7,7 @@ When an annulus finishes, the runner replaces the bundle's ``inj``/``clean`` wit
 **winner's committed trial** -- the reduction it keeps as ``annulus01/best_inj.fits``.  That
 picture's injections are validation's *fresh* draw, not the search evaluation the bundle was
 built from: validation re-scores the elected config at new positions precisely so the winner
-is not a lucky realisation.  The overwrite used to move the image and leave ``sources``
+is not a lucky realization.  The overwrite used to move the image and leave ``sources``
 behind, and the panel then circled the search azimuths on the committed image.
 
 Measured on the NACO beta Pic tutorial, one annulus, three sources:
@@ -65,7 +65,7 @@ def test_the_bundles_per_source_values_move_with_it(tmp_path):
     assert len(ps) == len(want)
 
 
-# --------------------------------------------------- the panel honours the bundle's sources
+# --------------------------------------------------- the panel honors the bundle's sources
 
 def test_step_images_sources_override_the_history_lookup():
     """``best_sources`` is what makes the fix reachable from every call site: the cells look

@@ -36,7 +36,7 @@ def test_planned_observations_are_told_from_delivered_ones():
     # the placeholder visit group, and the bare instrument instead of a detector
     assert F._planned("jw11225001001_xx101_00001_miri")
     assert F._planned("jw11225003001_xx10a_00009_miri")
-    # delivered data, from programmes whose downloads work
+    # delivered data, from programs whose downloads work
     for oid in ("jw01386001001_04101_00001_nrcalong",       # HIP 65426 ERS
                 "jw04014001001_03106_00001_mirimage",       # MWC 758, the control
                 "jw01193002001_02101_00002_mirimage",       # Fomalhaut GTO
@@ -91,7 +91,7 @@ def test_real_targets_are_not_swept_up_as_support(name):
 
 def test_programmes_sort_numerically():
     """proposal_id is a string, so the default sort put 10758 between 1046 and 1193 and a
-    programme's rows were not contiguous."""
+    program's rows were not contiguous."""
     rows = _table([("10758", "a", "F1140C", "MIRI/CORON"), ("1046", "b", "F1065C", "MIRI/CORON"),
                    ("1193", "c", "F1550C", "MIRI/CORON"), ("11225", "d", "F1140C", "MIRI/CORON")])
     assert [r[0] for r in F._rows(rows)] == ["1046", "1193", "10758", "11225"]
@@ -113,7 +113,7 @@ def _crit_for(name, target_only=False):
 
 
 def test_widening_to_the_programme_drops_the_target_not_everything_else():
-    """"The whole programme" means stop restricting to one TARGET.
+    """"The whole program" means stop restricting to one TARGET.
 
     Rebuilding the criteria as {"proposal_id": pid} also discarded instrument_name, so
     hip65426_miri would have pulled the entire ERS -- NIRCam included -- to get its MIRI
@@ -131,7 +131,7 @@ def test_target_only_keeps_the_target_restriction():
 
 
 def test_coron_lets_a_target_override_the_default_instrument():
-    """A mixed programme needs one instrument of it; the default must not collide."""
+    """A mixed program needs one instrument of it; the default must not collide."""
     import inspect
     src = inspect.getsource(F._coron)
     assert "crit.update(extra)" in src, "extra must override, not be passed alongside"

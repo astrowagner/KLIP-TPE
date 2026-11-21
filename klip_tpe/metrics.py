@@ -266,7 +266,7 @@ def pa_wedge_mask(shape: Tuple[int, int], bands: Sequence[Tuple[float, float]],
     -----
     Removing ring apertures because they are bright biases the noise estimate down and inflates
     every S/N, so the exclusion has to be justified before the image is looked at.  A disk at a
-    catalogued position angle qualifies, the brightest speckle group does not.  On beta Pic the two
+    cataloged position angle qualifies, the brightest speckle group does not.  On beta Pic the two
     are comparable in the annulus.  The disk bands carry about +0.2 sigma of median excess over the
     rest of the ring, while removing about 22% of the apertures.
     """

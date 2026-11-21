@@ -1,4 +1,4 @@
-# Running the NEAR production optimisation
+# Running the NEAR production optimization
 
 This is the IDL `optimize_near_2_tpe` production protocol (the NEAR/VISIR campaign: 6
 nights, 3 annuli, 500 warm-up + 10 000 / 2500 / 2500 evaluations) driven from a terminal or
@@ -282,13 +282,13 @@ NEAR2's s6 adds three on the seams of its first edges:
 --ann-edges 2.19 11.5 20.81 30.12 39.43 48.74 58.05 67.36 --ann-extra 6.85:16.16 16.16:25.47 25.47:34.78
 ```
 
-All annuli are numbered by their centre radius, so this run has ten, from `annulus01` (2.19-11.5)
+All annuli are numbered by their center radius, so this run has ten, from `annulus01` (2.19-11.5)
 to `annulus10` (58.05-67.36), and the per-annulus lists of `--n-iter`, `--n-init`,
 `--n-sources` and `--use-contrast` follow that order.  The first three repeat their last entry
 for the annuli past their end.  `--use-contrast` does not.  An annulus past its end is
 calibrated, as one given 0 is.  Each annulus is searched, calibrated, validated, gridded and verified over its own zone,
 as any annulus is.  Where two annuli overlap, the stitch takes each radius from the annulus whose
-centre is nearest.  The boundary between their tiles is the midpoint between the centres, and
+center is nearest.  The boundary between their tiles is the midpoint between the centers, and
 the tiles meet there sharply.  The boundary lies inside both zones, so there is no zone edge to
 blend over, and a 2 px blend would give the sources inside it partly to the neighbor's image.
 Where annuli meet without overlapping, the tile edge is their shared edge, with the 2 px blend.
@@ -831,7 +831,7 @@ the run's contrast curve there (NEAR2's note of 2026-11-16).
   `--fg-cover` FWHM (default 0.5) of annulus k's part of the stitch, tile k's points and the
   nearest of its neighbors'.  The other annuli's reductions are made once and shared by the
   finalists.  A finalist replaces the winner when its mean paired gain over the winner exceeds
-  `--fg-z` (default 1) times its standard error.  The first sweep goes inner to outer and the
+  `--fg-z` (default 2) times its standard error.  The first sweep goes inner to outer and the
   second back, and the election stops sooner once a sweep changes nothing (`--fg-sweeps`).
 * **The held-out check.**  Each changed annulus' new and old winners are read again on the
   curve's grid at the same contrasts, the other annuli at their elected winners.  The election

@@ -46,7 +46,7 @@ def test_add_stamp_subpixel_centroid_and_clipping():
     f3 = np.zeros((31, 31))
     add_stamp(f3, st, (5.0, 5.0), -20.0, 5.0)
     assert f3.sum() == 0.0
-    # non-integer stamp centre (even-sized stamp)
+    # non-integer stamp center (even-sized stamp)
     f4 = np.zeros((31, 31))
     even = np.ones((4, 4)) / 16.0
     add_stamp(f4, even, (1.5, 1.5), 10.0, 20.0)
@@ -72,7 +72,7 @@ def test_template_psf_normalisation():
     assert ok and c == (15.0, 15.0)
     assert st.sum() == pytest.approx(1.0)
     assert m.flux_unit == pytest.approx(np.nansum(t)) and m.template_flux == m.flux_unit
-    # encircled-energy normalisation: unit flux inside the aperture, > 1 in total
+    # encircled-energy normalization: unit flux inside the aperture, > 1 in total
     m2 = TemplatePSF(t, ee_radius_px=3.0, star_flux=123.0, throughput_fn=lambda r: 0.5)
     st2, _, _ = m2.stamp(0.7)
     inside = np.hypot(xx - 15, yy - 15) <= 3.0
@@ -98,9 +98,9 @@ def test_library_psf_interpolation_and_ok_flag():
     st_lo, _, _ = lib.stamp(0.5)
     st_mid, _, _ = lib.stamp(1.0)
     st_q, _, _ = lib.stamp(0.75)
-    # interpolated stamp lies between its neighbours (peak height monotone)
+    # interpolated stamp lies between its neighbors (peak height monotone)
     assert st_mid[10, 10] < st_q[10, 10] < st_lo[10, 10]
-    # midpoint = renormalised average of the two neighbours
+    # midpoint = renormalised average of the two neighbors
     avg = 0.5 * (lib.slices[0] + lib.slices[1])
     np.testing.assert_allclose(st_q, avg / avg[ee].sum(), atol=1e-12)
     # outside the tabulated range -> ok False, stamp None
@@ -196,7 +196,7 @@ def test_the_stamp_is_translated_to_the_source_and_not_rotated():
     the wrong way, which is how it was caught.
 
     The IDL reduction this package ports settles it (``reduce_nircam_v13.pro``): one WebbPSF
-    template per filter, centred with ``cntrd`` + ``fshift``, and at injection
+    template per filter, centered with ``cntrd`` + ``fshift``, and at injection
     ``fshift(big_ref * contrast, xshift, yshift)`` per frame -- a translation, and nothing
     else.
     """
@@ -229,7 +229,7 @@ def test_the_stamp_is_translated_to_the_source_and_not_rotated():
 
 
 def test_refpa_deg_still_rotates_when_a_model_asks_for_it():
-    """The old behaviour stays reachable, for reproducing a pre-2026-09-22 run."""
+    """The old behavior stays reachable, for reproducing a pre-2026-09-22 run."""
     from klip_tpe.injection import LibraryPSF, inject_sources, Source
     st = np.zeros((21, 21))
     st[10, 10] = 1.0

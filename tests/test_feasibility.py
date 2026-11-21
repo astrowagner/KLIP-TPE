@@ -15,7 +15,7 @@ def test_ref_fraction_synthetic_angles():
     assert ref_fraction(ANG, 0.0, 360.0, ARC, 10) == 1.0
     # nothing qualifies when angsep*arc exceeds the total span
     assert ref_fraction(ANG, 4.0, 360.0, ARC, 10) == 0.0
-    # anglemax=0.5 deg: only immediate neighbours (<=2) -> 0 for nminref=3, 1 for nminref=1 (except edges)
+    # anglemax=0.5 deg: only immediate neighbors (<=2) -> 0 for nminref=3, 1 for nminref=1 (except edges)
     assert ref_fraction(ANG, 0.0, 0.5, ARC, 3) == 0.0
     assert ref_fraction(ANG, 0.0, 0.5, ARC, 1) == 1.0
     # hand count: window 2 deg = 4 frames each side (dpa 0.404..1.616) -> 8 refs in the interior

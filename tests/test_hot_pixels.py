@@ -1,7 +1,7 @@
 """Static hot pixels the DQ array misses, the record of what a load did, and one exposure once.
 
 * :func:`static_hot_pixels` finds, on the blank-sky median of the background pointings, a
-  pixel that stands out from BOTH its row and its column neighbours -- a 4QPM glow stick
+  pixel that stands out from BOTH its row and its column neighbors -- a 4QPM glow stick
   stands out along one axis only and must not be flagged, and neither may the
   unilluminated border.
 * ``load_calints(hot_pixels=...)`` repairs them in every frame, records which, and says so
@@ -59,7 +59,7 @@ def test_a_glow_stick_is_level_with_its_neighbours_along_the_stick():
 def test_the_unilluminated_border_is_never_flagged():
     sky = _sky()
     sky[:, :4] = np.nan                               # the border
-    sky[20, 4] += 50.0                                # a spike beside it: 3 finite row neighbours
+    sky[20, 4] += 50.0                                # a spike beside it: 3 finite row neighbors
     sky[40, 30] += 50.0                               # and one well inside
     hot = static_hot_pixels(sky)
     assert not hot[20, 4]
@@ -120,7 +120,7 @@ def _load(files, **kw):
 
 
 def _spike(cube, y=HOT[0] - 30, x=HOT[1] - 30):
-    """The hot pixel's excess over its 8 neighbours, in the 41x41 crop (star at 50 -> 20)."""
+    """The hot pixel's excess over its 8 neighbors, in the 41x41 crop (star at 50 -> 20)."""
     c = np.nanmedian(np.asarray(cube, float), axis=0)
     ring = np.concatenate([c[y - 1, x - 1:x + 2], c[y + 1, x - 1:x + 2], c[y, [x - 1, x + 1]]])
     return float(c[y, x] - np.median(ring))

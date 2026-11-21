@@ -45,10 +45,10 @@ Root directory: `root` keyword, default `/Volumes/RAID36TB/NEAR2/` (L163). Per n
 
 | File (per night `n<seq>/`) | Format / shape (IDL) | Variables / keywords used | Where read |
 |---|---|---|---|
-| `AB_cube_skysub_cen_clean.fits` | FITS primary, float `[432, 432, nf]` (`2*hsize` square, `hsize=216`, see §7) — one frame per raw file (chop A−B median), sky-subtracted, centred (KS5-centred, star at pixel 215.5,215.5), floor-cleaned | data only; header not used (NAXIS3 read by optimizer L4580 to auto-size `k_klip_max`) | L1310/1316 (inject), L1633/1641 (klip), L1442 (fm), L1520 (rotate) |
+| `AB_cube_skysub_cen_clean.fits` | FITS primary, float `[432, 432, nf]` (`2*hsize` square, `hsize=216`, see §7) — one frame per raw file (chop A−B median), sky-subtracted, centered (KS5-centred, star at pixel 215.5,215.5), floor-cleaned | data only; header not used (NAXIS3 read by optimizer L4580 to auto-size `k_klip_max`) | L1310/1316 (inject), L1633/1641 (klip), L1442 (fm), L1520 (rotate) |
 | `AB_parang_clean.sav` | IDL SAVE | `angles` — float `[nf]`, **parallactic angle in degrees** per frame, `(PARANG START+PARANG END)/2` (L477–479), same order/length as the clean cube | L1311/1317, 1634/1642 |
 | `AB_frametags.sav` | IDL SAVE | `corrs` `[nf]` (peak cross-correlation of frame vs running-window pupil median, L976–981), `noises` `[nf]` (stddev in a 21×21 empty background patch at (182,92), L984), `coronoise` `[nf]` (stddev in the 0.3″–0.5″ annulus, L988–995). All aligned to the clean cube. **Optional**: if absent → no frame selection (L99). | `near2_framesel` L98–101 |
-| `PSF_ACenB.fits` | FITS float `[16, 16]`, median B-star PSF template, **centred at (7.5, 7.5)** (L1283), raw ADU units | data | L1319 (`ref_file = acenb_file`, L369) |
+| `PSF_ACenB.fits` | FITS float `[16, 16]`, median B-star PSF template, **centered at (7.5, 7.5)** (L1283), raw ADU units | data | L1319 (`ref_file = acenb_file`, L369) |
 | `texp.sav` | IDL SAVE | `texp` — float scalar, night's total on-source integration, seconds | header provenance only (`near2_provhdr` L39–42); **weights in `near2m_avg`** (optimizer L456–460); absent → TEXP=-1 / weight 1 |
 | `AB_cube_inj.fits` | FITS `[432,432,nf]` | injected cube, **written then re-read** by the same call when `cache=0` (L1430 → L1527/1638/1641) | — |
 | `AB_cube_refstar_clean.fits` | FITS `[≥nx, ≥ny, nref]` | only if `use_rdi` (L1860) — off in production | — |
@@ -82,7 +82,7 @@ psflib/throughput_merged.csv        (global)  [optional: analytic fallback T(r)=
 * Raw ESO `*.fits` (multi-extension chop cubes) — `do_cuber` (L432–567): header keys `EXPTIME`,
   `HIERARCH ESO DET SEQ1 DIT`, `HIERARCH ESO DET NDIT`, `HIERARCH ESO TEL CHOP FREQ` (via `near2_hpar`),
   `ESO TEL PARANG START/END` (via `esopar`). Produces `AB_cube.fits`, `info.sav`, `texp.sav`.
-* `AB_cube.fits` → `do_precise_center` (KS5 field-star centring, L573–946) → `AB_cube_skysub_cen.fits`,
+* `AB_cube.fits` → `do_precise_center` (KS5 field-star centering, L573–946) → `AB_cube_skysub_cen.fits`,
   `AB_median_pupil.fits`, `ks5_*.fits`, `derotref_for_center.fits`, `cenref.fits`.
 * `AB_cube_skysub_cen.fits` → `do_clean` (L953–1121) → `AB_cube_skysub_cen_clean.fits`, `AB_parang_clean.sav`,
   `AB_frametags.sav`, `AB_pupil.fits`, `AB_mean_pupil_hpf.fits`, `coronoises.fits`, `noise.pdf`.
@@ -113,7 +113,7 @@ psflib/throughput_merged.csv        (global)  [optional: analytic fallback T(r)=
 | `spat_mean` | 0 (L239) | passed to `multiklip` → `get_klip_basis_new`: subtract each frame's own spatial mean (within the zone) before building the basis. |
 | `temp_mean` | 0 (L240) | subtract the per-pixel temporal mean of the reference set before building the basis. |
 | `do_destripe` | 1 (L202) | row/column destriping (`destripe(img,90°)` then `destripe(img,0°)`, `clip_level=0`, L1672–1677). **Optimizer passes 0** (`def_do_destripe=0`, opt L4838). |
-| `angsep` | 1.0 (L221) | minimum parallactic separation between target and reference, in units of **FWHM (λ/D) of arc at the annulus mid-radius** — converted to degrees via `arcdist` (§3.8). Only honoured on the slow path. |
+| `angsep` | 1.0 (L221) | minimum parallactic separation between target and reference, in units of **FWHM (λ/D) of arc at the annulus mid-radius** — converted to degrees via `arcdist` (§3.8). Only honored on the slow path. |
 | `anglemax` | 360 (L222) | maximum |Δparang| (degrees) for a frame to be a reference. Slow path only. |
 | `corr_thresh` | 0.95 (L346) | frame selection: keep `corrs >= corr_thresh`. |
 | `noise_max` | 2.0 (L349, as `noise_thresh`) | keep `noises <= noise_max * mean(noises)` (`noise_clean=1` hard-on, L348). |
@@ -134,7 +134,7 @@ psflib/throughput_merged.csv        (global)  [optional: analytic fallback T(r)=
 | `nowait`, `jobflags` | — | parallel dispatch plumbing (§6). |
 | `block_burn`, `aa,bb,ba,ab`, `block_airy` | 0 | NaN-mask persistence/off-axis-PSF regions in the final image (L2147–2172). Legacy, off. |
 
-Hard-coded switches relevant to behaviour: `comb_type='nwadi'` (L203); `truenorth=36.5` deg (L204);
+Hard-coded switches relevant to behavior: `comb_type='nwadi'` (L203); `truenorth=36.5` deg (L204);
 `bin_type='mean'` (L211); `annmode=1`, `hyp=0` (L216, 227) so the **annular path is always taken**;
 `nrings=6`, `wr=33` are passed to `multiklip` but unused in annmode (L223–224).
 
@@ -182,7 +182,7 @@ census replica (`near2_ref_binangles`, opt L4238–4255) implements the identica
 
 ### 3.2 Crop (L1656)
 `cube = cube[hsize-shsize : hsize+shsize-1, same, *]` = `[216-75 : 216+74]` = indices 141..290 → **150×150**.
-Star at full-frame 215.5 → cropped **74.5 = (150-1)/2** (between-pixel centre; see §7).
+Star at full-frame 215.5 → cropped **74.5 = (150-1)/2** (between-pixel center; see §7).
 
 ### 3.3 Angle-aware temporal binning (L1693–1738)
 Only if `bin > 1`. Groups consecutive surviving frames:
@@ -253,7 +253,7 @@ for each frame j:
     clip to the frame and ADD into cube[..., j]   (L1385-1392)
 ```
 So in both branches the injected source has **encircled energy within 1 λ/D = contrast·(129/57)·T(ρ)·EE_B**,
-centred at full-frame `(215.5 + xshift, 215.5 + yshift)`; the library changes only the PSF *shape* (per-frame
+centered at full-frame `(215.5 + xshift, 215.5 + yshift)`; the library changes only the PSF *shape* (per-frame
 rotated so its vortex-distortion axis points radially). The sub-pixel shift is bilinear (identical to `fshift`).
 
 *Sign convention check:* derotation is `rot(frame, -(parang+truenorth))` = CCW by `parang+truenorth`, so a
@@ -270,8 +270,8 @@ is cached (`cache=1`) or written to `AB_cube_inj.fits` (L1428–1430).
 `n_ang` sectors, exactly as `adklip.pro` L66–73 does): for a `[nx,ny]` frame,
 `dist_circle(mask, [nx,ny], nx/2., ny/2.)` and `angmask(mask, nx/2., ny/2.)`; zone pixels are
 `ang ∈ [a0, a1]` (rad, inclusive both ends) **and** `r ∈ [annulus[0], annulus[1]]` (inclusive both ends).
-Note `getzone` centres on `nx/2. = 75.0` for the 150 px crop (its comment L24–30 refers to a 320-px pipeline
-whose star sits at `sc/2`), i.e. **0.5 px off the NEAR star centre of 74.5** — this only shifts the zone
+Note `getzone` centers on `nx/2. = 75.0` for the 150 px crop (its comment L24–30 refers to a 320-px pipeline
+whose star sits at `sc/2`), i.e. **0.5 px off the NEAR star center of 74.5** — this only shifts the zone
 boundary mask, not the pixel values (zone is mapped back in place), but a faithful port should replicate it (or
 knowingly fix it and document). Sectors: `[si*360/n_ang, (si+1)*360/n_ang]` degrees **[INFERRED]** from
 `adklip.pro` L67; whether `multiklip` pads/overlaps sectors is unknown. **Annulus padding** is done by the
@@ -349,8 +349,8 @@ Consequences to reproduce: (a) the data that is averaged has been **rotated twic
 starved targets) contribute zero weight; (d) pixels never covered → NaN. `mean`/`median` branches exist
 (L2109–2110, 2119–2120) but are dead code under `comb_type='nwadi'`.
 
-### 3.13 Output normalisation / NaN masking
-There is **no photometric normalisation** of the output image; units are input ADU after high-pass and KLIP.
+### 3.13 Output normalization / NaN masking
+There is **no photometric normalization** of the output image; units are input ADU after high-pass and KLIP.
 NaNs arise from: pixels outside `[inrad,outrad]` (KLIP fills NaN), `nw_ang_comb` zero-coverage pixels, and the
 optional `block_burn`/`block_airy` masks (off). No explicit inner/outer NaN mask is applied beyond the zone.
 
@@ -361,7 +361,7 @@ optional `block_burn`/`block_airy` masks (off). No explicit inner/outer NaN mask
 | | `fast=1` | `fast=0` (per-target) |
 |---|---|---|
 | Basis | one KL basis per zone from **all** binned frames (target included ⇒ some self-subtraction) (`reduce_nircam_coro.pro` L2176–2177) | per target frame, basis from `refs(ii)` (§3.8) |
-| `angsep`/`anglemax` | ignored | honoured |
+| `angsep`/`anglemax` | ignored | honored |
 | Starved-target drop (`n_min_ref`) | n/a | yes (L1929–1969) |
 | Output | `multiklip` returns the whole cube in one call (L1905–1914); `klip_cube` pre-copy skipped when `lean` (L1824–1825) | filled frame by frame (L1990) |
 | Auto switch | — | if `angsep <= 0` and `anglemax >= (max−min of binned angles)` the slow path is degenerate and `fast=1` is forced (L1839–1845). RDI also forces fast (L1883). |
@@ -403,7 +403,7 @@ path uses `_csi`/`_csc` (opt L732–733).
 
 `nbridges > 1` (L2221–2372): for every night a command string
 `reduce_near_2, seq_range=[s,s], nbridges=1, /nocomb, cache=1, root='…' + parstr` is built (L2237–2275; `parstr`
-serialises every reduction keyword incl. `rho/theta/contrast`, `out_suffix`, `lean`, `klip_scan`, `nthreads`,
+serializes every reduction keyword incl. `rho/theta/contrast`, `out_suffix`, `lean`, `klip_scan`, `nthreads`,
 `use_near2_throughput`, RDI, `n_min_ref`). It is written atomically as `parflags/[<subdir>/]job_<wname>_<id>.txt`
 (line 1 = done-flag path, line 2 = command) for a persistent worker `n<seq>w<slot>` (`near2_worker.pro`): the
 worker polls, claims the job by renaming to `.run`, `execute()`s the command (so the night's cube stays cached in
@@ -427,9 +427,9 @@ its heartbeat is >30 s stale and no busy flag <1800 s old (L2283–2312); one-sh
 | `truenorth` | 36.5° (added to parang in every derotation) | L204 |
 | raw crop | `xcen=250, ycen=284`, `hsize = 500 − 284 = 216` → full frame **432×432** (`[xcen-216 : xcen+215]`) | L161–162, 509 |
 | KLIP crop | `shsize=75` → **150×150**, indices 141..290 of the full frame | L161, 1656 |
-| star centre | full frame **(215.5, 215.5)** = `hsize − 0.5`; cropped **(74.5, 74.5)** = `(n−1)/2` (L1367 comment; template centred at 7.5 of 16 placed at `hsize−8`, L1283/1325) | |
-| rotation centre (`rot`) | `((n−1)/2, (n−1)/2)` = 74.5 — consistent with star | IDL `rot` default |
-| `getzone` centre | `n/2 = 75.0` — 0.5 px off (see §3.8) | `getzone.pro` L28–29 |
+| star center | full frame **(215.5, 215.5)** = `hsize − 0.5`; cropped **(74.5, 74.5)** = `(n−1)/2` (L1367 comment; template centered at 7.5 of 16 placed at `hsize−8`, L1283/1325) | |
+| rotation center (`rot`) | `((n−1)/2, (n−1)/2)` = 74.5 — consistent with star | IDL `rot` default |
+| `getzone` center | `n/2 = 75.0` — 0.5 px off (see §3.8) | `getzone.pro` L28–29 |
 | `outrad` cap | 70 px; `inrad ∈ [0, outrad−1]` | L231–232 |
 | default production annulus | `ann_edges=[11,44]` px → padded `[9,46]` | opt L4796, 695–696 |
 | B→A contrast factor | 129/57 | L381 |
@@ -495,7 +495,7 @@ Written by `do_cuber` (L541–561): per raw file `fexp_h × nframes` where
 `fexp_h = DIT·NDIT` if both `HIERARCH ESO DET SEQ1 DIT` and `HIERARCH ESO DET NDIT` > 0, else `1/(2·CHOP FREQ)`
 if `HIERARCH ESO TEL CHOP FREQ` > 0, else `EXPTIME` (L470–476); `texp = Σ_files`.
 
-Rebuilt by `near2_texp.pro` (L47–117) for nights initialised before that code existed: same per-frame rule
+Rebuilt by `near2_texp.pro` (L47–117) for nights initialized before that code existed: same per-frame rule
 (L72–77), frame count = Σ over all HDUs of `NAXIS3` (3-D) or 1 (2-D) (L80–87), skipping pipeline products
 (`AB*` and names containing `.fits` twice, L64–65); `texp = Σ f_exp·nfr` counting **both chop halves** (L104;
 the header comment's `ceil(NAXIS3/2)` is not what the code does). Consumers: `near2_provhdr` (TEXP card),
@@ -511,12 +511,12 @@ fraction, opt L5306–5330).
 ## 10. Port checklist / open items
 
 1. **Get `multiklip.pro` and `get_klip_basis_new.pro`** (and `destripe.pro` if destriping is ever needed) — they
-   determine: mean-subtraction behaviour when `spat_mean=temp_mean=0`, sector boundaries/overlap, eigenvalue cut,
+   determine: mean-subtraction behavior when `spat_mean=temp_mean=0`, sector boundaries/overlap, eigenvalue cut,
    handling of `nref < k`, the all-frames fallback, and the exact klip_scan accumulation.
-2. Decide whether to keep the `getzone` 0.5-px centre offset (75.0 vs 74.5) for bit-faithfulness.
+2. Decide whether to keep the `getzone` 0.5-px center offset (75.0 vs 74.5) for bit-faithfulness.
 3. The IDL pipeline's `theta` is degrees despite the docstring; `rho` arcsec; contrast relative to A.
 4. The high-pass is applied twice (pre- and post-KLIP); the second uses NaN-aware smoothing.
-5. `nw_ang_comb` double-rotates the data — reproduce, don't "optimise away".
+5. `nw_ang_comb` double-rotates the data — reproduce, don't "optimize away".
 6. Frame selection is applied after injection and must not alter the injected frames' order; the min-keep rule is
    `max(k_klip·bin, 3)`.
 7. `outrad` capped at 70 and `inrad` clamped inside `reduce_near_2` **after** the optimizer's ±2 px padding.

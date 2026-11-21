@@ -3,7 +3,7 @@
 ``k_default`` is the seed of the whole run: the configuration the contrast is calibrated at,
 the one ``collect.py`` re-scores as the anchor, and the starting point the search is judged
 against.  It is chosen by ``argmax`` of a curve of S/N against the number of KL modes, and
-that curve is measured -- so the argmax can be an artefact of the measurement rather than a
+that curve is measured -- so the argmax can be an artifact of the measurement rather than a
 statement about the data.  Two ways, both seen on real MIRI data:
 
 * the argmax sits at an **edge** of the scanned range, so it is not an interior optimum;

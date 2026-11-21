@@ -80,13 +80,13 @@ def test_crop_to_finite_returns_a_square_with_no_nan_left():
 
 
 def test_crop_to_finite_is_symmetric_about_the_star():
-    """The package puts the star at the geometric centre of whatever array it is given, so
+    """The package puts the star at the geometric center of whatever array it is given, so
     an off-centre crop moves the star without telling anyone."""
     a = _padded()
     (ca,) = R.crop_to_finite(a)
     n0, n1 = a.shape[-1], ca.shape[-1]
-    assert n1 % 2 == n0 % 2 or True                       # parity follows from the centring
-    # the crop's centre is the original centre
+    assert n1 % 2 == n0 % 2 or True                       # parity follows from the centering
+    # the crop's center is the original center
     off = (n0 - n1) // 2
     np.testing.assert_allclose(ca[0], a[0, off:off + n1, off:off + n1], equal_nan=True)
 

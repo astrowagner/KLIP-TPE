@@ -3,7 +3,7 @@
 A search runs for days, on a machine doing other things, and the only record of it was
 ``results.jsonl`` -- which advances once per *completed* evaluation.  That is a poor clock.
 An evaluation on a busy machine takes anything from six seconds to eight minutes (measured:
-a 147-D RX J0534 evaluation ran 479 s while its neighbours took 6 s, with four searches and
+a 147-D RX J0534 evaluation ran 479 s while its neighbors took 6 s, with four searches and
 a benchmark sharing the cores), so a run that has written nothing for an hour is either
 grinding through one slow reduction or dead, and the files cannot tell the two apart.  The
 question "is it stuck or is it gone?" then has no answer short of hunting for the pid.

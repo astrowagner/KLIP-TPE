@@ -354,7 +354,7 @@ def test_forbidden_pa_does_not_hinge_on_a_floating_point_tie_for_two_rolls():
 
 
 def test_forbidden_pa_wraps_a_sector_across_zero():
-    """A sector centred on PA 0 spans 359-1 and must come back as one sector, not two."""
+    """A sector centered on PA 0 spans 359-1 and must come back as one sector, not two."""
     g = synthetic_map(width=20.0)
     out = miri.forbidden_pa([0.0], rho_as=1.0, filter="F1065C", g=g, log=lambda *_: None)
     assert len(out) == 4, [round(c) for c, _ in out]
@@ -407,7 +407,7 @@ def test_the_pixel_mask_follows_the_roll_and_leaves_the_plateau_alone():
 
 
 def test_the_pixel_mask_with_no_frames_masks_only_the_unsampled_core():
-    """No angles is not a licence to mask the whole frame: outside the core the map has
+    """No angles is not a license to mask the whole frame: outside the core the map has
     said nothing about any roll, so nothing is excluded."""
     g = synthetic_map()
     pm = miri.dead_zone_pixel_mask((101, 101), 0.1, [], filter="F1065C", g=g,

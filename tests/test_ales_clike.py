@@ -1,10 +1,10 @@
-"""Coloured injections and the ALES paper reduction's ADI step, for a run tuned on MWC 758c.
+"""Colored injections and the ALES paper reduction's ADI step, for a run tuned on MWC 758c.
 
 What must hold:
 
 * ``PartitionedReducer.set_injection_spectrum`` gives each partition the sources at its own
   point of the spectrum, from a function of wavelength, a table or one factor per partition,
-  normalised at the representative partition, another partition or a wavelength; the
+  normalized at the representative partition, another partition or a wavelength; the
   search's, the SDI pool's and the KLIP-FM sources all get it; a negative source (a known
   companion taken out) keeps its contrast; None is the flat spectrum, to the bit; the
   factors are in the reducer's record;
@@ -121,10 +121,10 @@ def test_tables_dicts_and_normalisations():
     raw = {p: float(np.interp(um[p], *tab)) for p in um}
     assert fac["g03"] == 1.0 and fac["g00"] == pytest.approx(raw["g00"] / raw["g03"])
     assert raw["g00"] == 1.0 and raw["g03"] == 3.0, "held at the ends"
-    # one factor per partition, normalised at a partition
+    # one factor per partition, normalized at a partition
     fac = red.set_injection_spectrum({"g00": 0.0, "g01": 1.0, "g02": 2.0, "g03": 4.0}, norm="g02")
     assert fac == {"g00": 0.0, "g01": 0.5, "g02": 1.0, "g03": 2.0}
-    # a wavelength (m) as the normalisation
+    # a wavelength (m) as the normalization
     fac = red.set_injection_spectrum(lambda w: w, norm=3.5e-6)
     assert fac["g01"] == pytest.approx(um["g01"] / 3.5)
     with pytest.raises(ValueError, match="per-partition"):
@@ -255,7 +255,7 @@ def test_set_zone_center_moves_the_zones_and_none_restores_them():
     assert set_zone_center(red, (22.0, 22.0)) == red.partitions()
     assert all(r.defaults["zone_center"] == (22.0, 22.0) for r in red.reducers.values())
     moved, _ = _one(red)
-    assert not np.array_equal(np.isfinite(base), np.isfinite(moved)), "the zone footprint moves with its centre"
+    assert not np.array_equal(np.isfinite(base), np.isfinite(moved)), "the zone footprint moves with its center"
     set_zone_center(red, None)
     assert all("zone_center" not in r.defaults for r in red.reducers.values())
     np.testing.assert_array_equal(_one(red)[0], base)
@@ -331,7 +331,7 @@ def test_corr_range_searches_the_band_where_the_cut_acts():
 def test_getzone2015_zones_are_the_paper_reductions_pixels():
     """The 2015 getzone (MWC758_ALES reduce_ales_mwc758_2.pro): dist_circle and angmask about (sc/2 - 1,
     sc/2 - 1) in single precision, ang = atan2 + pi, zone jj = [jj, jj + 1] * 360 / n_ang deg, both ends
-    inclusive, with annmode_inout = [5, 27].  zone_indices with that centre and 'getzone2015' angles
+    inclusive, with annmode_inout = [5, 27].  zone_indices with that center and 'getzone2015' angles
     gives the same pixels in every sector, where the default angles move one row of 23 pixels."""
     from klip_tpe.klip import zone_indices
     n, c, n_ang = 62, np.float32(30.0), 6
@@ -358,7 +358,7 @@ def test_the_reducer_draws_its_zones_as_set():
     assert all(r.defaults["zone_center"] == (24.0, 24.0) and r.defaults["zone_angles"] == "getzone2015"
                for r in red.reducers.values())
     a, _ = _one(red, n_ang=4)
-    set_zone_center(red, (24.0, 24.0))                       # the default angles, the same centre
+    set_zone_center(red, (24.0, 24.0))                       # the default angles, the same center
     assert all("zone_angles" not in r.defaults for r in red.reducers.values())
     b, _ = _one(red, n_ang=4)
     assert np.array_equal(np.isfinite(a), np.isfinite(b)), "the angles move sectors, not the zone"

@@ -112,7 +112,7 @@ class FinalGridConfig:
         Number of calibration steps at most.
     sweeps : int, default 2
         Number of sweeps of the election at most.
-    z : float, default 1.0
+    z : float, default 2.0
         How many standard errors a finalist's mean paired gain must exceed to replace the winner.
     finalists : int, default 0
         Number of each run's finalists per annulus, its winner and its best by validated score.  0 takes
@@ -132,7 +132,7 @@ class FinalGridConfig:
     n_cal: int = 12
     max_cal: int = 4
     sweeps: int = 2
-    z: float = 1.0
+    z: float = 2.0
     finalists: int = 0
     entrants_from: List[str] = field(default_factory=list)
     curve_snr: str = "grid"
@@ -442,7 +442,7 @@ def touched(r_px: float, regions: Sequence[Tuple[float, float]], reach_px: float
     return [i for i, (lo, hi) in enumerate(regions) if max(lo - r, r - hi, 0.0) <= float(reach_px) + 1e-9]
 
 
-def elect_one(readings: Dict[str, np.ndarray], order: Sequence[str], winner: str, z: float = 1.0
+def elect_one(readings: Dict[str, np.ndarray], order: Sequence[str], winner: str, z: float = 2.0
               ) -> Tuple[str, Dict[str, Dict[str, Any]]]:
     """Return an annulus' winner after its election, and each finalist's statistics against the winner.
 
@@ -458,7 +458,7 @@ def elect_one(readings: Dict[str, np.ndarray], order: Sequence[str], winner: str
         The finalists' keys, in the order a tie goes by.
     winner : str
         The current winner's key, among ``order``.
-    z : float, default 1.0
+    z : float, default 2.0
         How many standard errors the gain must exceed.
 
     Returns

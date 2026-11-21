@@ -178,7 +178,7 @@ if HAVE_DATA:
     if g.get("boundaries") is not None:
         for b in np.atleast_1d(g["boundaries"]):
             ax[0].axvline(float(b) % 360, color="0.7", lw=0.6, zorder=0)
-        print(f"grey lines: the boundaries measured for {FILTER}, "
+        print(f"gray lines: the boundaries measured for {FILTER}, "
               f"{', '.join(f'{float(b) % 360:.0f}' for b in np.atleast_1d(g['boundaries']))} deg")
     R, A = np.meshgrid(np.geomspace(0.3, 8.0, 160), az)
     im = ax[1].pcolormesh(A, R, T(R, A), shading="auto", cmap="magma", vmin=0, vmax=1.05)

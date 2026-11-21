@@ -3,7 +3,7 @@
 From the NEAR2 note of 2026-10-12: with four trials in flight (552d9cc) the search ran
 0.50 s per evaluation over evaluations 501-2500 and 0.67 s over 4501-5040, at a constant
 bin mix, so something on the main thread grew with the history.  The routine checkpoint
-is now serialised only when it is written (tests/test_checkpoint_sync.py) and a TPE
+is now serialized only when it is written (tests/test_checkpoint_sync.py) and a TPE
 proposal computes all its candidates' densities at once (tests/test_optimizers.py).  What
 must hold here:
 

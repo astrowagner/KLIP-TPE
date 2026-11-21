@@ -1444,7 +1444,7 @@ def _add_near_args(p):
     gg.add_argument("--names", nargs="+", default=None, help="partition names (default: cube file stems)")
     gg.add_argument("--star-flux", nargs="+", default=None,
                     help="star flux per cube, in the science frames' own units and in the "
-                         "template's normalisation aperture; omit it and the contrast axis is "
+                         "template's normalization aperture; omit it and the contrast axis is "
                          "in template units")
     gg.add_argument("--pxscale", type=float, default=None,
                     help="arcsec / px. generic: the cubes' scale. near: the plate scale the pixel constants follow "
@@ -1456,7 +1456,7 @@ def _add_near_args(p):
     gg.add_argument("--angle-sign", type=float, default=1.0, help="-1 flips the derotation-angle sign")
     gg.add_argument("--crop-half", type=int, default=None,
                     help="crop to 2h+1 px around --center (generic default: full frame; nomic default: 75)")
-    gg.add_argument("--center", type=float, nargs=2, default=None, help="star pixel (x y); default: array centre")
+    gg.add_argument("--center", type=float, nargs=2, default=None, help="star pixel (x y); default: array center")
     gg.add_argument("--wv-index", type=int, default=None, help="channel of a 4-d IFS cube")
     gg.add_argument("--no-tags", action="store_true", help="no data-derived frame-quality tags (no frame selection)")
     gg.add_argument("--forbidden-pa", type=float, nargs=2, action="append", metavar=("PA", "HALFWIDTH"),
@@ -1540,7 +1540,7 @@ def _add_near_args(p):
     g.add_argument("--truenorth", type=float, default=0.0)
     g.add_argument("--fwhm-px", type=float, default=None, help="override the FWHM (default: Airy fit / 1.028 l/D)")
     g.add_argument("--name", default=None, help="partition-name prefix (default: --obj)")
-    g.add_argument("--r-ee", type=float, default=None, help="core radius (px) for the frame PSF normalisation (1.5 l/D)")
+    g.add_argument("--r-ee", type=float, default=None, help="core radius (px) for the frame PSF normalization (1.5 l/D)")
     g.add_argument("--groups", nargs="+", default=None,
                    help="image groups as partitions: 'auto' (pyNOMIC's star-position split), JD split times, "
                         "or @file with one integer label per frame; default: no grouping (partitions = chop states)")
@@ -1623,7 +1623,7 @@ def _add_near_args(p):
     p.add_argument("--subtract-sources", default=None, metavar="FILE",
                    help="point sources taken out of every frame once, at load: one per line, rho (arcsec), PA "
                         "(deg) and contrast, each injected with the negative of its contrast by the injection "
-                        "code, so placement, true north, centre, flux unit and throughput are a draw's. Every "
+                        "code, so placement, true north, center, flux unit and throughput are a draw's. Every "
                         "reduction sees the edited frames, the KLIP-FM model cube does not. Recorded in the "
                         "run's checkpoint, and kept on resume and extend when not typed")
     p.add_argument("--subtract-line", default=None, metavar="FILE",
@@ -1878,7 +1878,7 @@ def _final_grid_config(a):
     mode = getattr(a, "final_grid", None)
     fc = FinalGridConfig(**({"mode": mode} if mode else {}), n_pa=int(getattr(a, "fg_pa", 12)),
                          sep_step_fwhm=float(getattr(a, "fg_step", 1.0)),
-                         cover_fwhm=float(getattr(a, "fg_cover", 0.5)), z=float(getattr(a, "fg_z", 1.0)),
+                         cover_fwhm=float(getattr(a, "fg_cover", 0.5)), z=float(getattr(a, "fg_z", 2.0)),
                          sweeps=int(getattr(a, "fg_sweeps", 2)), finalists=int(getattr(a, "fg_finalists", 0)),
                          entrants_from=[os.path.abspath(p) for p in getattr(a, "fg_entrants_from", None) or []],
                          curve_snr=getattr(a, "fg_curve", "grid") or "grid")
@@ -3006,10 +3006,10 @@ def _add_run_args(p):
     p.add_argument("--ann-edges", type=float, nargs="+", default=[0.0, 20.0])
     p.add_argument("--ann-extra", nargs="+", default=None, metavar="IN:OUT",
                    help="annuli beside those of --ann-edges, each IN:OUT px, which may overlap them, e.g. 6.85:16.16 "
-                        "16.16:25.47. All are numbered by centre and searched, validated and verified over their own "
+                        "16.16:25.47. All are numbered by center and searched, validated and verified over their own "
                         "zones. Where annuli overlap, the stitch takes each radius from the annulus with the nearest "
-                        "centre (their tiles, in final_results.json and klip_stitched_params.txt). The per-annulus "
-                        "lists of --n-iter, --n-init, --n-sources and --use-contrast follow the numbering by centre. "
+                        "center (their tiles, in final_results.json and klip_stitched_params.txt). The per-annulus "
+                        "lists of --n-iter, --n-init, --n-sources and --use-contrast follow the numbering by center. "
                         "The first three repeat their last entry past their end, and an annulus past the end of "
                         "--use-contrast is calibrated")
     p.add_argument("--n-iter", type=int, nargs="+", default=[200])
@@ -3028,7 +3028,7 @@ def _add_run_args(p):
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--contrast0", type=float, default=3e-5)
     p.add_argument("--use-contrast", type=float, nargs="+", default=None,
-                   help="forced contrast per annulus, in the annuli's order (by centre with --ann-extra). 0 calibrates "
+                   help="forced contrast per annulus, in the annuli's order (by center with --ann-extra). 0 calibrates "
                         "that annulus, and so does every annulus past the end of the list. Unlike --n-iter, the list "
                         "does not repeat its last entry"),
     p.add_argument("--cmax-cal", type=float, default=None)
@@ -3089,9 +3089,9 @@ def _add_run_args(p):
     p.add_argument("--fg-cover", type=float, default=0.5, metavar="FWHM",
                    help="how far beyond an annulus' part of the stitch a point still counts toward its election, "
                         "in FWHM (default 0.5)")
-    p.add_argument("--fg-z", type=float, default=1.0, metavar="Z",
+    p.add_argument("--fg-z", type=float, default=2.0, metavar="Z",
                    help="how many standard errors a finalist's mean paired gain must exceed to replace the "
-                        "winner (default 1)")
+                        "winner (default 2)")
     p.add_argument("--fg-sweeps", type=int, default=2, metavar="N",
                    help="sweeps of the election at most, inner to outer and back (default 2)")
     p.add_argument("--fg-finalists", type=int, default=0, metavar="N",
@@ -3381,9 +3381,9 @@ def _build_parser():
     p.add_argument("--cover", type=float, default=0.5, metavar="FWHM",
                    help="how far beyond an annulus' part of the stitch a point still counts toward its election, "
                         "in FWHM (default 0.5)")
-    p.add_argument("--z", type=float, default=1.0,
+    p.add_argument("--z", type=float, default=2.0,
                    help="how many standard errors a finalist's mean paired gain must exceed to replace the "
-                        "winner (default 1)")
+                        "winner (default 2)")
     p.add_argument("--sweeps", type=int, default=2, help="sweeps of the election at most (default 2)")
     p.add_argument("--finalists", type=int, default=0, metavar="N",
                    help="each run's finalists per annulus, its winner and its best by validated score (default 0, "
