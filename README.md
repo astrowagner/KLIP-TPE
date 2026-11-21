@@ -168,6 +168,7 @@ klip-tpe resume   --run-dir <dir>|last  <same data arguments>                   
 klip-tpe extend   --run-dir <dir> --n-iter <new totals>                                              # more evaluations
 klip-tpe plots    --run-dir <dir>                                                                    # figures
 klip-tpe render   --run-dir <dir> [--every N]                                                        # every panel, afterwards
+klip-tpe extract  --run-dir <dir> --rho <as> --pa <deg> --contrast <c>                               # a companion's fit
 ```
 
 Common search arguments: `--ann-edges r0 r1 [r2 ...]` (px), `--n-iter`, `--n-init` (per
@@ -190,6 +191,7 @@ lists all of them.
 | `runner.py` | calibrate → search → validate, products, checkpoints, `resume` / `extend`, callbacks |
 | `display.py`, `intro.py`, `animate.py`, `plots.py` | live panel, books, launch movie, GIF / MP4, diagnostics |
 | `products.py`, `stitch.py`, `verify.py`, `param_verify.py`, `candidates.py` | contrast curves, stitches, S/N maps, the verification stack |
+| `companion.py`, `extract.py` | known companions: taking one out, its S/N, and its position and contrast with uncertainties |
 | `instruments/` | `generic`, `near`, `nomic`, `ales` adapters |
 | `backends/` | `pyklip`, `vip`, `spaceklip`, `custom` |
 | `datasets.py` | public example data (auto-download) |
@@ -205,6 +207,7 @@ lists all of them.
 * `docs/DISPLAY.md` — the live panel, cell by cell, and every product file.
 * `docs/BACKENDS.md` — pyKLIP / VIP / spaceKLIP: parameter mapping, conventions, ingestion.
 * `docs/CUSTOM_PIPELINE.md` — plugging in your own reduction (three levels).
+* `docs/EXTRACT.md` — a known companion's position and contrast with uncertainties, per wavelength group too (`klip-tpe extract`).
 * `docs/CLI.md` — every command-line argument.
 * `CHANGELOG.md`.
 
