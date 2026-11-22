@@ -10,7 +10,9 @@ Writes (and caches the default-configuration reductions it needs as FITS):
   f3_landscape.pdf   sampled parameter landscape (one annulus)
   f4_partition.pdf   partition (time-group) selection on beta Pic
   f5_gallery.pdf     default vs optimized reductions, companion circled
-  f6_contrast.pdf    injection-calibrated 5-sigma contrast + KLIP-FM cross-check
+  f6_contrast.pdf    injection-calibrated 5-sigma contrast + KLIP-FM cross-check.  The paper's
+                     Fig. 8 is fig8_plot.py's, drawn over this file from the curves
+                     fig8_curve.py reads, so run those two after this script.
   f7_bench.pdf       search-strategy benchmark
   f8_paramverify.pdf parameter-ensemble reliability maps
 """

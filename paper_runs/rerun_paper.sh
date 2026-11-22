@@ -279,4 +279,7 @@ for s in "${STAGES[@]}"; do
   fi
 done
 
-say "stages attempted.  Collect with:  python3 collect.py && python3 figs.py"
+# Fig. 8 (figs/f6_contrast.pdf) is fig8_plot.py's, from the curves fig8_curve.py reads with the
+# final-image grid on A2, C and D2.  figs.py draws its own version of that file first, so
+# fig8_plot.py runs after it.
+say "stages attempted.  Collect with:  python3 collect.py && python3 figs.py && python3 fig8_curve.py && python3 fig8_plot.py"

@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased — 2026-11-22 (the scripts behind the paper's Fig. 8)
+
+From the paper session's note of 2026-11-21, committed at Kevin Wagner's request.  The paper's "Data and
+code availability" section promises the scripts behind every figure, and these two make Fig. 8.
+
+- **`paper_runs/fig8_curve.py`** reads Fig. 8's contrast curves with the final-image grid on the paper
+  runs A2 (beta Pic, VLT/NACO), C (HD 95086, VLT/SPHERE) and D2 (HIP 65426, JWST/NIRCam on pyKLIP, b
+  subtracted).  It resumes each run with the reducer, objective, sampler and guard that `run_demos.py`
+  built for it, and gives the stage each annulus' validated winner alone
+  (`FinalGridConfig(mode="on", finalists=1)`), so no annulus can change winner and the paper's Table 2
+  stands.  The curve takes the contrast grid's current settings: one injected source per reduction,
+  aperture S/N, each point stepped to within 10 % of S/N 5.  Before the stage, each winner is reduced
+  again and compared with the run's `best_clean.fits`.  The script writes nothing into the run
+  directories, and `--plan` counts the points and the reductions without reducing.  The paper's curves
+  were read with commit `233bbee`, and there every winner reproduced its saved image (A2 and D2 to the
+  bit, C to 3e-8 rms), by the paper session's record.
+- **`paper_runs/fig8_plot.py`** draws Fig. 8, `figs/f6_contrast.pdf`, from those curves and `collect.py`'s
+  `summary.json`, in the layout of `figs.py`'s `fig_contrast`: the median contrast at S/N 5 over position
+  angle at each separation, its 16th to 84th percentiles as a band, the KLIP-FM cross-check, the seeded
+  default, the annulus edges and the companion.  `figs.py` still draws its own version of that file
+  from the throughput fit, so `fig8_plot.py` runs after it.  `figs.py`'s list of figures and
+  `rerun_paper.sh`'s closing line give the order.
+- The winner check reads internals (`Runner._config_from_dict`, `Runner._start_workers`,
+  `StitchScorer.reduce`), so a change to them needs it updated.  The stage itself calls only
+  `Runner.resume`, `run_final_grid` and `run_weights`.
+
 ## Unreleased — 2026-11-22 (a Ctrl-C ends a run that reduces through pyKLIP, and the final grid's winner in winner.json and tutorial 03)
 
 After the FLIP note of 2026-11-21, "the K5 rerun on `bf99474` did not hang; a Ctrl-C still leaves the run
