@@ -7,6 +7,7 @@
     python3 scripts/readme_panel.py --cg-step 1           # the contrast grid at FWHM steps
     python3 scripts/readme_panel.py --no-show             # no window, panels still written
     python3 scripts/readme_panel.py --target hd95086      # the panel on public data (VLT/SPHERE)
+    python3 scripts/readme_panel.py --extra-annuli 1 --seam-annuli   # two annuli and one on their boundary
 
 RX J0534 is ``scripts/run_rxj0534.py``'s four-night search (``--partitions 4``), with the
 companion held out of the objective.  The first annulus is its separation +/- 2 FWHM
@@ -23,6 +24,15 @@ separations per annulus, a FWHM in from its edges, so the curve has no points wi
 the seams.  The panel's title is ``--title`` ("RX J0534"), not the run directory's name.  The
 data are read from ``LMIRCAM_ROOT`` (default /Volumes/RAID36TB/LMIRCam).
 
+``--seam-annuli`` adds an annulus on each boundary between the annuli (``run_rxj0534.py
+--seam-annuli``), from the center of the one inside to the center of the one outside, numbered by
+center among them; with ``--extra-annuli 1`` the annuli are 0.20-0.58", 0.39-0.77" and
+0.58-0.97".  The stitch takes each radius from the annulus with the nearest center, so a
+boundary's radii come from the middle of the seam annulus' zone, and every tile edge lies 1 FWHM
+inside the zones on both sides.  The stitched images then hold none of the KLIP zone edges, where
+the reductions ring: the three touching annuli show a dark ring just outside the 0.58" boundary.
+The seam annulus' injections sit on the boundary.
+
 ``--target hd95086`` is tutorial 02's search on HD 95086 (VLT/SPHERE IRDIS K1+K2, 30-70 px,
 HD 95086 b passed as known) with the same data and seed, after a 200-evaluation warm-up.  Its
 injections are at a fixed contrast of 3e-6 (``--contrast``, 0 calibrates it as the tutorial
@@ -35,13 +45,13 @@ source per reduction at 12 position angles per separation (``--cg-pa``), each it
 (``--cg-target``) with the IDL contrast generators' aperture photometry or the run's
 matched-filter S/N (``--cg-snr``).
 
-The run writes to ``--run-dir`` (``~/klip_tpe_runs/rxj0534/readme_3ann``, or
-``~/klip_tpe_runs/hd95086``), outside any synced folder; the single-annulus run of 2026-10-30 is
-in ``~/klip_tpe_runs/rxj0534/readme``.  Its last panel, the last annulus finished with its
-validated winner, is the image at the top of the README (``docs/img/step_display.png``): its
-stitched images and contrast curve cover every annulus, the companion's included, and its
-convergence and parameter panels are the last annulus'.  Running the command again resumes the
-run.
+The run writes to ``--run-dir`` (``~/klip_tpe_runs/rxj0534/readme_3ann``, ``readme_seam`` with
+``--seam-annuli``, or ``~/klip_tpe_runs/hd95086``), outside any synced folder; the single-annulus
+run of 2026-10-30 is in ``~/klip_tpe_runs/rxj0534/readme``.  The image at the top of the README
+(``docs/img/step_display.png``) is the three-annulus run's panel at the end of its second annulus,
+finished with its validated winner: its stitched images and contrast curve cover the first two
+annuli, the companion's included, and its convergence and parameter panels are the second
+annulus'.  Running the command again resumes the run.
 """
 from __future__ import annotations
 
@@ -65,6 +75,26 @@ TARGETS = {
 
 
 def parse(argv=None) -> argparse.Namespace:
+    """Read the command line, with the target's settings for the options not given.
+
+    Parameters
+    ----------
+    argv : list of str or None, default None
+        The command line without the program name; None reads ``sys.argv``.
+
+    Returns
+    -------
+    a : argparse.Namespace
+        The options.  Those not given take ``TARGETS``' values for the target (run directory,
+        title, seed, warm-up, grid step, source count and extra annuli), and ``run_dir`` is
+        expanded.  With ``--seam-annuli`` the default run directory is
+        ``~/klip_tpe_runs/rxj0534/readme_seam``, so the touching annuli's run is not resumed.
+
+    Raises
+    ------
+    SystemExit
+        On a bad option, or ``--seam-annuli`` with ``--target hd95086``.
+    """
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--target", default="rxj0534", choices=sorted(TARGETS),
@@ -79,6 +109,10 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--extra-annuli", type=int, default=None,
                    help="RX J0534: annuli outside the companion's, each as wide (default 2; 0 for the "
                         "companion's annulus alone)")
+    p.add_argument("--seam-annuli", action="store_true",
+                   help="RX J0534: one more annulus on each boundary between the annuli, so the stitched "
+                        "images hold no KLIP zone edge (run_rxj0534.py --seam-annuli; needs --extra-annuli 1 "
+                        "or more). Default run directory: ~/klip_tpe_runs/rxj0534/readme_seam")
     p.add_argument("--run-dir", default=None,
                    help="run directory (default ~/klip_tpe_runs/rxj0534/readme_3ann or ~/klip_tpe_runs/hd95086)")
     p.add_argument("--title", default=None, help="the panel's title (default \"RX J0534\" or \"HD 95086\")")
@@ -98,6 +132,10 @@ def parse(argv=None) -> argparse.Namespace:
                     help="fixed injection contrast (default 3e-6), or 0 to calibrate it as tutorial 02 does")
     hd.add_argument("--every", type=int, default=5, help="a panel every this many evaluations (default 5)")
     a = p.parse_args(argv)
+    if a.seam_annuli and a.target != "rxj0534":
+        p.error("--seam-annuli is for RX J0534's annuli")
+    if a.seam_annuli and a.run_dir is None:
+        a.run_dir = "~/klip_tpe_runs/rxj0534/readme_seam"
     for k, v in TARGETS[a.target].items():
         if getattr(a, k) is None:
             setattr(a, k, v)
@@ -106,12 +144,27 @@ def parse(argv=None) -> argparse.Namespace:
 
 
 def rxj0534_argv(a: argparse.Namespace) -> list:
-    """``scripts/run_rxj0534.py``'s command line for the README run."""
+    """Return ``scripts/run_rxj0534.py``'s command line for the README run.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The options from :func:`parse`.
+
+    Returns
+    -------
+    argv : list of str
+        The four-night search (``--partitions 4``) with the sources 180 deg apart on each annulus'
+        mid-radius (``--even-pa``) and the injection-grid contrast curve, with the run directory,
+        title, budget, extra and seam annuli, warm-up, seed and window as given.
+    """
     argv = ["--partitions", "4", "--n-iter", str(a.n_iter), "--out", a.run_dir, "--title", a.title,
             "--n-sources", str(a.n_sources), "--even-pa", "--contrast-grid", "grid", "--cg-pa", str(a.cg_pa), "--cg-step", f"{a.cg_step:g}",
             "--cg-target", f"{a.cg_target:g}", "--cg-snr", a.cg_snr, "--workers", str(a.workers)]
     if a.extra_annuli:
         argv += ["--extra-annuli", str(a.extra_annuli)]
+    if a.seam_annuli:
+        argv += ["--seam-annuli"]
     if a.n_init is not None:
         argv += ["--n-init", str(a.n_init)]
     if a.seed is not None:
@@ -120,6 +173,19 @@ def rxj0534_argv(a: argparse.Namespace) -> list:
 
 
 def run_rxj0534(a: argparse.Namespace) -> int:
+    """Run the README search on RX J0534 through ``scripts/run_rxj0534.py``.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The options from :func:`parse`.
+
+    Returns
+    -------
+    status : int
+        ``run_rxj0534.main``'s status.  The run's products go to ``a.run_dir``, and the path of its
+        last panel is printed.
+    """
     scripts = os.path.join(_HERE, "scripts")
     if scripts not in sys.path:
         sys.path.insert(0, scripts)
@@ -187,6 +253,18 @@ def run_hd95086(a: argparse.Namespace) -> int:
 
 
 def main(argv=None) -> int:
+    """Run the README panel's search on the chosen target.
+
+    Parameters
+    ----------
+    argv : list of str or None, default None
+        The command line without the program name; None reads ``sys.argv``.
+
+    Returns
+    -------
+    status : int
+        The status of :func:`run_rxj0534` or :func:`run_hd95086`, 0 when the run finishes.
+    """
     a = parse(argv)
     return run_rxj0534(a) if a.target == "rxj0534" else run_hd95086(a)
 

@@ -171,6 +171,30 @@ After a user's note of 2026-11-21, "a companion's extraction, and its render".
   quoted values (`test_the_summary_quotes_the_fit_less_a_significant_bias`) and the table
   (`test_the_fakes_table_fits_its_slot_whatever_it_holds`).
 
+## Unreleased — 2026-11-21 (an annulus on each boundary for the README run)
+
+- **`run_rxj0534.py --seam-annuli` and `readme_panel.py --seam-annuli`** (Kevin Wagner, 2026-11-21).
+  With `--extra-annuli`, one more annulus goes on each boundary between the touching annuli,
+  from the center of the one inside to the center of the one outside (`seam_annuli`, through
+  `RunConfig.ann_extra`).  The stitch takes each radius from the annulus with the nearest center,
+  so every tile edge lies 1 FWHM inside the zones on both sides, and the stitched images hold none
+  of the KLIP zone edges, where the touching annuli's reductions ring (the dark ring just outside
+  0.58" on the README's panel).  With `--extra-annuli 1` the annuli are 0.20–0.58", 0.39–0.77"
+  and 0.58–0.97", numbered by center; the seam annulus' pair goes on the boundary.  The log gives
+  every annulus' zone and tile, the companion's recovered S/N is reported for the annulus whose
+  tile holds it, and `readme_panel.py` writes such a run to `~/klip_tpe_runs/rxj0534/readme_seam`
+  by default.  Without the option nothing changes.  Tests in `test_readme_panel.py` and
+  `test_run_rxj0534.py`.
+
+## Unreleased — 2026-11-21 (the README's panel over two annuli)
+
+- **The README's panel ends at the second of the three annuli** (Kevin Wagner, 2026-11-21).
+  `docs/img/step_display.png` is now the same run's annulus-done frame of annulus 2 (0.58–0.97"),
+  drawn on `a795c83` when that annulus' validated winner was chosen: its stitched images and
+  contrast curve cover the companion's annulus and the next one out (0.20–0.97"), it circles the
+  two winners' four injected sources, and the best S/N cell reads 14.36 from its validation trial.
+  It replaces the third annulus' frame of the entry below.
+
 ## Unreleased — 2026-11-21 (the README's panel over three annuli)
 
 - **The README's panel is RX J0534's three-annulus run** (Kevin Wagner, 2026-11-07).

@@ -29,6 +29,7 @@ Running it
     python scripts/run_rxj0534.py --partitions 4   # one per night, comparable to run B2
     python scripts/run_rxj0534.py --default-only   # just the baseline, no search (~minutes)
     python scripts/run_rxj0534.py --extra-annuli 2 # and two annuli outside the companion's
+    python scripts/run_rxj0534.py --extra-annuli 1 --seam-annuli   # and one more on their boundary
 
 ``--partitions`` is the interesting knob: 4 nights reproduces the 38-D regime the paper
 already benchmarks, 16 pushes it to ~150-D.  Running both gives the dimension-scaling
@@ -74,6 +75,33 @@ def annulus_edges(r_px, fwhm, ann=None, ann_fwhm=2.0, extra=0):
     a0, a1 = (float(ann[0]), float(ann[1])) if ann else (max(float(r_px) - half, 1.0), float(r_px) + half)
     w = a1 - a0
     return [a0, a1] + [a1 + w * (k + 1) for k in range(int(extra))]
+
+
+def seam_annuli(edges):
+    """Return an annulus centered on each boundary between touching annuli.
+
+    Each spans from the center of the annulus inside the boundary to the center of the one outside
+    it, so between annuli of one width ``w`` it is ``w`` wide and centered on the boundary.  The
+    stitch takes each radius from the annulus whose center is nearest
+    (:func:`klip_tpe.stitch.annulus_tiles`), so a boundary's radii then come from the middle of a
+    zone, and each tile edge lies ``w / 4`` inside the zones on both sides of it: 1 FWHM for the
+    default annulus of 4 FWHM.  The KLIP zone edges, where the reductions ring, fall outside the
+    tiles.
+
+    Parameters
+    ----------
+    edges : sequence of float
+        The touching annuli's edges, in pixels, increasing (:func:`annulus_edges`); ``n`` edges make
+        ``n - 1`` annuli.
+
+    Returns
+    -------
+    seams : list of list of 2 floats
+        One ``[inner, outer]`` zone in pixels per boundary, ``n - 2`` of them, for
+        ``RunConfig.ann_extra``.  Empty for one annulus.
+    """
+    e = [float(v) for v in edges]
+    return [[0.5 * (e[k - 1] + e[k]), 0.5 * (e[k] + e[k + 1])] for k in range(1, len(e) - 1)]
 
 
 def crop_for(edges, margin_px=25.6, floor=80):
@@ -256,6 +284,31 @@ def make_reducer(partitions=4, clean=False, crop=80, workers="auto", log=print):
 
 
 def main(argv=None):
+    """Run the RX J0534 search from a command line.
+
+    Loads the four nights (:func:`make_reducer`), builds the annuli around the companion
+    (:func:`annulus_edges`, and :func:`seam_annuli` with ``--seam-annuli``), searches each annulus
+    with RX J0534 b held out of the objective, and logs the companion's recovered S/N.  A
+    check-pointed run in ``--out`` is continued.
+
+    Parameters
+    ----------
+    argv : list of str or None, default None
+        The command line without the program name; None reads ``sys.argv``.  ``--help`` lists the
+        options.
+
+    Returns
+    -------
+    status : int
+        0 when the run finishes.  The run's products, ``run.log`` and ``companion_snr.jsonl`` go to
+        ``--out``.
+
+    Raises
+    ------
+    SystemExit
+        On a bad option, an annulus past the crop, injections off the companion's separation
+        without ``--allow-offset-ann``, or ``--resume`` without a checkpoint.
+    """
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--partitions", type=int, default=16, choices=[4, 8, 16],
                     help="4 = one per night, 8 = night x side, 16 = night x side x cube (default)")
@@ -281,6 +334,12 @@ def main(argv=None):
                          "(default 0). The first stays the companion's; with the default annulus, 2 gives "
                          "0.20-0.58\", 0.58-0.97\" and 0.97-1.35\". With --even-pa each annulus' injections "
                          "sit on its own mid-radius, which for the first is the companion's separation")
+    ap.add_argument("--seam-annuli", action="store_true",
+                    help="with --extra-annuli: one more annulus on each boundary between the annuli, from the "
+                         "center of the one inside to the center of the one outside (RunConfig.ann_extra). "
+                         "The stitch then takes each boundary's radii from the middle of a zone, and every tile "
+                         "edge lies 1 FWHM inside the zones on both sides, away from the KLIP zone edges. With "
+                         "--extra-annuli 1: 0.20-0.58\", 0.39-0.77\" and 0.58-0.97\", numbered by center")
     # 3, not 2: this is LMIRCam.  The NIRCam limit of two (a small coronagraphic field, where
     # simultaneous sources perturb the basis each other sees) was applied here by mistake on
     # 2026-09-22 (471c017) and is a NIRCam setting only -- run_demos D / H2 carry it.
@@ -335,6 +394,8 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.extra_annuli < 0:
         raise SystemExit(f"--extra-annuli takes 0 or more, not {a.extra_annuli}")
+    if a.seam_annuli and not a.extra_annuli:
+        raise SystemExit("--seam-annuli goes with --extra-annuli 1 or more: one annulus has no boundary")
     if a.crop is None:
         # chosen before the data are loaded, so from the nominal FWHM; checked against the
         # reducer's own once it exists
@@ -363,6 +424,7 @@ def main(argv=None):
     # separation the result is about -- instead of being diluted across a wide band.
     r_px = PLANET[0] / PXSCALE
     edges = annulus_edges(r_px, red.fwhm, a.ann, a.ann_fwhm, a.extra_annuli)
+    seams = seam_annuli(edges) if a.seam_annuli else []
     ann = (edges[0], edges[1])
     multi = len(edges) > 2
     mid = 0.5 * (ann[0] + ann[1])
@@ -371,9 +433,21 @@ def main(argv=None):
     if abs(mid - r_px) > 0.5 * red.fwhm:
         log(f"  note: injections will sit at {mid * PXSCALE:.3f}\", not the companion's "
             f"{PLANET[0]:.3f}\" -- pass --ann symmetric about {r_px:.1f} px to match it")
-    for k in range(2, len(edges)):
-        log(f"annulus {k} of {len(edges) - 1}: {edges[k - 1]:.1f}-{edges[k]:.1f} px "
-            f"({edges[k - 1] * PXSCALE:.3f}-{edges[k] * PXSCALE:.3f}\") (--extra-annuli)")
+    if not seams:
+        for k in range(2, len(edges)):
+            log(f"annulus {k} of {len(edges) - 1}: {edges[k - 1]:.1f}-{edges[k]:.1f} px "
+                f"({edges[k - 1] * PXSCALE:.3f}-{edges[k] * PXSCALE:.3f}\") (--extra-annuli)")
+    else:
+        # numbered by center, as the runner numbers them (RunConfig.zones), with the tile the
+        # stitch takes from each (RunConfig.tiles)
+        geo = RunConfig(ann_edges=list(edges), ann_extra=seams)
+        seam_set = {tuple(s) for s in seams}
+        for k, (z, t) in enumerate(zip(geo.zones, geo.tiles)):
+            why = ("--seam-annuli" if tuple(z) in seam_set else
+                   "the companion's" if k == 0 else "--extra-annuli")
+            log(f"annulus {k + 1} of {len(geo.zones)}: {z[0]:.1f}-{z[1]:.1f} px "
+                f"({z[0] * PXSCALE:.3f}-{z[1] * PXSCALE:.3f}\"), stitched over {t[0]:.1f}-{t[1]:.1f} px "
+                f"({t[0] * PXSCALE:.3f}-{t[1] * PXSCALE:.3f}\") ({why})")
     if a.crop and edges[-1] + 0.5 * red.fwhm > a.crop:
         raise SystemExit(f"the outermost annulus reaches {edges[-1]:.1f} px, past the {a.crop}-px crop -- "
                          f"pass a larger --crop, or 0 for the full frame")
@@ -417,7 +491,7 @@ def main(argv=None):
     # band (Runner._band_for) is that mid-radius, which for the first annulus is the
     # companion's separation again.  The contrast grid keeps its own edges (edge_fwhm).
     collapse = {"inject_inset_fwhm": 0.5 * (ann[1] - ann[0]) / red.fwhm + 0.01} if (a.even_pa and multi) else {}
-    cfg = RunConfig(ann_edges=list(edges), n_iter=n_iter, n_init=n_init, seed=a.seed,
+    cfg = RunConfig(ann_edges=list(edges), ann_extra=seams, n_iter=n_iter, n_init=n_init, seed=a.seed,
                     n_sources=a.n_sources,
                     # NEAR's two-source convention collapses the band to the annulus'
                     # AREA-weighted mid radius, which for a band centered on the companion
@@ -470,10 +544,11 @@ def main(argv=None):
         log(f"  all within {off:.2f} px of the companion at {PLANET[0] / PXSCALE:.2f} px -- "
             f"the objective is measured on its own ring, at whatever angles each "
             f"evaluation draws")
-    for ia in range(1, len(edges) - 1):
+    zones = cfg.zones                                # numbered by center, the seams' among them
+    for ia in range(1, len(zones)):
         runner_probe.ia = ia
         more = runner_probe.search_sources(ia, cfg.contrast0)
-        ring = 0.5 * (edges[ia] + edges[ia + 1])
+        ring = 0.5 * (zones[ia][0] + zones[ia][1])
         log(f"annulus {ia + 1}: {len(more)} injected at rho = "
             + ", ".join(f"{s.rho:.4f}\" ({s.rho / PXSCALE:.2f} px)" for s in more)
             + f", PA re-drawn each evaluation; its center ring is {ring:.2f} px")
@@ -509,7 +584,12 @@ def main(argv=None):
         rc = runner.cfg
         log(f"  continued with the recorded settings: n_iter={rc.n_iter}  "
             f"n_sources={rc.n_sources}  ann_edges={rc.ann_edges}  "
-            f"fixed_sources={rc.fixed_sources}")
+            + (f"ann_extra={rc.ann_extra}  " if rc.ann_extra else "")
+            + f"fixed_sources={rc.fixed_sources}")
+        if bool(seams) != bool(rc.ann_extra):
+            log(f"  note: --seam-annuli was {'given' if seams else 'not given'}, but the run continues with "
+                f"{'its seam annuli' if rc.ann_extra else 'no seam annuli'} -- use --fresh, or a new --out, "
+                f"to change it")
         for name, now, then in (("--n-iter", a.n_iter, rc.n_iter),
                                 ("--n-sources", a.n_sources, rc.n_sources)):
             if then is not None and now != then and not (isinstance(then, list) and now in then):
@@ -520,10 +600,15 @@ def main(argv=None):
     try:
         from klip_tpe import MawetPeakSNR
         m = MawetPeakSNR(pxscale=red.pxscale, fwhm=red.fwhm, kernel_fn=red.matched_filter_kernel)
+        # each annulus' tile, where the stitch takes its image: its zone (inrad, outrad) unless
+        # annuli overlap, and with --seam-annuli the companion sits on the seam annulus' zone edge
+        tiles = list(runner.cfg.tiles)
         for r in results:
             img = getattr(r, "clean_image", None)
-            inr, outr = float(getattr(r, "inrad", 0.0)), float(getattr(r, "outrad", np.inf))
-            if img is not None and inr <= r_px <= outr:        # the annuli that hold the companion
+            k = int(getattr(r, "annulus", -1))
+            inr, outr = (tiles[k] if 0 <= k < len(tiles) else
+                         (float(getattr(r, "inrad", 0.0)), float(getattr(r, "outrad", np.inf))))
+            if img is not None and inr <= r_px <= outr:        # the annulus whose tile holds the companion
                 snr = float(m.per_source(img, None, [PLANET[0]], [PLANET[1]])[0])
                 log(f"annulus {r.annulus + 1}: RX J0534 b recovered at S/N = {snr:.2f} "
                     f"(published four-night stack: ~5.2)")
