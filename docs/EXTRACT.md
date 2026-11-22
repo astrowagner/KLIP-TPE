@@ -40,7 +40,8 @@ write_extract(found, run_dir + "_extract_b", label="b")
    reduced image is read in a fixed disk of `--patch` FWHM (default 2) around the starting position.
    The disk's pixels, less their mean, give an L2 norm, divided by the same norm of the reduction
    without the injection.  0 is a perfect null and 1 is no cancellation.  The residual is
-   deterministic, so no trial is drawn again.
+   deterministic, so no trial is drawn again.  The negatives and the fakes go to their sub-pixel
+   positions by a cubic spline (`--inject-interp`, below), not by the run's bilinear shift.
 3. **The search.**  A TPE proposes `(rho, pa, contrast)` in a box around the start and maximizes
    `-log(residual)`, `--n-init` random trials first and `--n-iter` in all.  The box is 0.5 FWHM either
    side in separation, 0.5 FWHM along the arc in angle and 0.5 to 2 times the starting contrast
@@ -121,7 +122,8 @@ Each panel is 1600 x 760 pixels on black, laid out as the IDL predecessor drew i
   parabola, its minimum and 1-sigma.  Once the profile scans run, they take the trials' place.
 - **The corner plot** of the trials in rho, PA and contrast, colored by -log residual.
 - **The text**, with the trial count, the best and the trial's values, the time per trial, the elapsed
-  time, the ETA and the live minimum with its 1-sigma.
+  time, the ETA and the live minimum with its 1-sigma.  The last panel gives the values to quote, with
+  a `*` on those that are the best less the fakes' significant bias.
 
 The later stages have panels of their own:
 
@@ -160,6 +162,35 @@ their own positions and the fakes come from the extraction's tables and summary,
 so each trial's panels show the best's injected model moved to the trial and scaled to its contrast,
 titled as an approximation.  The fakes' and the partitions' own fits come as their tables, since their
 trials were not saved.  The panels go to `steps/`, or to `steps_saved/` beside a live display's.
+
+## Where each negative lands: the placement
+
+Every injected stamp is moved to its sub-pixel position by an interpolation.  The run's default,
+`linear`, is the IDL predecessor's bilinear `fshift`.  It keeps the stamp's centroid and total but
+convolves it with `[1 - f, f]` along each axis at a fractional offset `f`, which spreads it by
+`f (1 - f)` px^2 per axis, 1/6 on average.  A real companion is not spread that way, so a negative
+injection has to be brighter to cancel it, by about 1/(6 sigma^2) of the PSF's variance `sigma^2`.  For
+a sampled Gaussian the least-squares contrast comes out:
+
+| FWHM (px) | linear | cubic | quintic |
+|---|---|---|---|
+| 2.4 | 1.088 | 1.0035 | 1.0005 |
+| 3.0 | 1.065 | 1.0015 | 1.0001 |
+| 4.0 | 1.035 | 1.0004 | 1.0000 |
+| 9.0 | 1.007 | 1.0000 | 1.0000 |
+
+Through KLIP the bias can grow.  In the test of a companion drawn at its own position in every frame
+(`test_an_exactly_placed_companion_fits_back_at_its_contrast`, 2.5 px FWHM), the bilinear negatives fit
+it 15 % high, and the cubic ones within 1 %.  The fakes cannot show any of it, since they go in by the
+same interpolation as the negatives.
+
+The step therefore places its negatives and fakes by a cubic spline with its prefilter (`--inject-interp
+cubic`, `ExtractConfig.inject_interp`), about four times the bilinear shift's cost per stamp.
+`quintic` takes the last few tenths of a percent at twice the cubic's cost, and `linear` gives back
+the run's own placement.  The summary's `injection` line says which it was.  A run can take the same
+choice for its own injections (`--inject-interp`, `RunConfig.inject_interp`).  By default it keeps the
+bilinear shift, the IDL predecessor's, under which the contrast curves err slightly on the
+conservative side.
 
 ## Which sigma to quote
 
@@ -211,7 +242,12 @@ measures the bias that remains in the configuration used.  The IDL predecessor f
 its production ARDI configuration the same way.
 
 A configuration whose references never hold the companion (RDI) gives a sharper minimum, but not
-always a lower floor.  Name it with `--config` to compare.
+always a lower floor.  Name it with `--config` to compare.  A run whose evaluations all kept the science
+frames has none to name.  `--set KEY=VALUE` (`extract_companion(params=)`) then overrides the
+configuration's reduction parameters in every partition, and the summary's configuration line records
+it.  For a searched reference library, `--set nkeep_altroll=0` empties the science pool and leaves the
+reference star's frames, the RDI point of the elected winner.  The step reads the image alone, so it
+skips the KLIP-FM pass that a forward-modeled metric asks of the run's own reductions.
 
 An angle offset between the injection and the derotation cannot bias the fakes.  Each fake and each
 trial's negative go into the frames through the same injection, with the frames' angles and the same
@@ -232,7 +268,7 @@ the companion too, and the summary takes it off where it is significant.
 
 | File | What it holds |
 |---|---|
-| `extract_summary.txt`, `extract_summary.json` | The best values, the position in pixels from the star, both sets of sigmas in arcsec, degrees, pixels and percent, the profiles' minima, the floors, the reductions, the recovery check with the best less its bias and the bias' t, the values and sigmas to quote, the partitions' contrasts and the `--subtract-sources` line |
+| `extract_summary.txt`, `extract_summary.json` | The configuration with any `--set` overrides, the placement, the best values, the position in pixels from the star, both sets of sigmas in arcsec, degrees, pixels and percent, the profiles' minima, the floors, the reductions, the recovery check with the best less its bias and the bias' t, the values and sigmas to quote, the partitions' contrasts and the `--subtract-sources` line |
 | `extract_trials.txt` | Every search trial: rho, pa, contrast, residual and how it was proposed |
 | `extract_profiles.txt` | The profile scans' points |
 | `extract_partitions.txt` | Each partition's wavelength, contrast, the sigma to quote, the profile sigma, its fakes' bias and scatter, the floor, and the contrast less the bias and the contrast to quote |

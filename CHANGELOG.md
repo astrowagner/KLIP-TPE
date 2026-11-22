@@ -1,5 +1,77 @@
 # Changelog
 
+## Unreleased — 2026-11-22 (a Ctrl-C ends a run that reduces through pyKLIP, and the final grid's winner in winner.json and tutorial 03)
+
+After the FLIP note of 2026-11-21, "the K5 rerun on `bf99474` did not hang; a Ctrl-C still leaves the run
+stuck".
+
+- **pyKLIP's pool workers ignore a Ctrl-C** (`klip_tpe/backends/pyklip.py`).  A Ctrl-C goes to the run's
+  whole process group, and the forkserver hands its workers Python's default handler, so pyKLIP's
+  workers took it as `KeyboardInterrupt` and died inside the pool.  The pool never gives a dead worker's
+  task to another, so `klip_parallelized` waited for it forever, and the run's main thread with it.
+  `_NoMainContext.Pool` now starts each worker with `_pool_worker_init`, which sets SIGINT to `SIG_IGN`
+  and then runs pyKLIP's own initializer, as klip-tpe's workers do (`parallel._worker_main`).  The
+  forkserver preloads `klip_tpe.backends.pyklip`, so no worker imports it.  On a synthetic two-partition
+  run with pyKLIP reductions of a few seconds, a SIGINT to the process group at evaluation 8 left the
+  old pools still running 90 s later, and now ends the run within a second.
+- **`winner.json` gets the final-image grid's record** (`klip_tpe/runner.py`).  Each annulus' `winner.json`
+  was written when the annulus finished and kept `final_grid: null` after the stage replaced its winner.
+  It is now written again once the stage has run, as the checkpoint and `final_results.json` already
+  were, the validation's winner kept and the stage's record beside it.
+- **The final configuration from a script** (`AnnulusResult.final_label`, `final_score`,
+  `final_image_path`, beside `final_config` and `final_partitions`): a line naming the winner the run's
+  products take, its validated score, and its image, `final_grid/annulusNN_best_clean.fits` where the
+  stage changed the winner.
+- **Tutorial 03 reports the run's winner**, the final grid's where it replaced the validation's: its
+  parameters, its score and the S/N on its image, for both searches.  The notebook's two changed cells
+  lost their old outputs, and the text says where its numbers come from.
+- Docs: BACKENDS.md (the pools ignore a Ctrl-C), RUNNING.md (interruptions, the final grid's records and
+  the script helpers).  Tests: `tests/test_pyklip_pool.py` (a SIGINT to the workers leaves the task to
+  come back, and pyKLIP's initializer still runs), and the final grid's tests read `winner.json` and the
+  helpers.
+
+## Unreleased — 2026-11-22 (injected stamps placed without spreading them, extract's overrides, the values to quote on the last panel)
+
+After a user's note of 2026-11-21, evening, "the fakes' residuals, the RDI test, the panels, and
+the contrast offset".
+
+- **A placement that does not spread the stamp** (`klip_tpe/injection.py`, `reducer.py`, `klip_gpu.py`,
+  `gpu_reducer.py`).  Every injected stamp went to its sub-pixel position by the IDL predecessor's
+  bilinear `fshift`, which convolves it with `[1 - f, f]` along each axis and spreads it by
+  `f (1 - f)` px^2, 1/6 on average.  A fit of a real companion by negative injection therefore came out
+  high, by about 1/(6 sigma^2): 6 to 9 % in the frames at a FWHM of 2.5 to 3 px, and 15 % through KLIP
+  in the new test below.  `inject_interp` now chooses the placement: `linear`, the default and the IDL
+  predecessor's, `cubic`, a cubic spline with its prefilter, which keeps a sampled Gaussian's contrast
+  to 0.4 % at 2.4 px FWHM for four times the cost per stamp, or `quintic`, to 0.05 % for eight times
+  (`interp_order`, `INJECT_INTERP`).  It is a reduction parameter and a reducer default.  The
+  injections, the KLIP-FM model cube, `subtract_sources`, `inject_sources` and the GPU path take it,
+  and each placement keeps its own cached frames.
+- **`klip-tpe extract` places its negatives and fakes by the cubic spline** (`ExtractConfig.inject_interp`,
+  `--inject-interp`, cubic by default).  A companion drawn at its own position in every frame now fits
+  back within 1 % of its contrast, against 15 % high with the bilinear shift
+  (`test_an_exactly_placed_companion_fits_back_at_its_contrast`).  This lowers every extraction's
+  contrast at a small FWHM, and `--inject-interp linear` gives back the old numbers.  The summary's
+  `injection` line says which it was.
+- **A run's placement** (`RunConfig.inject_interp`, `--inject-interp` on the run commands).  None leaves
+  the reducer's default.  Given, it travels in every reduction's parameters and a resume keeps it.  From
+  the command line it is every KLIP reducer's default too, so `--subtract-sources` and
+  `--inject-sources` take it.  Runs keep the bilinear shift by default, under which the contrast curves
+  err slightly on the conservative side.
+- **extract's overrides** (`extract_companion(params=)`, `--set KEY=VALUE`).  Reduction parameters that
+  override the configuration's in every partition, such as `nkeep_altroll=0` for a searched library's
+  RDI point, recorded in the summary's configuration line and in `configuration.overrides`.  The step
+  also skips the KLIP-FM pass that a forward-modeled metric asks of the run's reductions, since it reads
+  the image alone.
+- **The last panel gives the values to quote** (`klip_tpe/extract_display.py`).  `extract_companion` ends
+  with a `result` event, and the last panel, live or rendered, shows the values to quote in place of the
+  profile minima, with a `*` on those that are the best less the fakes' significant bias.
+- Docs: EXTRACT.md (where each negative lands, the overrides, the last panel), RUNNING.md (where an
+  injected source lands), CLI.md, and the injection, extract and reducer docstrings.  Tests: the
+  placements against an exactly drawn Gaussian, the names and orders, the cached frames kept apart, the
+  GPU path against the CPU path with the cubic placement, the exactly placed companion, the overrides
+  with the skipped KLIP-FM pass and the `result` event, the run's placement in every reduction, the
+  `--set` parser and the last panel's text.
+
 ## Unreleased — 2026-11-21 (extract: the partitions' profiles, the fakes' bias in what to quote, the display's table)
 
 After a user's note of 2026-11-21, "a companion's extraction, and its render".

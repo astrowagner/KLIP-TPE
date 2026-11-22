@@ -51,7 +51,16 @@ cancels the companion in every frame before the PSF subtraction, so at the null 
 ADI's included, holds any of it, and the residual's minimum lies at the companion.  ADI's
 self-subtraction still flattens the residual around the null, which widens the sigmas, and the
 recovery check measures the bias that remains in the configuration used.  The IDL predecessor fitted
-MWC 758c in its production ARDI configuration the same way.
+MWC 758c in its production ARDI configuration the same way.  ``params`` overrides the configuration's
+reduction parameters in every partition, such as ``nkeep_altroll`` 0 for a searched library's RDI
+point, and the summary records it.
+
+Where the negatives land
+------------------------
+The step places its negatives and fakes by a cubic spline (``ExtractConfig.inject_interp``), not by
+the run's bilinear ``fshift``.  The bilinear shift spreads each stamp, so a negative has to be
+brighter to cancel a real companion, which is not spread that way: 6 to 9 % at a FWHM of 2.5 to 3 px
+in the frames, and more through KLIP.  The fakes cannot show it, since they go in the same way.
 
 Notes
 -----
@@ -142,6 +151,10 @@ class ExtractConfig:
         The partitions' boxes, as a fraction of the combined fit's half-widths in separation and angle.
     group_fake_iter : int or None, default None
         Number of trials of each fake source's fit in a partition, None for ``group_iter``.
+    inject_interp : {"cubic", "quintic", "linear"}, default "cubic"
+        How the step's negatives and fakes go to their sub-pixel positions
+        (:func:`klip_tpe.injection.interp_order`).  "linear", the run's bilinear ``fshift``, spreads each
+        stamp, so the contrast of a real companion came out high, by 6 to 9 % at a FWHM of 2.5 to 3 px.
     seed : int or None, default None
         Seed of the random draws.
     """
@@ -168,6 +181,7 @@ class ExtractConfig:
     group_init: int = 50
     group_box: float = 0.5
     group_fake_iter: Optional[int] = None
+    inject_interp: str = "cubic"
     seed: Optional[int] = None
 
     def check(self) -> None:
@@ -206,6 +220,8 @@ class ExtractConfig:
             raise ValueError("group_box must lie in (0, 1]")
         if self.group_fake_iter is not None and int(self.group_fake_iter) < 20:
             raise ValueError("group_fake_iter must be at least 20, or None")
+        from .injection import interp_order
+        interp_order(self.inject_interp)
 
 
 # ----------------------------------------------------------------------------- the residual
@@ -959,7 +975,7 @@ def _record_config(run_dir: str, annulus: int, evaluation: int) -> Dict[str, Any
 
 def extract_companion(runner, rho: float, pa: float, contrast: float, *, annulus: Optional[int] = None,
                       evaluation: Optional[int] = None, config: Optional[ExtractConfig] = None,
-                      log: Optional[Callable[[str], None]] = None,
+                      params: Optional[Dict[str, Any]] = None, log: Optional[Callable[[str], None]] = None,
                       progress: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
     """Extract a known companion's position and contrast, with uncertainties, from a finished run.
 
@@ -980,14 +996,18 @@ def extract_companion(runner, rho: float, pa: float, contrast: float, *, annulus
         annulus' elected winner.
     config : ExtractConfig or None, default None
         The settings, None for the defaults.
+    params : dict or None, default None
+        Reduction parameters that override the configuration's, in every partition, such as
+        ``{"nkeep_altroll": 0}`` for a searched library's RDI point.  They are recorded in the
+        configuration's ``what`` and ``overrides``.
     log : callable or None, default None
         Function that takes a line of progress, None for the runner's log.
     progress : callable or None, default None
         Function that takes each event of the extraction as a dict, such as an
         :class:`~klip_tpe.extract_display.ExtractDisplay`.  The fits' events (:func:`fit_companion`) are named
         ``main``, ``fake K of N``, ``partition P (K of N)`` and ``partition P, fake K of N``, and a partition's
-        own carry ``partition`` and ``lam_um``.  Each partition's contrast gives a ``group`` event, and its
-        fake sources a ``group_fakes`` event.
+        own carry ``partition`` and ``lam_um``.  Each partition's contrast gives a ``group`` event, its
+        fake sources a ``group_fakes`` event, and the end a ``result`` event with the values to quote.
 
     Returns
     -------
@@ -1000,6 +1020,12 @@ def extract_companion(runner, rho: float, pa: float, contrast: float, *, annulus
     ------
     ValueError
         If the settings or the start are out of range, or the annulus or evaluation is not in the run.
+
+    Notes
+    -----
+    The step's reductions place every stamp by ``config.inject_interp``, unless ``params`` names
+    ``inject_interp``, and skip the KLIP-FM pass a forward-modeled metric asks of the run's reductions,
+    since the step reads the image alone.
     """
     cfg = config or ExtractConfig()
     cfg.check()
@@ -1010,6 +1036,16 @@ def extract_companion(runner, rho: float, pa: float, contrast: float, *, annulus
     else:
         cdict, what = _record_config(runner.run_dir, int(res.annulus), int(evaluation)), f"eval {int(evaluation)}"
     ccfg = runner._config_from_dict(cdict)
+    over = {str(k): v for k, v in dict(params or {}).items()}
+    put = dict(over)
+    put.setdefault("inject_interp", str(cfg.inject_interp))
+    from .injection import interp_order
+    interp_order(put["inject_interp"])
+    # every partition reduces with the overrides: params_for() returns a partition's own dict whole
+    ccfg = dataclasses.replace(ccfg, params=dict(ccfg.params, **put),
+                               per_partition={pid: dict(d, **put) for pid, d in ccfg.per_partition.items()})
+    if over:
+        what += ", with " + ", ".join(f"{k}={v}" for k, v in over.items())
     red = runner.reducer
     fwhm, pxs = float(runner.fwhm), float(runner.pxscale)
     conv = str(getattr(red, "angle_convention", "pa"))
@@ -1020,14 +1056,16 @@ def extract_companion(runner, rho: float, pa: float, contrast: float, *, annulus
                                                          (x0, y0)))) <= 2.0 * fwhm]
     keep = {"ia": runner.ia, "known": known, "scale": getattr(red, "injection_scale", None)}
     say(f"extract: annulus {int(res.annulus) + 1} ({float(res.inrad):.1f}-{float(res.outrad):.1f} px), {what}, "
-        f"start rho {rho:.4f}\", pa {pa:.3f} deg, contrast {contrast:.4e}")
+        f"start rho {rho:.4f}\", pa {pa:.3f} deg, contrast {contrast:.4e}, stamps placed by "
+        f"{put['inject_interp']} interpolation")
     if near:
         say(f"  extract: {len(near)} source(s) of subtract_known near the start left out, since the step fits it")
     selected = list(getattr(ccfg, "selected", None) or [])
 
     def reduce_fn(srcs, sel=None):
         c = ccfg if sel is None else dataclasses.replace(ccfg, selected=list(sel))
-        return runner._reduce(c, list(srcs) if srcs else None, tag="extract").image
+        # fm_sources=() skips the KLIP-FM pass a forward-modeled metric asks of the run's reductions
+        return runner._reduce(c, list(srcs) if srcs else None, tag="extract", fm_sources=()).image
 
     try:
         runner.ia = int(res.annulus)
@@ -1105,12 +1143,20 @@ def extract_companion(runner, rho: float, pa: float, contrast: float, *, annulus
         runner.cfg.subtract_known = keep["known"]
         if keep["scale"] is not None:
             red.injection_scale = keep["scale"]
-    return {"fit": fit, "groups": groups, "recovery": rec, "config": dataclasses.asdict(cfg),
-            "configuration": {"what": what, "annulus": int(res.annulus), "inrad": float(res.inrad),
-                              "outrad": float(res.outrad), "params": dict(ccfg.params),
-                              "selected": [str(s) for s in selected]},
-            "run_dir": os.path.abspath(runner.run_dir), "fwhm_px": fwhm, "pxscale": pxs,
-            "angle_convention": conv, "left_out": [list(map(float, s)) for s in near]}
+    found = {"fit": fit, "groups": groups, "recovery": rec, "config": dataclasses.asdict(cfg),
+             "configuration": {"what": what, "annulus": int(res.annulus), "inrad": float(res.inrad),
+                               "outrad": float(res.outrad), "params": dict(ccfg.params),
+                               "selected": [str(s) for s in selected], "overrides": dict(over),
+                               "inject_interp": str(put["inject_interp"])},
+             "run_dir": os.path.abspath(runner.run_dir), "fwhm_px": fwhm, "pxscale": pxs,
+             "angle_convention": conv, "left_out": [list(map(float, s)) for s in near]}
+    if progress is not None:
+        summ = _summary(found)
+        bt = summ.get("bias_test") or {}
+        progress({"kind": "result", "phase": "results", "quoted": dict(summ["quoted"]),
+                  "sigma": {n: float(summ["sigma_quoted"][n]) for n in NAMES},
+                  "corrected": {n: bool((bt.get("significant") or {}).get(n, False)) for n in NAMES}})
+    return found
 
 
 # ----------------------------------------------------------------------------- outputs
@@ -1451,6 +1497,7 @@ def _txt(s: Dict[str, Any], label: str) -> str:
     L = [f"# klip-tpe extract: {label}, {time.strftime('%Y-%m-%d %H:%M')}",
          f"run              : {s['run_dir']}",
          f"configuration    : annulus {c['annulus'] + 1} ({c['inrad']:.1f}-{c['outrad']:.1f} px), {c['what']}",
+         f"injection        : each stamp placed by {c.get('inject_interp', 'linear')} interpolation (inject_interp)",
          f"start            : rho {s['start']['rho']:.5f}\"  pa {s['start']['pa']:.3f} deg  contrast "
          f"{s['start']['contrast']:.4e}",
          f"box              : rho {s['box']['lo']['rho']:.4f}-{s['box']['hi']['rho']:.4f}\"  pa "

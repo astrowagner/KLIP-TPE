@@ -360,15 +360,14 @@ if HAVE_DATA:
 
 # %%
 if HAVE_DATA:
-    r = results[0]
-    print(f"winner: eval {r.winner_index + 1}, validated {r.validated}, injected S/N {r.winner_score:.2f}"
-          f"   partitions: {r.partitions}")
-    print(f"  mode = {r.winner_config['params'].get('mode')}")
-    for pid, blk in r.winner_config["per_partition"].items():
+    r = results[0]       # the run's winner: the final-image grid's where it replaced the validation's
+    print(f"winner: {r.final_label}, injected S/N {r.final_score:.2f}   partitions: {r.final_partitions}")
+    print(f"  mode = {r.final_config['params'].get('mode')}")
+    for pid, blk in r.final_config["per_partition"].items():
         print(f"  {pid}: " + "  ".join(f"{k}={v}" for k, v in blk.items() if k in ("filter", "n_ang", "k_klip")))
-    best_clean = fits.getdata(os.path.join(RUN_DIR, "annulus01", "best_clean.fits"))
+    best_clean = fits.getdata(r.final_image_path(RUN_DIR))
     snr1 = float(metric.per_source(best_clean, None, [PLANET[0]], [PLANET[1]])[0])
-    print(f"HIP 65426 b: S/N {snr0:.1f} (default)  ->  {snr1:.1f} (validated winner)")
+    print(f"HIP 65426 b: S/N {snr0:.1f} (default)  ->  {snr1:.1f} (the run's winner)")
     fig, ax = plt.subplots(1, 2, figsize=(9.5, 4.4))
     for a, im, t in zip(ax, (res.image, best_clean), (f"default (S/N {snr0:.1f})", f"winner (S/N {snr1:.1f})")):
         v = np.nanpercentile(im[np.isfinite(im)], [2, 99.7])
@@ -387,6 +386,12 @@ if HAVE_DATA:
 # HIP 65426 b goes from S/N 12.3 in the default reduction to 13.3. That is less than the 14.1
 # `ADI` gives it at the default configuration (section 3). Only the injections were optimized.
 # They sit near the detection limit, and the planet is far above it (tutorial 1, section 5).
+#
+# The cell reports the run's winner, the one its stitch and contrast curve take. The final-image
+# grid (`docs/RUNNING.md`) can replace the validation's winner, and then the cell names the grid's
+# winner, prints its parameters and scores its image, `final_grid/annulus01_best_clean.fits`.
+# `AnnulusResult.final_config`, `final_label`, `final_score` and `final_image_path` give the same for
+# any run. The numbers in this text come from the notebook's last execution.
 #
 # The planet stays in the frames in this tutorial. A companion this bright spreads light over
 # its KLIP sector, beyond the 1.5 FWHM that `known=` excludes. For a contrast curve near it,
@@ -436,14 +441,15 @@ if HAVE_DATA:
 
 # %%
 if HAVE_DATA:
-    fm_clean = fits.getdata(os.path.join(run_fm, "annulus01", "best_clean.fits"))
+    r_fm = results_fm[0]
+    fm_clean = fits.getdata(r_fm.final_image_path(run_fm))
     snr2 = float(metric.per_source(fm_clean, None, [PLANET[0]], [PLANET[1]])[0])
     print(f"HIP 65426 b, scored the same way for all three images:")
     print(f"   default k=10        S/N {snr0:5.1f}")
     print(f"   PSF matched filter  S/N {snr1:5.1f}")
     print(f"   forward-modeled MF S/N {snr2:5.1f}")
-    print(f"   winner (fmmf): " + "  ".join(
-        f"{k}={v}" for k, v in results_fm[0].winner_config["params"].items()
+    print(f"   winner (fmmf), {r_fm.final_label}: " + "  ".join(
+        f"{k}={v}" for k, v in r_fm.final_config["params"].items()
         if k in ("mode", "filter", "n_ang", "k_klip")))
 
 # %% [markdown]

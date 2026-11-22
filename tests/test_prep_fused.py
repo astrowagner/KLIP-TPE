@@ -245,12 +245,12 @@ def test_a_set_of_sources_keeps_its_stamps_from_its_second_reduction(monkeypatch
     b1, f1 = run(p1)
     assert _bits(b1, ref1) and f1 == []
     red.prepare(ReductionRequest(p1, other))      # the other set's second time: it is kept now
-    assert red._crops["inj"].key == tuple(s.as_tuple() for s in other)
+    assert red._crops["inj"].key == (("interp", 1),) + tuple(s.as_tuple() for s in other)
     # the FM model cube keeps its own
     fm = [Source(0.6, 120.0, 1e-3)]
     for _ in range(2):
         red.prepare(ReductionRequest(p1, None, fm_sources=fm))
-    assert red._crops["fm"].key == tuple(s.as_tuple() for s in fm) and red._crops["fm"].frames
+    assert red._crops["fm"].key == (("interp", 1),) + tuple(s.as_tuple() for s in fm) and red._crops["fm"].frames
 
 
 def test_the_headroom_check_runs_once_per_new_set_on_a_peak_taken_once(monkeypatch):

@@ -58,6 +58,9 @@ CASES: List[Tuple[str, str, Dict[str, Any], Optional[list], int, bool]] = [
                               noise_max=2.8, coronoise_max=3.0, k_klip=10), SOURCES, 16, True),
     ("sectors one by one", "n1", dict(bin=20, n_ang=4, filter=7, angsep=0.2, anglemax=101.0, corr_thresh=0.3,
                                       noise_max=2.8, coronoise_max=3.0, k_klip=10), SOURCES, 0, False),
+    ("cubic placement", "n1", dict(bin=20, n_ang=4, filter=7, angsep=0.2, anglemax=101.0, corr_thresh=0.3,
+                                   noise_max=2.8, coronoise_max=3.0, k_klip=10, inject_interp="cubic"),
+     SOURCES, 0, True),
 ]
 META_KEYS = ("n_kept", "n_binned", "k_effective", "n_dropped", "fast", "inrad", "outrad", "n_starved", "drop_enabled")
 

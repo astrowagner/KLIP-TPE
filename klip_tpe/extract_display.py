@@ -993,7 +993,15 @@ def _text(fig, st: Dict[str, Any], run: Dict[str, Any], live: List[Tuple[float, 
              (f"{per:.2f} s/trial" if per is not None and np.isfinite(per) else "- s/trial")
              + f"    elapsed {_hms(run.get('elapsed'))}    ETA {_hms(run.get('eta'))}    all {_hms(st.get('elapsed_all'))}",
              f"min +- 1-sigma, from the {source}:"]
-    if any(np.isfinite(s) for _, s in live):
+    q = st.get("quoted") if run.get("phase") == "main" else None
+    if q:
+        # the extraction's results: the values to quote, * where the fakes' significant bias came off
+        v, sg, cr = q["value"], q["sigma"], q.get("corrected") or {}
+        lines[-1] = "to quote" + (", * less the fakes' bias:" if any(cr.values()) else ":")
+        lines.append(f"rho {v['rho']:.5f}{'*' if cr.get('rho') else ''} +- {sg['rho']:.1e}  "
+                     f"PA {v['pa'] % 360:.3f}{'*' if cr.get('pa') else ''} +- {sg['pa']:.3f}  "
+                     f"c {v['contrast']:.3e}{'*' if cr.get('contrast') else ''} +- {sg['contrast']:.1e}")
+    elif any(np.isfinite(s) for _, s in live):
         parts = []
         for name, d, fm, fs in (("rho", 0, ".5f", ".1e"), ("PA", 1, ".3f", ".3f"), ("c", 2, ".3e", ".1e")):
             m, s = live[d]
@@ -1141,6 +1149,7 @@ class ExtractDisplay:
         self.spectrum: List[Dict[str, Any]] = []
         self.chromatic: Dict[str, Any] = {"rows": [], "combined": None}
         self.fakes: Optional[Dict[str, Any]] = None
+        self.quoted: Optional[Dict[str, Any]] = None
         self.crops: List[np.ndarray] = []
         self.crop_x: List[List[float]] = []
         self.t0 = time.time()
@@ -1159,7 +1168,7 @@ class ExtractDisplay:
         ----------
         ev : dict
             The event, its ``kind`` one of ``start``, ``trial`` and ``done`` (from
-            :func:`klip_tpe.extract.fit_companion`), ``group`` and ``group_fakes`` (from
+            :func:`klip_tpe.extract.fit_companion`), ``group``, ``group_fakes`` and ``result`` (from
             :func:`klip_tpe.extract.extract_companion`).  Others are ignored.
         """
         if self.off:
@@ -1313,6 +1322,22 @@ class ExtractDisplay:
         self.status = f"the partitions' fake sources: {ev.get('k')} of {ev.get('n')}"
         self._draw(force=True)
 
+    def _on_result(self, ev: Dict[str, Any]) -> None:
+        """Draw the last panel with the values to quote.
+
+        Parameters
+        ----------
+        ev : dict
+            ``quoted`` and ``sigma``, each a dict of ``rho``, ``pa`` and ``contrast``, and ``corrected``, which
+            of them are the best less the fakes' significant bias.
+        """
+        self.quoted = {"value": dict(ev["quoted"]), "sigma": dict(ev["sigma"]),
+                       "corrected": dict(ev.get("corrected") or {})}
+        if self.main is not None:
+            self.run = self.main
+            self.status = "the extraction's results"
+            self._draw(force=True)
+
     # -- the panels ---------------------------------------------------------------------------
     def _psf(self, start: Sequence[float], shape: Tuple[int, ...]) -> Optional[Dict[str, Any]]:
         """Return the PSF model's stamp around the start, with a peak of 1.
@@ -1398,7 +1423,8 @@ class ExtractDisplay:
         st : dict
             ``geom`` (the cut-outs' half side, the plate scale, the FWHM, the angle convention and the label),
             ``run`` (the fit's cut-outs, trials, box, best and trial, profiles, stage, title and times),
-            ``psf``, ``reference``, ``spectrum``, ``chromatic``, ``fakes`` and ``elapsed_all``.
+            ``psf``, ``reference``, ``spectrum``, ``chromatic``, ``fakes``, ``quoted`` (the values to quote,
+            once the extraction has them) and ``elapsed_all``.
         """
         src = self.run
         run = {k: v for k, v in src.items() if k not in ("X", "R", "flags", "t0")}
@@ -1418,6 +1444,7 @@ class ExtractDisplay:
                               "combined": self.chromatic["combined"]},
                 "fakes": None if self.fakes is None else {"ctx": self.fakes["ctx"], "n": self.fakes["n"],
                                                           "rows": [dict(r) for r in self.fakes["rows"]]},
+                "quoted": None if self.quoted is None else {k: dict(v) for k, v in self.quoted.items()},
                 "elapsed_all": now - self.t0 if timed else None}
 
     def _busy(self) -> bool:
@@ -1743,6 +1770,11 @@ def render_saved(out_dir: str, every: int = 10, reference: Optional[Sequence[flo
                                            "dy": r["dy_px"], "sdx": r.get("sigma_dx_px"), "sdy": r.get("sigma_dy_px")})
         if gp:
             disp.chromatic["combined"] = (float(sb["dx_px"]), float(sb["dy_px"]))
+    if s.get("quoted") and s.get("sigma_quoted") and not disp.off:
+        sig = {n: float(s["sigma_quoted"][n]) for n in ("rho", "pa", "contrast")}
+        corr = (s.get("bias_test") or {}).get("significant") or {}
+        disp.quoted = {"value": dict(s["quoted"]), "sigma": sig, "corrected": dict(corr)}
+    if (rec.get("fakes") or gp or disp.quoted) and not disp.off:
         disp.run, disp.status = disp.main, "the extraction's results"
         disp._draw(force=True)
     paths = [p for p in disp.paths if os.path.exists(p)]

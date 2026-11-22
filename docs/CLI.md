@@ -78,6 +78,7 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--fg-z Z] [--fg-sweeps N] [--fg-finalists N]
                         [--fg-entrants-from [RUN ...]]
                         [--fg-curve {grid,path_a,off}] [--min-coverage F]
+                        [--inject-interp {linear,cubic,quintic}]
                         [--sidelobes {farthest,clean,off}] [--global-block]
                         [--no-framesel] [--no-selection] [--max-drop MAX_DROP]
                         [--tag TAG] [--from-idl-setup RUN_SETUP_TXT]
@@ -391,6 +392,14 @@ options:
                         injected there and for the noise to sample it (default
                         0.5, RunConfig.min_coverage). The run writes
                         coverage.fits
+  --inject-interp {linear,cubic,quintic}
+                        how each injected stamp goes to its sub-pixel
+                        position: linear, the IDL predecessor's bilinear
+                        fshift, which spreads the stamp so an injected source
+                        has 6 to 9 % less peak than a real one at a FWHM of
+                        2.5 to 3 px, or a cubic or quintic spline (default the
+                        reducer's, linear, RunConfig.inject_interp, which a
+                        resume keeps)
   --sidelobes {farthest,clean,off}
                         the noise rings of the search, calibration,
                         validation, verify and candidates. off (the default)
@@ -744,6 +753,7 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--fg-sweeps N] [--fg-finalists N]
                      [--fg-entrants-from [RUN ...]]
                      [--fg-curve {grid,path_a,off}] [--min-coverage F]
+                     [--inject-interp {linear,cubic,quintic}]
                      [--sidelobes {farthest,clean,off}] [--global-block]
                      [--no-framesel] [--no-selection] [--max-drop MAX_DROP]
                      [--tag TAG] [--from-idl-setup RUN_SETUP_TXT]
@@ -1055,6 +1065,14 @@ options:
                         injected there and for the noise to sample it (default
                         0.5, RunConfig.min_coverage). The run writes
                         coverage.fits
+  --inject-interp {linear,cubic,quintic}
+                        how each injected stamp goes to its sub-pixel
+                        position: linear, the IDL predecessor's bilinear
+                        fshift, which spreads the stamp so an injected source
+                        has 6 to 9 % less peak than a real one at a FWHM of
+                        2.5 to 3 px, or a cubic or quintic spline (default the
+                        reducer's, linear, RunConfig.inject_interp, which a
+                        resume keeps)
   --sidelobes {farthest,clean,off}
                         the noise rings of the search, calibration,
                         validation, verify and candidates. off (the default)
@@ -3713,9 +3731,11 @@ usage: klip-tpe extract [-h] [--instrument {near,nomic,generic,ales}]
                         [--explore EXPLORE] [--best-frac BEST_FRAC] [--nref N]
                         [--fakes N] [--fake-iter N] [--no-groups]
                         [--group-positions] [--group-iter N] [--group-box F]
-                        [--group-fake-iter N] [--seed SEED] [--display]
-                        [--no-display] [--display-every N]
-                        [--reference RHO PA] [--render DIR]
+                        [--group-fake-iter N] [--seed SEED]
+                        [--inject-interp {cubic,quintic,linear}]
+                        [--set KEY=VALUE] [--display] [--no-display]
+                        [--display-every N] [--reference RHO PA]
+                        [--render DIR]
 
 options:
   -h, --help            show this help message and exit
@@ -3923,6 +3943,17 @@ options:
   --group-fake-iter N   trials of each fake source's fit in a partition
                         (default --group-iter)
   --seed SEED           seed of the random draws
+  --inject-interp {cubic,quintic,linear}
+                        how the negatives and the fakes go to their sub-pixel
+                        positions: cubic, a cubic spline (default), quintic, a
+                        spline of order 5, or linear, the run's bilinear
+                        fshift, which spreads each stamp and fits a real
+                        companion 6 to 9 % high at a FWHM of 2.5 to 3 px
+  --set KEY=VALUE       a reduction parameter that overrides the
+                        configuration's in every partition, recorded in the
+                        summary's configuration line, such as --set
+                        nkeep_altroll=0 for a searched library's RDI point.
+                        Repeat it for more
   --display             draw the live dashboard into <out>/steps, for klip-tpe
                         view --run-dir <out> (default)
   --no-display          no live dashboard

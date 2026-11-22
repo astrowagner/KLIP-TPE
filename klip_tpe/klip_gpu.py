@@ -331,12 +331,13 @@ class XsyevBatched:
 
 # ----------------------------------------------------------------------------- the per-frame steps
 def inject(be: Backend, cube_dev, angles: np.ndarray, sources, model, pxscale: float, truenorth,
-           angle_convention: str = "pa", fallback=None):
+           angle_convention: str = "pa", fallback=None, interp="linear"):
     """Inject sources into a cube on the device, as klip-tpe's ``inject_sources`` does.
 
     For each source the stamp is turned per frame (models with ``refpa``), shifted by the fractional
     offset and added at the integer one, every frame at once.  Each stamp is added in float64 and the
-    cube stored in float32 after each source, as on the host.
+    cube stored in float32 after each source, as on the host.  The cubic shift evaluates a spline over
+    the stack of stamps at whole frame indices, which gives each frame's own cubic shift.
 
     Parameters
     ----------
@@ -358,6 +359,8 @@ def inject(be: Backend, cube_dev, angles: np.ndarray, sources, model, pxscale: f
         How the sources' angles are read.
     fallback : InjectionModel or None, default None
         Model whose stamp and flux unit are used where ``model`` has no stamp.
+    interp : {"linear", "cubic", "quintic"}, default "linear"
+        How each stamp goes to its sub-pixel position (:func:`klip_tpe.injection.interp_order`).
 
     Returns
     -------
@@ -367,9 +370,11 @@ def inject(be: Backend, cube_dev, angles: np.ndarray, sources, model, pxscale: f
     Raises
     ------
     ValueError
-        If a source has no stamp and there is no fallback, or ``truenorth`` gives another number of
-        values than frames.
+        If a source has no stamp and there is no fallback, ``truenorth`` gives another number of
+        values than frames, or ``interp`` names no placement.
     """
+    from .injection import interp_order
+    order = interp_order(interp)
     xp, ndi = be.xp, be.ndi
     n, ny, nx = cube_dev.shape
     out = cube_dev.astype(xp.float64)            # klip-tpe adds each stamp in float64 and stores float32
@@ -415,7 +420,7 @@ def inject(be: Backend, cube_dev, angles: np.ndarray, sources, model, pxscale: f
         ddx, ddy = xp.asarray(fx - ix), xp.asarray(fy - iy)
         jj = xp.broadcast_to(xp.arange(n, dtype=xp.float64)[:, None, None], (n, sh, sw))
         coords = xp.stack([jj, syy[None] - ddy[:, None, None], sxx[None] - ddx[:, None, None]])
-        shifted = ndi.map_coordinates(xp.ascontiguousarray(stamps), coords.reshape(3, -1), order=1,
+        shifted = ndi.map_coordinates(xp.ascontiguousarray(stamps), coords.reshape(3, -1), order=order,
                                       mode="constant", cval=0.0).reshape(n, sh, sw)
         ty = xp.asarray(iy)[:, None, None] + syy.astype(xp.int64)[None]
         tx = xp.asarray(ix)[:, None, None] + sxx.astype(xp.int64)[None]

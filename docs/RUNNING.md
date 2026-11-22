@@ -395,6 +395,23 @@ good set, the best so far, the validation candidates), ties at 0 go by evaluatio
 do, since the IDL does not floor its scores.  A run saved before 2026-11-01 resumes without a
 floor.
 
+### Where an injected source lands (`--inject-interp`)
+
+Each injected stamp is moved to its sub-pixel position by an interpolation.  The default, `linear`, is
+the IDL predecessor's bilinear `fshift`.  It keeps the stamp's centroid and total but spreads it by
+`f (1 - f)` px^2 per axis at a fractional offset `f`, 1/6 on average, so an injected source has less
+peak than a real one of the same contrast: about 9 % at a FWHM of 2.5 px, 5 % at 4 px and 1 % at 9 px.
+A run's contrast curves therefore err that much on the conservative side.  `--inject-interp cubic`
+places each stamp by a cubic spline with its prefilter, which keeps a sampled Gaussian's peak to 1 %
+at 2.4 px FWHM, at about four times the cost per stamp, and `quintic` to 0.1 % at eight times.  The
+choice is `RunConfig.inject_interp`, carried in every reduction's parameters, and a resume keeps the
+run's own.  From the command line it is also every KLIP reducer's default, so `--subtract-sources` and
+`--inject-sources`, which edit the frames once before any reduction, take it too.  A script that builds
+its own reducer sets the default itself (`defaults={"inject_interp": "cubic"}`), which every reduction
+then takes unless `RunConfig.inject_interp` says otherwise.  `klip-tpe extract` places its negatives
+and fakes by the cubic spline unless told otherwise (`docs/EXTRACT.md`), since there the spread biases
+a real companion's contrast directly.
+
 ### The card (`--gpu-share`, `--gpu-adapt-every`, `--gpu-workers`, `--gpu-device`)
 
 A share of the search's injected draws can be reduced on an NVIDIA card, or on several, beside the
@@ -705,6 +722,10 @@ and every param_verify reduction; `klip-tpe resume --root ... --nights 1 2 3 4 5
 `<root>/comb/opt`; give a directory to pick another) or the script's `resume` continues exactly where it stopped.  `klip-tpe extend --n-iter ...`
 reopens a finished annulus with a larger budget (IDL `extend_ann`).
 
+A Ctrl-C ends the run after the reductions in flight.  klip-tpe's own workers, the panel process and
+pyKLIP's pool workers ignore it, so none of them dies with a task half done, and the run's main thread
+takes it alone.
+
 The checkpoint also survives a crash of the machine.  Each write is fsynced before its
 rename, and the directory after it, and the save before the newest stays beside it as
 `checkpoint.prev.json`.  `results.jsonl` and `results.txt` reach the disk before the
@@ -915,8 +936,12 @@ the run's contrast curve there (NEAR2's note of 2026-11-16).
 * **The products take the elected winners.**  An annulus whose winner changed gets that winner's
   images in `final_grid/annulusNN_best_*.fits`, its parameters in `klip_stitched_params.txt` and
   its record in `final_results.json` (`final_grid`, with the configuration).  Its annulus
-  directory keeps the validation's winner and its products.  A later resume, `rereduce`,
-  `fit-chain`, the re-score and other runs' finalists take the elected winner.
+  directory keeps the validation's winner and its products, and its `winner.json` gets the stage's
+  record too, `changed` or not, so it no longer says `final_grid: null` after the stage ran.  A later
+  resume, `rereduce`, `fit-chain`, the re-score and other runs' finalists take the elected winner.
+  From a script, `AnnulusResult.final_config`, `final_label`, `final_score` and `final_image_path`
+  give the elected winner's configuration, a line naming it, its validated score and its image, as
+  tutorial 03 prints them.
 * **It replaces the validation's final round.**  A run with the stage on leaves `--n-final` to
   it, and the log says so.
 * **Its reports** are `final_grid/election.txt` (each sweep's finalists with their mean S/N and

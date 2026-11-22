@@ -9,6 +9,15 @@ A source at position angle ``theta`` (degrees East of North) sits at detector az
 ``az = theta - truenorth - 270 - parang`` from +x.  After derotation, counter-clockwise by
 ``parang + truenorth``, it lands at ``theta + 90`` degrees from +x, at PA ``theta``.
 
+Each stamp is placed at its sub-pixel position by an interpolation, ``inject_interp`` (:func:`interp_order`).
+``"linear"``, the default, is the IDL predecessor's ``fshift``.  It keeps a stamp's centroid and total but
+convolves it with ``[1 - f, f]`` along each axis at a fractional offset ``f``, which spreads it by
+``f (1 - f)`` px^2 per axis, 1/6 on average.  A real source is not spread that way, so a fit of a real
+source by a negative injection raises its contrast, by about 1/(6 sigma^2) of the PSF's variance
+``sigma^2``: 6 to 9 % at a FWHM of 2.5 to 3 px, 1 % at 9 px.  ``"cubic"``, a cubic spline with its
+prefilter, places a sampled Gaussian of 2.4 px FWHM with its contrast right to 0.4 %, at about four
+times the cost per stamp, and ``"quintic"`` to 0.05 % at eight times.
+
 Notes
 -----
 The azimuth convention is that of ``do_inject`` in ``reduce_near_2.pro``, the IDL predecessor.
@@ -25,7 +34,11 @@ from scipy import ndimage
 from .metrics import Source
 
 __all__ = ["InjectionModel", "GaussianPSF", "TemplatePSF", "AiryPSF", "FramePSF", "LibraryPSF", "inject_sources",
-           "inject_frames", "shift_bilinear", "add_stamp", "takes_azimuth", "read_sources", "injected_model"]
+           "inject_frames", "shift_bilinear", "add_stamp", "takes_azimuth", "read_sources", "injected_model",
+           "interp_order", "INJECT_INTERP"]
+
+#: the sub-pixel placements a stamp can take, by name, and the spline order of each
+INJECT_INTERP = {"linear": 1, "cubic": 3, "quintic": 5}
 
 
 def read_sources(path: str, columns: int = 3):
@@ -94,6 +107,39 @@ def takes_azimuth(model) -> bool:
     return bool(getattr(model, "azimuth_dependent", False))
 
 
+def interp_order(interp) -> int:
+    """Return the spline order of a sub-pixel placement.
+
+    Parameters
+    ----------
+    interp : str, int or None
+        ``"linear"`` (also ``"bilinear"`` or 1), the IDL predecessor's ``fshift``, ``"cubic"`` (also
+        ``"spline"`` or 3), a cubic spline with its prefilter, or ``"quintic"`` (5), a spline of order 5.
+        None takes ``"linear"``.
+
+    Returns
+    -------
+    order : int
+        1, 3 or 5.
+
+    Raises
+    ------
+    ValueError
+        If ``interp`` names no placement.
+    """
+    if interp is None:
+        return 1
+    if isinstance(interp, (int, np.integer, float)) and not isinstance(interp, bool):
+        if int(interp) in (1, 3, 5) and float(interp) == int(interp):
+            return int(interp)
+        raise ValueError(f"inject_interp {interp!r}: the spline order is 1 (linear), 3 (cubic) or 5 (quintic)")
+    name = str(interp).strip().lower()
+    name = {"bilinear": "linear", "spline": "cubic"}.get(name, name)
+    if name not in INJECT_INTERP:
+        raise ValueError(f"inject_interp {interp!r}: use one of {sorted(INJECT_INTERP)}")
+    return INJECT_INTERP[name]
+
+
 def shift_bilinear(img: np.ndarray, dx: float, dy: float) -> np.ndarray:
     """Shift an image by a fraction of a pixel with bilinear interpolation.
 
@@ -119,7 +165,7 @@ def shift_bilinear(img: np.ndarray, dx: float, dy: float) -> np.ndarray:
 
 
 def stamp_crop(shape: Tuple[int, int], stamp: np.ndarray, stamp_center: Tuple[float, float],
-               x: float, y: float, buf: Optional[np.ndarray] = None):
+               x: float, y: float, buf: Optional[np.ndarray] = None, order: int = 1):
     """Compute where :func:`add_stamp` puts a stamp in a frame and the values it adds there.
 
     Parameters
@@ -136,6 +182,9 @@ def stamp_crop(shape: Tuple[int, int], stamp: np.ndarray, stamp_center: Tuple[fl
         Frame row of the stamp's center, in pixels.
     buf : ndarray or None, default None
         A float64 array of the stamp's shape that receives the shifted stamp.  None allocates one.
+    order : int, default 1
+        Spline order of the sub-pixel shift (:func:`interp_order`), 1 for the IDL predecessor's
+        bilinear ``fshift`` and 3 for a cubic spline with its prefilter.
 
     Returns
     -------
@@ -153,10 +202,10 @@ def stamp_crop(shape: Tuple[int, int], stamp: np.ndarray, stamp_center: Tuple[fl
     x1, y1 = min(ix + sw, nx), min(iy + sh, ny)
     if x1 <= x0 or y1 <= y0:
         return None
-    if buf is None:
+    if buf is None and int(order) == 1:
         s = shift_bilinear(stamp, fx - ix, fy - iy)
     else:
-        s = ndimage.shift(np.asarray(stamp, float), (fy - iy, fx - ix), output=buf, order=1,
+        s = ndimage.shift(np.asarray(stamp, float), (fy - iy, fx - ix), output=buf, order=int(order),
                           mode="constant", cval=0.0)
     return y0, y1, x0, x1, s[y0 - iy:y1 - iy, x0 - ix:x1 - ix]
 
@@ -178,11 +227,11 @@ def add_crop(frame: np.ndarray, crop) -> None:
 
 
 def add_stamp(frame: np.ndarray, stamp: np.ndarray, stamp_center: Tuple[float, float],
-              x: float, y: float, buf: Optional[np.ndarray] = None) -> None:
+              x: float, y: float, buf: Optional[np.ndarray] = None, order: int = 1) -> None:
     """Add a stamp to a frame in place, shifting it to a sub-pixel position.
 
     The integer part of the position is taken by placement and the fractional part by a
-    bilinear shift.  The stamp is clipped at the frame's edges.
+    bilinear shift, or a cubic spline's.  The stamp is clipped at the frame's edges.
 
     Parameters
     ----------
@@ -199,12 +248,14 @@ def add_stamp(frame: np.ndarray, stamp: np.ndarray, stamp_center: Tuple[float, f
     buf : ndarray or None, default None
         A float64 array of the stamp's shape that receives the shifted stamp, so a caller adding
         many stamps does not allocate one each time.  None allocates one.
+    order : int, default 1
+        Spline order of the sub-pixel shift, 1 (bilinear) or 3 (cubic, :func:`interp_order`).
 
     Notes
     -----
-    It does what ``near2_psfstamp`` does in the IDL predecessor.
+    It does what ``near2_psfstamp`` does in the IDL predecessor, with ``order`` 1.
     """
-    c = stamp_crop(frame.shape, stamp, stamp_center, x, y, buf)
+    c = stamp_crop(frame.shape, stamp, stamp_center, x, y, buf, order)
     if c is not None:
         add_crop(frame, c)
 
@@ -1036,7 +1087,8 @@ def _check_float32_headroom(cube: np.ndarray, sources: Sequence[Source], model: 
 def inject_sources(cube: np.ndarray, angles: np.ndarray, sources: Sequence[Source], model: InjectionModel,
                    pxscale: float, truenorth: float = 0.0, center: Optional[Tuple[float, float]] = None,
                    fallback: Optional[InjectionModel] = None, angle_convention: str = "pa",
-                   copy: bool = True, frames: Optional[Sequence[int]] = None, threads: int = 1) -> np.ndarray:
+                   copy: bool = True, frames: Optional[Sequence[int]] = None, threads: int = 1,
+                   interp="linear") -> np.ndarray:
     """Return a cube with synthetic companions added to every frame.
 
     Each source's amplitude is ``contrast * flux_unit * throughput(rho)``, and in each frame its
@@ -1076,6 +1128,9 @@ def inject_sources(cube: np.ndarray, angles: np.ndarray, sources: Sequence[Sourc
         all.
     threads : int, default 1
         Number of threads the frames are spread over.
+    interp : {"linear", "cubic", "quintic"}, default "linear"
+        How each stamp goes to its sub-pixel position (:func:`interp_order`).  "linear" is the IDL
+        predecessor's bilinear ``fshift``, which spreads the stamp.
 
     Returns
     -------
@@ -1096,7 +1151,7 @@ def inject_sources(cube: np.ndarray, angles: np.ndarray, sources: Sequence[Sourc
     out = np.array(cube, dtype=np.float32, copy=copy)
     _check_float32_headroom(out, sources, model, fallback)
     inject_frames(out, out, angles, sources, model, pxscale, frames, truenorth=truenorth, center=center,
-                  fallback=fallback, angle_convention=angle_convention, threads=threads)
+                  fallback=fallback, angle_convention=angle_convention, threads=threads, interp=interp)
     return out
 
 
@@ -1125,6 +1180,8 @@ class _Prepared:
     base : ndarray or None
         Stamp scaled by contrast, flux unit and throughput, shared by every frame.  None when the
         stamp or the throughput changes frame to frame.
+    order : int, default 1
+        Spline order of the sub-pixel shift, 1 (bilinear) or 3 (cubic).
     """
 
     src: Source
@@ -1136,10 +1193,11 @@ class _Prepared:
     az_aware: bool
     thru: Optional[float]
     base: Optional[np.ndarray]      # stamp * contrast * flux_unit * throughput, or None
+    order: int = 1
 
 
 def _prepare(sources: Sequence[Source], model: InjectionModel, fallback: Optional[InjectionModel],
-             pxscale: float) -> list:
+             pxscale: float, interp="linear") -> list:
     """Work out what each source needs in every frame.
 
     Parameters
@@ -1152,6 +1210,8 @@ def _prepare(sources: Sequence[Source], model: InjectionModel, fallback: Optiona
         Model that supplies the stamp where ``model`` has no template.
     pxscale : float
         Plate scale, in arcsec per pixel.
+    interp : {"linear", "cubic", "quintic"}, default "linear"
+        How each stamp goes to its sub-pixel position (:func:`interp_order`).
 
     Returns
     -------
@@ -1163,6 +1223,7 @@ def _prepare(sources: Sequence[Source], model: InjectionModel, fallback: Optiona
     ValueError
         If ``model`` has no template at a source's separation and there is no fallback.
     """
+    order = interp_order(interp)
     out = []
     for s in sources:
         st, sc, ok = model.stamp(s.rho)
@@ -1187,7 +1248,7 @@ def _prepare(sources: Sequence[Source], model: InjectionModel, fallback: Optiona
         az_aware = takes_azimuth(model)
         thru = None if az_aware else float(model.throughput(s.rho))
         base = None if (az_aware or per_frame) else st * (s.contrast * m.flux_unit * thru)
-        out.append(_Prepared(s, m, st, sc, s.rho / pxscale, per_frame, az_aware, thru, base))
+        out.append(_Prepared(s, m, st, sc, s.rho / pxscale, per_frame, az_aware, thru, base, order))
     return out
 
 
@@ -1195,7 +1256,7 @@ def inject_frames(out: np.ndarray, cube: np.ndarray, angles: np.ndarray, sources
                   model: InjectionModel, pxscale: float, frames: Optional[Sequence[int]] = None, *,
                   truenorth: float = 0.0, center: Optional[Tuple[float, float]] = None,
                   fallback: Optional[InjectionModel] = None, angle_convention: str = "pa",
-                  threads: int = 1) -> None:
+                  threads: int = 1, interp="linear") -> None:
     """Set ``out[j]`` to ``cube[j]`` with the sources added, for every listed frame ``j``.
 
     The numbers are those :func:`inject_sources` gives, each frame's stamps added in the order of
@@ -1229,9 +1290,11 @@ def inject_frames(out: np.ndarray, cube: np.ndarray, angles: np.ndarray, sources
         How a source's angle sets its detector azimuth, as for :func:`inject_sources`.
     threads : int, default 1
         Number of threads.
+    interp : {"linear", "cubic", "quintic"}, default "linear"
+        How each stamp goes to its sub-pixel position (:func:`interp_order`).
     """
     from .klip import frame_blocks, run_blocks
-    prepared = _prepare(sources, model, fallback, pxscale)
+    prepared = _prepare(sources, model, fallback, pxscale, interp)
     n, ny, nx = out.shape
     fr = np.arange(n) if frames is None else np.asarray(frames, dtype=np.intp).reshape(-1)
     if not prepared and out is cube:
@@ -1367,7 +1430,7 @@ def _place_shared(J, p: _Prepared, angles, truenorth, center, angle_convention, 
         stamps = None
     buf = np.empty(p.base.shape)
     for i in range(k):
-        c = stamp_crop(shape, p.base if stamps is None else stamps[i], p.center, xs[i], ys[i], buf)
+        c = stamp_crop(shape, p.base if stamps is None else stamps[i], p.center, xs[i], ys[i], buf, p.order)
         if c is not None:
             sink(i, c)
 
@@ -1414,7 +1477,7 @@ def _place_each(J, p: _Prepared, model, angles, truenorth, center, angle_convent
             stamp = rotate_ccw(stamp, az - m.refpa_deg, cval=0.0)
         if buf is None or buf.shape != stamp.shape:
             buf = np.empty(stamp.shape)
-        c = stamp_crop(shape, stamp, sc, xs, ys, buf)
+        c = stamp_crop(shape, stamp, sc, xs, ys, buf, p.order)
         if c is not None:
             sink(i, c)
 
@@ -1451,7 +1514,7 @@ def place_source(J, p: _Prepared, model, angles, truenorth, center, angle_conven
 
 
 def prepare_sources(sources: Sequence[Source], model: InjectionModel, fallback: Optional[InjectionModel],
-                    pxscale: float) -> list:
+                    pxscale: float, interp="linear") -> list:
     """Work out what each source needs in every frame, for :func:`place_source`.
 
     Parameters
@@ -1464,13 +1527,15 @@ def prepare_sources(sources: Sequence[Source], model: InjectionModel, fallback: 
         Model that supplies the stamp where ``model`` has no template.
     pxscale : float
         Plate scale, in arcsec per pixel.
+    interp : {"linear", "cubic", "quintic"}, default "linear"
+        How each stamp goes to its sub-pixel position (:func:`interp_order`).
 
     Returns
     -------
     prepared : list of _Prepared
         One entry per source, in order.
     """
-    return _prepare(sources, model, fallback, pxscale)
+    return _prepare(sources, model, fallback, pxscale, interp)
 
 
 def _add_shared(out, J, p: _Prepared, angles, truenorth, center, angle_convention) -> None:
@@ -1523,7 +1588,7 @@ def _add_each(out, J, p: _Prepared, model, angles, truenorth, center, angle_conv
                 lambda i, c: add_crop(out[J[i]], c))
 
 
-def injected_model(reducer, sources, shape) -> Optional[np.ndarray]:
+def injected_model(reducer, sources, shape, interp=None) -> Optional[np.ndarray]:
     """Return the injected PSFs of some sources as they appear in the final north-up image.
 
     The model is built at the data's own roll angles, then derotated and combined as the science
@@ -1541,6 +1606,9 @@ def injected_model(reducer, sources, shape) -> Optional[np.ndarray]:
         sequence.
     shape : tuple of int
         Shape of the final image, ``(ny, nx)``.
+    interp : {"linear", "cubic", "quintic"} or None, default None
+        How each stamp goes to its sub-pixel position (:func:`interp_order`), None for the reducer's
+        default ``inject_interp``.
 
     Returns
     -------
@@ -1574,9 +1642,11 @@ def injected_model(reducer, sources, shape) -> Optional[np.ndarray]:
             ang = np.zeros(1)
         uang, cnt = np.unique(np.round(ang, 2), return_counts=True)
         blank = np.zeros((uang.size,) + tuple(int(v) for v in shape), np.float32)
+        if interp is None:
+            interp = (getattr(sub, "defaults", None) or {}).get("inject_interp", "linear")
         img = inject_sources(blank, uang, src, sub.model, sub.pxscale, truenorth=tn,
                              fallback=getattr(sub, "fallback", None),
-                             angle_convention=getattr(sub, "angle_convention", "pa"))
+                             angle_convention=getattr(sub, "angle_convention", "pa"), interp=interp)
         # cval=0 rather than derotate()'s NaN fill: this is a display model, and NaN
         # corners would drag the panel's robust stretch around.
         der = np.stack([rotate_ccw(np.asarray(img[i], float), float(uang[i]) + tn, cval=0.0)

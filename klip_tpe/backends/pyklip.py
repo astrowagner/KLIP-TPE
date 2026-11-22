@@ -96,7 +96,8 @@ def _pyklip_start_method(par) -> None:
     import multiprocessing
     ctx = multiprocessing.get_context(name)
     if name == "forkserver":
-        ctx.set_forkserver_preload(["numpy", "scipy.ndimage", "pyklip.parallelized"])
+        # this module too, for the workers' initializer (_pool_worker_init), so no worker imports it
+        ctx.set_forkserver_preload(["numpy", "scipy.ndimage", "pyklip.parallelized", "klip_tpe.backends.pyklip"])
     par.mp = _NoMainContext(ctx)
     par._klip_tpe_start = name
 
@@ -136,15 +137,38 @@ def _main_hidden():
         m.__spec__ = spec
 
 
+def _pool_worker_init(init, initargs) -> None:
+    """Start a pyKLIP pool worker: SIGINT ignored, then pyKLIP's own initializer.
+
+    A Ctrl-C goes to the run's whole process group.  A worker that takes it as ``KeyboardInterrupt``
+    dies inside the pool, which never gives its task to another worker, so pyKLIP's wait for that task
+    never returns and the run stays stuck.  A worker that ignores it finishes its task, and the
+    ``KeyboardInterrupt`` reaches the run's main thread alone, as with klip-tpe's own workers
+    (:func:`klip_tpe.parallel._worker_main`).
+
+    Parameters
+    ----------
+    init : callable or None
+        pyKLIP's initializer, ``_tpool_init``, None for none.
+    initargs : tuple
+        Its arguments, the shared arrays.
+    """
+    import signal
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if init is not None:
+        init(*initargs)
+
+
 class _NoMainContext:
-    """A multiprocessing context whose pools' workers never import the run's main script.
+    """A multiprocessing context whose pools' workers never import the run's main script, and ignore a Ctrl-C.
 
     pyKLIP's workers run pyklip's own functions on shared arrays and need nothing from the script that
     started the run.  A ``forkserver`` or ``spawn`` worker would import that script first, which runs a
     script without an ``if __name__ == "__main__":`` guard again inside the worker, and the pool never
     starts.  So a pool is made with the main module out of sight (:func:`_main_hidden`), and without
-    ``maxtasksperchild``, since a worker started later to replace one would import the script.
-    Everything else is the context's own.
+    ``maxtasksperchild``, since a worker started later to replace one would import the script.  Its
+    workers ignore SIGINT (:func:`_pool_worker_init`), since a worker killed by a Ctrl-C loses its task
+    for good.  Everything else is the context's own.
 
     Parameters
     ----------
@@ -170,26 +194,29 @@ class _NoMainContext:
         """
         return getattr(self._ctx, name)
 
-    def Pool(self, *args, **kwargs):
-        """Return the context's pool, its workers started with the main module out of sight.
+    def Pool(self, processes=None, initializer=None, initargs=(), maxtasksperchild=None, **kwargs):
+        """Return the context's pool, its workers started with the main module out of sight and SIGINT ignored.
 
         Parameters
         ----------
-        args : tuple
-            The pool's positional arguments.
+        processes : int or None, default None
+            Number of workers, None for the context's default.
+        initializer : callable or None, default None
+            Function each worker runs first, pyKLIP's ``_tpool_init``, after it ignores SIGINT.
+        initargs : tuple, default ()
+            The initializer's arguments.
+        maxtasksperchild : int or None, default None
+            Ignored, since a worker started to replace one would import the run's main script.
         kwargs : dict
-            Its keyword arguments, ``maxtasksperchild`` dropped.
+            The pool's other keyword arguments.
 
         Returns
         -------
         pool : multiprocessing.pool.Pool
             The pool, its workers running.
         """
-        kwargs.pop("maxtasksperchild", None)
-        if len(args) > 3:                       # (processes, initializer, initargs, maxtasksperchild)
-            args = args[:3]
         with _MAIN_LOCK, _main_hidden():
-            return self._ctx.Pool(*args, **kwargs)
+            return self._ctx.Pool(processes, _pool_worker_init, (initializer, tuple(initargs)), **kwargs)
 
 
 def _quiet_pyklip_progress(par) -> None:

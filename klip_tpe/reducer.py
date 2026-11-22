@@ -27,7 +27,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .injection import (InjectionModel, _check_float32_headroom, add_crop, cube_peak, inject_frames,
-                        place_source, prepare_sources)
+                        interp_order, place_source, prepare_sources)
 from .klip import (BLOCK_BYTES, KLIPParams, _highpass_frames, arcdist_deg, bin_by_groups, bin_frames,
                    bin_groups, bin_values, bins_with_data, coverage_map, derotate, destripe, frame_blocks,
                    frame_selection_mask, group_bounds, group_mean, highpass_stack, klip_annular, nw_ang_comb,
@@ -554,7 +554,7 @@ class _CropCache:
 
 def _flux_taken(orig: np.ndarray, edited: np.ndarray, angles: np.ndarray, sources: Sequence[Source], model,
                 pxscale: float, *, truenorth, fallback, angle_convention: str,
-                n_frames: int = 32) -> Tuple[float, int]:
+                n_frames: int = 32, interp="linear") -> Tuple[float, int]:
     """Measure the fraction of sources' flux that left the frames when they were subtracted.
 
     It is ``sum(sign(m) (orig - edited)) / sum(|m|)``, with ``m`` the sources injected into zeros, on
@@ -584,6 +584,8 @@ def _flux_taken(orig: np.ndarray, edited: np.ndarray, angles: np.ndarray, source
         How the sources' angles are read.
     n_frames : int, default 32
         Maximum number of frames measured.
+    interp : {"linear", "cubic", "quintic"}, default "linear"
+        How the stamps went to their sub-pixel positions (:func:`klip_tpe.injection.interp_order`).
 
     Returns
     -------
@@ -597,7 +599,7 @@ def _flux_taken(orig: np.ndarray, edited: np.ndarray, angles: np.ndarray, source
     m = np.zeros((idx.size,) + tuple(orig.shape[-2:]), np.float32)
     tn = truenorth if np.ndim(truenorth) == 0 else np.asarray(truenorth, float)[idx]
     inject_frames(m, m, np.asarray(angles, float)[idx], list(sources), model, pxscale, None, truenorth=tn,
-                  fallback=fallback, angle_convention=angle_convention)
+                  fallback=fallback, angle_convention=angle_convention, interp=interp)
     took = (np.asarray(orig[idx], np.float32).astype(np.float64)
             - np.asarray(edited[idx], np.float32).astype(np.float64))
     m64 = m.astype(np.float64)
@@ -804,6 +806,12 @@ class KLIPReducer(Reducer):
     ``klip_gram``
         "target" by default, or "zone" (:attr:`klip_tpe.klip.KLIPParams.gram`), about twice as fast
         per target at small bins and equal to float64 rounding (:func:`set_klip_gram`).
+    ``inject_interp``
+        "linear" by default, the predecessor's bilinear ``fshift``, "cubic", a cubic spline with its
+        prefilter, or "quintic", a spline of order 5: how each injected stamp goes to its sub-pixel position
+        (:func:`klip_tpe.injection.interp_order`).  The bilinear shift spreads a stamp, so a fit of a
+        real source by negative injection comes out high by 6 to 9 % at a FWHM of 2.5 to 3 px.  The
+        injections, the KLIP-FM model cube and ``subtract_sources`` take it.
     ``zone_in``, ``zone_out``
         How far the KLIP zone reaches inside and outside the annulus, in pixels, 0 by default.  The
         ALES reduction of MWC 758 fits one 5-27 px annulus this way, while ``angsep``'s arc and the
@@ -872,7 +880,7 @@ class KLIPReducer(Reducer):
                          "n_min_ref": 10, "comb_type": "nwadi",
                          "use_rdi": False, "rdi_mode": "ardi", "do_destripe": False, "destripe_clip": 0.0,
                          "fm_selfsub": True, "hp_nan_aware": False, "prep_fused": True,
-                         "klip_gram": "target"}
+                         "klip_gram": "target", "inject_interp": "linear"}
         self.defaults.update(defaults or {})
         #: whether the frames hold NaN, pixels without data beyond a detector's or a registration's edge
         self.has_nan = _holds_nan(data.cube)
@@ -1090,7 +1098,7 @@ class KLIPReducer(Reducer):
             return None
 
     def _inject(self, sources: Sequence[Source], keep: Optional[np.ndarray] = None,
-                threads: int = 1) -> np.ndarray:
+                threads: int = 1, interp="linear") -> np.ndarray:
         """Return the cube with sources injected, every frame or the kept frames only.
 
         Only the frames asked for are injected, since the selection depends on the tags and a frame it
@@ -1106,6 +1114,8 @@ class KLIPReducer(Reducer):
             The frames to return, ``cube[keep]`` in order.  None returns every frame.
         threads : int, default 1
             Number of threads.
+        interp : {"linear", "cubic", "quintic"}, default "linear"
+            How each stamp goes to its sub-pixel position (:func:`klip_tpe.injection.interp_order`).
 
         Returns
         -------
@@ -1122,7 +1132,8 @@ class KLIPReducer(Reducer):
         RuntimeWarning
             When a new set of sources is too faint to survive float32 rounding.
         """
-        key = tuple(s.as_tuple() for s in sources)
+        order = interp_order(interp)
+        key = (("interp", order),) + tuple(s.as_tuple() for s in sources)
         with self._inj_lock:
             ent = self._inj_cache.get(key)
             if ent is None:
@@ -1134,10 +1145,10 @@ class KLIPReducer(Reducer):
                 self._inj_cache = {key: ent}       # keep only the latest set of sources
                 _check_float32_headroom(self.data.cube, sources, self.model, self.fallback,
                                         peak=self.cube_peak())
-        return self._fill(ent, self.data.cube, sources, keep, threads)
+        return self._fill(ent, self.data.cube, sources, keep, threads, order)
 
     def model_cube(self, sources: Sequence[Source], keep: Optional[np.ndarray] = None,
-                   threads: int = 1) -> np.ndarray:
+                   threads: int = 1, interp="linear") -> np.ndarray:
         """Return the KLIP-FM planet-model cube, the sources injected into zero frames.
 
         The injection code and conventions are those of the data.
@@ -1150,6 +1161,8 @@ class KLIPReducer(Reducer):
             The frames to return, as for :meth:`_inject`.
         threads : int, default 1
             Number of threads.
+        interp : {"linear", "cubic", "quintic"}, default "linear"
+            How each stamp goes to its sub-pixel position, as for :meth:`_inject`.
 
         Returns
         -------
@@ -1165,7 +1178,8 @@ class KLIPReducer(Reducer):
         -----
         It does what ``reduce_near_2`` L1441-1494 does in the IDL predecessor.
         """
-        key = tuple(s.as_tuple() for s in sources)
+        order = interp_order(interp)
+        key = (("interp", order),) + tuple(s.as_tuple() for s in sources)
         with self._inj_lock:
             ent = self._fm_cache.get(key)
             if ent is None:
@@ -1173,10 +1187,10 @@ class KLIPReducer(Reducer):
                     raise ValueError("KLIPReducer needs an injection_model to build the FM model cube")
                 ent = _FrameCache(np.zeros(self.data.cube.shape, np.float32))
                 self._fm_cache = {key: ent}
-        return self._fill(ent, ent.cube, sources, keep, threads)
+        return self._fill(ent, ent.cube, sources, keep, threads, order)
 
     def _fill(self, ent: _FrameCache, base: np.ndarray, sources: Sequence[Source],
-              keep: Optional[np.ndarray], threads: int) -> np.ndarray:
+              keep: Optional[np.ndarray], threads: int, order: int = 1) -> np.ndarray:
         """Inject the frames a cache entry does not hold yet, and return the frames asked for.
 
         Parameters
@@ -1191,6 +1205,8 @@ class KLIPReducer(Reducer):
             The frames asked for, or None for all.
         threads : int
             Number of threads.
+        order : int, default 1
+            Spline order of the sub-pixel shift, 1 (bilinear) or 3 (cubic).
 
         Returns
         -------
@@ -1203,7 +1219,7 @@ class KLIPReducer(Reducer):
             if todo.size:
                 inject_frames(ent.cube, base, self.data.angles, sources, self.model, self.pxscale, todo,
                               truenorth=self.injection_north(), fallback=self.fallback,
-                              angle_convention=self.angle_convention, threads=threads)
+                              angle_convention=self.angle_convention, threads=threads, interp=order)
                 ent.done[todo] = True
             return ent.cube if want.all() else ent.cube[want]
 
@@ -1473,13 +1489,14 @@ class KLIPReducer(Reducer):
         from dataclasses import replace
         orig = self.data.cube
         cube = np.array(orig, dtype=np.float32, order="C", copy=True)
+        interp = self.defaults.get("inject_interp", "linear")
         inject_frames(cube, cube, self.data.angles, todo, self.model, self.pxscale, None,
                       truenorth=self.injection_north(), fallback=self.fallback,
-                      angle_convention=self.angle_convention, threads=max(int(threads), 1))
+                      angle_convention=self.angle_convention, threads=max(int(threads), 1), interp=interp)
         before, after = (orig, cube) if sign < 0 else (cube, orig)
         kept, k = _flux_taken(before, after, self.data.angles, own, self.model, self.pxscale,
                               truenorth=self.injection_north(), fallback=self.fallback,
-                              angle_convention=self.angle_convention)
+                              angle_convention=self.angle_convention, interp=interp)
         if np.isfinite(kept) and abs(kept - 1.0) > 1e-3:
             warnings.warn(f"{what}: {kept:.5f} of the sources' flux {'left' if sign < 0 else 'reached'} the frames "
                           f"(measured on {k} of {orig.shape[0]} frames), float32 rounding "
@@ -1915,8 +1932,9 @@ class KLIPReducer(Reducer):
             # the reference: a whole cube per step.  The selection reads the tags, not the
             # pixels, so it comes first.  Only the kept frames are injected, and the injected
             # cubes come back as cube[keep].
-            cube = self._inject(req.injections, keep, threads=nth) if req.injections else ds.cube
-            mcube = self.model_cube(req.fm_sources, keep, threads=nth) if do_fm else None
+            interp = p.get("inject_interp", "linear")
+            cube = self._inject(req.injections, keep, threads=nth, interp=interp) if req.injections else ds.cube
+            mcube = self.model_cube(req.fm_sources, keep, threads=nth, interp=interp) if do_fm else None
             if mcube is not None and filt > 1 and not hp_binned:
                 mcube = highpass_stack(mcube, filt, nan_aware=hp_nan, threads=nth)
             bcube, bang, grp, bkeep = self._prep_cube(cube, p, keep, bin_, filt, dth, hp_nan, hp_binned, nth,
@@ -2011,7 +2029,8 @@ class KLIPReducer(Reducer):
         else:
             bang = np.bincount(grp, weights=a_, minlength=ng) / np.bincount(grp, minlength=ng)
         clip = float(p["destripe_clip"]) if (p["do_destripe"] and not hp_binned) else None
-        place = self._placer(injections, "inj") if injections else None
+        interp = p.get("inject_interp", "linear")
+        place = self._placer(injections, "inj", interp) if injections else None
         bc = self._fused_bins(ds.cube, kidx, bounds, bin_, filt, hp_nan, hp_binned, nth, place, clip)
         if bkeep is None:
             bkeep = bins_with_data(bc)
@@ -2022,11 +2041,11 @@ class KLIPReducer(Reducer):
         mcube = None
         if fm_sources:
             mb = self._fused_bins(None, kidx, bounds, bin_, filt, hp_nan, hp_binned, nth,
-                                  self._placer(fm_sources, "fm"), None)
+                                  self._placer(fm_sources, "fm", interp), None)
             mcube = mb[bkeep]
         return bc[bkeep], bang[bkeep], grp, bkeep, mcube
 
-    def _placer(self, sources: Sequence[Source], kind: str):
+    def _placer(self, sources: Sequence[Source], kind: str, interp="linear"):
         """Return a function that adds every source's stamp to a batch of frames.
 
         The function is ``place(frames, J)``, which adds to ``frames[i]``, frame ``J[i]`` of the cube,
@@ -2039,6 +2058,8 @@ class KLIPReducer(Reducer):
             The sources.
         kind : {"inj", "fm"}
             Whether the sources are injections or KLIP-FM test sources, which have caches of their own.
+        interp : {"linear", "cubic", "quintic"}, default "linear"
+            How each stamp goes to its sub-pixel position (:func:`klip_tpe.injection.interp_order`).
 
         Returns
         -------
@@ -2058,11 +2079,12 @@ class KLIPReducer(Reducer):
         if self.model is None:
             raise ValueError("KLIPReducer needs an injection_model to inject sources" if kind == "inj" else
                              "KLIPReducer needs an injection_model to build the FM model cube")
-        key = tuple(s.as_tuple() for s in sources)
+        order = interp_order(interp)
+        key = (("interp", order),) + tuple(s.as_tuple() for s in sources)
         first, cache = self._crops[kind].lookup(key)
         if first and kind == "inj":
             _check_float32_headroom(self.data.cube, sources, self.model, self.fallback, peak=self.cube_peak())
-        prepared = prepare_sources(sources, self.model, self.fallback, self.pxscale)
+        prepared = prepare_sources(sources, self.model, self.fallback, self.pxscale, order)
         ny, nx = self.data.cube.shape[1:]
         center = ((nx - 1) / 2.0, (ny - 1) / 2.0)
         angles = np.asarray(self.data.angles, float)

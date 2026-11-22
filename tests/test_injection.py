@@ -313,3 +313,69 @@ def test_display_model_superposes_the_rolls_rather_than_picking_one():
     # the 90-degree roll's lobe sits above the core; the single-roll model has nothing there
     assert m[cy + 6, cx] > 0.3 * m[cy, cx]
     assert np.nan_to_num(one)[cy + 6, cx] < 0.1 * np.nan_to_num(one)[cy, cx]
+
+
+# ----------------------------------------------------------------------------
+# the sub-pixel placement (inject_interp)
+# ----------------------------------------------------------------------------
+def _exact_gaussian(n, x0, y0, fwhm, norm):
+    """A Gaussian drawn at its own sub-pixel position, scaled like GaussianPSF's unit stamp."""
+    yy, xx = np.mgrid[0:n, 0:n]
+    s = fwhm / 2.3548
+    return np.exp(-0.5 * ((xx - x0) ** 2 + (yy - y0) ** 2) / s ** 2) / norm
+
+
+@pytest.mark.parametrize("fwhm", [2.4, 3.0])
+def test_a_cubic_placement_keeps_an_exact_sources_contrast(fwhm):
+    from klip_tpe.injection import interp_order
+    model = GaussianPSF(fwhm, star_flux=1.0)
+    norm = 1.0 / float(model._stamp.max())             # the unit stamp's divisor: its center pixel was 1
+    n = 49
+    rng = np.random.default_rng(3)
+    got = {"linear": [], "cubic": [], "quintic": []}
+    for _ in range(25):
+        rho_px, theta = rng.uniform(8.0, 14.0), rng.uniform(0.0, 360.0)
+        blank = np.zeros((1, n, n), np.float32)
+        x0, y0 = source_xy([rho_px * PX], [theta], PX, (n - 1) / 2.0, (n - 1) / 2.0, "pa")
+        exact = _exact_gaussian(n, x0[0], y0[0], fwhm, norm)
+        yy, xx = np.mgrid[0:n, 0:n]
+        m = np.hypot(xx - x0[0], yy - y0[0]) <= 2 * fwhm
+        e = exact[m] - exact[m].mean()
+        for interp in got:
+            img = inject_sources(blank, np.zeros(1), [Source(rho_px * PX, theta, 1.0)], model, PX,
+                                 interp=interp)[0].astype(float)
+            v = img[m] - img[m].mean()
+            got[interp].append(float(np.dot(e, v) / np.dot(v, v)))     # the contrast that matches the source
+    # the bilinear shift spreads the stamp, so the fit of a real source goes high; the cubic spline does not
+    assert abs(np.mean(got["cubic"]) - 1.0) < 0.005 and max(abs(c - 1.0) for c in got["cubic"]) < 0.01
+    assert abs(np.mean(got["quintic"]) - 1.0) < 0.001
+    assert np.mean(got["linear"]) > 1.05
+    assert interp_order("cubic") == 3 and interp_order(None) == 1
+
+
+def test_interp_order_reads_names_and_orders():
+    from klip_tpe.injection import interp_order
+    assert [interp_order(v) for v in ("linear", "bilinear", "cubic", "spline", " Cubic ", "quintic", 1, 3, 5,
+                                      None)] == [1, 1, 3, 3, 3, 5, 1, 3, 5, 1]
+    for bad in ("quadratic", 2, 4, 0, True, 3.5):
+        with pytest.raises(ValueError, match="inject_interp"):
+            interp_order(bad)
+
+
+def test_the_reducer_keeps_each_placement_apart():
+    from klip_tpe.reducer import KLIPReducer, ReductionRequest
+    from klip_tpe.synthetic import synthetic_klip_dataset
+    ds = synthetic_klip_dataset(nframes=16, size=48, pa_span=30, seed=2)
+    red = KLIPReducer(ds, PX, 3.0 * PX / 206265 * 8.2, 8.2, injection_model=GaussianPSF(2.5, star_flux=1e4),
+                      outrad_cap=22)
+    src = [Source(12 * PX, 40.0, 5e-3)]
+    base = dict(k_klip=4, inrad=6, outrad=18, n_ang=1, angsep=0.0, anglemax=360.0, fast=True, bin=1, filter=0)
+    for fused in (True, False):
+        p = dict(base, prep_fused=fused)
+        lin = red.reduce(ReductionRequest(dict(p, inject_interp="linear"), src)).image
+        cub = red.reduce(ReductionRequest(dict(p, inject_interp="cubic"), src)).image
+        again = red.reduce(ReductionRequest(dict(p, inject_interp="linear"), src)).image
+        assert np.nanmax(np.abs(cub - lin)) > 1e-3, "the cubic placement is not the bilinear one"
+        assert np.array_equal(again, lin, equal_nan=True), "each placement keeps its own cached frames"
+        assert np.array_equal(red.reduce(ReductionRequest(dict(p), src)).image, lin, equal_nan=True), \
+            "linear is the default"

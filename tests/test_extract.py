@@ -146,6 +146,34 @@ def test_fit_contrast_refines_before_its_profile_and_takes_the_given_width():
         fit_contrast(rf, TRUE.rho, TRUE.theta, c_min, fwhm_px=4.0, pxscale=PX, half_frac=0.0)
 
 
+def test_an_exactly_placed_companion_fits_back_at_its_contrast():
+    """A companion drawn at its own sub-pixel position in every frame, not interpolated, is fitted back at
+    its contrast to better than 1 % with the cubic placement.  The bilinear one fits it high."""
+    fw, c_true = 2.5, 1e-2
+    ds = synthetic_klip_dataset(nframes=40, size=64, pa_span=60, seed=3, speckle_amp=5.0, noise=0.1)
+    model = GaussianPSF(fw, star_flux=1e4)
+    norm = 1.0 / float(model._stamp.max())              # the unit stamp's divisor: its center pixel was 1
+    n = ds.cube.shape[-1]
+    yy, xx = np.mgrid[0:n, 0:n]
+    sg = fw / 2.3548
+    cube = np.array(ds.cube, np.float64)
+    for j, ang in enumerate(ds.angles):                  # the injection's own geometry, pa convention, north 0
+        az = np.deg2rad(TRUE.theta - 270.0 - ang)
+        x0, y0 = (n - 1) / 2.0 + TRUE.rho / PX * np.cos(az), (n - 1) / 2.0 + TRUE.rho / PX * np.sin(az)
+        cube[j] += c_true * model.flux_unit * np.exp(-0.5 * ((xx - x0) ** 2 + (yy - y0) ** 2) / sg ** 2) / norm
+    red = KLIPReducer(Dataset(cube.astype(np.float32), ds.angles, ds.tags, texp=ds.texp, name="exact", meta={}),
+                      PX, LAM, 8.2, injection_model=model, outrad_cap=30)
+    got = {}
+    for interp in ("cubic", "linear"):
+        rf = (lambda srcs, interp=interp: red.reduce(ReductionRequest(dict(PARAMS, inject_interp=interp),
+                                                                      list(srcs) if srcs else None)).image)
+        g = fit_contrast(rf, TRUE.rho, TRUE.theta, 0.8 * c_true, fwhm_px=red.fwhm, pxscale=PX,
+                         angle_convention=red.angle_convention, nref=3, half_frac=0.05)
+        got[interp] = g["contrast"] / c_true
+    assert abs(got["cubic"] - 1.0) < 0.01, got
+    assert got["linear"] > 1.03, got
+
+
 def test_debias_tests_the_fakes_bias_with_students_t():
     from klip_tpe.extract import _debias
     r = _debias(60.0, 0.15, 0.03, 5, "pa")
@@ -249,6 +277,52 @@ def test_extract_companion_on_a_finished_run_writes_its_products(red, tmp_path):
     assert s["sigma_quoted"]["rho"] == pytest.approx(s["sigma_profile"]["rho"])
 
 
+def test_extract_takes_overrides_places_by_cubic_and_skips_the_fm_pass(red, tmp_path, monkeypatch):
+    r = _finished_runner(red, tmp_path, subtract=False)
+    seen = []
+    real = r._reduce
+
+    def spy(cfg, sources, *args, **kw):
+        seen.append((dict(cfg.params), kw.get("fm_sources", "absent")))
+        return real(cfg, sources, *args, **kw)
+
+    monkeypatch.setattr(r, "_reduce", spy)
+    events = []
+    cfg = ExtractConfig(n_iter=24, n_init=10, nref=0, n_fakes=0, seed=5)
+    found = extract_companion(r, TRUE.rho, TRUE.theta, TRUE.contrast, config=cfg, params={"k_klip": 3},
+                              log=lambda s: None, progress=events.append)
+    assert all(p["k_klip"] == 3 and p["inject_interp"] == "cubic" for p, _ in seen)
+    assert all(fm == () for _, fm in seen), "the step reads the image alone, so no KLIP-FM pass"
+    c = found["configuration"]
+    assert c["overrides"] == {"k_klip": 3} and c["what"].endswith("with k_klip=3") and c["inject_interp"] == "cubic"
+    assert events[-1]["kind"] == "result" and set(events[-1]["quoted"]) == {"rho", "pa", "contrast"}
+    # params can name the placement too, and the summary says which it was
+    seen.clear()
+    found = extract_companion(r, TRUE.rho, TRUE.theta, TRUE.contrast, config=cfg,
+                              params={"inject_interp": "linear"}, log=lambda s: None)
+    assert all(p["inject_interp"] == "linear" for p, _ in seen)
+    from klip_tpe.extract import _summary, _txt
+    assert "placed by linear interpolation" in _txt(_summary(found), "t")
+    with pytest.raises(ValueError, match="inject_interp"):
+        ExtractConfig(inject_interp="nearest").check()
+
+
+def test_a_run_carries_its_placement_in_every_reduction(red, tmp_path, monkeypatch):
+    r = _finished_runner(red, tmp_path, subtract=False)
+    seen = []
+    real = red.reduce
+    monkeypatch.setattr(red, "reduce", lambda req: (seen.append(dict(req.params)), real(req))[1])
+    win = r.space.decode(r.space.default_vector())
+    r._reduce(win, None)
+    assert "inject_interp" not in seen[-1], "None leaves it to the reducer's default"
+    r.cfg.inject_interp = "cubic"
+    r._reduce(win, [TRUE])
+    assert seen[-1]["inject_interp"] == "cubic"
+    from klip_tpe.runner import RunConfig
+    assert RunConfig.from_dict(dict(r.cfg.to_dict())).inject_interp == "cubic"
+    assert RunConfig.from_dict({k: v for k, v in r.cfg.to_dict().items() if k != "inject_interp"}).inject_interp is None
+
+
 @pytest.fixture(scope="module")
 def two_partitions():
     ds = synthetic_klip_dataset(nframes=40, size=64, pa_span=60, seed=3)
@@ -303,9 +377,17 @@ def test_each_partition_gets_its_own_contrast_with_the_position_held(two_partiti
 
 
 def test_the_cli_parses_extract():
-    from klip_tpe.cli import _build_parser
+    from klip_tpe.cli import _build_parser, _set_params
     a = _build_parser().parse_args(["extract", "--run-dir", "r", "--rho", "0.452", "--pa", "211.2", "--contrast",
                                    "7e-4", "--n-iter", "300", "--fakes", "0", "--box-contrast", "0.6", "1.8"])
     assert a.rho == 0.452 and a.n_iter == 300 and a.fakes == 0 and a.box_contrast == [0.6, 1.8]
     assert a.patch == 2.0 and a.nref == 5 and a.annulus is None and a.config is None
     assert not a.group_positions and a.group_iter == 300 and a.group_box == 0.5
+    assert a.extract_interp == "cubic" and a.set_params == [] and getattr(a, "inject_interp", None) is None
+    a = _build_parser().parse_args(["extract", "--rho", "0.3", "--pa", "20", "--contrast", "1e-3", "--set",
+                                   "nkeep_altroll=0", "--set", "rdi_mode=rdi", "--inject-interp", "linear"])
+    assert a.extract_interp == "linear"
+    assert _set_params(a.set_params) == {"nkeep_altroll": 0, "rdi_mode": "rdi"}
+    assert _set_params(["a=1.5", "b=true", "c=None", "d=x=y"]) == {"a": 1.5, "b": True, "c": None, "d": "x=y"}
+    with pytest.raises(ValueError, match="KEY=VALUE"):
+        _set_params(["nokey"])

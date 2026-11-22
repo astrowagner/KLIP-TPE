@@ -260,7 +260,8 @@ class GPUKLIPReducer(KLIPReducer):
         n_ = None if nf is None else np.asarray(nf, float)[keep]
         if req.injections:
             cube = kg.inject(be, cube, a_, req.injections, self.model, self.pxscale,
-                             self.truenorth if n_ is None else n_, self.angle_convention, fallback=self.fallback)
+                             self.truenorth if n_ is None else n_, self.angle_convention, fallback=self.fallback,
+                             interp=p.get("inject_interp", "linear"))
         lap("inject")
         grp = bin_groups(a_, bin_, dth) if bin_ > 1 else np.arange(a_.size)
         if bin_ > 1:

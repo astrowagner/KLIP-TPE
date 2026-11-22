@@ -276,6 +276,10 @@ def test_a_run_elects_on_the_final_grid_and_its_products_take_the_curve(runs):
     fr = json.load(open(os.path.join(a, "final_results.json")))
     assert all(x["final_grid"] is not None for x in fr["annuli"])
     assert all(x["final_grid"]["changed"] == rec["annuli"][str(x["annulus"] + 1)]["changed"] for x in fr["annuli"])
+    # each annulus' winner.json carries the stage's record too, rather than saying it never ran
+    for x in fr["annuli"]:
+        wj = json.load(open(os.path.join(a, f"annulus{x['annulus'] + 1:02d}", "winner.json")))
+        assert wj["final_grid"] == x["final_grid"]
 
 
 @pytest.mark.slow
@@ -356,6 +360,16 @@ def test_a_changed_winner_reaches_the_final_products(runs, tmp_path, monkeypatch
     fg2 = fr["annuli"][1]["final_grid"]
     assert fg2["changed"] and fg2["config"] and fg2["held_out"]["n"] > 0
     assert config_key(fg2["config"]) != config_key(fr["annuli"][1]["winner_config"])
+    # winner.json keeps the validation's winner and names the grid's, and the record says where its image is
+    from klip_tpe.runner import AnnulusResult
+    wj = AnnulusResult.from_dict(json.load(open(os.path.join(run, "annulus02", "winner.json"))))
+    assert wj.final_grid == fg2 and wj.winner_config == fr["annuli"][1]["winner_config"]
+    assert wj.final_config == fg2["config"] and wj.final_label.startswith("the final grid's winner")
+    assert wj.final_image_path(run) == os.path.join(run, "final_grid", "annulus02_best_clean.fits")
+    assert (np.isnan(wj.final_score) if fg2["validated_score"] is None
+            else wj.final_score == pytest.approx(fg2["validated_score"]))
+    kept = AnnulusResult.from_dict(json.load(open(os.path.join(run, "annulus01", "winner.json"))))
+    assert kept.final_image_path(run, "inj") == os.path.join(run, "annulus01", "best_inj.fits")
     for f in ("best_clean.fits", "best_inj.fits", "best_clean_partitions.fits", "best_inj_partitions.fits"):
         assert os.path.exists(os.path.join(run, "final_grid", f"annulus02_{f}")), f
     # the parameters table takes the elected winner

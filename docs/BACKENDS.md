@@ -118,6 +118,13 @@ numpy, scipy and pyklip imported, the workers forked from it.
 - The pools' workers never import the run's main script.  A forkserver or spawn worker would import
   it first, which runs a script without an `if __name__ == "__main__":` guard again inside the
   worker, and the pool never starts.  A tutorial run as a script works for that reason.
+- The pools' workers ignore a Ctrl-C.  It goes to the run's whole process group, and the forkserver
+  hands its workers Python's default handler, so a worker took it as `KeyboardInterrupt` and died
+  inside the pool.  The pool never gives a dead worker's task to another, so pyKLIP's wait for it
+  never returned and the run stayed stuck (FLIP note, 2026-11-21).  Now the workers finish their tasks
+  and the `KeyboardInterrupt` reaches the run's main thread alone, as with klip-tpe's own workers.  On
+  a synthetic two-partition run whose pyKLIP reductions take a few seconds, a Ctrl-C at evaluation 8
+  left the old pools still running 90 s later, and now ends the run within a second.
 
 `KLIP_TPE_PYKLIP_START=spawn|fork|forkserver` overrides.
 

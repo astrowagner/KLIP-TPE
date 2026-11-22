@@ -91,6 +91,36 @@ def test_the_fakes_table_fits_its_slot_whatever_it_holds():
         assert t.get_window_extent(r).x1 <= fig.bbox.x1 - 5, t.get_text()[:40]
 
 
+def test_the_last_panel_shows_the_values_to_quote():
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    from klip_tpe.extract_display import _text
+    run = {"phase": "main", "best_x": [0.9, 60.0, 4e-3], "best_r": 0.3, "trial_x": None, "title": "results",
+           "per_trial": None, "elapsed": None, "eta": None}
+    st = {"geom": {"label": "a test"}, "elapsed_all": None,
+          "quoted": {"value": {"rho": 0.90012, "pa": 59.85, "contrast": 4.1e-3},
+                     "sigma": {"rho": 1.1e-3, "pa": 0.025, "contrast": 6e-5},
+                     "corrected": {"rho": False, "pa": True, "contrast": False}}}
+    live = [(0.9, 1e-4), (60.0, 0.01), (4e-3, 1e-5)]
+    for quoted, want, gone in ((True, "PA 59.850* +- 0.025", "from the profiles"),
+                               (False, "PA 60.000 +- 0.010", "to quote")):
+        fig = Figure(figsize=(16, 7.6), dpi=100)
+        FigureCanvasAgg(fig)
+        _text(fig, dict(st, quoted=st["quoted"] if quoted else None), run, live, "profiles")
+        text = fig.texts[-1].get_text()
+        assert want in text and gone not in text, text
+    assert "to quote, * less the fakes' bias:" in _last_text(_text, st, run, live)
+
+
+def _last_text(fn, st, run, live):
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    fig = Figure(figsize=(16, 7.6), dpi=100)
+    FigureCanvasAgg(fig)
+    fn(fig, st, run, live, "profiles")
+    return fig.texts[-1].get_text()
+
+
 def test_the_fit_tells_its_progress(red):  # noqa: F811
     cfg = ExtractConfig(n_iter=24, n_init=10, nref=3, n_fakes=0, seed=4)
     ev = []
@@ -224,8 +254,8 @@ def test_render_saved_stands_in_for_trials_it_did_not_save(red, tmp_path):  # no
     paths = render_saved(out, every=15, reference=(TRUE.rho, TRUE.theta), movie=True, log=lines.append)
     assert any("were not saved" in s for s in lines)
     pngs = _pngs(os.path.join(out, "steps"))
-    # trials 15 and 30, profile points 15, 30 and 39, and the end
-    assert len(pngs) == 2 + 3 + 1 and paths[:-1] == pngs
+    # trials 15 and 30, profile points 15, 30 and 39, the end, and the results with the values to quote
+    assert len(pngs) == 2 + 3 + 1 + 1 and paths[:-1] == pngs
     assert paths[-1].endswith("extract_steps.gif") and os.path.exists(paths[-1])
     assert not os.path.exists(os.path.join(out, CROPS)), "the stand-ins are never saved as the trials' images"
 

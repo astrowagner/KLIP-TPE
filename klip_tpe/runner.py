@@ -507,6 +507,14 @@ class RunConfig:
     #: ``pixel_mask`` and the sampler's ``forbidden_mask``, so the final grid leaves those position
     #: angles out too.  0 masks only where no frame holds data, and frames without NaN change nothing.
     min_coverage: float = 0.5
+    #: How every injected stamp goes to its sub-pixel position, ``"linear"`` (the IDL predecessor's
+    #: bilinear ``fshift``), ``"cubic"`` (a cubic spline with its prefilter) or ``"quintic"``, carried in each
+    #: reduction's parameters as ``inject_interp`` (:func:`klip_tpe.injection.interp_order`).  None
+    #: leaves it to the reducer's default, "linear" unless its ``defaults`` say otherwise.  The bilinear
+    #: shift spreads a stamp, so an injected source has 6 to 9 % less peak than a real one at a FWHM of
+    #: 2.5 to 3 px, and the contrast curves err that much on the conservative side.  A run keeps the
+    #: placement it began with, since a resume reads it from the checkpoint.
+    inject_interp: Optional[str] = None
     #: What the frames are, when they are not the instrument's default: ``cube_name`` (the
     #: cube file read for each night), ``dropped_frames`` (``{"n4": [551], ...}``, frames left
     #: out of a night at load, by their index in its cube), ``subtracted_sources`` (``[[rho,
@@ -709,6 +717,44 @@ class AnnulusResult:
         """
         sel = self.final_config.get("selected") if (self.final_grid or {}).get("changed") else None
         return [str(p) for p in (sel or self.partitions)]
+
+    @property
+    def final_score(self) -> float:
+        """The validated score of the final configuration, NaN where the final-image grid's winner has none.
+        """
+        return _final_score(self)
+
+    @property
+    def final_label(self) -> str:
+        """Which configuration the run's final image takes, for a printed line.
+        """
+        fg = self.final_grid or {}
+        if fg.get("changed"):
+            ev = fg.get("eval_index")
+            return (f"the final grid's winner, {fg.get('run')} {fg.get('kind')} eval "
+                    f"{'-' if ev is None else int(ev) + 1}, in place of eval {self.winner_index + 1}")
+        return (f"eval {self.winner_index + 1}, " + ("validated" if self.validated else "the search's best")
+                + (", kept by the final grid" if fg else ""))
+
+    def final_image_path(self, run_dir: str, kind: str = "clean") -> str:
+        """Return the path of the final configuration's image of the annulus.
+
+        Parameters
+        ----------
+        run_dir : str
+            The run's directory.
+        kind : {"clean", "inj"}, default "clean"
+            The reduction without injections or with the annulus' own sources.
+
+        Returns
+        -------
+        path : str
+            ``final_grid/annulusNN_best_KIND.fits`` where the final-image grid changed the winner, else
+            ``annulusNN/best_KIND.fits``, the validation's winner's.
+        """
+        if (self.final_grid or {}).get("changed"):
+            return os.path.join(run_dir, "final_grid", f"annulus{int(self.annulus) + 1:02d}_best_{kind}.fits")
+        return os.path.join(run_dir, f"annulus{int(self.annulus) + 1:02d}", f"best_{kind}.fits")
 
     def to_dict(self) -> Dict[str, Any]:
         return json.loads(json.dumps(asdict(self), default=_json_default))
@@ -2385,6 +2431,12 @@ class Runner:
         params.update(pad_in=pad_in, pad_out=pad_out)
         for dd in per.values():
             dd.update(pad_in=pad_in, pad_out=pad_out)
+        interp = getattr(self.cfg, "inject_interp", None)
+        if interp:
+            # the run's placement travels with the request, so the workers need no reducer of their own
+            params.setdefault("inject_interp", str(interp))
+            for dd in per.values():
+                dd.setdefault("inject_interp", str(interp))
         cfg2 = Config(params, per, cfg.selected, cfg.x)
         if (fm_sources is None and sources and not k_scan and self.reducer.supports_fm
                 and getattr(self.objective.metric, "needs_fm", False)):
@@ -5488,7 +5540,8 @@ class Runner:
                 # the injected-PSF model of those sources, which the annulus-done frame shows
                 # beside them and ``klip-tpe render`` draws again from this file
                 from .injection import injected_model
-                mdl = injected_model(self.reducer, sources, np.shape(inj_img)) if sources else None
+                mdl = (injected_model(self.reducer, sources, np.shape(inj_img),
+                                      interp=getattr(self.cfg, "inject_interp", None)) if sources else None)
                 mpath = os.path.join(d, "best_inj_model.fits")
                 if mdl is not None:
                     hm = dict(hdr_inj, IMGTYPE="injected-PSF model of the sources in best_inj.fits")
@@ -6116,6 +6169,13 @@ class Runner:
             fcurve = self._guard("final grid", self._final_grid, results)
             # its records reach the checkpoint, from which a resume, rereduce and the re-score take the winners
             self.checkpoint(final_annulus=self._last_final)
+            # and each annulus' winner.json, written when the annulus finished, so it does not say the stage
+            # never ran (final_grid null) where it did
+            for r in results:
+                d = os.path.join(self.run_dir, f"annulus{int(r.annulus) + 1:02d}")
+                if os.path.isdir(d):
+                    self._guard(f"annulus {int(r.annulus) + 1} winner.json", _atomic_write, os.path.join(d, "winner.json"),
+                                json.dumps(r.to_dict(), indent=1, default=_json_default))
         self.hb.stage("final products")
         out = {"annuli": [r.to_dict() for r in results], "seed": self.cfg.seed, "bench_tag": self.cfg.bench_tag}
         stitched = None

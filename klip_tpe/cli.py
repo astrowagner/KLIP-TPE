@@ -93,6 +93,7 @@ def _near_objects(a, log=print):
     except near.NorthFileError as exc:
         raise SystemExit(f"{exc}. --north files takes the north files as they are now, --north constant "
                          f"{near.NEAR.truenorth:g} deg for every frame; either one no longer reproduces the run")
+    _set_inject_interp(red, a)
     _subtract(red, a, log)
     _set_threads_per_job(red, a)
     _set_card(red, a)
@@ -123,6 +124,30 @@ def _set_threads_per_job(red, a) -> None:
     """
     if hasattr(red, "threads_per_job"):
         red.threads_per_job = max(int(getattr(a, "threads_per_job", 2) or 2), 1)
+
+
+def _set_inject_interp(red, a) -> None:
+    """Set ``--inject-interp`` as the default of every KLIP reducer, before the frames are edited.
+
+    The run's reductions carry it in their parameters (``RunConfig.inject_interp``).  As a default it also
+    reaches ``--subtract-sources`` and ``--inject-sources``, which edit the frames once before any
+    reduction, and the workers, which keep the reducers they were forked with.
+
+    Parameters
+    ----------
+    red : Reducer
+        The reducer.
+    a : argparse.Namespace
+        The parsed command line.
+    """
+    interp = getattr(a, "inject_interp", None)
+    if not interp:
+        return
+    subs = getattr(red, "reducers", None)
+    for r in (list(subs.values()) if isinstance(subs, dict) and subs else [red]):
+        d = getattr(r, "defaults", None)
+        if isinstance(d, dict):
+            d["inject_interp"] = str(interp)
 
 
 def _set_klip_gram(red, a, log=print) -> None:
@@ -1224,6 +1249,7 @@ def _generic_objects(a, log=print):
                                backend=getattr(a, "backend", "klip"), log=log)
     _no_cube_name(a, "--instrument generic")
     _no_drop_frames(a, "--instrument generic")
+    _set_inject_interp(red, a)
     _subtract(red, a, log)
     _set_threads_per_job(red, a)
     _set_card(red, a)
@@ -1313,6 +1339,7 @@ def _nomic_objects(a, log=print):
                              backend=getattr(a, "backend", "klip"))
     _no_cube_name(a, "--instrument nomic")
     _no_drop_frames(a, "--instrument nomic")
+    _set_inject_interp(red, a)
     _subtract(red, a, log)
     _set_threads_per_job(red, a)
     _set_card(red, a)
@@ -1400,6 +1427,7 @@ def _ales_objects(a, log=print):
                             sdi_lenders=getattr(a, "ales_sdi_lenders", "all") or "all", log=log)
     _no_cube_name(a, "--instrument ales")
     _no_drop_frames(a, "--instrument ales")
+    _set_inject_interp(red, a)
     _subtract(red, a, log)
     _set_threads_per_job(red, a)
     _set_card(red, a)
@@ -1982,6 +2010,7 @@ def _protocol_config(a) -> dict:
                 **({"n_sources": ns} if ns is not None else {}),
                 **({"min_r_fwhm": rmin} if rmin is not None else {}),
                 **({"min_coverage": float(a.min_coverage)} if getattr(a, "min_coverage", None) is not None else {}),
+                **({"inject_interp": a.inject_interp} if getattr(a, "inject_interp", None) else {}),
                 **({"ann_extra": extra} if extra else {}),
                 **({"score_floor": _score_floor(sf)} if sf is not None else {}),
                 **({"verify_snr": a.verify_snr} if getattr(a, "verify_snr", None) else {}),
@@ -2731,6 +2760,48 @@ def cmd_elect(a):
             logf.close()
 
 
+def _set_params(items) -> Dict[str, Any]:
+    """Read ``--set KEY=VALUE`` items into reduction parameters.
+
+    A value reads as an int, a float, true or false, none, or else as text.
+
+    Parameters
+    ----------
+    items : sequence of str
+        The items, each ``KEY=VALUE``.
+
+    Returns
+    -------
+    params : dict
+        The parameters, in the order given.
+
+    Raises
+    ------
+    ValueError
+        If an item has no ``=`` or an empty key.
+    """
+    out: Dict[str, Any] = {}
+    for item in items:
+        key, eq, val = str(item).partition("=")
+        key, val = key.strip(), val.strip()
+        if not eq or not key:
+            raise ValueError(f"--set {item!r}: give KEY=VALUE")
+        low = val.lower()
+        if low in ("true", "false"):
+            out[key] = low == "true"
+        elif low in ("none", "null"):
+            out[key] = None
+        else:
+            try:
+                out[key] = int(val)
+            except ValueError:
+                try:
+                    out[key] = float(val)
+                except ValueError:
+                    out[key] = val
+    return out
+
+
 def cmd_extract(a):
     """Run ``klip-tpe extract``, a known companion's position and contrast, with uncertainties, from a finished run.
 
@@ -2778,9 +2849,10 @@ def cmd_extract(a):
                         gamma=a.gamma, ncand=a.ncand, explore_frac=a.explore, best_frac=a.best_frac, nref=a.nref,
                         n_fakes=a.fakes, fake_iter=a.fake_iter, per_group=not a.no_groups,
                         group_positions=a.group_positions, group_iter=a.group_iter, group_box=a.group_box,
-                        group_fake_iter=a.group_fake_iter, seed=a.seed)
+                        group_fake_iter=a.group_fake_iter, inject_interp=a.extract_interp, seed=a.seed)
     try:
         cfg.check()
+        overrides = _set_params(getattr(a, "set_params", None) or [])
     except ValueError as exc:
         raise SystemExit(f"extract: {exc}") from None
     if not (a.rho > 0 and a.contrast > 0):
@@ -2813,14 +2885,14 @@ def cmd_extract(a):
         from .injection import injected_model
         from .metrics import Source
 
-        def psf_fn(rho, pa, shape, red=r.reducer):
-            return injected_model(red, [Source(float(rho), float(pa), 1.0)], shape)
+        def psf_fn(rho, pa, shape, red=r.reducer, interp=cfg.inject_interp):
+            return injected_model(red, [Source(float(rho), float(pa), 1.0)], shape, interp=interp)
 
         disp = ExtractDisplay(out, label=label, every=a.display_every or 1, reference=a.reference, psf_fn=psf_fn,
                               log=log)
     try:
         found = extract_companion(r, a.rho, a.pa, a.contrast, annulus=None if a.annulus is None else a.annulus - 1,
-                                  evaluation=a.config, config=cfg, log=log, progress=disp)
+                                  evaluation=a.config, config=cfg, params=overrides or None, log=log, progress=disp)
         files = write_extract(found, out, label=label)
         with open(files["summary_txt"]) as f:
             log(f.read().rstrip())
@@ -3211,6 +3283,11 @@ def _add_run_args(p):
                    help="for frames that hold NaN, such as beyond a detector's edge: the fewest of the frames, as a "
                         "fraction, that must hold data at a position for a source to be injected there and for the "
                         "noise to sample it (default 0.5, RunConfig.min_coverage). The run writes coverage.fits")
+    p.add_argument("--inject-interp", default=None, choices=["linear", "cubic", "quintic"],
+                   help="how each injected stamp goes to its sub-pixel position: linear, the IDL predecessor's "
+                        "bilinear fshift, which spreads the stamp so an injected source has 6 to 9 %% less peak than "
+                        "a real one at a FWHM of 2.5 to 3 px, or a cubic or quintic spline (default the reducer's, "
+                        "linear, RunConfig.inject_interp, which a resume keeps)")
     p.add_argument("--sidelobes", default=None, choices=["farthest", "clean", "off"],
                    help="the noise rings of the search, calibration, validation, verify and candidates. off (the "
                         "default) skips the apertures within 1.5 FWHM of each injected source and known companion, "
@@ -3568,6 +3645,14 @@ def _build_parser():
     p.add_argument("--group-fake-iter", type=int, default=None, metavar="N",
                    help="trials of each fake source's fit in a partition (default --group-iter)")
     p.add_argument("--seed", type=int, default=None, help="seed of the random draws")
+    p.add_argument("--inject-interp", dest="extract_interp", default="cubic", choices=["cubic", "quintic", "linear"],
+                   help="how the negatives and the fakes go to their sub-pixel positions: cubic, a cubic spline "
+                        "(default), quintic, a spline of order 5, or linear, the run's bilinear fshift, which spreads "
+                        "each stamp and fits a real companion 6 to 9 %% high at a FWHM of 2.5 to 3 px")
+    p.add_argument("--set", dest="set_params", action="append", default=[], metavar="KEY=VALUE",
+                   help="a reduction parameter that overrides the configuration's in every partition, recorded in "
+                        "the summary's configuration line, such as --set nkeep_altroll=0 for a searched library's "
+                        "RDI point.  Repeat it for more")
     p.add_argument("--display", dest="display", action="store_true", default=True,
                    help="draw the live dashboard into <out>/steps, for klip-tpe view --run-dir <out> (default)")
     p.add_argument("--no-display", dest="display", action="store_false", help="no live dashboard")
