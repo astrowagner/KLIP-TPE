@@ -749,6 +749,76 @@ def test_the_default_crop_grows_to_hold_the_extra_annuli(tree, tmp_path, monkeyp
     assert "cropped to 305 px" in open(os.path.join(out, "run.log")).read()
 
 
+def test_seam_annuli_reach_the_run_numbered_by_center(wide_tree, tmp_path, monkeypatch):
+    """--seam-annuli: RunConfig.ann_extra holds one annulus on the boundary, the runner numbers it
+    second, and its pair goes on the boundary itself.  The log gives each annulus' zone and tile."""
+    import re
+
+    seen = _capture_cfg(monkeypatch)
+    out = str(tmp_path / "o_seam")
+    rc = run_rxj0534.main(["--partitions", "4", "--n-iter", "10", "--out", out, "--extra-annuli", "1",
+                           "--seam-annuli", "--even-pa", "--n-sources", "2", "--k-max", "4", "--max-drop", "0",
+                           "--crop", "0", "--workers", "1"])
+    assert rc == 0
+    cfg, fwhm = seen["cfg"], seen["fwhm"]
+    r_px = run_rxj0534.PLANET[0] / run_rxj0534.PXSCALE
+    e = run_rxj0534.annulus_edges(r_px, fwhm, extra=1)
+    assert cfg.ann_edges == pytest.approx(e)
+    assert cfg.ann_extra == [pytest.approx([0.5 * (e[0] + e[1]), 0.5 * (e[1] + e[2])])]
+    assert cfg.nann == 3
+    log = open(os.path.join(out, "run.log")).read()
+    assert "annulus 2 of 3:" in log and "(--seam-annuli)" in log and "stitched over" in log, log
+    for ia, ring in ((1, e[1]), (2, 0.5 * (e[1] + e[2]))):
+        line = [l for l in log.splitlines() if f"annulus {ia + 1}: 2 injected at rho" in l]
+        assert line, log
+        got = [float(v) for v in re.findall(r"\(([0-9.]+) px\)", line[0].split(", PA")[0])]
+        assert got == pytest.approx([ring, ring], abs=0.01), (ia, got, ring)
+
+
+def test_seam_annuli_need_a_boundary(tree, tmp_path, monkeypatch):
+    """--seam-annuli without --extra-annuli is refused: one annulus has no boundary."""
+    _capture_cfg(monkeypatch)
+    with pytest.raises(SystemExit, match="--seam-annuli"):
+        run_rxj0534.main(["--partitions", "4", "--n-iter", "10", "--out", str(tmp_path / "o_noseam"),
+                          "--seam-annuli", "--k-max", "4", "--max-drop", "0", "--crop", "0", "--workers", "1"])
+
+
+def test_a_resumed_run_without_seam_annuli_says_so(tree, tmp_path, monkeypatch):
+    """A resumed run keeps its recorded annuli, so --seam-annuli given to a run started without
+    them is reported, not applied."""
+    from klip_tpe.runner import Runner
+
+    def fake_run(self):
+        self._resumed = True
+        self.cfg.ann_extra = []                    # the recorded run had no seam annuli
+        return []
+
+    monkeypatch.setattr(Runner, "run", fake_run)
+    out = str(tmp_path / "o_seam_resume")
+    run_rxj0534.main(["--partitions", "4", "--n-iter", "10", "--out", out, "--extra-annuli", "1", "--seam-annuli",
+                      "--k-max", "4", "--max-drop", "0", "--crop", "0", "--workers", "1"])
+    log = open(os.path.join(out, "run.log")).read()
+    assert "--seam-annuli was given, but the run continues with no seam annuli" in log, log
+
+
+def test_with_seam_annuli_the_tile_holding_the_companion_reports_it(tree, tmp_path, monkeypatch):
+    """The seam annulus' zone starts at the companion's separation, so the report goes by tiles:
+    only the first annulus, whose tile holds the companion, reports it."""
+    from klip_tpe import RunConfig
+
+    img = np.random.default_rng(0).normal(size=(161, 161))
+    r_px = run_rxj0534.PLANET[0] / run_rxj0534.PXSCALE
+    e = run_rxj0534.annulus_edges(r_px, run_rxj0534.FWHM_PX, extra=1)
+    zones = RunConfig(ann_edges=e, ann_extra=run_rxj0534.seam_annuli(e)).zones
+    res = [types.SimpleNamespace(annulus=k, inrad=z[0], outrad=z[1], clean_image=img) for k, z in enumerate(zones)]
+    _capture_cfg(monkeypatch, res)
+    out = str(tmp_path / "o_seam_rep")
+    run_rxj0534.main(["--partitions", "4", "--n-iter", "10", "--out", out, "--extra-annuli", "1", "--seam-annuli",
+                      "--k-max", "4", "--max-drop", "0", "--crop", "0", "--workers", "1"])
+    said = [l for l in open(os.path.join(out, "run.log")).read().splitlines() if "recovered at S/N" in l]
+    assert len(said) == 1 and "annulus 1:" in said[0], said
+
+
 def test_only_the_annulus_holding_the_companion_reports_it(tree, tmp_path, monkeypatch):
     img = np.random.default_rng(0).normal(size=(161, 161))
     r_px = run_rxj0534.PLANET[0] / run_rxj0534.PXSCALE

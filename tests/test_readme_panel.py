@@ -73,6 +73,47 @@ def test_the_three_annuli_touch_and_the_crop_holds_them():
     assert rx.annulus_edges(r_px, rx.FWHM_PX, ann=(20, 40), extra=1) == [20.0, 40.0, 60.0]
 
 
+def test_seam_annuli_reach_run_rxj0534_with_a_directory_of_their_own():
+    """--seam-annuli goes through to run_rxj0534.py, off unless asked.  Its default directory is not
+    the touching annuli's, whose run would otherwise be resumed with its own settings."""
+    a = readme_panel.parse(["--extra-annuli", "1", "--seam-annuli"])
+    argv = readme_panel.rxj0534_argv(a)
+    assert "--seam-annuli" in argv and _opt(argv, "--extra-annuli") == "1"
+    assert a.run_dir == os.path.expanduser("~/klip_tpe_runs/rxj0534/readme_seam")
+    assert "--seam-annuli" not in readme_panel.rxj0534_argv(readme_panel.parse([]))
+    given = readme_panel.parse(["--extra-annuli", "1", "--seam-annuli", "--run-dir", "/tmp/seam_run"])
+    assert given.run_dir == "/tmp/seam_run"
+    with pytest.raises(SystemExit):
+        readme_panel.parse(["--target", "hd95086", "--seam-annuli"])
+
+
+def test_a_seam_annulus_keeps_every_tile_edge_a_fwhm_inside_the_zones():
+    """The geometry --seam-annuli gives, without loading data: one annulus per boundary, from the
+    center of the annulus inside to the center of the one outside.  The runner numbers the three by
+    center, and the stitch's tile edges lie a quarter of the 4-FWHM width, 1 FWHM, inside both zones
+    that meet there, so no KLIP zone edge reaches the stitched images."""
+    rx = pytest.importorskip("run_rxj0534")
+    from klip_tpe import RunConfig
+
+    r_px = rx.PLANET[0] / rx.PXSCALE
+    e = rx.annulus_edges(r_px, rx.FWHM_PX, extra=1)
+    seams = rx.seam_annuli(e)
+    assert seams == [pytest.approx([r_px, r_px + 4 * rx.FWHM_PX])]
+    assert [round(v * rx.PXSCALE, 3) for v in seams[0]] == [0.39, 0.774]
+    cfg = RunConfig(ann_edges=e, ann_extra=seams)
+    zones, tiles = cfg.zones, cfg.tiles
+    assert zones == [pytest.approx((e[0], e[1])), pytest.approx(tuple(seams[0])), pytest.approx((e[1], e[2]))]
+    for k in range(len(tiles) - 1):
+        edge = tiles[k][1]
+        assert edge == pytest.approx(tiles[k + 1][0])
+        assert zones[k][1] - edge == pytest.approx(rx.FWHM_PX), "1 FWHM inside the inner zone"
+        assert edge - zones[k + 1][0] == pytest.approx(rx.FWHM_PX), "1 FWHM inside the outer zone"
+    assert tiles[0][0] == pytest.approx(e[0]) and tiles[-1][1] == pytest.approx(e[-1]), "the same span"
+    assert tiles[0][0] <= r_px <= tiles[0][1], "the companion stays in the first annulus' tile"
+    assert rx.seam_annuli(rx.annulus_edges(r_px, rx.FWHM_PX)) == [], "one annulus has no boundary"
+    assert len(rx.seam_annuli(rx.annulus_edges(r_px, rx.FWHM_PX, extra=2))) == 2
+
+
 def test_hd95086_keeps_its_own_settings():
     a = readme_panel.parse(["--target", "hd95086"])
     assert (a.seed, a.n_init, a.cg_step, a.title) == (3, 200, 1.0, "HD 95086")
