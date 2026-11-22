@@ -19,6 +19,14 @@ class _ScanStub:
     reducer, so the draws' reductions run one after another, in order."""
 
     def __init__(self, draws):
+        """Set up the runner state ``_scan_k`` reads.
+
+        Parameters
+        ----------
+        draws : list of list of float
+            The S/N curve of each draw, one value per k.  The scan takes ``len(draws)`` draws
+            (``n_remeasure``), and the stub's metric reads no clean image.
+        """
         import types
         import numpy as np
         from klip_tpe.runner import CalibrationConfig, Runner
@@ -31,7 +39,8 @@ class _ScanStub:
             score_raw=lambda img, src, clean: types.SimpleNamespace(score=float(img)))
         self.rng = np.random.default_rng(0)
         self.reducer = types.SimpleNamespace()
-        for name in ("_scan_k", "_run_ordered", "_parallel_reducer"):
+        # _scan_k asks _metric_reads_clean whether to reduce a clean scan too (since 1f05243)
+        for name in ("_scan_k", "_run_ordered", "_parallel_reducer", "_metric_reads_clean"):
             setattr(self, name, types.MethodType(getattr(Runner, name), self))
 
     def _k_scan_max(self):

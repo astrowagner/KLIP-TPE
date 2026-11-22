@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — 2026-11-22 (the k-scan tests' runner stub)
+
+- `tests/test_kscan.py`'s runner stub binds `Runner._metric_reads_clean`, which `_scan_k` calls
+  since the entry below.  Without it the scan stopped on the missing method and recorded nothing,
+  so its three tests failed on the quick job (run 44996293214, `e2d50dc`).  Tests only.
+
 ## Unreleased — 2026-11-22 (a despike that spares a source's core, and the noise read on the clean reduction)
 
 After the FLIP note of 2026-11-21, "MawetPeakSNR's de-spiking and noise floor distort the search
