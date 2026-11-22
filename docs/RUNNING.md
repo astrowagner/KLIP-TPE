@@ -412,6 +412,38 @@ then takes unless `RunConfig.inject_interp` says otherwise.  `klip-tpe extract` 
 and fakes by the cubic spline unless told otherwise (`docs/EXTRACT.md`), since there the spread biases
 a real companion's contrast directly.
 
+### A source's core and its own noise (`declip_isolated`, `noise_image`)
+
+The metric (`MawetPeakSNR`) despikes each image before the matched filter, as the IDL predecessor
+does: every pixel more than 6 robust sigma from its 3x3 median takes that median.  The rule was made
+for NEAR, at 6.2 px per FWHM, where a point source's core lies within 7 % of its peak from its median.
+At 2.3 px per FWHM it lies 41 % above it, and in speckle-limited residuals, whose pixel-to-pixel
+scatter is far below the noise that sets the S/N, the rule takes every source's core.  In NIRCam's
+HIP 65426 searches the injected sources kept 0.47 to 0.94 of their S/N.  On a spiky, high-pass-filtered
+residual the rule can raise a source's S/N instead, since there it takes noise too (FLIP note,
+2026-11-21).  The ALES adapter turns the despike off for the same reason.
+
+* `MawetPeakSNR(declip_isolated=True)` keeps the despike's aim.  A pixel past the threshold is
+  replaced only when at most one of its 8 neighbors also stands out, on the same side, by half the
+  threshold.  A core sampled at 2.3 px or more per FWHM, a source's or a speckle's, has all 8, a hot
+  pixel none and a hit on two pixels one.  The verify, the candidate search, the contrast grid and the
+  final-image grid take it from the run's metric.  `declip_nsig=None` keeps every pixel.
+* `MawetPeakSNR(noise_image="clean")` reads the injected image's noise on the clean reduction of the
+  same configuration, at the same places.  A PSF whose matched-filtered wings reach past the 1.5 FWHM
+  keep-outs puts each source into its own ring and radial band in proportion to its brightness, so
+  its S/N grows ever more slowly.  NIRCam's off-axis PSF behind MASK335R, filtered by its own
+  profile, keeps 35 % of its peak at 1.5 FWHM and 6 % at 4 FWHM.  In a synthetic test at 0.82" a
+  source 48 times the speckles' sigma reads S/N 11 with its own noise, 20 with keep-outs of
+  3.5 FWHM, and 27 with the clean image's, which grows in proportion to the source.  The runner then
+  reduces the clean image for every score, the search's clean term still reads the clean image's own
+  noise, and where no clean image comes the noise is the image's own.  The verify, the contrast grid and the
+  final-image grid read each image's own noise.  A wider keep-out (`excl_fwhm`) lets less of the
+  wings in, at the cost of ring samples, and the sidelobe rule (`--sidelobes`) leaves out the arc
+  where ADI or a second roll puts a source's negative copies.
+
+Both default to the IDL predecessor's behavior, so the existing runs and the paper's reproduce, and
+a run records either only when it is set.
+
 ### The card (`--gpu-share`, `--gpu-adapt-every`, `--gpu-workers`, `--gpu-device`)
 
 A share of the search's injected draws can be reduced on an NVIDIA card, or on several, beside the

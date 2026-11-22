@@ -548,11 +548,13 @@ def radprof(image: np.ndarray) -> np.ndarray:
     return img - mu[ri]
 
 
-def declip(img: np.ndarray, nsig: float = 6.0) -> np.ndarray:
+def declip(img: np.ndarray, nsig: float = 6.0, isolated: bool = False) -> np.ndarray:
     """Replace isolated single-pixel spikes by their 3x3 median.
 
     A spike is a finite pixel with a finite 3x3 neighborhood that lies more than ``nsig`` robust
-    sigma (1.4826 times the median absolute residual) from its 3x3 median.
+    sigma (1.4826 times the median absolute residual) from its 3x3 median.  With ``isolated``, such
+    a pixel is a spike only when at most one of its 8 neighbors also lies more than ``nsig / 2``
+    robust sigma from its own median, on the same side.
 
     Parameters
     ----------
@@ -560,6 +562,9 @@ def declip(img: np.ndarray, nsig: float = 6.0) -> np.ndarray:
         The image.  An array of another number of dimensions comes back unchanged.
     nsig : float, default 6.0
         Threshold in robust sigma.
+    isolated : bool, default False
+        Whether to spare a pixel whose neighbors stand out with it, such as a point source's core
+        or a speckle's.  False replaces every pixel past the threshold, as the IDL predecessor does.
 
     Returns
     -------
@@ -569,7 +574,15 @@ def declip(img: np.ndarray, nsig: float = 6.0) -> np.ndarray:
 
     Notes
     -----
-    It does what ``near2m_declip`` does in the IDL predecessor.
+    It does what ``near2m_declip`` does in the IDL predecessor, written for NEAR, whose PSF spans
+    about 6 px per FWHM.  There a point source's core lies within 7 % of its peak from its 3x3
+    median, so only a spike passes the threshold.  At 2.3 px per FWHM the core lies 41 % of the
+    peak above its median, and in speckle-limited residuals, whose pixel-to-pixel scatter is far
+    below the noise that sets the S/N, every source's core passes it (FLIP note, 2026-11-21).
+    ``isolated`` keeps the predecessor's aim.  A core sampled at 2.3 px or more per FWHM has all 8
+    neighbors at more than half its own residual, a hot pixel has none, and a hit on two pixels
+    has one.  At 2 px per FWHM the 4 nearest neighbors stand at half, so a core only just past the
+    threshold may still be replaced.
     """
     img = np.asarray(img, float)
     if img.ndim != 2:
@@ -587,6 +600,14 @@ def declip(img: np.ndarray, nsig: float = 6.0) -> np.ndarray:
         return img
     out = img.copy()
     bad = g & (np.abs(res) > nsig * rob)
+    if isolated and bad.any():
+        # neighbors that stand out on the same side: a source's or a speckle's core has them all
+        ring8 = np.ones((3, 3))
+        ring8[1, 1] = 0.0
+        half = 0.5 * nsig * rob
+        n_up = ndimage.convolve((g & (res > half)).astype(float), ring8, mode="constant")
+        n_down = ndimage.convolve((g & (res < -half)).astype(float), ring8, mode="constant")
+        bad &= np.where(res > 0, n_up, n_down) <= 1.5
     out[bad] = m[bad]
     return out
 
@@ -706,7 +727,7 @@ def _frozen(*arrays: np.ndarray) -> None:
         a.flags.writeable = False
 
 
-def _prepare(img: np.ndarray, declip_nsig: Optional[float]) -> Dict[str, Any]:
+def _prepare(img: np.ndarray, declip_nsig: Optional[float], declip_isolated: bool = False) -> Dict[str, Any]:
     """Prepare an image for the matched filter, from the cache when these bytes were prepared before.
 
     Parameters
@@ -715,6 +736,8 @@ def _prepare(img: np.ndarray, declip_nsig: Optional[float]) -> Dict[str, Any]:
         The image, in float.
     declip_nsig : float or None
         Threshold of the despike in robust sigma (:func:`declip`).  None does not despike.
+    declip_isolated : bool, default False
+        Whether the despike spares pixels whose neighbors stand out with them (:func:`declip`).
 
     Returns
     -------
@@ -724,13 +747,14 @@ def _prepare(img: np.ndarray, declip_nsig: Optional[float]) -> Dict[str, Any]:
         caller's.
     """
     def build() -> Dict[str, Any]:
-        d = declip(img, declip_nsig) if declip_nsig is not None else img
+        d = declip(img, declip_nsig, isolated=declip_isolated) if declip_nsig is not None else img
         if d is img:
             d = img.copy()
         return {"img": d, "imz": np.where(np.isfinite(d), d, 0.0), "finite": np.isfinite(d), "maps": {}}
     if PREPARED_CACHE_SIZE <= 0:
         return build()
-    key = _digest(img) + (None if declip_nsig is None else float(declip_nsig),)
+    key = _digest(img) + (None if declip_nsig is None else float(declip_nsig),
+                          bool(declip_isolated) and declip_nsig is not None)
     with _prepared_lock:
         hit = _prepared_cache.get(key)
         if hit is not None:
@@ -1229,7 +1253,7 @@ class _PlacedFilter:
 def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                    kernel=None, search_px: float = 1.5,
                    excl_fwhm: float = 1.5, known: Sequence[Tuple[float, float]] = (),
-                   declip_nsig: Optional[float] = 6.0, band_fwhm: float = 0.6,
+                   declip_nsig: Optional[float] = 6.0, declip_isolated: bool = False, band_fwhm: float = 0.6,
                    min_ring: int = 6, penalty: str = "geometric",
                    pixel_mask: Optional[np.ndarray] = None, inner_fwhm: float = 1.0,
                    angle_convention: str = "pa", return_details: bool = False,
@@ -1238,7 +1262,8 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                    exclude_xy: Sequence[Tuple[float, float]] = (), mfmap: Optional[np.ndarray] = None,
                    turn: Any = None,
                    templates_at: Optional[Sequence[Optional[Callable[[float, float], Optional[np.ndarray]]]]] = None,
-                   correlate: bool = True, coverage_mask: Optional[np.ndarray] = None):
+                   correlate: bool = True, coverage_mask: Optional[np.ndarray] = None,
+                   noise_img: Optional[np.ndarray] = None):
     """Measure the matched-filter detection S/N of each source (Mawet et al. 2014).
 
     The image is despiked and correlated with ``kernel``, the template as a source looks.  Each
@@ -1273,6 +1298,9 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
     declip_nsig : float or None, default 6.0
         Threshold of the single-pixel despike in robust sigma (:func:`declip`).  None does not
         despike.
+    declip_isolated : bool, default False
+        Whether the despike spares a pixel whose neighbors stand out with it, such as a point
+        source's core (:func:`declip`).  False despikes as the IDL predecessor does.
     band_fwhm : float, default 0.6
         Half width of the radial band, in FWHM.
     min_ring : int, default 6
@@ -1321,6 +1349,11 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
         and no aperture of the ring: the geometric penalty counts the apertures that fall on data, and
         a ring that keeps fewer than ``min_ring`` samples for want of data gives no S/N rather than
         the radial band's.  None leaves the rings as they were.
+    noise_img : ndarray, shape (ny, nx), or None, default None
+        Image the noise is read on in place of ``img``, such as the clean reduction of the same
+        configuration, despiked and filtered alike.  Each source's peak is still read on ``img``, and
+        its ring and band samples are taken at the same places on this image, which holds no
+        injected source.  It does not go with ``mfmap``, ``turn`` or ``templates_at``.
 
     Returns
     -------
@@ -1337,8 +1370,9 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
     Raises
     ------
     ValueError
-        If ``mfmap`` is not the image's shape, or ``kernel``, ``turn`` or ``templates_at`` has an
-        entry count other than the number of sources.
+        If ``mfmap`` is not the image's shape, ``kernel``, ``turn`` or ``templates_at`` has an entry
+        count other than the number of sources, or ``noise_img`` is not the image's shape or comes
+        with ``mfmap``, ``turn`` or ``templates_at``.
 
     Notes
     -----
@@ -1372,10 +1406,19 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
         kerns = [None] * nsrc
     else:
         # the declip, the zero fill and each kernel's convolution, once per image and kernel
-        prep = _prepare(img, declip_nsig)
+        prep = _prepare(img, declip_nsig, declip_isolated)
         kerns = _per_source_kernels(kernel, nsrc, fwhm)
     img, imz = prep["img"], prep.get("imz")
+    prep_n = None
+    if noise_img is not None:
+        noise_img = np.asarray(noise_img, float)
+        if noise_img.shape != img.shape:
+            raise ValueError(f"mawet_peak_snr: noise_img {noise_img.shape} is not the image's {img.shape}")
+        if mfmap is not None or templates_at is not None or (turn is not None and turn is not False):
+            raise ValueError("mawet_peak_snr: noise_img does not go with mfmap, turn or templates_at")
+        prep_n = _prepare(noise_img, declip_nsig, declip_isolated)
     _amaps: Dict[int, np.ndarray] = {}
+    _namaps: Dict[int, np.ndarray] = {}            # the noise image's maps, by kernel, this call only
     if turn is None or turn is False or mfmap is not None:
         turns = [False] * nsrc
     elif turn is True:
@@ -1391,19 +1434,21 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
             raise ValueError(f"mawet_peak_snr: {len(placed)} templates_at entries for {nsrc} sources")
     _pads: Dict[int, np.ndarray] = {}
 
-    def amap(i: int) -> np.ndarray:
+    def amap(i: int, pr: Optional[Dict[str, Any]] = None) -> np.ndarray:
         if mfmap is not None:
             return mfmap
+        pr = prep if pr is None else pr
         k = kerns[i]
-        if id(k) not in _amaps:
+        store = _amaps if pr is prep else _namaps
+        if id(k) not in store:
             kk = _digest(np.asarray(k)) + (bool(correlate),)
-            m = prep["maps"].get(kk)
+            m = pr["maps"].get(kk)
             if m is None:
-                m = (ndimage.correlate if correlate else ndimage.convolve)(imz, k, mode="nearest")
+                m = (ndimage.correlate if correlate else ndimage.convolve)(pr["imz"], k, mode="nearest")
                 _frozen(m)
-                prep["maps"][kk] = m
-            _amaps[id(k)] = m
-        return _amaps[id(k)]
+                pr["maps"][kk] = m
+            store[id(k)] = m
+        return store[id(k)]
 
     xs, ys = source_xy(rho, theta, pxscale, cx, cy, angle_convention)
     ex = np.array([float(e[0]) for e in exclude_xy], float)
@@ -1414,7 +1459,8 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
         kt = np.array([k[1] for k in known], float)
         kx, ky = source_xy(kr, kt, pxscale, cx, cy, angle_convention)
     yy, xx, rr = _grids(ny, nx)
-    finite = prep["finite"]
+    # the noise samples' image: its finite pixels decide where a sample can be taken
+    finite = prep["finite"] if prep_n is None else prep_n["finite"]
     if pixel_mask is not None:
         finite = finite & ~np.asarray(pixel_mask, bool)
     cov = None
@@ -1430,6 +1476,7 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
     details: List[Dict[str, float]] = []
     for s in range(nsrc):
         A = amap(s)
+        An = A if prep_n is None else amap(s, prep_n)     # the map the noise samples are read on
         px, py = int(round(xs[s])), int(round(ys[s]))
         pkv = -np.inf
         bx, by = px, py
@@ -1487,8 +1534,8 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                 if ring is not None:
                     ring.append([xk, yk, "excluded"])
                 continue
-            if cov is not None and (not (0 <= xk < nx and 0 <= yk < ny) or not prep["finite"][yk, xk]
-                                    or cov[yk, xk]):
+            if cov is not None and (not (0 <= xk < nx and 0 <= yk < ny)
+                                    or not (prep if prep_n is None else prep_n)["finite"][yk, xk] or cov[yk, xk]):
                 n_unc += 1                    # no data there: neither a sample nor an aperture of the ring
                 if ring is not None:
                     ring.append([xk, yk, "uncovered"])
@@ -1497,7 +1544,8 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                 if ring is not None:
                     ring.append([xk, yk, "masked" if (pixel_mask is not None and 0 <= xk < nx and 0 <= yk < ny
                                                       and bool(np.asarray(pixel_mask)[yk, xk])
-                                                      and bool(prep["finite"][yk, xk])) else "off"])
+                                                      and bool((prep if prep_n is None else prep_n)["finite"][yk, xk]))
+                                  else "off"])
                 continue
             if arcs and bool(_in_arcs(xk, yk, arcs, cx, cy)):
                 if ring is not None:
@@ -1508,7 +1556,7 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                 v = pf.at(xk, yk)
                 vals.append(A[yk, xk] if v is None else v)
             else:
-                vals.append(A[yk, xk] if tf is None else tf.at(xk, yk, th - tf.az))
+                vals.append(An[yk, xk] if tf is None else tf.at(xk, yk, th - tf.az))
             valok.append(mok)
             if ring is not None:
                 ring.append([xk, yk, "used" if mok else "known"])
@@ -1535,7 +1583,7 @@ def mawet_peak_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float, *,
                 if off.any():
                     bvals[off] = A[byy[off], bxx[off]]
             elif tf is None:
-                bvals = A[sel]
+                bvals = An[sel]
             else:
                 byy, bxx = np.nonzero(sel)
                 bvals = tf.band(bxx, byy, cx, cy, 0.5 * fwhm / max(r, 1.0))
@@ -1650,8 +1698,8 @@ def _ring_rec(fn: str, shape, cx: float, cy: float, det: Dict[str, Any], fwhm: f
 
 #: the keywords of :func:`mawet_peak_snr` a run's metric sets, which every ring S/N of the run
 #: takes (:func:`ring_rules`): the search's, the verify's and the candidate search's
-RING_RULE_KEYS = ("search_px", "excl_fwhm", "declip_nsig", "band_fwhm", "min_ring", "penalty", "pixel_mask",
-                  "inner_fwhm", "coverage_mask")
+RING_RULE_KEYS = ("search_px", "excl_fwhm", "declip_nsig", "declip_isolated", "band_fwhm", "min_ring", "penalty",
+                  "pixel_mask", "inner_fwhm", "coverage_mask")
 
 #: the rules of a run that measures as before 2026-11-01 (``RunConfig.verify_snr = "idl"``): the
 #: verify and the candidate search take the S/N of the IDL predecessor's verify
@@ -1697,6 +1745,10 @@ def ring_rules(metric) -> Dict[str, Any]:
     if metric is None or not hasattr(metric, "excl_fwhm"):
         return {}
     out: Dict[str, Any] = {k: getattr(metric, k) for k in RING_RULE_KEYS if hasattr(metric, k)}
+    if not out.get("declip_isolated"):
+        # only when set, so the rules of other runs, which the final grid's state keeps a hash of,
+        # stay as they were
+        out.pop("declip_isolated", None)
     if callable(getattr(metric, "kernel", None)):
         out["kernel_at"] = metric.kernel
     elif callable(getattr(metric, "kernel_fn", None)) or getattr(metric, "mf_fwhm", None):
@@ -1764,7 +1816,7 @@ def matched_filter(img: np.ndarray, fwhm: float, rules: Optional[Dict[str, Any]]
         The matched-filter map.
     """
     kw = rule_kwargs(rules, rho if rho is not None else 0.0, np.shape(img)) if rules else {}
-    prep = _prepare(np.asarray(img, float), kw.get("declip_nsig", 6.0))
+    prep = _prepare(np.asarray(img, float), kw.get("declip_nsig", 6.0), bool(kw.get("declip_isolated", False)))
     k = kw.get("kernel")
     k = gaussian_kernel(fwhm) if k is None else np.asarray(k, float)
     return ndimage.correlate(prep["imz"], k, mode="nearest")
@@ -2391,11 +2443,16 @@ class Metric:
         Whether the metric uses the clean image on every call.
     needs_fm : bool
         Whether the metric asks for the KLIP-FM pass.
+    wants_clean : bool
+        Whether the metric reads its noise on the clean image when it is given one, so the runner
+        reduces it even where no clean term is subtracted.  It leaves the clean term as it is,
+        which ``needs_clean`` turns off.
     """
 
     name = "metric"
     needs_clean = False
     needs_fm = False
+    wants_clean = False
 
     def per_source(self, img_inj, img_clean, rho, theta) -> np.ndarray:  # pragma: no cover
         """Return each source's S/N.
@@ -2453,6 +2510,9 @@ class MawetPeakSNR(Metric):
         Known companions, as ``(rho_arcsec, theta_deg)``.
     declip_nsig : float or None, default 6.0
         Threshold of the despike in robust sigma.  None does not despike.
+    declip_isolated : bool, default False
+        Whether the despike spares a pixel whose neighbors stand out with it, such as a point
+        source's or a speckle's core (:func:`declip`).  False despikes as the IDL predecessor does.
     band_fwhm : float, default 0.6
         Half width of the radial band, in FWHM.
     min_ring : int, default 6
@@ -2475,6 +2535,10 @@ class MawetPeakSNR(Metric):
         Inner guard, in FWHM.  The :class:`~klip_tpe.runner.Runner` lowers it to the injection floor
         when the floor is closer in (``RunConfig.min_r_fwhm``), so a run that injects there is
         scored there.
+    noise_image : {"own", "clean"}, default "own"
+        Image each source's noise is read on.  "own" reads it on the image scored, as the IDL
+        predecessor does.  "clean" reads the injected image's noise on the clean reduction of the
+        same configuration, at the same places, so no injected source enters its own noise.
 
     Notes
     -----
@@ -2484,6 +2548,14 @@ class MawetPeakSNR(Metric):
     companion, the MIRI 4QPM dead zones or a glow-stick residual.  On a ring the mask already eats,
     the mean comes from the surviving pixels and is removed from all of them, which biases the
     sources the metric measures.
+
+    ``noise_image="clean"`` is for a PSF whose matched-filtered wings reach past the keep-outs.
+    NIRCam's off-axis PSF behind MASK335R, filtered by its own profile, keeps 35 % of its peak at
+    1.5 FWHM and 6 % at 4 FWHM.  A source's own wings then enter its ring and band in proportion to
+    its brightness, and its S/N levels off, at 11 to 14 at 0.82" without the despike (FLIP note,
+    2026-11-21, and a synthetic test).  The clean term, the validation's score and the k-scan read the
+    clean image the runner reduces, and where no clean image is given the noise comes from the image
+    scored.  The verify, the contrast grid and the final-image grid read each image's own noise.
     """
 
     pxscale: float
@@ -2494,6 +2566,7 @@ class MawetPeakSNR(Metric):
     excl_fwhm: float = 1.5
     known: Sequence[Tuple[float, float]] = ()
     declip_nsig: Optional[float] = 6.0
+    declip_isolated: bool = False
     band_fwhm: float = 0.6
     min_ring: int = 6
     penalty: str = "geometric"
@@ -2503,6 +2576,23 @@ class MawetPeakSNR(Metric):
     name: str = "mawet_peak"
     inner_fwhm: float = 1.0
     coverage_mask: Optional[np.ndarray] = None
+    noise_image: str = "own"
+
+    def __post_init__(self) -> None:
+        """Check ``noise_image``.
+
+        Raises
+        ------
+        ValueError
+            If ``noise_image`` is not "own" or "clean".
+        """
+        if str(self.noise_image) not in ("own", "clean"):
+            raise ValueError(f"MawetPeakSNR: noise_image {self.noise_image!r}: 'own' or 'clean'")
+
+    @property
+    def wants_clean(self) -> bool:
+        """Whether the noise is read on the clean image (``noise_image="clean"``)."""
+        return str(self.noise_image) == "clean"
 
     def kernel(self, rho) -> np.ndarray:
         """Return the matched filter for sources at the given separations.
@@ -2532,7 +2622,8 @@ class MawetPeakSNR(Metric):
         img_inj : ndarray, shape (ny, nx)
             The image scored.
         img_clean : ndarray or None
-            The clean reduction, used only by ``sidelobes`` with ``mode="clean"``.
+            The clean reduction, on which the noise is read with ``noise_image="clean"``, and which
+            ``sidelobes`` with ``mode="clean"`` uses.  None reads the noise on ``img_inj``.
         rho : sequence of float
             Separation of each source, in arcsec.
         theta : sequence of float
@@ -2550,12 +2641,14 @@ class MawetPeakSNR(Metric):
         """
         img = radprof(img_inj) if self.flatten else np.asarray(img_inj, float)
         kw = dict(kernel=self.kernel(rho), search_px=self.search_px, excl_fwhm=self.excl_fwhm,
-                  declip_nsig=self.declip_nsig, band_fwhm=self.band_fwhm, penalty=self.penalty,
-                  pixel_mask=self.pixel_mask, inner_fwhm=self.inner_fwhm)
+                  declip_nsig=self.declip_nsig, declip_isolated=self.declip_isolated, band_fwhm=self.band_fwhm,
+                  penalty=self.penalty, pixel_mask=self.pixel_mask, inner_fwhm=self.inner_fwhm)
         if self.coverage_mask is not None:
             kw["coverage_mask"] = self.coverage_mask
+        cln = None if img_clean is None else (radprof(img_clean) if self.flatten else np.asarray(img_clean, float))
+        if self.wants_clean and cln is not None and np.shape(cln) == np.shape(img):
+            kw["noise_img"] = cln
         if sidelobes is not None:
-            cln = None if img_clean is None else (radprof(img_clean) if self.flatten else np.asarray(img_clean, float))
             snr, det = sidelobe_snr(img, rho, theta, self.pxscale, self.fwhm, sidelobes, img_clean=cln,
                                     known=self.known, angle_convention=self.angle_convention, **kw)
         else:
@@ -2579,13 +2672,14 @@ class MawetPeakSNR(Metric):
                 "mf_fwhm": self.mf_fwhm, "measured_kernel": self.kernel_fn is not None,
                 "search_px": self.search_px, "excl_fwhm": self.excl_fwhm,
                 "known": [list(k) for k in self.known], "declip_nsig": self.declip_nsig,
-                "band_fwhm": self.band_fwhm, "min_ring": self.min_ring, "penalty": self.penalty,
+                # recorded only when set, so the records and fingerprints of other runs stay as they were
+                **({"declip_isolated": True} if self.declip_isolated else {}), "band_fwhm": self.band_fwhm, "min_ring": self.min_ring, "penalty": self.penalty,
                 "inner_fwhm": self.inner_fwhm,
                 # a masked noise estimate is not comparable with an unmasked one, so the
                 # run's own setup record has to say whether one was in force
                 "pixel_mask_px": None if self.pixel_mask is None else int(np.count_nonzero(self.pixel_mask)),
                 "coverage_mask_px": None if self.coverage_mask is None else int(np.count_nonzero(self.coverage_mask)),
-                "flatten": self.flatten}
+                "flatten": self.flatten, **({"noise_image": "clean"} if self.wants_clean else {})}
 
 
 @dataclass

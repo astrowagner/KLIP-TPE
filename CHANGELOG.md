@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased — 2026-11-22 (a despike that spares a source's core, and the noise read on the clean reduction)
+
+After the FLIP note of 2026-11-21, "MawetPeakSNR's de-spiking and noise floor distort the search
+objective".
+
+- **A despike that keeps a source's core** (`metrics.declip(isolated=True)`,
+  `MawetPeakSNR(declip_isolated=True)`, the same in `FMMFSNR`).  The IDL predecessor's `near2m_declip`
+  replaces every pixel more than 6 robust sigma from its 3x3 median.  Its aim is the lone hot or cold
+  pixel the matched filter would take for a source, and it assumes a companion's 3x3 median tracks
+  it.  That holds at NEAR's 6.2 px per FWHM, where a core lies within 7 % of its peak from its median,
+  and fails at 2.3 px, where it lies 41 % above.  In speckle-limited residuals the threshold sits far
+  below the noise that sets the S/N, so in NIRCam's HIP 65426 searches the injected sources kept 0.47
+  to 0.94 of their S/N.  The new rule replaces such a pixel only when at most one of its 8 neighbors
+  also stands out, by half the threshold on the same side.  A core sampled at 2.3 px or more per
+  FWHM, a source's or a speckle's, has all 8, a hot pixel none and a hit on two pixels one.  On
+  synthetic speckles at 2.3 px per FWHM each source keeps the S/N it has without the despike, to 1 %,
+  and hot, cold and two-pixel spikes still go.  The verify, the candidate search, the contrast grid
+  and the final-image grid take it from the run's metric (`RING_RULE_KEYS`).
+- **The noise read on the clean reduction** (`MawetPeakSNR(noise_image="clean")`,
+  `mawet_peak_snr(noise_img=)`).  Each source's peak is read on the injected image, and its ring and
+  band samples at the same places on the clean reduction, so no injected source enters its own
+  noise.  NIRCam's off-axis PSF behind MASK335R, filtered by its own profile, keeps 35 % of its peak
+  at 1.5 FWHM and 6 % at 4 FWHM, past the keep-outs.  In a synthetic test a source at 0.82" 48 times
+  the speckles' sigma reads S/N 11 with its own noise, 20 with keep-outs of 3.5 FWHM and 27 with the
+  clean image's, which grows in proportion to the source.  The runner reduces the clean image for
+  every score of such a metric (`Metric.wants_clean`): the search, the calibration, the k-scan and the
+  validation.  The search's clean term reads the clean image's own noise and is still subtracted.
+  The verify, the contrast grid and the final-image grid keep each image's own noise.
+- Both are off by default, as the IDL predecessor measures, so the existing runs and the paper's
+  reproduce.  A run's records name either only when it is set, so other runs' setups, and the final
+  grid's state, which keeps a hash of the ring rules, stay as they were.
+- Docs: RUNNING.md ("A source's core and its own noise").  Tests: `tests/test_despike_and_clean_noise.py`.
+
 ## Unreleased — 2026-11-22 (the scripts behind the paper's Fig. 8)
 
 From the paper session's note of 2026-11-21, committed at Kevin Wagner's request.  The paper's "Data and

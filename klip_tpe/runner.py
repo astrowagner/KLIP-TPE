@@ -2618,7 +2618,8 @@ class Runner:
                 flat = bool(mget("flatten", False))
                 kw = dict(kernel=metric.kernel(rho) if callable(getattr(metric, "kernel", None)) else None,
                           search_px=float(mget("search_px", 1.5)), excl_fwhm=float(mget("excl_fwhm", 1.5)),
-                          declip_nsig=mget("declip_nsig", 6.0), band_fwhm=float(mget("band_fwhm", 0.6)),
+                          declip_nsig=mget("declip_nsig", 6.0), declip_isolated=bool(mget("declip_isolated", False)),
+                          band_fwhm=float(mget("band_fwhm", 0.6)),
                           penalty=str(mget("penalty", "geometric")), pixel_mask=mget("pixel_mask", None),
                           inner_fwhm=float(mget("inner_fwhm", 1.0)))
                 if mget("coverage_mask", None) is not None:
@@ -2641,6 +2642,7 @@ class Runner:
             snr, det = mawet_peak_snr(im, [rho], [theta], pxscale, fwhm, kernel=kern,
                                       search_px=float(mget("search_px", 1.5)), excl_fwhm=float(mget("excl_fwhm", 1.5)),
                                       known=geo["known"], declip_nsig=mget("declip_nsig", 6.0),
+                                      declip_isolated=bool(mget("declip_isolated", False)),
                                       band_fwhm=float(mget("band_fwhm", 0.6)), min_ring=geo["min_ring"],
                                       penalty=str(mget("penalty", "geometric")), pixel_mask=mget("pixel_mask", None),
                                       inner_fwhm=float(mget("inner_fwhm", 1.0)), angle_convention=geo["conv"],
@@ -2960,7 +2962,7 @@ class Runner:
         kmax = self._k_scan_max()
         cfgk = self._with_k(cfg, kmax)
         calls = [lambda: self._reduce(cfgk, sources, k_scan=True, tag=tag + "_scan")]
-        if self.objective.metric.needs_clean:
+        if self._metric_reads_clean():
             calls.append(lambda: self._reduce(cfgk, None, k_scan=True, tag=tag + "_cscan"))
         got = [r for _, r in self._run_ordered(calls, len(calls) if self._parallel_reducer() else 1)]
         for r in got:                                  # the first failure, in the old order
@@ -3005,7 +3007,32 @@ class Runner:
         return bool(self.cfg.k_mode in SCAN_MODES and getattr(self.reducer, "supports_kscan", False))
 
     def _needs_clean(self, raw_only: bool = False) -> bool:
-        return bool((self.objective.needs_clean and not raw_only) or self.objective.metric.needs_clean)
+        """Tell whether a score needs the clean reduction of its configuration.
+
+        Parameters
+        ----------
+        raw_only : bool, default False
+            Whether the score is the injected image's alone, with no clean term subtracted.
+
+        Returns
+        -------
+        needs : bool
+            True when the objective subtracts the clean term (unless ``raw_only``) or the metric
+            reads the clean image (:meth:`_metric_reads_clean`).
+        """
+        return bool((self.objective.needs_clean and not raw_only) or self._metric_reads_clean())
+
+    def _metric_reads_clean(self) -> bool:
+        """Tell whether the metric reads the clean image on every call.
+
+        Returns
+        -------
+        reads : bool
+            True for a difference metric (``needs_clean``) and for one that reads its noise on the
+            clean image (``wants_clean``).
+        """
+        m = self.objective.metric
+        return bool(getattr(m, "needs_clean", False) or getattr(m, "wants_clean", False))
 
     # -- reductions in flight ----------------------------------------------------
     def _parallel_reducer(self) -> bool:
@@ -3619,7 +3646,7 @@ class Runner:
             kmax = self._k_scan_max()
             curves = []
             cfgk = self._with_k(cfg0, kmax)
-            needs = bool(self.objective.metric.needs_clean)
+            needs = self._metric_reads_clean()
             # every draw first, in order, keeping the generator state after each: a failure
             # in draw m puts it back where the draw-by-draw loop stopped
             plan = []
@@ -3756,7 +3783,7 @@ class Runner:
             # the remeasurements' positions first, in order (every draw happens whatever
             # fails), then their reductions together, scored in order
             draws = [self.sampler.sample(nsrc, rlo, rhi, self.rng, contrast) for _ in range(cc.n_remeasure)]
-            need_c = bool(self.objective.needs_clean)
+            need_c = bool(self.objective.needs_clean) or self._metric_reads_clean()
             calls: List[Callable[[], Any]] = []
             for d in draws:
                 calls.append(lambda d=d, cfgk=cfgk: self._reduce(cfgk, d, tag="calib_inj"))

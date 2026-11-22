@@ -596,6 +596,9 @@ class FMMFSNR(Metric):
         Known companions, as ``(rho_arcsec, theta_deg)``.
     declip_nsig : float or None, default 6.0
         Threshold of the despike in robust sigma.  None does not despike.
+    declip_isolated : bool, default False
+        Whether the despike spares a pixel whose neighbors stand out with it, such as a point
+        source's core (:func:`~klip_tpe.metrics.declip`).  False despikes as the IDL predecessor does.
     band_fwhm : float, default 0.6
         Half width of the radial band, in FWHM.
     min_ring : int, default 6
@@ -651,6 +654,7 @@ class FMMFSNR(Metric):
     excl_fwhm: float = 1.5
     known: Sequence[Tuple[float, float]] = ()
     declip_nsig: Optional[float] = 6.0
+    declip_isolated: bool = False
     band_fwhm: float = 0.6
     min_ring: int = 6
     penalty: str = "geometric"
@@ -775,8 +779,9 @@ class FMMFSNR(Metric):
                     self.stats["fm_empty"] = self.stats.get("fm_empty", 0) + fm_at.n_empty - e0
         snr, det = mawet_peak_snr(img, rho, theta, self.pxscale, self.fwhm, kernel=ks,
                                   search_px=self.search_px, excl_fwhm=self.excl_fwhm, known=self.known,
-                                  declip_nsig=self.declip_nsig, band_fwhm=self.band_fwhm,
-                                  min_ring=self.min_ring, penalty=self.penalty,
+                                  declip_nsig=self.declip_nsig,
+                                  declip_isolated=bool(getattr(self, "declip_isolated", False)),
+                                  band_fwhm=self.band_fwhm, min_ring=self.min_ring, penalty=self.penalty,
                                   pixel_mask=self.pixel_mask, inner_fwhm=self.inner_fwhm,
                                   angle_convention=self.angle_convention, return_details=True, turn=turn,
                                   templates_at=tat, correlate=bool(getattr(self, "correlate", True)))
@@ -799,7 +804,9 @@ class FMMFSNR(Metric):
                 "size_fwhm": self.size_fwhm, "zero_mean": self.zero_mean,
                 "min_snr_px": self.min_snr_px, "search_px": self.search_px,
                 "excl_fwhm": self.excl_fwhm, "known": [list(k) for k in self.known],
-                "declip_nsig": self.declip_nsig, "band_fwhm": self.band_fwhm,
+                "declip_nsig": self.declip_nsig,
+                **({"declip_isolated": True} if getattr(self, "declip_isolated", False) else {}),
+                "band_fwhm": self.band_fwhm,
                 "min_ring": self.min_ring, "penalty": self.penalty, "flatten": self.flatten,
                 "inner_fwhm": self.inner_fwhm, "fm_from_difference": self.fm_from_difference,
                 "turn": bool(self.turn), "fm_apertures": bool(getattr(self, "fm_apertures", False)),
