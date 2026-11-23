@@ -8,8 +8,8 @@ runs the same search several ways and prints the median interval between two eva
 dispatches, in milliseconds:
 
     no early scoring, no cache    the draws scored on the main thread, each image filtered
-                                  for every call (the code before 8cfc1fe)
-    no early scoring, cache       each image filtered once (8cfc1fe)
+                                  for every call (the code before 6a4b9dd)
+    no early scoring, cache       each image filtered once (6a4b9dd)
     early scoring, cache          the draws scored in the threads that ran their reductions
     scoring stubbed               the floor: the main thread with no scoring at all
 

@@ -1,10 +1,15 @@
 # Changelog
 
+## Unreleased — 2026-11-22 (the commit hashes the docs cite)
+
+- The commits from `a56e91c` on have new hashes.  The hashes this file, `docs/RUNNING.md`, two
+  scripts and seven tests cite are the new ones.  Docs and comments only.
+
 ## Unreleased — 2026-11-22 (the k-scan tests' runner stub)
 
 - `tests/test_kscan.py`'s runner stub binds `Runner._metric_reads_clean`, which `_scan_k` calls
   since the entry below.  Without it the scan stopped on the missing method and recorded nothing,
-  so its three tests failed on the quick job (run 44996293214, `e2d50dc`).  Tests only.
+  so its three tests failed on the quick job (run 44996293214, `b1f50ad`).  Tests only.
 
 ## Unreleased — 2026-11-22 (a despike that spares a source's core, and the noise read on the clean reduction)
 
@@ -53,7 +58,7 @@ code availability" section promises the scripts behind every figure, and these t
   aperture S/N, each point stepped to within 10 % of S/N 5.  Before the stage, each winner is reduced
   again and compared with the run's `best_clean.fits`.  The script writes nothing into the run
   directories, and `--plan` counts the points and the reductions without reducing.  The paper's curves
-  were read with commit `233bbee`, and there every winner reproduced its saved image (A2 and D2 to the
+  were read with commit `0a4ff38`, and there every winner reproduced its saved image (A2 and D2 to the
   bit, C to 3e-8 rms), by the paper session's record.
 - **`paper_runs/fig8_plot.py`** draws Fig. 8, `figs/f6_contrast.pdf`, from those curves and `collect.py`'s
   `summary.json`, in the layout of `figs.py`'s `fig_contrast`: the median contrast at S/N 5 over position
@@ -67,7 +72,7 @@ code availability" section promises the scripts behind every figure, and these t
 
 ## Unreleased — 2026-11-22 (a Ctrl-C ends a run that reduces through pyKLIP, and the final grid's winner in winner.json and tutorial 03)
 
-After the FLIP note of 2026-11-21, "the K5 rerun on `bf99474` did not hang; a Ctrl-C still leaves the run
+After the FLIP note of 2026-11-21, "the K5 rerun on `ad8205b` did not hang; a Ctrl-C still leaves the run
 stuck".
 
 - **pyKLIP's pool workers ignore a Ctrl-C** (`klip_tpe/backends/pyklip.py`).  A Ctrl-C goes to the run's
@@ -196,7 +201,7 @@ After a user's note of 2026-11-21, "a companion's extraction, and its render".
 
 - **The README's panel ends at the second of the three annuli** (Kevin Wagner, 2026-11-21).
   `docs/img/step_display.png` is now the same run's annulus-done frame of annulus 2 (0.58–0.97"),
-  drawn on `a795c83` when that annulus' validated winner was chosen: its stitched images and
+  drawn on `84b8891` when that annulus' validated winner was chosen: its stitched images and
   contrast curve cover the companion's annulus and the next one out (0.20–0.97"), it circles the
   two winners' four injected sources, and the best S/N cell reads 14.36 from its validation trial.
   It replaces the third annulus' frame of the entry below.
@@ -207,7 +212,7 @@ After a user's note of 2026-11-21, "a companion's extraction, and its render".
   `docs/img/step_display.png` is the annulus-done frame of the last annulus of
   `scripts/readme_panel.py`'s run: the companion's annulus (0.20–0.58") and two more of its
   width outward (to 1.35"), 3,000 evaluations each, all three validated.  The run began on
-  `895d2bf` and was resumed on `a795c83`, so the frame circles the stitch at the winners'
+  `7c87dea` and was resumed on `84b8891`, so the frame circles the stitch at the winners'
   sources and titles the best S/N cell from its validation trial.  On the stitch the companion
   reads S/N 9.02 (FAP 5.7E-09, a detection at the operating FAP) and the six injected sources
   10.0 to 14.7.  It replaces the single annulus at 5,000 evaluations of 2026-10-30.
@@ -750,7 +755,7 @@ rotation, 3 card workers, 2026-11-15).
   The classic layout (`render_step_classic`) is unchanged.
 - Tests in `tests/test_display_stitch_circles.py`, with the same frame's stitch circles: the
   search trial's two sources beside the six the stitch holds, which the annulus-done frame no
-  longer circles (0e9c172).
+  longer circles (2aec12f).
 
 ## Unreleased — 2026-11-11 (klip_annular's inputs and outputs, documented)
 
@@ -1100,10 +1105,10 @@ rotation, 3 card workers, 2026-11-15).
   run saved before 2026-11-01, and a `--from-idl-setup` run, keeps the IDL verify's S/N, the
   candidate search and param_verify as they measured, and the pixel mask in the search's rings
   and the grid's matched filter alone (`idl`, `metrics.VERIFY_IDL`).  On a synthetic stack the
-  `idl` path gives d104527's verify rows, candidate list, solved contrasts and param_verify
+  `idl` path gives fb5fc27's verify rows, candidate list, solved contrasts and param_verify
   curve to the bit.  `klip-tpe rereduce --verify-snr search` gives an old run the new verify,
   and the display reads the setting from the run's setup.
-- **The candidate search measures each night on its own image again.**  dd433e7 cached each
+- **The candidate search measures each night on its own image again.**  5fc6cda cached each
   night's matched-filter map under the address of a view made anew for every peak, and an
   address freed before came back, so every night took one night's S/N.  On a planted source
   the tier-A candidate fell to tier B with no night above 2.  The nights are now one list, and
@@ -1211,15 +1216,15 @@ rotation, 3 card workers, 2026-11-15).
 - `--score-floor off` keeps the means.  Runs saved before 2026-11-01 resume without a floor, and
   `--from-idl-setup` runs go without one, as the IDL does.
 - Tests in `tests/test_score_floor.py`.
-- **The source count line claims no full rings over a starved ring.**  The line of b7c903c said
+- **The source count line claims no full rings over a starved ring.**  The line of ed44e29 said
   each ring keeps at least 6 apertures even where the next line said one source's ring keeps
-  fewer.  As merged with c8d4ea0 (the next entry), a starved ring gets the count alone and the
+  fewer.  As merged with e4ac73e (the next entry), a starved ring gets the count alone and the
   starved-ring line, and `tests/test_injection_floor.py` holds both cases.
 
 ## Unreleased — 2026-11-01 (the count line claims only the rings it saw)
 
 - **An annulus' count line no longer contradicts the starved-ring line under it.**  The line of
-  b7c903c for an annulus the cap leaves alone said each ring keeps at least `min_ring` clean
+  ed44e29 for an annulus the cap leaves alone said each ring keeps at least `min_ring` clean
   apertures whenever the count was not lowered, so close to the star the log read `annulus 1: 1
   source a draw, as asked, and each separation's Mawet ring keeps at least 6 clean apertures`
   and then `annulus 1: one source at 0.275" keeps 5 clean apertures in its Mawet ring, fewer
@@ -1229,7 +1234,7 @@ rotation, 3 card workers, 2026-11-15).
   (`annulus 1: 1 source a draw, as asked`) and the starved-ring line, and rings that cannot be
   measured get no claim.  The sidelobe rule's wording is treated the same way.  The source count
   itself is unchanged.
-- `tests/test_injection_floor.py` and `tests/test_inner_guard.py` had failed since b7c903c: they
+- `tests/test_injection_floor.py` and `tests/test_inner_guard.py` had failed since ed44e29: they
   count the lines naming the Mawet ring, and the count line named it too.  The roomy annulus of
   `test_one_source_that_starves_its_ring_is_logged`, whose count line names the Mawet ring by
   design, now looks for the warning itself.  New tests in `tests/test_count_line.py`.
@@ -1256,7 +1261,7 @@ rotation, 3 card workers, 2026-11-15).
 - The help of `--use-contrast` and `--ann-extra`, `docs/RUNNING.md` and `CalibrationConfig`'s
   docstring now say that an annulus past the end of `--use-contrast` is calibrated, as one given
   0 is.  `--n-iter`, `--n-init` and `--n-sources` repeat their last entry, and
-  `--use-contrast` does not.  The note of 5a1f9ba had said all four repeat (NEAR2, 2026-10-31
+  `--use-contrast` does not.  The note of fb08f7c had said all four repeat (NEAR2, 2026-10-31
   20:40).  The code is unchanged, and a test in `tests/test_overlap_annuli.py` now holds it.
 
 ## Unreleased — 2026-11-01 (overlapping annuli)
@@ -1300,7 +1305,7 @@ rotation, 3 card workers, 2026-11-15).
   subsets of `verify_report.txt` and `stitched_verify_report.txt`, with `rereduce
   --verify-sources` too, leave out of each ring the ADI arcs of the source, of the known
   companions and of the injection block's other sources, as the run's own S/N does since
-  b992328 (`verify.ring_snr`).  The sources are given, not counted, so where the arcs leave
+  6e4e47c (`verify.ring_snr`).  The sources are given, not counted, so where the arcs leave
   fewer than 4 samples the source's own arc narrows to let in the farthest, then the other
   sources' arcs are let in, then the known companions'.  The last is the ring without the rule.
   The STIM annulus and the solved contrasts leave out what the source's Path-A ring left out.
@@ -1352,7 +1357,7 @@ rotation, 3 card workers, 2026-11-15).
   a line per night.  The stitched headers say `TRUENORT = 'per frame (ICRS)'`, with each night's
   values in `TN_<night>`.
 - `replay`, `compare` and a new `near --from-idl-setup` mirror IDL runs, so they take the IDL's
-  0.0456"/px and 36.5 deg unless told otherwise.  Since 33fe73b they had taken the new plate
+  0.0456"/px and 36.5 deg unless told otherwise.  Since ecfc9ef they had taken the new plate
   scale.
 - The contrast curve's throughput comes from the run's `--psflib`, not always `ROOT/psflib`.
 - Tests in `tests/test_true_north.py`: the file and the frame plan, the record and its refusals,
@@ -1399,12 +1404,12 @@ rotation, 3 card workers, 2026-11-15).
   metric that needs a forward-model pass of its own, and not on a serial reducer.
 - **`scripts/bench_main_thread.py`** times the main thread's own work per evaluation, with every
   reduction returned at once.  On this sandbox's two cores, six 150 px nights at NEAR's FWHM, five
-  draws a trial: 316 ms per evaluation before 8cfc1fe, 194 ms with its cache, 178 ms with the early
+  draws a trial: 316 ms per evaluation before 6a4b9dd, 194 ms with its cache, 178 ms with the early
   scoring, and 67 ms with the scoring stubbed.  With spare cores the early scoring runs beside the
   main thread, so the pace on patrick should come closer to the stubbed figure.
 - `Runner._reduce` passes `card=` to `reduce_config` only for a marked draw, so a `reduce_config`
   of the old signature (a wrapper, a test's spy) serves every other reduction.  Three tests in
-  `tests/test_fmmf.py` had failed on e880ba6 for that reason.
+  `tests/test_fmmf.py` had failed on 3370563 for that reason.
 - Tests in `tests/test_score_early.py`.
 
 ## Unreleased — 2026-10-31 (the card's reducer, from the GPU session)
@@ -1666,7 +1671,7 @@ outside the bootstrap's 16–84 % interval.
   `election_score` is its median in the round.
 - `winner.json: final_round` keeps the entrants' medians and trials, `validation_final.json`
   the draws as well.  The validation panel draws the round's medians as diamonds.
-- README and docs/BUDGET.md now describe the winner's fresh draws of 7a5bc15.
+- README and docs/BUDGET.md now describe the winner's fresh draws of c66828e.
 
 ## Unreleased — 2026-10-28 (distinct reductions in validation, the winner on fresh draws)
 
@@ -1705,7 +1710,7 @@ that reproduces klip-tpe's validation trials to 6e-6.
 
 ## Unreleased — 2026-10-28 (the thread cap off by default)
 
-From the GPU session's A/B of 9097654 on patrick (2026-10-27), with the same farm benchmark of
+From the GPU session's A/B of eb3ce34 on patrick (2026-10-27), with the same farm benchmark of
 NEAR2's annulus 5 as before.
 
 - **`PartitionedReducer.cap_threads` is False.**  Holding the jobs running together to the
@@ -1924,7 +1929,7 @@ rings follow no wedge.
   metric, the sampler and the guards, is then the band's middle group's (g17, 3.97 µm, for
   15-19), since g10 lies outside the band; **`--kernel-group gNN`** picks another.  Run directory
   tags `_gLO-HI` and `_mfgNN`; a run is not resumed with other groups or another matched filter.
-- **`--max-contrast C`** of the same script (in since 6c9813e, not logged then): a cap on the
+- **`--max-contrast C`** of the same script (in since 60573ad, not logged then): a cap on the
   injected contrast through the calibration and every re-calibration
   (`CalibrationConfig.ceiling`); with c's spectrum it is the contrast at 3.8 µm.  The cap tags
   the run directory `_cmaxC`, and a run is not resumed with another cap.

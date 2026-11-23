@@ -5,7 +5,7 @@ RX J0534's three-annulus README run (2026-11-10) ended on a frame whose best S/N
 "Best mean S/N  orig 12.12 / corr 11.41" -- the search trial's scores -- over two sources
 circled 10.0 and 10.5 from the winner's committed trial, validation's fresh draw.  The same
 frame had two empty circles in "Stitched SNR (with inj)", at 1.16" and PA 131 / 311 deg: the
-search trial's sources, beside the winners' committed trials that the stitch holds.  0e9c172
+search trial's sources, beside the winners' committed trials that the stitch holds.  2aec12f
 stopped the annulus-done frame adding the search trial's; the tests here hold that for the
 README frame's case.
 """

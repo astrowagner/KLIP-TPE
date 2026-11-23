@@ -1,6 +1,6 @@
 """The sidelobe rule in the verify and the candidate search (NEAR2 s6 note, section 4).
 
-Since b992328 the run's own S/N (search, calibration, validation, the contrast grid) leaves the
+Since 6e4e47c the run's own S/N (search, calibration, validation, the contrast grid) leaves the
 ADI sidelobes of every injected source and known companion out of its noise rings.  The verify's
 Path A and subsets, its STIM annulus and solved contrasts, the candidates' S/N and the blind S/N
 map now take the same rule.  The verify's fallback is the farthest samples, then the other

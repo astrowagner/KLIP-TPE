@@ -1,6 +1,6 @@
 """The count line an annulus logs claims only the rings the probe at the sources saw.
 
-b7c903c gave an annulus the cap leaves alone a line of its own (NEAR2 s6 note, section 4):
+ed44e29 gave an annulus the cap leaves alone a line of its own (NEAR2 s6 note, section 4):
 ``annulus 1: 1 source a draw, as asked, and each separation's Mawet ring keeps at least 6
 clean apertures``.  It was printed whenever the count was not lowered, and a line later the
 probe at the sources could say the opposite: ``annulus 1: one source at 0.275" keeps 5 clean

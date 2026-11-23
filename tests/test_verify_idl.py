@@ -3,7 +3,7 @@
 ``--from-idl-setup`` runs, keep the IDL verify's S/N, the candidate search and param_verify as
 they measured, and no pixel mask outside the search (``"idl"``, :data:`metrics.VERIFY_IDL`).
 
-The numbers below are the ones d104527, the last code before the change, gave on these inputs.
+The numbers below are the ones fb5fc27, the last code before the change, gave on these inputs.
 """
 from __future__ import annotations
 
@@ -101,7 +101,7 @@ def test_the_idl_candidate_search_gives_the_numbers_of_before():
 
 @pytest.mark.parametrize("rules", [KEEP_SPIKES, IDL], ids=["search", "idl"])
 def test_each_night_of_the_candidate_search_is_measured_on_its_own_image(rules):
-    """dd433e7 cached each night's map under the address of a view made anew for every peak, and
+    """5fc6cda cached each night's map under the address of a view made anew for every peak, and
     an address freed before came back: every night took one night's S/N."""
     stack = T._planted_stack(6, 0.8, 40.0, 8.0)
     rows = C.find_candidates(None, stack, T.FWHM, T.PX, night_ids=list(range(6)), rules=rules)

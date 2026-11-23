@@ -19,11 +19,11 @@ Usage::
 
 reads the run directories where ``run_demos.py`` puts them (this folder, or ``$RUNS_DIR``) with
 the package of this checkout, and writes to ``fig8/`` there.  ``--code``, ``--runs`` and
-``--out`` override the three.  The paper's curves were read with commit ``233bbee``, from a clone
+``--out`` override the three.  The paper's curves were read with commit ``0a4ff38``, from a clone
 pinned to it and from copies of the three run directories without their ``steps/``::
 
     PYTHONPATH=<clone> python3 fig8_curve.py --code <clone> --runs <copies> --out <dir> \
-        --commit 233bbee A2
+        --commit 0a4ff38 A2
 
 one stage per call, in chunks that resume from the stage's saved readings.  ``fig8_plot.py``
 then draws Fig. 8 from the outputs.

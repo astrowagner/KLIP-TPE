@@ -39,7 +39,7 @@ class _ScanStub:
             score_raw=lambda img, src, clean: types.SimpleNamespace(score=float(img)))
         self.rng = np.random.default_rng(0)
         self.reducer = types.SimpleNamespace()
-        # _scan_k asks _metric_reads_clean whether to reduce a clean scan too (since 1f05243)
+        # _scan_k asks _metric_reads_clean whether to reduce a clean scan too (since 5feefd0)
         for name in ("_scan_k", "_run_ordered", "_parallel_reducer", "_metric_reads_clean"):
             setattr(self, name, types.MethodType(getattr(Runner, name), self))
 

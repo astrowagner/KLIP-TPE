@@ -154,7 +154,7 @@ def test_a_forward_model_metric_hands_over_the_kernel_it_falls_back_to():
 
 
 def test_the_s_n_map_widens_a_band_the_mask_starves():
-    """A mask over whole rings left the S/N map blank there (dd433e7).  The band of such a
+    """A mask over whole rings left the S/N map blank there (5fc6cda).  The band of such a
     radius widens past the mask until it holds products.SNR_BAND_MIN pixels, and the map says
     which radii borrowed (Kevin Wagner, 2026-11-01)."""
     from klip_tpe.products import snr_widened_header, snr_widened_note

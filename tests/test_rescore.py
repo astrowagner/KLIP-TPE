@@ -178,7 +178,7 @@ def test_an_entrant_tag_is_stable():
 
 
 def _old_draw(sc, tiles, contrasts, rng):
-    """The draw of the code before the placement rules (0531e2f), for the comparison."""
+    """The draw of the code before the placement rules (6e8cd88), for the comparison."""
     smp, px = sc.r.sampler, float(sc.r.pxscale)
     dmin = float(getattr(smp, "min_mutual_fwhm", 2.0)) * float(getattr(smp, "fwhm_as", sc.r.fwhm * px))
     out = []
