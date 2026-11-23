@@ -87,6 +87,14 @@ LibraryPSF(slices, seps_as, center, ee_radius_px, throughput_fn=...)         # s
 A model may also provide `throughput(rho_as)` (coronagraphic transmission) and
 `matched_filter_kernel(rho_as, fwhm)` (used by the S/N metric instead of a Gaussian).
 
+`generic.make_reducer` builds a `TemplatePSF` from each dataset's template unless it is given a
+model, one for every partition or one per partition:
+
+```python
+red = generic.make_reducer({"n1": ds}, pxscale=px, lam_m=lam, diam_m=d,
+                           injection_model=FramePSF(ds.cube, r_ee=1.5 * lam_over_d_px))
+```
+
 ## 4. Frame-quality tags (optional)
 
 If you supply `tags`, three searched dimensions select frames before subtraction:
@@ -152,7 +160,11 @@ given (`RunConfig.edge_padding`).
 
 `frame_angles()` must give the parallactic angles so the reference-count guardrail and the
 binning-span rule can work; if you cannot, set `space.project = None` and leave
-`angsep/anglemax` out of the space. Injections must follow the same PA convention as the
+`angsep/anglemax` out of the space.  For a sequence that rotates 20 deg or less, `make_space`
+pins `anglemax` at 360 rather than searching it, and the guardrail then moves `angsep` alone, to
+the largest value that leaves `n_min_ref` references for 95 % of the targets.  Before 2026-11-23
+it skipped such a space, and any `angsep` past the rotation gave the same reduction, since
+`klip_annular` falls back to all other frames for a target with fewer than 4 references. Injections must follow the same PA convention as the
 metric (PA east of north, north up after your derotation) — the easiest way to guarantee
 that is to inject with `klip_tpe.injection.inject_sources` on your frames before your
 pipeline runs.

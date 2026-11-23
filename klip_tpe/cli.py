@@ -1759,6 +1759,10 @@ def _protocol_args(p):
     p.add_argument("--window-scale", type=float, default=1.0,
                    help="live window size as a fraction of the 1850x990 panel (1.0 = the IDL window, 1:1 pixels), "
                         "shrunk to fit a smaller screen; the window keeps this size")
+    p.add_argument("--stitch-scale", choices=["radial", "tile", "one"], default=None,
+                   help="how the stitched image cells are scaled: radial (the default) puts the stitch's noise on one "
+                        "power law in radius, tile divides each annulus by its own sigma, one draws one stretch; "
+                        "the S/N cells are the stitch's own")
     p.add_argument("--no-fm-curve", dest="fm_curve", action="store_false", default=True,
                    help="skip the KLIP-FM cross-check curve after each annulus (A 9.1)")
     p.add_argument("--fm-preview", dest="fm_preview", action="store_true", default=True,
@@ -2183,7 +2187,7 @@ def _callbacks(a):
     from .display import LiveDisplay
     return [LiveDisplay(a.run_dir, every=a.display_every, pdf_every=a.pdf_every, show=getattr(a, "show", False),
                         aliens=getattr(a, "aliens", False), window_scale=getattr(a, "window_scale", 1.0),
-                        movie_every=getattr(a, "movie_every", None))]
+                        movie_every=getattr(a, "movie_every", None), stitch_scale=getattr(a, "stitch_scale", None))]
 
 
 def latest_run_dir(root: str) -> str:
@@ -2995,7 +2999,8 @@ def cmd_render(a):
     annuli = None if not a.annulus else [int(k) - 1 for k in a.annulus]
     fn = _injected_model_fn(a) if getattr(a, "with_data", False) else None
     paths = render_steps(a.run_dir, annuli=annuli, every=a.every, dpi=a.dpi, out_dir=out,
-                         movie=not a.no_movie, movie_dir=out, inj_model_fn=fn)
+                         movie=not a.no_movie, movie_dir=out, inj_model_fn=fn,
+                         stitch_scale=getattr(a, "stitch_scale", None))
     print(f"wrote {len(paths)} panels to {out}")
     gif = os.path.join(out, "opt_steps.gif")
     if not a.no_movie and paths and os.path.exists(gif):
@@ -3418,6 +3423,8 @@ def _build_parser():
     p.add_argument("--show", nargs="?", const="window", default=False)
     p.add_argument("--aliens", action="store_true")
     p.add_argument("--window-scale", type=float, default=1.0)
+    p.add_argument("--stitch-scale", choices=["radial", "tile", "one"], default=None,
+                   help="how the stitched image cells are scaled (as for the run commands)")
     p.set_defaults(func=cmd_resume)
 
     p = sub.add_parser("extend", help="reopen a run with new per-annulus totals (<=0 untouched, "
@@ -3707,6 +3714,8 @@ def _build_parser():
                    help="output directory (default <run-dir>/steps_rebuilt; the live steps/ and "
                         "opt_steps.gif are left as they are)")
     p.add_argument("--no-movie", action="store_true", help="skip <out>/opt_steps.gif")
+    p.add_argument("--stitch-scale", choices=["radial", "tile", "one"], default=None,
+                   help="how the stitched image cells are scaled (as for the run commands)")
     p.add_argument("--with-data", action="store_true",
                    help="load the run's frames, from the data arguments as rereduce takes them (the ones left out "
                         "filled from the run's record), to draw each frame's injected-PSF model, as the live "

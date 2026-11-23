@@ -39,14 +39,33 @@ so the evaluation loop never waits for it.
 | Ann *i*/*n* Eval *e*/*N* | this evaluation's reduction *with* the injected companions (the "test") |
 | Test (no inj) | the same configuration on the clean cube |
 | Best (eval *b*) | the incumbent's injected reduction.  On an annulus' last frame, the winner's validation trial, its fresh injections circled, titled `Best (eval b, validation trial)` |
-| Stitched best (no inj) / (with inj) | the running stitch over annuli done so far + the incumbent, each annulus' tile stretched by its own σ.  On the run's last frame, the final stitch, `Final stitch (no inj)` / `(with inj)` |
+| Stitched best (no inj) / (with inj) | the running stitch over annuli done so far + the incumbent, scaled so its noise falls continuously away from the star.  On the run's last frame, the final stitch, `Final stitch (no inj)` / `(with inj)` |
 
 Each cell is stretched from −1 to 5 σ of its own image, the robust σ (1.4826 × the median
-absolute deviation).  The stitched cells take each annulus' tile at its own σ, since a stitch
-puts together annuli whose noise differs severalfold.  On NEAR2 (2026-11-15) the inner tiles
-were 2.5 times noisier than the outer, and with one σ for the whole stitch a speckle there read
-4.6 σ on the stretch and 1.7 on the S/N map.  The color bar then reads `each annulus' sigma`.
-The tiles' edges come from the stitch's `EDGES` header.
+absolute deviation).  A stitch puts together annuli whose noise differs severalfold, each from its
+own winner, so one σ for the whole stitch shows each annulus' own level.  On NEAR2 (2026-11-15) the
+inner tiles were 2.5 times noisier than the outer, and a speckle there read 4.6 σ on the stretch
+and 1.7 on the S/N map.  The stitched cells are therefore scaled, three ways
+(`--stitch-scale`, `LiveDisplay(stitch_scale=)`, `render_steps(stitch_scale=)`, or
+`KLIP_TPE_STITCH_SCALE` in the environment):
+
+* `radial`, the default since 2026-11-23: the stitch times a gain that puts its noise on one power
+  law in radius.  The stitch's robust scatter is measured in 2 px rings, the known companions left
+  out within 1.5 FWHM, and smoothed by a running median of 5 rings within each annulus, never across
+  an edge.  One power law is fitted to all the rings, and each pixel's gain is the power law over the
+  smoothed scatter at its radius, within its own annulus.  The displayed noise then falls
+  continuously away from the star.  On the five-annulus stitch of a user's note of 2026-11-22, the
+  noise just outside each inner edge over just inside it came out at 0.93 to 0.98, where the power
+  law gives 0.90 to 0.96.
+  The gain changes the relative brightness across radii, so the color bar reads
+  `sigma, the stitch radially scaled`.
+* `tile`: each annulus' tile over its own σ, the default from 2026-11-15.  The noise then falls
+  within each tile and jumps back up at the next edge, a sawtooth (up by 15 to 40 % at three of that
+  stitch's four inner edges).  The color bar reads `each annulus' sigma`.
+* `one`: one stretch for the whole stitch, which shows the real jumps between annuli.
+
+The S/N cells below are the unscaled stitch's in every case.  The tiles' edges come from the
+stitch's `EDGES` header.
 
 A known companion is circled on the images, and its S/N is printed on the two clean ones.  It
 is measured as the search measures, with the run's matched filter, despike, radial band and

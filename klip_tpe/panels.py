@@ -442,12 +442,17 @@ class _Worker:
         Parameters
         ----------
         msg : dict
-            ``kw``, the keywords of :func:`klip_tpe.display.annulus_from_records` but the records, and
-            ``reset``.
+            ``kw``, the keywords of :func:`klip_tpe.display.annulus_from_records` but the records, with
+            ``stitch_scale`` when the run's display names one (:data:`klip_tpe.display.STITCH_SCALE`),
+            and ``reset``.
         """
         if msg.get("reset") or self.recipe is None:
             self.records, self.best, self.best_curve = [], {}, None
         self.recipe = dict(msg["kw"])
+        scale = self.recipe.pop("stitch_scale", None)
+        if scale is not None:
+            from . import display as D
+            D.STITCH_SCALE = D.check_stitch_scale(scale)
 
     def _op_records(self, msg: Dict[str, Any]) -> None:
         """Take records, from their index on.

@@ -212,7 +212,7 @@ def test_each_tile_of_a_stitch_is_stretched_by_its_own_sigma():
         assert D._robust_sigma(out[m]) == pytest.approx(1.0, rel=1e-6)
     assert D._per_tile_sigma(img, None) is img and D._per_tile_sigma(None, [1.0, 2.0]) is None
     stitch = dict(stitch_clean=img, stitch_inj=img, stitch_sources=[], stitch_edges=[8.0, 20.0, 30.0],
-                  stitch_label="Final stitch")
+                  stitch_label="Final stitch", stitch_scale="tile")
     seen, labels = _titles(D.StepImages(cur_inj=img, cur_clean=img, best_inj=img, best_clean=img, best_index=1,
                                         **stitch))
     by = {t: (im, vr) for t, im, vr in seen}
@@ -221,6 +221,24 @@ def test_each_tile_of_a_stitch_is_stretched_by_its_own_sigma():
         assert vr == (-1.0, 5.0) and np.allclose(im, out, equal_nan=True), t
     assert "Final stitch SNR (no inj)" in by and "Final stitch SNR (with inj)" in by
     assert labels == ["KLIP image stretch (each annulus' sigma)"], labels
+    # the default since 2026-11-23: the noise put on one power law in radius
+    stitch["stitch_scale"] = None
+    seen, labels = _titles(D.StepImages(cur_inj=img, cur_clean=img, best_inj=img, best_clean=img, best_index=1,
+                                        **stitch))
+    by = {t: (im, vr) for t, im, vr in seen}
+    gain, _ = D._radial_gain(img, [8.0, 20.0, 30.0], _ad().fwhm)
+    want = img * gain / D._robust_sigma(img * gain)
+    for t in ("Final stitch (no inj)", "Final stitch (with inj)"):
+        im, vr = by[t]
+        assert vr == (-1.0, 5.0) and np.allclose(im, want, equal_nan=True), t
+    assert labels == ["KLIP image stretch (sigma, the stitch radially scaled)"], labels
+    # one stretch: the stitch as it is, at its own sigma
+    stitch["stitch_scale"] = "one"
+    seen, labels = _titles(D.StepImages(cur_inj=img, cur_clean=img, best_inj=img, best_clean=img, best_index=1,
+                                        **stitch))
+    by = {t: (im, vr) for t, im, vr in seen}
+    assert by["Final stitch (no inj)"][1] is None and by["Final stitch (no inj)"][0] is img
+    assert labels == ["KLIP image stretch (sigma)"], labels
     # without the tiles' edges (annulus 1, the best images) the cells keep one sigma
     seen, labels = _titles(D.StepImages(cur_inj=img, cur_clean=img, best_inj=img, best_clean=img, best_index=1))
     by = {t: (im, vr) for t, im, vr in seen}

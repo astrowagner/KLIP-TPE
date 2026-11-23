@@ -120,6 +120,11 @@ in order:
   sources' arcs are let in, then the known companions'.  The report says which ring took
   which.  The S/N maps (`klip_stitched_snr.fits` and the blind candidate search) leave out the
   known companions' arcs alone.
+* With the rule or without it, the S/N maps leave each known companion out of its radius'
+  noise, 1.5 FWHM around it, as they leave the injected sources out of the injected maps.
+  Before 2026-11-23 only the rule's arcs kept them out, so with the rule off, the default, a
+  bright companion counted in its own noise and could read half its S/N in
+  `klip_stitched_snr.fits` (a user's note of 2026-11-22).
 * The verify, the candidate search and param_verify measure each source with the search's own
   S/N (`metrics.mawet_peak_snr`) and the rules of the run's metric, since 2026-11-01 (Kevin
   Wagner).  The rules are its matched filter, despike, peak search, keep-outs, radial band (the
@@ -255,6 +260,13 @@ A run keeps the mode it was started with.  `klip-tpe resume --klip-gram zone` sw
 stopped run from that point on and writes the switch, with its time, into `klip_gram.json`
 in the run directory, so every later resume keeps it.  `--klip-gram target` switches it back.
 The log says when a run uses `zone`.
+
+A script sets it on the reducer before the run starts its workers, which keep the reducers they
+were made with: `klip_tpe.reducer.set_klip_gram(reducer, "zone")`, or
+`defaults={"klip_gram": "zone"}` in `generic.make_reducer`.  It pays wherever the search favors
+small bins.  On an LMIRCam sequence of 189 frames a bin-1 configuration took 6 s where it took
+28 s, to the same float32 image, and a run resumed with it reproduced its winners exactly
+(a user's note of 2026-11-22).
 
 ### The plate scale and the PSF library (`--pxscale`, `--psflib`)
 

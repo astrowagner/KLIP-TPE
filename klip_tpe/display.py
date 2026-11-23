@@ -955,6 +955,186 @@ def _per_tile_sigma(img: Optional[np.ndarray], edges: Optional[Sequence[float]])
     return out
 
 
+#: how the stitched image cells are scaled: "radial", the noise put on one power law in radius
+#: (:func:`_radial_gain`, the default since 2026-11-23), "tile", each tile over its own robust sigma
+#: (:func:`_per_tile_sigma`), or "one", one stretch for the whole stitch
+STITCH_SCALES = ("radial", "tile", "one")
+#: the scaling the stitched cells take when a frame names none: ``KLIP_TPE_STITCH_SCALE``, "radial"
+#: without it, set for a run by ``LiveDisplay(stitch_scale=)`` and ``render_steps(stitch_scale=)``
+STITCH_SCALE = (os.environ.get("KLIP_TPE_STITCH_SCALE", "").strip().lower() or "radial")
+if STITCH_SCALE not in STITCH_SCALES:
+    STITCH_SCALE = "radial"
+
+
+def check_stitch_scale(scale: Optional[str]) -> Optional[str]:
+    """Return a stitched cells' scaling in lower case, after checking it.
+
+    Parameters
+    ----------
+    scale : str or None
+        One of :data:`STITCH_SCALES`, or None.
+
+    Returns
+    -------
+    scale : str or None
+        The scaling, None for None.
+
+    Raises
+    ------
+    ValueError
+        If ``scale`` is not one of :data:`STITCH_SCALES`.
+    """
+    if scale is None:
+        return None
+    v = str(scale).strip().lower()
+    if v not in STITCH_SCALES:
+        raise ValueError(f"stitch_scale {scale!r}: one of {', '.join(STITCH_SCALES)}")
+    return v
+
+
+def _radial_gain(img: np.ndarray, edges: Sequence[float], fwhm: float, known_xy: Sequence[Tuple[float, float]] = (),
+                 ring: float = 2.0, smooth: int = 5) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
+    """Return the gain that puts a stitch's noise on one power law in radius, for the stitched cells.
+
+    The stitch's robust scatter is measured in rings ``ring`` px wide, the known companions left out
+    within 1.5 FWHM.  Within each tile the ring scatters are smoothed by a running median of ``smooth``
+    rings that never crosses the tile's edges, so the jumps between tiles stay sharp.  One power law
+    in radius is fitted to all the smoothed scatters in log-log, and the gain at a pixel is the power
+    law at its radius over the smoothed scatter there, interpolated within the pixel's own tile.
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The stitch, with the star at ``((nx-1)/2, (ny-1)/2)``.
+    edges : sequence of float
+        Radii of the tiles' edges, in pixels (the stitch's ``EDGES`` header).  Pixels inside the first
+        edge go with the first tile, and pixels past the last edge with the last.
+    fwhm : float
+        FWHM of the PSF, in pixels, for the companions' keep-outs.
+    known_xy : sequence of tuple of 2 floats, default ()
+        The known companions' ``(x, y)`` pixels.
+    ring : float, default 2.0
+        Width of the rings, in pixels.
+    smooth : int, default 5
+        Length of the running median over each tile's rings, in rings.
+
+    Returns
+    -------
+    gain : ndarray, shape (ny, nx), or None
+        The gain, NaN where the stitch is.  None when fewer than two rings hold a scatter.
+    profile : dict
+        ``r`` (the rings' middles, in pixels), ``scatter`` (their smoothed scatter, in the image's units),
+        ``tile`` (each ring's tile), and ``amp`` and ``index`` of the power law,
+        ``scatter = amp * r ** index``.
+
+    Notes
+    -----
+    It follows a user's note of 2026-11-22.  Each tile over its own sigma leaves the noise falling
+    within each tile and rising again past each edge, a sawtooth, and one stretch for the whole stitch
+    shows each annulus' own level.  On that stitch the displayed noise just outside each inner edge over
+    just inside it went from 0.91 to 1.40 with the tiles' sigmas, and from 0.52 to 1.76 with one stretch,
+    to 0.93 to 0.98 with this gain, where the power law gives 0.90 to 0.96.
+    """
+    from scipy.ndimage import median_filter
+    im = np.asarray(img, float)
+    e = np.asarray(sorted(float(v) for v in edges), float)
+    cx, cy = star_center(im.shape)
+    yy, xx = np.indices(im.shape)
+    rr = np.hypot(xx - cx, yy - cy)
+    keep = np.isfinite(im)
+    for kx, ky in known_xy:
+        keep &= np.hypot(xx - float(kx), yy - float(ky)) > 1.5 * float(fwhm)
+    rs, ss, ts = [], [], []
+    for t, (a, b) in enumerate(zip(e[:-1], e[1:])):
+        r0 = np.arange(a, b, float(ring))
+        if r0.size == 0:
+            continue
+        sc = np.array([_robust_sigma(im[keep & (rr >= r) & (rr < min(r + ring, b))])
+                       if (keep & (rr >= r) & (rr < min(r + ring, b))).sum() >= 10 else np.nan for r in r0])
+        ok = np.isfinite(sc)
+        if not ok.any():
+            continue
+        sc = np.interp(np.arange(sc.size), np.flatnonzero(ok), sc[ok])     # a ring too small takes its neighbors'
+        rs.append(np.minimum(r0 + ring / 2.0, b))
+        ss.append(median_filter(sc, size=int(smooth), mode="nearest"))
+        ts.append(np.full(r0.size, t))
+    if not rs:
+        return None, {}
+    r, sc, tl = np.concatenate(rs), np.concatenate(ss), np.concatenate(ts)
+    good = np.isfinite(sc) & (sc > 0)
+    if good.sum() < 2:
+        return None, {}
+    index, lamp = np.polyfit(np.log(r[good]), np.log(sc[good]), 1)
+    tile = np.clip(np.searchsorted(e, rr, side="right") - 1, 0, len(e) - 2)
+    gain = np.full(im.shape, np.nan)
+    for t in range(len(e) - 1):
+        m = (tile == t) & np.isfinite(im)
+        sel = (tl == t) & good
+        if not m.any() or not sel.any():
+            continue
+        gain[m] = np.exp(lamp + index * np.log(np.maximum(rr[m], 1.0))) / np.interp(rr[m], r[sel], sc[sel])
+    return gain, {"r": r, "scatter": sc, "tile": tl, "amp": float(np.exp(lamp)), "index": float(index)}
+
+
+def _stitch_cells(clean: Optional[np.ndarray], inj: Optional[np.ndarray], edges: Optional[Sequence[float]],
+                  scale: Optional[str], ad: "AnnulusData"):
+    """Return the stitched image cells' two images, their stretch and the colorbar's label.
+
+    Parameters
+    ----------
+    clean : ndarray or None
+        The stitch.
+    inj : ndarray or None
+        The injected stitch.
+    edges : sequence of float or None
+        Radii of the stitch's tile edges, in pixels.  None draws both images on one stretch, as for
+        annulus 1's best images.
+    scale : {"radial", "tile", "one"} or None
+        How the cells are scaled (:data:`STITCH_SCALES`).  None takes :data:`STITCH_SCALE`.
+    ad : AnnulusData
+        The annulus' data, for the FWHM, the plate scale and the known companions.
+
+    Returns
+    -------
+    clean : ndarray or None
+        The stitch as drawn.
+    inj : ndarray or None
+        The injected stitch as drawn.
+    kw : dict
+        ``{"vrange": (-1.0, 5.0)}`` when the images come in units of sigma, else empty.
+    label : str
+        The colorbar's label.
+
+    Raises
+    ------
+    ValueError
+        If ``scale`` is not one of :data:`STITCH_SCALES`.
+    """
+    scale = check_stitch_scale(scale) or STITCH_SCALE
+    one = (clean, inj, {}, "KLIP image stretch (sigma)")
+    if not edges or len(edges) < 2 or scale == "one":
+        return one
+    if scale == "tile":
+        return (_per_tile_sigma(clean, edges), _per_tile_sigma(inj, edges), {"vrange": (-1.0, 5.0)},
+                "KLIP image stretch (each annulus' sigma)")
+    if clean is None or np.ndim(clean) != 2:
+        return one
+    kxy: List[Tuple[float, float]] = []
+    if getattr(ad, "known", None):
+        cx, cy = star_center(np.shape(clean))
+        kx, ky = source_xy([float(k[0]) for k in ad.known], [float(k[1]) for k in ad.known], ad.pxscale, cx, cy,
+                           ad.angle_convention)
+        kxy = list(zip(np.atleast_1d(kx).tolist(), np.atleast_1d(ky).tolist()))
+    gain, _ = _radial_gain(clean, edges, float(ad.fwhm), kxy)
+    if gain is None:
+        return (_per_tile_sigma(clean, edges), _per_tile_sigma(inj, edges), {"vrange": (-1.0, 5.0)},
+                "KLIP image stretch (each annulus' sigma)")
+    prod = np.asarray(clean, float) * gain
+    s = _robust_sigma(prod)
+    out_inj = None if inj is None or np.shape(inj) != np.shape(clean) else np.asarray(inj, float) * gain / s
+    return prod / s, out_inj, {"vrange": (-1.0, 5.0)}, "KLIP image stretch (sigma, the stitch radially scaled)"
+
+
 def _header_edges(path: str) -> Optional[List[float]]:
     """Return the tiles' edges a stitch's FITS header lists (``EDGES``), in pixels.
 
@@ -2533,8 +2713,12 @@ class StepImages:
     stitch_sources : list of tuple of 3 floats or None, default None
         Sources of ``stitch_inj``.
     stitch_edges : list of float or None, default None
-        Radii of the stitch's tile edges, in pixels (its ``EDGES`` header), by which each tile is
-        stretched by its own sigma (:func:`_per_tile_sigma`).  None stretches by one sigma.
+        Radii of the stitch's tile edges, in pixels (its ``EDGES`` header), by which the stitched
+        cells are scaled (``stitch_scale``).  None stretches by one sigma.
+    stitch_scale : {"radial", "tile", "one"} or None, default None
+        How the stitched image cells are scaled (:func:`_stitch_cells`): the noise put on one power
+        law in radius, each tile over its own sigma, or one stretch.  None takes
+        :data:`STITCH_SCALE`.  The S/N cells are the stitch's own in every case.
     stitch_label : str, default "Stitched best"
         Name of the stitched cells, "Final stitch" on the run's last frame.
     inj_model : ndarray or None, default None
@@ -2582,6 +2766,8 @@ class StepImages:
     #: radii of the stitch's tile edges (px, its ``EDGES`` header): the stitched cells show each
     #: tile at its own robust sigma (:func:`_per_tile_sigma`); None stretches by one sigma
     stitch_edges: Optional[List[float]] = None
+    #: how the stitched image cells are scaled (:func:`_stitch_cells`); None takes STITCH_SCALE
+    stitch_scale: Optional[str] = None
     #: what the stitched cells are called: "Stitched best" (the running stitch, the IDL
     #: predecessor's name) or "Final stitch" (the run's last frame, :meth:`LiveDisplay.on_finish`)
     stitch_label: str = "Stitched best"
@@ -3676,9 +3862,10 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
         st_inj = images.stitch_inj if images.stitch_inj is not None else images.best_inj
         st_src = images.stitch_sources if images.stitch_inj is not None else best_src
         st_lab = None if images.stitch_inj is not None else [_lbl(v, r) for v, r in zip(best_ps, best_rps or [None] * len(best_ps))]
-        # a stitch's tiles at their own sigma each (the S/N cells below are unchanged)
+        # a stitch scaled so its noise falls continuously, or each tile at its own sigma, or one
+        # stretch (stitch_scale); the S/N cells below are the stitch's own
         st_e = images.stitch_edges if images.stitch_clean is not None else None
-        st_kw = {"vrange": (-1.0, 5.0)} if st_e else {}
+        st_c, st_i, st_kw, st_cb = _stitch_cells(st_clean, st_inj, st_e, images.stitch_scale, ad)
         st_name = images.stitch_label or "Stitched best"
         st_snr = "Stitched SNR" if st_name == "Stitched best" else f"{st_name} SNR"
 
@@ -3699,12 +3886,11 @@ def render_step(ad: AnnulusData, i: int, images: StepImages, out_png: Optional[s
         cell(xs[0], img_y0, img_y1, images.cur_inj, t0)
         cell(xs[1], img_y0, img_y1, images.cur_clean, "Test (no inj)")
         cell(xs[2], img_y0, img_y1, images.best_inj, t_best)
-        cell(xs[3], img_y0, img_y1, _per_tile_sigma(st_clean, st_e), f"{st_name} (no inj)", **st_kw)
-        cell(xs[4], img_y0, img_y1, _per_tile_sigma(st_inj, st_e), f"{st_name} (with inj)", **st_kw)
+        cell(xs[3], img_y0, img_y1, st_c, f"{st_name} (no inj)", **st_kw)
+        cell(xs[4], img_y0, img_y1, st_i, f"{st_name} (with inj)", **st_kw)
         cax = _box(fig, cbx0, img_y0 + 0.012, cbx0 + cbw, img_y1 - 0.012)
         fig.colorbar(matplotlib.cm.ScalarMappable(norm=mcolors.Normalize(-1, 5), cmap=cmap), cax=cax)
-        cax.set_ylabel("KLIP image stretch (each annulus' sigma)" if st_e else "KLIP image stretch (sigma)",
-                       fontsize=6.5)
+        cax.set_ylabel(st_cb, fontsize=6.5)
         cax.tick_params(labelsize=6)
         # ---- row 2: S/N maps -------------------------------------------------------
         cur_lab = [_lbl(v, r) for v, r in zip(cur_ps, cur_rps or [None] * len(cur_ps))]
@@ -4559,7 +4745,7 @@ def _final_stitch_cells(run_dir: str, imgs: "StepImages") -> Optional["StepImage
 def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: int = 1, dpi: int = 90,
                  out_dir: Optional[str] = None, movie: bool = True,
                  partition_label: Optional[str] = None, movie_dir: Optional[str] = None,
-                 inj_model_fn=None, reducer=None) -> List[str]:
+                 inj_model_fn=None, reducer=None, stitch_scale: Optional[str] = None) -> List[str]:
     """Draw the step panels of a run again from its log and the crops it saved.
 
     Each annulus' every ``every``-th evaluation and its last are drawn from the per-evaluation crops
@@ -4596,6 +4782,9 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
     reducer : Reducer or None, default None
         The run's reducer, built as the run built it, such as by a script, from which that model is
         drawn when ``inj_model_fn`` is None.
+    stitch_scale : {"radial", "tile", "one"} or None, default None
+        How the stitched image cells are scaled (:data:`STITCH_SCALES`).  None takes
+        :data:`STITCH_SCALE`.
 
     Returns
     -------
@@ -4607,6 +4796,7 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
     ValueError
         If the reducer's plate scale is not the run's (``run_setup.json``).
     """
+    scale_given = check_stitch_scale(stitch_scale)
     run = load_run(run_dir)
     if reducer is not None and inj_model_fn is None:
         from .injection import injected_model
@@ -4704,6 +4894,7 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
                 cnote = "no validated curve for this annulus" if not curves else None
             else:
                 cnote = None if have else "rebuilt from log: no live images, so no per-eval preview"
+            imgs.stitch_scale = scale_given
             fig = render_step(ad, i, imgs, p, curves=curves, elapsed_s=float(el),
                               eta_s=float(np.nanmean(full.wall[:i + 1]) * (full.n - i - 1)) if i + 1 < full.n else 0.0,
                               dpi=dpi, fig=fig, step_label=ff.get("step_label") or "(rebuilt from log)",
@@ -4725,6 +4916,7 @@ def render_steps(run_dir: str, annuli: Optional[Sequence[int]] = None, every: in
             except Exception:
                 pass
             p = os.path.join(out_dir, f"step{step:04d}.png")
+            cells.stitch_scale = scale_given
             fig = render_step(ad, i, cells, p, curves=curves, elapsed_s=el, eta_s=0.0, dpi=dpi, fig=fig,
                               step_label="run complete -- final stitch (rebuilt from log)", contrast_note=cnote)
             paths.append(p)
@@ -4876,11 +5068,16 @@ class LiveDisplay(RunCallback):
         as named; ``show=True`` keeps an interactive window (``plt.ion``).
     movie
         assemble ``opt_steps.gif`` (and ``.mp4`` when an ffmpeg backend exists) at the end.
+    stitch_scale
+        how the stitched image cells are scaled, ``"radial"``, ``"tile"`` or ``"one"``
+        (:data:`STITCH_SCALES`).  None keeps :data:`STITCH_SCALE`.  Given, it is this
+        process's default and the panels process's too.
     """
 
     def __init__(self, run_dir: str, every: int = 1, pdf_every: int = 10, save_png: bool = True, show: bool = False,
                  cmap: str = "inferno", dpi: int = 100, movie: bool = True, log=None, aliens: bool = False,
-                 window_scale: float = 1.0, movie_every: Optional[int] = None, title: Optional[str] = None):
+                 window_scale: float = 1.0, movie_every: Optional[int] = None, title: Optional[str] = None,
+                 stitch_scale: Optional[str] = None):
         """``aliens=True`` plays IDL's five-act launch movie in the live window during the
         first annulus' calibration and writes ``intro_frames/`` + ``intro.gif``; off by
         default (the calibration panel alone is shown).  ``movie_every`` (evaluations;
@@ -4890,6 +5087,10 @@ class LiveDisplay(RunCallback):
         in place of the run directory's name (the README panel's "RX J0534")."""
         self.run_dir = run_dir
         self.title = None if title is None or not str(title).strip() else str(title)
+        self.stitch_scale = check_stitch_scale(stitch_scale)
+        if self.stitch_scale is not None:
+            global STITCH_SCALE
+            STITCH_SCALE = self.stitch_scale     # the frames this process draws (thread mode)
         self.movie_every = max(int(pdf_every if movie_every is None else movie_every), 0)
         self._ann_frames: List[str] = []
         self.aliens = bool(aliens)
@@ -5525,6 +5726,8 @@ class LiveDisplay(RunCallback):
             recipe = runner_recipe(runner)
             if self.title:
                 recipe["run_name"] = self.title
+            if self.stitch_scale is not None:
+                recipe["stitch_scale"] = self.stitch_scale       # the panels process takes it out
             rules = recipe.get("rules")
             if isinstance(rules, dict) and callable(rules.get("kernel_at")):
                 from .books import _snapshot                 # the kernels sampled, as the books get them

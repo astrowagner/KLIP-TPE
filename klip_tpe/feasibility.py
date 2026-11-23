@@ -71,20 +71,39 @@ def min_feasible_anglemax(bangles, angsep, arcdist, nminref, ref_frac, amlo, amh
 class ReferenceCountGuard:
     """Project ``(angsep, anglemax)`` of every partition block to a feasible pair.
 
+    A pair is feasible when at least ``ref_frac`` of the binned target frames keep ``n_min_ref``
+    references with ``angsep`` of arc <= |dPA| <= ``anglemax``.  An ``anglemax`` the space pins
+    rather than searches (:func:`~klip_tpe.instruments.search_space.make_space` pins it at 360 for a
+    PA span of 20 deg or less) holds its pinned value, and ``angsep`` alone is projected.
+
     Parameters
     ----------
-    angles_fn
-        ``f(partition_id) -> per-frame parallactic angles`` (deg).
-    tags_fn
-        ``f(partition_id) -> {'corrs','noises','coronoise'}`` or None.
-    fwhm_px, lam_over_d_px
-        for the binning PA-span rule and the ``angsep`` unit.
-    n_min_ref, ref_frac
-        guardrail thresholds (10 references for 95 % of targets in production).
-    random_redraw
-        for random (warm-up / explore) proposals, draw ``angsep`` uniformly inside
-        the feasible range instead of snapping to its boundary (keeps the random
-        phase unbiased; guided proposals are always snapped).
+    angles_fn : callable
+        Function ``partition_id -> parallactic angles`` of the partition's frames, in degrees.
+    tags_fn : callable or None, default None
+        Function ``partition_id -> {"corrs", "noises", "coronoise"}`` of the frames' tags, or None.
+    fwhm_px : float, default 6.38
+        FWHM of the PSF, in pixels, for the binning's PA-span rule.
+    lam_over_d_px : float, default 6.206
+        lambda/D, in pixels, the unit of ``angsep``.
+    n_min_ref : int, default 10
+        Fewest references a target frame must keep.
+    ref_frac : float, default 0.95
+        Smallest fraction of target frames that must keep them.
+    random_redraw : bool, default True
+        Whether a random proposal (warm-up, exploration) with an infeasible ``angsep`` draws a new one
+        uniformly inside the feasible range, rather than snapping to its edge as a guided one does,
+        which keeps the random phase unbiased.
+    k_max : int, default 100
+        KL modes assumed for the frame selection when the configuration names none.
+
+    Notes
+    -----
+    In :func:`~klip_tpe.klip.klip_annular` a target with fewer than 4 references falls back to all
+    other frames, so an ``angsep`` past the sequence's rotation gives the same reduction whatever its
+    value.  Before 2026-11-23 the guard did nothing when ``anglemax`` was pinned, which on a sequence
+    of 12.7 deg left most of ``angsep``'s range on that plateau, the search's budget spent there and
+    the winners' ``angsep`` unlike what was done (a user's note of 2026-11-22).
     """
 
     def __init__(self, angles_fn: Callable[[Any], np.ndarray], tags_fn: Optional[Callable] = None,
@@ -98,7 +117,22 @@ class ReferenceCountGuard:
         self._cache: Dict[Any, np.ndarray] = {}
 
     def binned_angles(self, pid, params: Dict[str, Any], outrad: float) -> np.ndarray:
-        """Replicate the reducer's frame selection + angle-aware binning."""
+        """Return a partition's binned parallactic angles, after the reducer's frame selection and binning.
+
+        Parameters
+        ----------
+        pid : object
+            The partition's id, None for a reducer of one partition.
+        params : dict
+            The configuration's parameters for the partition (``bin``, ``k_klip`` and the frame cuts).
+        outrad : float
+            Outer radius of the annulus, in pixels, which sets the binning's PA-span rule.
+
+        Returns
+        -------
+        angles : ndarray
+            The binned frames' parallactic angles, in degrees.
+        """
         if pid not in self._cache:
             self._cache[pid] = np.asarray(self.angles_fn(pid), float)
         ang = self._cache[pid]
@@ -112,7 +146,34 @@ class ReferenceCountGuard:
         return bin_angles(a, int(round(params.get("bin", 1))), dth)
 
     def feasible_pair(self, bang, angsep, anglemax, arcdist, am_hi, rng=None):
-        """One partition: returns projected ``(angsep, anglemax)``."""
+        """Project one partition's ``(angsep, anglemax)`` to a feasible pair.
+
+        Where ``angsep = 0`` is infeasible, ``anglemax`` widens to the least feasible value up to
+        ``am_hi`` and ``angsep`` goes to 0.  Otherwise an ``angsep`` past the largest feasible one goes
+        to it, or with ``rng`` and ``random_redraw`` to a uniform draw below it.
+
+        Parameters
+        ----------
+        bang : ndarray
+            The binned frames' parallactic angles, in degrees.
+        angsep : float
+            The proposed least separation, in lambda/D.
+        anglemax : float
+            The proposed widest rotation between a target and a reference, in degrees.
+        arcdist : float
+            Field rotation that moves a source by lambda/D in the annulus, in degrees.
+        am_hi : float
+            Widest ``anglemax`` allowed, in degrees.
+        rng : numpy.random.Generator or None, default None
+            Generator for the redraw of a random proposal, None to snap.
+
+        Returns
+        -------
+        angsep : float
+            The projected ``angsep``, in lambda/D.
+        anglemax : float
+            The projected ``anglemax``, in degrees.
+        """
         if bang.size <= 1:
             return angsep, anglemax
         if ref_fraction(bang, 0.0, anglemax, arcdist, self.n_min_ref) < self.ref_frac:
@@ -127,14 +188,43 @@ class ReferenceCountGuard:
 
     def __call__(self, x: np.ndarray, space: SearchSpace, rng=None, is_random: bool = False,
                  zone: Optional[Sequence[float]] = None, **_) -> np.ndarray:
-        if "angsep" not in space.bases or "anglemax" not in space.bases:
+        """Project a point of the space to feasible ``(angsep, anglemax)`` pairs.
+
+        Parameters
+        ----------
+        x : ndarray, shape (ndim,)
+            The point, in the space's coordinates.
+        space : SearchSpace
+            The space.
+        rng : numpy.random.Generator or None, default None
+            Generator for the redraw of a random proposal.
+        is_random : bool, default False
+            Whether the point is a random proposal, which ``random_redraw`` redraws.
+        zone : sequence of 2 floats or None, default None
+            The annulus' inner and outer radii, in pixels.  None takes ``inrad`` and ``outrad`` from the
+            configuration.
+        _ : dict
+            Other keywords of the projection chain, ignored.
+
+        Returns
+        -------
+        x : ndarray, shape (ndim,)
+            The projected point, ``x`` itself when the space searches no ``angsep`` or pins it.
+        """
+        if "angsep" not in space.bases:
+            return x
+        if "anglemax" not in space.bases and "anglemax" not in space.fixed:
             return x
         x = np.asarray(x, float).copy()
         cfg = space.decode(x)
         inrad = float(cfg.params.get("inrad", 0.0)) if zone is None else float(zone[0])
         outrad = float(cfg.params.get("outrad", 70.0)) if zone is None else float(zone[1])
         arc = arcdist_deg(inrad, outrad, self.lam_over_d_px)
-        am_hi = float(space[[space.params[i].name for i in space.dims_of_base("anglemax")][0]].hi)
+        if "anglemax" in space.bases:
+            am_hi = float(space[[space.params[i].name for i in space.dims_of_base("anglemax")][0]].hi)
+        else:
+            # pinned: the window cannot widen past its value, so only angsep moves
+            am_hi = float(space.fixed["anglemax"])
         r = rng if is_random else None
         parts = space.partitions or [None]
         as_all, am_all = [], []
@@ -161,6 +251,13 @@ class ReferenceCountGuard:
         return x
 
     def describe(self) -> Dict[str, Any]:
+        """Return the guard's settings, for a run's record.
+
+        Returns
+        -------
+        info : dict
+            ``name``, ``n_min_ref``, ``ref_frac`` and ``random_redraw``.
+        """
         return {"name": "reference_count_guard", "n_min_ref": self.n_min_ref, "ref_frac": self.ref_frac,
                 "random_redraw": self.random_redraw}
 

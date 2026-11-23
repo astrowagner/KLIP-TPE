@@ -100,7 +100,8 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--display-every DISPLAY_EVERY]
                         [--pdf-every PDF_EVERY] [--movie-every MOVIE_EVERY]
                         [--show [SHOW]] [--aliens]
-                        [--window-scale WINDOW_SCALE] [--no-fm-curve]
+                        [--window-scale WINDOW_SCALE]
+                        [--stitch-scale {radial,tile,one}] [--no-fm-curve]
                         [--fm-preview] [--no-fm-preview]
                         [--no-liveness-check | --strict-liveness]
 
@@ -533,6 +534,12 @@ options:
                         live window size as a fraction of the 1850x990 panel
                         (1.0 = the IDL window, 1:1 pixels), shrunk to fit a
                         smaller screen; the window keeps this size
+  --stitch-scale {radial,tile,one}
+                        how the stitched image cells are scaled: radial (the
+                        default) puts the stitch's noise on one power law in
+                        radius, tile divides each annulus by its own sigma,
+                        one draws one stretch; the S/N cells are the stitch's
+                        own
   --no-fm-curve         skip the KLIP-FM cross-check curve after each annulus
                         (A 9.1)
   --fm-preview          live KLIP-FM preview at each new best (A 9.3; one
@@ -773,7 +780,8 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      --no-overlap-pads] [--display] [--no-display]
                      [--display-every DISPLAY_EVERY] [--pdf-every PDF_EVERY]
                      [--movie-every MOVIE_EVERY] [--show [SHOW]] [--aliens]
-                     [--window-scale WINDOW_SCALE] [--no-fm-curve]
+                     [--window-scale WINDOW_SCALE]
+                     [--stitch-scale {radial,tile,one}] [--no-fm-curve]
                      [--fm-preview] [--no-fm-preview] [--no-liveness-check |
                      --strict-liveness]
 
@@ -1206,6 +1214,12 @@ options:
                         live window size as a fraction of the 1850x990 panel
                         (1.0 = the IDL window, 1:1 pixels), shrunk to fit a
                         smaller screen; the window keeps this size
+  --stitch-scale {radial,tile,one}
+                        how the stitched image cells are scaled: radial (the
+                        default) puts the stitch's noise on one power law in
+                        radius, tile divides each annulus by its own sigma,
+                        one draws one stretch; the S/N cells are the stitch's
+                        own
   --no-fm-curve         skip the KLIP-FM cross-check curve after each annulus
                         (A 9.1)
   --fm-preview          live KLIP-FM preview at each new best (A 9.3; one
@@ -1410,6 +1424,7 @@ usage: klip-tpe resume [-h] [--instrument {near,nomic,generic,ales}]
                        [--display-every DISPLAY_EVERY] [--pdf-every PDF_EVERY]
                        [--movie-every MOVIE_EVERY] [--show [SHOW]] [--aliens]
                        [--window-scale WINDOW_SCALE]
+                       [--stitch-scale {radial,tile,one}]
 
 options:
   -h, --help            show this help message and exit
@@ -1578,6 +1593,9 @@ options:
   --show [SHOW]
   --aliens
   --window-scale WINDOW_SCALE
+  --stitch-scale {radial,tile,one}
+                        how the stitched image cells are scaled (as for the
+                        run commands)
 
 generic cubes (--instrument generic / klip-tpe generic):
   --cube CUBE [CUBE ...]
@@ -4163,7 +4181,8 @@ usage: klip-tpe render [-h] [--instrument {near,nomic,generic,ales}]
                        [--inject-sources FILE] [--metric {mawet,fmmf}]
                        --run-dir RUN_DIR [--every EVERY]
                        [--annulus ANNULUS [ANNULUS ...]] [--dpi DPI]
-                       [--out OUT] [--no-movie] [--with-data]
+                       [--out OUT] [--no-movie]
+                       [--stitch-scale {radial,tile,one}] [--with-data]
 
 options:
   -h, --help            show this help message and exit
@@ -4331,6 +4350,9 @@ options:
   --out OUT             output directory (default <run-dir>/steps_rebuilt; the
                         live steps/ and opt_steps.gif are left as they are)
   --no-movie            skip <out>/opt_steps.gif
+  --stitch-scale {radial,tile,one}
+                        how the stitched image cells are scaled (as for the
+                        run commands)
   --with-data           load the run's frames, from the data arguments as
                         rereduce takes them (the ones left out filled from the
                         run's record), to draw each frame's injected-PSF

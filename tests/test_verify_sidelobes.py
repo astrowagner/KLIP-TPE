@@ -189,13 +189,18 @@ def test_the_runner_hands_its_rule_to_the_products():
     stub._verify_rule = lambda: Runner._verify_rule(stub)
     stub._known_arcs = lambda: Runner._known_arcs(stub)
     stub._pixel_mask = lambda: None
+    for name in ("_known", "_known_xy", "_inj_xy"):
+        setattr(stub, name, getattr(Runner, name).__get__(stub))
     arcs = Runner._known_arcs(stub)
     assert arcs == [(0.8, 200.0, rule.half_width(0.8 / PX, FWHM), rule.radial_fwhm)]
     img = _stack(0.8, [60.0]).mean(axis=0)
-    assert np.array_equal(Runner._snr_map(stub, img), snr_map(img, FWHM, excl_arcs=arcs, pxscale=PX), equal_nan=True)
+    kxy = Runner._known_xy(stub, img.shape)
+    assert np.array_equal(Runner._snr_map(stub, img), snr_map(img, FWHM, excl_arcs=arcs, pxscale=PX, exclude_xy=kxy),
+                          equal_nan=True)
+    # without the rule the companion's keep-out still leaves its radius' noise (a user's note of 2026-11-22)
     stub.objective.sidelobes = None
-    assert Runner._known_arcs(stub) == [] and np.array_equal(Runner._snr_map(stub, img), snr_map(img, FWHM),
-                                                             equal_nan=True)
+    assert Runner._known_arcs(stub) == [] and np.array_equal(Runner._snr_map(stub, img),
+                                                             snr_map(img, FWHM, exclude_xy=kxy), equal_nan=True)
 
 
 def test_mf_and_ring_agree_with_a_given_map():

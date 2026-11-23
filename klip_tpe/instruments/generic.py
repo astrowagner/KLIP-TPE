@@ -414,7 +414,8 @@ def make_reducer(datasets: Dict[str, Dataset], pxscale: float, lam_m: float, dia
                  weighting: str = "equal", max_workers="auto", pool: str = "auto", fast: bool = False,
                  n_min_ref: int = 10, outrad_cap: Optional[float] = None, use_rdi: Optional[bool] = None,
                  rdi_mode: str = "ardi", backend: str = "klip", defaults: Optional[Dict[str, Any]] = None,
-                 partition_label: str = "dataset", log: Callable[[str], None] = print) -> PartitionedReducer:
+                 partition_label: str = "dataset", log: Callable[[str], None] = print,
+                 injection_model: Optional[Union[InjectionModel, Dict[str, InjectionModel]]] = None) -> PartitionedReducer:
     """Build one reducer per dataset on the chosen backend, combined by a :class:`~klip_tpe.reducer.PartitionedReducer`.
 
     Parameters
@@ -463,6 +464,12 @@ def make_reducer(datasets: Dict[str, Dataset], pxscale: float, lam_m: float, dia
         What the partitions are, for the display's wording.
     log : callable, default print
         Function called with each log line.
+    injection_model : InjectionModel, dict or None, default None
+        The injection model, one for every partition or ``{partition: model}``, such as a
+        :class:`~klip_tpe.injection.FramePSF` of per-frame stamps.  None builds each partition's
+        :class:`~klip_tpe.injection.TemplatePSF` from its template (:func:`injection_model_for`), and
+        so does a partition the dict leaves out.  ``psf``, ``ee_radius_px`` and ``star_flux`` then
+        apply to the built models alone.
 
     Returns
     -------
@@ -478,8 +485,10 @@ def make_reducer(datasets: Dict[str, Dataset], pxscale: float, lam_m: float, dia
         sf = star_flux.get(pid) if isinstance(star_flux, dict) else star_flux
         # a loader that knows where the template's star is (a header's STARX/STARY) says so in
         # meta['psf_center']; otherwise the centroid of the peak finds it
-        model = injection_model_for(ds, fw, psf=psf, ee_radius_px=ee_radius_px, star_flux=sf,
-                                    psf_center=ds.meta.get("psf_center") if psf is None else None)
+        given = injection_model.get(pid) if isinstance(injection_model, dict) else injection_model
+        model = given if given is not None else injection_model_for(
+            ds, fw, psf=psf, ee_radius_px=ee_radius_px, star_flux=sf,
+            psf_center=ds.meta.get("psf_center") if psf is None else None)
         cap = float(outrad_cap) if outrad_cap else float(min(ds.cube.shape[1:]) // 2 - 4)
         rdi = bool(ds.ref_cube is not None) if use_rdi is None else bool(use_rdi)
         d = {"fast": fast, "n_min_ref": n_min_ref, "comb_type": "nwadi", "use_rdi": rdi and ds.ref_cube is not None,

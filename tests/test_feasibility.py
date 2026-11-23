@@ -220,3 +220,54 @@ def test_frame_selection_guard_snaps_only_the_partition_whose_cut_did_not_act():
     assert g.last_snapped == 1
     assert y[names.index("noise_max_g1")] == 3.0 and y[names.index("corr_thresh_g1")] == 0.0
     assert y[names.index("noise_max_g2")] == 1.02 and y[names.index("corr_thresh_g2")] == 0.5
+
+
+def test_guard_projects_angsep_when_the_space_pins_anglemax():
+    """make_space pins anglemax at 360 for a PA span of 20 deg or less (a user's note of 2026-11-22)."""
+    small = np.linspace(-6.33, 6.33, 189)                    # 12.66 deg of rotation
+    arc = arcdist_deg(22, 52, 4.0)
+    for parts in (None, ["n1"]):
+        if parts is None:
+            sp = SearchSpace([Param("angsep", 0, 3, default=3.0), Param("bin", 1, 10, "int", default=1),
+                              Param("k_klip", 1, 20, "int", default=5)], fixed={"anglemax": 360.0})
+        else:
+            block = [Param("angsep", 0, 3, default=3.0), Param("bin", 1, 10, "int", default=1),
+                     Param("k_klip", 1, 20, "int", default=5)]
+            sp = SearchSpace(fixed={"anglemax": 360.0}).replicate(block, parts)
+        assert "anglemax" not in sp.bases
+        g = ReferenceCountGuard(lambda pid: small, fwhm_px=4.0, lam_over_d_px=4.0, n_min_ref=10, ref_frac=0.95)
+        x = sp.default_vector()
+        xp = g(x, sp, zone=(22, 52))
+        a = float(xp[sp.dims_of_base("angsep")[0]])
+        asf = max_feasible_angsep(small, 360.0, arc, 10, 0.95, 0.0, 3.0)
+        assert a == pytest.approx(asf) and 0 < a < 3.0
+        assert ref_fraction(small, a, 360.0, arc, 10) >= 0.95
+        assert ref_fraction(small, 3.0, 360.0, arc, 10) == 0.0     # where it was: no target kept a reference
+    # a space that neither searches nor pins anglemax passes through
+    sp2 = SearchSpace([Param("angsep", 0, 3, default=3.0)])
+    x2 = sp2.default_vector()
+    assert g(x2, sp2, zone=(22, 52)) is x2
+
+
+def test_make_space_s_guard_projects_angsep_on_a_sequence_of_little_rotation():
+    from klip_tpe.instruments import generic
+    from klip_tpe.instruments.search_space import make_space
+    from klip_tpe.synthetic import synthetic_klip_dataset
+
+    from klip_tpe.injection import GaussianPSF
+
+    ds = synthetic_klip_dataset(nframes=60, size=64, pa_span=12.66, seed=2)
+    model = GaussianPSF(4.0, star_flux=1.0)
+    red = generic.make_reducer({"n1": ds}, pxscale=0.05, lam_m=3.8e-6, diam_m=8.4, injection_model=model,
+                               log=lambda *a: None)
+    r0 = next(iter(red.reducers.values()))
+    assert r0.model is model                               # the model given, not one built from a template
+    space = make_space(red, k_klip_max=10, search_angles=True)
+    assert "anglemax" in space.fixed and "anglemax" not in space.bases
+    guard = generic.make_guard(red, k_max=10)
+    x = space.default_vector({"angsep": 3.0, "bin": 5})          # 12 binned frames, 11 references each
+    xp = guard(x, space, zone=(8, 20))
+    a = float(xp[space.dims_of_base("angsep")[0]])
+    arc = arcdist_deg(8, 20, r0.lam_over_d_px)
+    assert ref_fraction(np.sort(ds.angles), 3.0, 360.0, arc, 10) == 0.0
+    assert 0 < a < 3.0

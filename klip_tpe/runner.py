@@ -2147,14 +2147,57 @@ class Runner:
                  float(rule.radial_fwhm)) for k in known]
 
     def _snr_map(self, img: np.ndarray, **kw) -> np.ndarray:
-        """:func:`~klip_tpe.products.snr_map` of a product, its noise without the pixel mask and,
-        under the sidelobe rule, without the known companions' ADI arcs."""
+        """Make the S/N map of a product, its noise without the known companions or the pixel mask.
+
+        Parameters
+        ----------
+        img : ndarray, shape (ny, nx)
+            The product, with the star at ``((nx-1)/2, (ny-1)/2)``.
+        kw : dict
+            More keywords for :func:`~klip_tpe.products.snr_map`, such as ``exclude_xy`` (sources
+            left out of the noise besides the known companions) or ``info``.
+
+        Returns
+        -------
+        snr : ndarray, shape (ny, nx)
+            The S/N map.
+
+        Notes
+        -----
+        The known companions' keep-outs (``excl_fwhm`` of the map, 1.5 FWHM) are always left out of
+        each radius' noise, and under the sidelobe rule their ADI arcs too.  Before 2026-11-23 only
+        the rule's arcs left them out, so with the rule off, the default, a companion counted in its
+        own radius' noise, and a bright one could read half its S/N (a user's note of 2026-11-22).
+        """
         from .products import snr_map
         arcs = self._known_arcs()
         if arcs:
             kw.update(excl_arcs=arcs, pxscale=self.pxscale, angle_convention=self.reducer.angle_convention)
+        known = self._known_xy(np.shape(img))
+        if known:
+            kw["exclude_xy"] = list(kw.get("exclude_xy") or []) + known
         kw.setdefault("pixel_mask", self._pixel_mask())
         return snr_map(img, self.fwhm, **kw)
+
+    def _known_xy(self, shape) -> List[Tuple[float, float]]:
+        """Return the pixels of the known companions, the metric's and the sampler's.
+
+        Parameters
+        ----------
+        shape : tuple of int
+            Shape of the image, ``(ny, nx)``, with the star at its middle.
+
+        Returns
+        -------
+        xy : list of tuple of 2 floats
+            Each companion's ``(x, y)``, each listed once.
+        """
+        known: List[Tuple[float, float]] = []
+        for k in list(self._known()) + [tuple(k) for k in getattr(self.sampler, "known", ()) or ()]:
+            kk = (float(k[0]), float(k[1]))
+            if kk not in known:
+                known.append(kk)
+        return self._inj_xy(known, shape)
 
     def _snr_product(self, img: np.ndarray, hdr: Dict[str, Any], **kw) -> Tuple[np.ndarray, Dict[str, Any], Dict]:
         """:meth:`_snr_map` of a product and its FITS header, which names the radii whose noise
@@ -2563,6 +2606,34 @@ class Runner:
             if v is not None and np.isfinite(float(v)):
                 am.append(float(v))
         return min(rot, max(am)) if am else rot
+
+    def _rotation_note(self, cfg: Config, rlo: float, rhi: float) -> str:
+        """Return how far the frames turn a source in the injection band, for a log line.
+
+        Parameters
+        ----------
+        cfg : Config
+            The configuration, whose selected partitions' frames count.
+        rlo : float
+            Inner edge of the injection band, in arcsec.
+        rhi : float
+            Outer edge of the injection band, in arcsec.
+
+        Returns
+        -------
+        note : str
+            ``" (the frames turn X deg, Y FWHM of arc at R\")"``, or an empty string when the reducer
+            gives no angles.
+        """
+        try:                                  # a log line's detail, never a reason to fail the scan
+            rot = self._rotation_deg(cfg)
+            if rot is None or not np.isfinite(rot):
+                return ""
+            r_mid = 0.5 * (float(rlo) + float(rhi))
+            arc = np.deg2rad(rot) * r_mid / self.pxscale / max(float(self.fwhm), 1e-9)
+        except Exception:                     # noqa: BLE001
+            return ""
+        return f" (the frames turn {rot:.1f} deg, {arc:.1f} FWHM of arc at {r_mid:.2f}\")"
 
     def _grid_geometry(self, cfg: Config) -> Dict[str, Any]:
         """The contrast grid's measuring settings at ``cfg``: the metric's FWHM, pixel scale,
@@ -3708,9 +3779,11 @@ class Runner:
                          + (f" -- the data still wants more modes at k = {sc.size}; raise "
                             f"k_klip_max, which caps the SEARCH as well as this scan"
                             if edge == "top" else
-                            " -- k = 1 keeps only the single dominant mode, which is the "
-                            "signature of a basis whose first component is not the star "
-                            "(an unsubtracted background, say)"))
+                            " -- k = 1 keeps only the single dominant mode.  That is the signature "
+                            "of a basis whose first component is not the star (an unsubtracted "
+                            "background, say), or of little field rotation, under which each added "
+                            "mode takes more of the sources themselves"
+                            + self._rotation_note(cfg0, rlo, rhi)))
             info["kscan_edge"] = edge or None
             # And when the win is inside the draw-to-draw spread, it is not a win: keep the
             # incumbent rather than moving the seed of the whole run on noise.

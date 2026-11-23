@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased — 2026-11-23 (little field rotation, the companions in the S/N maps, and a stitch whose noise falls continuously)
+
+After a user's note of 2026-11-22, from an LBTI/LMIRCam run of 189 frames over 12.7 deg.
+
+- **The reference-count guard works when `anglemax` is pinned** (`feasibility.ReferenceCountGuard`).
+  `make_space` pins `anglemax` at 360 for a PA span of 20 deg or less, and the guard then returned
+  every point as it came.  `klip_annular` falls back to all other frames for a target with fewer
+  than 4 references, so any `angsep` past the rotation gave the same reduction, whatever its value.
+  On that run all five validated winners sat on the plateau, their `angsep` of 1.7 to 3.0 lambda/D
+  unlike what was done, and the search spent much of its budget there.  The guard now takes the
+  pinned value and projects `angsep` alone, to the largest that leaves `n_min_ref` references for 95 %
+  of the targets.  Its docstrings come up to the rule.
+- **The S/N maps leave the known companions out of the noise** (`Runner._snr_map`, and the S/N map
+  `find_candidates` makes).  Only the sidelobe rule's arcs kept them out, so with the rule off, the
+  default, each companion counted in its own radius' noise, and a bright one read as little as half
+  its S/N in `klip_stitched_snr.fits`.  Each companion's 1.5 FWHM keep-out now leaves the noise
+  whatever the rule, the metric's companions and the sampler's.
+- **The stitched image cells' noise falls continuously away from the star** (`display._radial_gain`,
+  `STITCH_SCALE`).  Each tile over its own sigma made the displayed noise fall within each tile and
+  jump back up at the next edge, a sawtooth, and one stretch shows each annulus' own level.  The
+  default is now the `radial_gain` of the note's driver: the stitch's robust scatter in 2 px rings, the
+  known companions left out, a running median of 5 rings within each annulus, one power law in
+  radius fitted to all of them, and a gain of the power law over the smoothed scatter, within each
+  pixel's annulus.  On that run's stitch the package's gain equals the driver's, and the displayed
+  noise just outside each inner edge over just inside it comes out at 0.93 to 0.98, where the power
+  law gives 0.90 to 0.96, against 0.91 to 1.40 with the tiles' sigmas.  The color bar says the stitch
+  is radially scaled, and the S/N cells keep the unscaled stitch.  `--stitch-scale tile` or `one` (the
+  run commands, `resume` and `render`), `LiveDisplay(stitch_scale=)`, `render_steps(stitch_scale=)`
+  and `KLIP_TPE_STITCH_SCALE` give the other two, and the panels process takes the run's choice.
+- **The calibration's k = 1 warning names little field rotation** as a cause, beside a basis whose
+  first component is not the star, with how far the frames turn a source in the injection band.
+- **`generic.make_reducer(injection_model=)`** takes a model, one for every partition or one per
+  partition, such as a `FramePSF`, in place of the `TemplatePSF` it builds from each template.
+- Docs: CUSTOM_PIPELINE.md (the guard on a pinned `anglemax`, the injection model), DISPLAY.md (the
+  three scalings), RUNNING.md (the S/N maps, `klip_gram` from a script), CLI.md.  Tests:
+  `tests/test_little_rotation_and_stitch_noise.py`, `tests/test_feasibility.py` (a pinned `anglemax`,
+  and `make_space` with `make_guard` on 12.7 deg), and the display, k-scan and sidelobe tests for the
+  new default and helpers.
 ## Unreleased — 2026-11-22 (the commit hashes the docs cite)
 
 - The commits from `a56e91c` on have new hashes.  The hashes this file, `docs/RUNNING.md`, two

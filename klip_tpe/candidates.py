@@ -356,7 +356,8 @@ def find_candidates(image: Optional[np.ndarray], stack: np.ndarray, fwhm: float,
         ``max(0.9 fwhm, 2)`` px (216).
     known, injected
         ``(rho, theta[, contrast])`` lists for the ``KNOWN`` / ``INJ`` flags (and
-        ``known`` is excluded from the noise rings).
+        ``known`` is excluded from the noise rings, and from the noise of the S/N map made
+        here, 1.5 FWHM around each, since 2026-11-23).
     persistence_map
         ``paramverify_stim_stitched`` map for the ``f_pv`` score term.
     verify_top
@@ -390,8 +391,16 @@ def find_candidates(image: Optional[np.ndarray], stack: np.ndarray, fwhm: float,
         im = np.asarray(image, float)
         arcs = [] if sidelobes is None else [(float(k[0]), float(k[1]), sidelobes.half_width(float(k[0]) / pxscale, fwhm),
                                               float(sidelobes.radial_fwhm)) for k in known]
+        # the known companions are no noise, whatever the sidelobe rule (a user's note of 2026-11-22)
+        kxy: List[Tuple[float, float]] = []
+        if len(known):
+            cx0, cy0 = star_center(im.shape)
+            kx0, ky0 = source_xy([float(k[0]) for k in known], [float(k[1]) for k in known], pxscale, cx0, cy0,
+                                 angle_convention)
+            kxy = list(zip(np.atleast_1d(kx0).tolist(), np.atleast_1d(ky0).tolist()))
         snrmap = snr_map(radprof(im) if flatten else im, fwhm, excl_arcs=arcs, pxscale=pxscale,
-                         angle_convention=angle_convention, pixel_mask=(rules or {}).get("pixel_mask"))
+                         angle_convention=angle_convention, pixel_mask=(rules or {}).get("pixel_mask"),
+                         exclude_xy=kxy)
     snrmap = np.asarray(snrmap, float)
     iwa = 1.2 * fwhm if iwa_px is None else float(iwa_px)
     owa = (min(nx, ny) / 2.0 - fwhm) if owa_px is None else float(owa_px)
