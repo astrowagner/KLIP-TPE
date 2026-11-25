@@ -26,7 +26,7 @@ __all__ = ["frame_selection_mask", "bin_frames", "bin_groups", "bin_by_groups", 
            "coverage_map", "group_mean", "group_bounds", "bins_with_data", "rotation_backend", "set_rotation_backend",
            "rotation_info",
            "nw_ang_comb", "nw_ang_comb_ref", "klip_basis", "zone_indices", "klip_annular", "klip_fm_zone",
-           "arcdist_deg", "reference_mask", "KLIPParams"]
+           "arcdist_deg", "reference_mask", "unwrap_angles", "KLIPParams"]
 
 
 # ----------------------------------------------------------------------------
@@ -93,6 +93,53 @@ def run_blocks(fn, blocks: Sequence[Tuple[int, int]], threads: int = 1) -> None:
         return
     from .parallel import target_pool
     list(target_pool(int(threads)).map(lambda b: fn(*b), blocks))
+
+
+# ----------------------------------------------------------------------------
+# angles on one branch
+# ----------------------------------------------------------------------------
+def unwrap_angles(angles) -> np.ndarray:
+    """Put a sequence's angles on one continuous branch, by whole turns.
+
+    Parallactic and roll angles are often stored in (-180, 180] or [0, 360), so a sequence that
+    crosses the branch cut reads as two groups about 360 degrees apart.  The frame selection, the
+    binning and the rotation a sequence spans all take differences of the angles as they are, so
+    such a sequence must come onto one branch first.  The angles are cut at the largest gap round
+    the circle and each moves by a whole number of turns, which changes no derotation.
+
+    Parameters
+    ----------
+    angles : array_like, shape (n,)
+        The angles, in degrees, in any order.  A NaN stays where it is.
+
+    Returns
+    -------
+    unwrapped : ndarray, shape (n,)
+        The angles in float64, each equal to its input modulo 360.  The input's values come back
+        when they span less than 180 degrees, where no cut can lie inside them, and the first
+        finite angle always keeps its value.
+
+    Notes
+    -----
+    Two frames whose stored angles differ by less than 180 degrees differ by the same on the
+    circle, so a sequence spanning less than half a turn needs nothing.  Past that, the largest gap
+    is where the sequence does not go: a sequence through the cut at +-180 or 0/360 has it at the
+    far side of the circle from the cut.
+    """
+    a = np.array(angles, dtype=float)
+    fin = np.isfinite(a)
+    if int(fin.sum()) < 2:
+        return a
+    v = a[fin]
+    if float(np.ptp(v)) < 180.0:
+        return a
+    s = np.sort(np.mod(v, 360.0))
+    gaps = np.diff(np.concatenate([s, s[:1] + 360.0]))
+    start = s[(int(np.argmax(gaps)) + 1) % s.size]          # the first angle past the largest gap
+    b = np.mod(v - start, 360.0) + start
+    b += 360.0 * np.round((v[0] - b[0]) / 360.0)             # the first frame keeps its value
+    a[fin] = b
+    return a
 
 
 # ----------------------------------------------------------------------------

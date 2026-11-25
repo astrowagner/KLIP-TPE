@@ -6255,6 +6255,7 @@ class Runner:
         self._auto_resume()            # any run is resumable, however it was constructed
         if not self._resumed:
             self._check_data_edits()   # a resume checked them as it adopted the checkpoint
+        self._note_unwrapped_angles()
         self._register()
         self._start_workers()          # before the heartbeat thread: the fork copies one thread
         self.hb.start()                # from here on the directory says whether this is alive
@@ -7544,6 +7545,36 @@ class Runner:
                              f"--drop-frames, --subtract-sources and --inject-sources from the checkpoint when "
                              f"they are not typed), or start a new run directory.  klip-tpe rereduce reduces a "
                              f"finished run's winners on other frames.")
+
+    def _note_unwrapped_angles(self) -> List[str]:
+        """Log each dataset whose angles crossed a branch cut and were put on one branch.
+
+        A :class:`~klip_tpe.reducer.Dataset` moves such angles by whole turns as it is made
+        (:func:`klip_tpe.klip.unwrap_angles`), which changes no derotation, and counts the frames it
+        moved in ``meta["angles_unwrapped"]``.
+
+        Returns
+        -------
+        lines : list of str
+            The lines logged, one per dataset whose angles moved, empty when none did.
+        """
+        if isinstance(self.reducer, PartitionedReducer):
+            reds = dict(getattr(self.reducer, "reducers", {}) or {})
+        else:
+            reds = {None: self.reducer}
+        lines = []
+        for pid, r in reds.items():
+            data = getattr(r, "data", None)
+            n = int((getattr(data, "meta", None) or {}).get("angles_unwrapped", 0) or 0)
+            if not n:
+                continue
+            ang = np.asarray(data.angles, float)
+            where = "" if pid is None else f" of partition {pid}"
+            lines.append(f"  angles: {n} of {ang.size} frames{where} crossed +-180 or 0/360 deg and moved by whole "
+                         f"turns onto one branch, {np.nanmin(ang):.2f} to {np.nanmax(ang):.2f} deg")
+        for ln in lines:
+            self.log(ln)
+        return lines
 
     def _auto_resume(self) -> None:
         """Continue a check-pointed run in this directory, unless told not to.

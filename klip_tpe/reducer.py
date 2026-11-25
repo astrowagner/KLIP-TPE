@@ -437,7 +437,8 @@ class Dataset:
     cube : ndarray, shape (n, ny, nx)
         The n frames, ny by nx pixels each, in float32.
     angles : ndarray, shape (n,)
-        Parallactic angle of each frame, in degrees.
+        Parallactic angle of each frame, in degrees.  Angles that cross a branch cut, at +-180 or at
+        0/360, are put on one branch when the dataset is made (:func:`klip_tpe.klip.unwrap_angles`).
     tags : dict of str to ndarray or None, default None
         Per-frame quality tags, ``corrs``, ``noises`` and ``coronoise``.
     texp : float, default 0.0
@@ -463,6 +464,25 @@ class Dataset:
     #: each frame's true north (deg), the frames' own in place of the reducer's ``truenorth``,
     #: at derotation and in the injection azimuth.  None: the reducer's one angle.
     north: Optional[np.ndarray] = None
+
+    def __post_init__(self) -> None:
+        """Bring angles that cross a branch cut onto one branch (:func:`klip_tpe.klip.unwrap_angles`).
+
+        The angles of a sequence that spans less than 180 degrees as stored stay the object given.
+        Otherwise ``angles`` becomes the unwrapped float64 copy and ``meta["angles_unwrapped"]`` the
+        number of frames moved by whole turns, so a loader or a log can say it.
+        """
+        from .klip import unwrap_angles
+        if self.angles is None:
+            return
+        raw = np.asarray(self.angles, float)
+        if raw.ndim != 1 or raw.size < 2:
+            return
+        un = unwrap_angles(raw)
+        moved = int(np.count_nonzero(np.isfinite(raw) & (np.abs(un - raw) > 1e-9)))
+        if moved:
+            self.angles = un
+            self.meta = dict(self.meta or {}, angles_unwrapped=moved)     # a copy: the caller's dict stays as it was
 
     @property
     def nframes(self) -> int:

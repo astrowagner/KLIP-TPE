@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased — 2026-11-25 (angles that cross a branch cut, on one branch)
+
+From the audit of 2026-11-25.
+
+- **A dataset puts angles that cross a branch cut on one branch** (`klip.unwrap_angles`,
+  `Dataset.__post_init__`).  Parallactic and roll angles are stored in (-180, 180] or [0, 360), and
+  no loader unwrapped them.  `klip.reference_mask`, `_bin_groups`, the guards' reference fractions
+  and every PA span take differences of the angles as stored.  A 60 deg sequence stored as 150 to
+  180 and -180 to -150 read a span of 358.5 deg, and a frame's neighbor 1 deg away across the cut
+  counted as a reference 359 deg away.  With `anglemax` 60 the median frame kept 8 references where
+  the continuous sequence keeps 31, 12 of the 60 frames were dropped, and a synthetic cube's image
+  differed from the continuous sequence's by 3.3 times its rms.
+- The angles are cut at the largest gap round the circle, and each moves by a whole number of
+  turns, which changes no derotation.  A sequence that spans less than 180 deg as stored comes back
+  untouched, and the first frame keeps its angle.  `meta["angles_unwrapped"]` counts the frames
+  moved, and the run's log names each dataset whose angles moved (`Runner._note_unwrapped_angles`).
+- Exposed: targets that transit south of the zenith at the VLT or north of it at the LBT, with raw
+  parallactic angles, and JWST rolls on both sides of 0/360.  None of the runs the audit could read
+  crossed a cut, with spans of 33.8 to 126.9 deg.  A run made on frames that did would reduce
+  differently on resume, its references now the ones the sequence has.
+- Docs: CUSTOM_PIPELINE.md (section 1).  Tests: `tests/test_angle_wrap.py`.
+
 ## Unreleased — 2026-11-25 (a source read where it is given, and the blind search's FAP over the field)
 
 From the audit of 2026-11-25.

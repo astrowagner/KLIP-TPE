@@ -32,6 +32,17 @@ Convention: rotating frame *i* counter-clockwise by `angles[i] + truenorth` (wit
 sign, negate them; a constant offset goes into `truenorth`. Check this once on a known
 companion — it cannot be inferred from the code.
 
+Angles stored in (-180, 180] or [0, 360) can cross the branch cut during a sequence, as
+parallactic angles do for a target that transits south of the zenith at the VLT or north of it
+at the LBT, and as JWST rolls do about 0/360. A `Dataset` puts them on one branch when it is
+made (`klip.unwrap_angles`, since 2026-11-25). It cuts the circle at the largest gap between the
+frames and moves each angle by a whole number of turns, which changes no derotation. The frame
+selection, the binning and the PA span take differences of the angles as they are, so before, a
+60° sequence through ±180° read as a span of 358.5° and a frame's neighbor across the cut
+counted as a reference 359° away. A sequence that spans less than 180° as stored comes back
+untouched, and the first frame keeps its angle. `meta["angles_unwrapped"]` counts the frames
+moved, and the run's log names them (`angles: ... moved by whole turns onto one branch`).
+
 One `Dataset` per *partition* (night, roll, chop state, epoch …). Partitions get their own
 parameter blocks and can be dropped by the search (`drop1/drop2` dims).
 
