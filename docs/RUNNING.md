@@ -743,6 +743,17 @@ line through alpha Cen A along the A-B direction (PA 13 and 193 deg):
 
 * `--forbidden-pa PA HALFWIDTH` keeps the injections out of a wedge, on `near` as on `generic`
   and `ales`.  Give it for PA and for PA + 180.
+* The sampler places a draw's sources evenly in angle and draws only the first angle, so some
+  rules leave it no draw.  3 or 6 sources cannot all miss sectors of 15 deg half-width or more
+  that lie 90 deg apart, while 2 or 4 can, and with MIRI's throughput maps and two rolls 10 deg
+  apart the sectors at 0.5" are +/- 16.5 to 25.5 deg.  When every try breaks a rule, the sources
+  are placed again one at a time at the same separations, each clear of the rules and as far in
+  angle from the others as fits (since 2026-11-25, from the audit of that date,
+  `RunConfig.sampler_fallback`).  Before, the last draw was injected as it was, inside the sectors,
+  and nothing said so.  A draw that fits is drawn as before.  The first draw of each kind warns,
+  and the log counts both at each annulus' end (`annulus N: injections, ... placed one source at a
+  time ... and ... injected breaking them`).  A run saved before 2026-11-25 keeps the old draws,
+  and so do `--from-idl-setup` runs.
 * `--mask-line PA HALFWIDTH` leaves the pixels within HALFWIDTH px of the line out of the noise
   apertures, on both sides of the star (`metrics.line_mask`).  As for any noise mask, choose it
   from what is known before the image is looked at.

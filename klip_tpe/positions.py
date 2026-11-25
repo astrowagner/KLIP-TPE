@@ -62,6 +62,15 @@ class PositionSampler:
         The noise rings' sidelobe rule (:class:`~klip_tpe.metrics.Sidelobes`), under which no source is
         drawn in another's ADI sidelobe arc, where its signal would carry the other's negative lobe.
         The :class:`~klip_tpe.runner.Runner` sets it from ``RunConfig.sidelobes``.
+    fallback : bool, default True
+        Whether a draw that breaks a rule at every try is placed again one source at a time
+        (:meth:`sample`).  False hands back the last draw as it is, as before 2026-11-25.  The
+        :class:`~klip_tpe.runner.Runner` sets it from ``RunConfig.sampler_fallback``.
+    n_fallbacks : int
+        Number of draws placed one source at a time.  The first one warns.
+    n_rule_breaks : int
+        Number of draws handed back that break a rule, the fallback off or failed too.  The first one
+        warns.
     _mask_dist : ndarray or None
         Cache of each pixel's distance from the mask, in pixels, made on the first check.
     """
@@ -82,6 +91,11 @@ class PositionSampler:
     #: in another's ADI sidelobe arc, where its signal would carry the other's negative lobe.
     #: The :class:`~klip_tpe.runner.Runner` sets it from ``RunConfig.sidelobes``.
     sidelobes: Optional[object] = field(default=None, repr=False, compare=False)
+    #: whether a draw that breaks a rule at every try is placed again one source at a time (:meth:`sample`)
+    fallback: bool = field(default=True, compare=False)
+    #: draws placed one source at a time, and draws handed back that break a rule (:meth:`sample`)
+    n_fallbacks: int = field(default=0, init=False, repr=False, compare=False)
+    n_rule_breaks: int = field(default=0, init=False, repr=False, compare=False)
     _mask_dist: Optional[np.ndarray] = field(default=None, init=False, repr=False, compare=False)
 
     def _xy(self, rho, theta):
@@ -220,7 +234,23 @@ class PositionSampler:
         Returns
         -------
         sources : list of Source
-            The sources, the last draw's when none passed.
+            The sources.  When every try breaks a rule, the sources placed one at a time
+            (:meth:`_one_at_a_time`), or the last draw when that fails too or ``fallback`` is off.
+
+        Warns
+        -----
+        UserWarning
+            The first time a draw is placed one source at a time, and the first time a draw that breaks
+            a rule is handed back.  Each also counts, in ``n_fallbacks`` and ``n_rule_breaks``.
+
+        Notes
+        -----
+        ``"spread"`` places the sources ``360 / n`` degrees apart and draws only the first angle, so
+        some rules leave it no draw.  3 or 6 sources cannot all miss sectors of 15 degrees' half-width
+        or more that lie 90 degrees apart, as a four-quadrant mask's do, while 2 or 4 can.  With MIRI's
+        throughput maps and two rolls 10 degrees apart the sectors at 0.5" are +/- 16.5 to 25.5
+        degrees, and every draw of 3 or 6 sources broke a rule (the audit of 2026-11-25).  A draw that
+        passes is the same as before, and so is the generator's state after it.
         """
         n = max(int(n), 1)
         rmin = self.min_r_fwhm * self.fwhm_as
@@ -254,7 +284,75 @@ class PositionSampler:
                     rho[i] = r_lo + (((r0 - r_lo) + i * span / n) % span) if span > 0 else r_lo
             if not self._bad(rho, theta):
                 break
+        else:
+            placed = self._one_at_a_time(rho, rng) if self.fallback else None
+            if placed is not None:
+                theta = placed
+                self.n_fallbacks += 1
+                if self.n_fallbacks == 1:
+                    import warnings
+                    warnings.warn(
+                        f"PositionSampler: no draw of {n} evenly spaced source{'s' * (n != 1)} at {r_lo:.3f}-"
+                        f"{r_hi:.3f}\" in {tries} tries kept clear of the sampler's rules (the known sources' "
+                        f"keep-outs, the forbidden sectors, the other sources' sidelobes, the mask), so the sources "
+                        f"are placed one at a time, each clear of them, as far apart as they fit", UserWarning,
+                        stacklevel=2)
+            else:
+                self.n_rule_breaks += 1
+                if self.n_rule_breaks == 1:
+                    import warnings
+                    warnings.warn(
+                        f"PositionSampler: none of {tries} draws of {n} source{'s' * (n != 1)} at {r_lo:.3f}-"
+                        f"{r_hi:.3f}\" kept clear of the sampler's rules (the known sources' keep-outs, the "
+                        f"forbidden sectors, the other sources' sidelobes, the mask)"
+                        + (", nor did placing them one at a time" if self.fallback else "")
+                        + ", so the last draw is injected as it is", UserWarning, stacklevel=2)
         return [Source(float(r), float(t), float(contrast)) for r, t in zip(rho, theta)]
+
+    def _one_at_a_time(self, rho: np.ndarray, rng: np.random.Generator, n_cand: int = 72) -> Optional[np.ndarray]:
+        """Place sources at given separations one at a time, each clear of the rules and as far as it fits from the rest.
+
+        Each source draws ``n_cand`` angles, keeps those at which the sources placed so far and it
+        break no rule (:meth:`_bad`) and lie ``min_mutual_fwhm`` FWHM or more apart, and takes the one
+        farthest in angle from the others.
+
+        Parameters
+        ----------
+        rho : ndarray, shape (n,)
+            Separation of each source, in arcsec.
+        rng : numpy.random.Generator
+            The generator.
+        n_cand : int, default 72
+            Number of angles each source draws.
+
+        Returns
+        -------
+        theta : ndarray or None
+            Angle of each source, in degrees, or None when a source finds no angle.
+        """
+        rho = np.asarray(rho, float)
+        theta = np.zeros(rho.size)
+        sep = self.min_mutual_fwhm * self.fwhm_as
+        for i in range(rho.size):
+            cand = rng.random(int(n_cand)) * 360.0
+            best, far = None, -1.0
+            for c in cand:
+                theta[i] = c
+                if self._bad(rho[:i + 1], theta[:i + 1]):
+                    continue
+                if i:
+                    x, y = self._xy(rho[:i + 1], theta[:i + 1])
+                    if np.min(np.hypot(x[:i] - x[i], y[:i] - y[i])) < sep:
+                        continue
+                    gap = float(np.min(np.abs((theta[:i] - c + 180.0) % 360.0 - 180.0)))
+                else:
+                    gap = 0.0
+                if gap > far:
+                    best, far = c, gap
+            if best is None:
+                return None
+            theta[i] = best
+        return theta
 
     def describe(self) -> dict:
         """Return the sampler's settings, for a run's record.

@@ -219,6 +219,12 @@ class RunConfig:
         innermost inner edge and outermost outer edge are reduced and stitched as given.
         ``"all"`` pads every edge, as the IDL does.  A run saved before this field existed
         resumes with ``"all"``, so its evaluations stay comparable.
+    sampler_fallback
+        whether a draw of injections that breaks the sampler's rules at every try is placed again one
+        source at a time, each clear of the rules (:attr:`klip_tpe.positions.PositionSampler.fallback`).
+        Evenly spaced sources cannot all miss sectors that lie a multiple of their spacing apart, and
+        such a draw was injected as it was, silently.  A run saved before 2026-11-25 resumes with
+        False, so its draws reproduce.  The log counts both kinds of draw at each annulus' end.
     klip_eig_cut
         the eigenvalue cut of the KL modes (:attr:`klip_tpe.klip.KLIPParams.eig_tol`).
         ``"relative"`` (the default) drops only the modes whose eigenvalue lies at or below the
@@ -494,6 +500,7 @@ class RunConfig:
     stitch_blend: str = "own"             # "own" (each pixel from its tile's annulus) | "weighted" (2 px blend)
     verify_position: str = "given"        # "given" (sources at their positions) | "peak" (within 1.5 px)
     klip_eig_cut: str = "relative"        # "relative" (the round-off floor) | "absolute" (1e-6, the IDL)
+    sampler_fallback: bool = True         # a draw that breaks the sampler's rules placed one source at a time
     stitch_overlap_pads: bool = False     # pad the stitch's tile edges between overlapping annuli
     stitch_injections: str = "all"        # "all" (every annulus' validation sources in each) | "own"
     #: the library the run rotates its frames with, "scipy" | "opencv" (klip.set_rotation_backend):
@@ -647,6 +654,7 @@ class RunConfig:
         d.setdefault("stitch_blend", "weighted")
         d.setdefault("verify_position", "peak")
         d.setdefault("klip_eig_cut", "absolute")
+        d.setdefault("sampler_fallback", False)
         return _from_dict_filtered(cls, d)
 
 
@@ -2017,12 +2025,40 @@ class Runner:
     def _apply_sampler_config(self) -> None:
         """``RunConfig.min_r_fwhm`` onto the run's sampler (the base of a replay), so the run
         injects with the floor it was started with, whatever sampler the caller built.  Then
-        the metric's inner guard is fitted to that floor (:meth:`_fit_inner_guard`)."""
+        the metric's inner guard is fitted to that floor (:meth:`_fit_inner_guard`).
+        ``RunConfig.sampler_fallback`` goes onto the sampler the same way."""
         v = getattr(self.cfg, "min_r_fwhm", None)
         smp = getattr(self.sampler, "base", None) or self.sampler
         if v is not None and hasattr(smp, "min_r_fwhm"):
             smp.min_r_fwhm = float(v)
+        if hasattr(smp, "fallback"):
+            smp.fallback = bool(getattr(self.cfg, "sampler_fallback", True))
         self._fit_inner_guard(smp)
+
+    def _sampler_note(self, ia: int) -> Optional[str]:
+        """Log the draws of an annulus the sampler could not keep evenly spaced, or clear of its rules at all.
+
+        Parameters
+        ----------
+        ia : int
+            The annulus, counted from 0.
+
+        Returns
+        -------
+        line : str or None
+            The line logged, None when every draw since the last note kept clear of the rules.
+        """
+        smp = getattr(self.sampler, "base", None) or self.sampler
+        now = (int(getattr(smp, "n_fallbacks", 0) or 0), int(getattr(smp, "n_rule_breaks", 0) or 0))
+        was = getattr(self, "_sampler_seen", (0, 0))
+        self._sampler_seen = now
+        fb, rb = now[0] - was[0], now[1] - was[1]
+        if not (fb or rb):
+            return None
+        line = (f"  annulus {ia + 1}: injections, {fb} draw(s) placed one source at a time, no evenly spaced draw "
+                f"keeping clear of the sampler's rules, and {rb} draw(s) injected breaking them")
+        self.log(line)
+        return line
 
     def _pa_coverage(self) -> Optional[float]:
         """The data's parallactic-angle coverage (deg): the largest PA range of any partition's
@@ -5534,6 +5570,9 @@ class Runner:
         # recorded in the checkpoint when it completes so a resumed run picks up at the
         # first unfinished hook instead of skipping or repeating them)
         self._run_hooks(ia, winner)
+        # the annulus' draws the sampler could not keep evenly spaced or clear of its rules, its
+        # search, calibration, validation and hooks
+        self._sampler_note(ia)
         # The display's books and panels for the annulus are drawn here, on this thread.  They
         # get a stage of their own, since under the last hook's name minutes of them read as a
         # candidate search in heartbeat.json and in the stall note.

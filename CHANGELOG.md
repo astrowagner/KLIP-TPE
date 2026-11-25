@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased — 2026-11-25 (a draw of injections that breaks the sampler's rules, placed one source at a time)
+
+From the audit of 2026-11-25.
+
+- **A draw that breaks a rule at every try is placed again one source at a time**
+  (`positions.PositionSampler.sample`, `PositionSampler.fallback`, `RunConfig.sampler_fallback`).  The
+  sampler places a draw's sources evenly in angle and draws only the first angle.  After 30 tries
+  that broke a rule (a known source's keep-out, a forbidden sector, another source's sidelobe, the
+  mask) it handed back the last draw as it was, and nothing counted or logged it.  Evenly spaced
+  sources cannot all miss sectors that lie a multiple of their spacing apart.  With sectors every
+  90 deg of +/- 15 deg or more every draw of 3 or 6 sources broke a rule, and no draw of 2 or 4 did.
+  With MIRI's throughput maps and two rolls 10 deg apart the sectors at 0.5" are +/- 16.5 to 25.5
+  deg, so every draw of 3 or 6.  `scripts/run_miri.py` computes its sectors at the first annulus' mid
+  radius, where they are +/- 10 deg, and stayed at 0.2 % or less.
+- Such a draw now keeps its separations, and each source takes, of 72 angles drawn, the one clear of
+  the rules and of the sources placed before it that lies farthest in angle from them.  A draw that
+  fits is drawn as before, with the generator in the same state after it.  The draws placed this way
+  and those that still break a rule are counted (`n_fallbacks`, `n_rule_breaks`), the first of each
+  kind warns, and the log counts both at each annulus' end (`Runner._sampler_note`).
+- A run saved before 2026-11-25 resumes with the fallback off, and so do `--from-idl-setup` runs, so
+  their draws reproduce.
+- Docs: RUNNING.md (the bullet on the sampler under `--forbidden-pa`).  Tests:
+  `tests/test_sampler_rule_breaks.py`.
+
 ## Unreleased — 2026-11-25 (the KL modes' eigenvalue cut at the round-off floor)
 
 From the audit of 2026-11-25.
