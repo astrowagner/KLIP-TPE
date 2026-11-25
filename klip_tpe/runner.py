@@ -6331,6 +6331,45 @@ class Runner:
         return next_ia >= self.cfg.nann
 
     def run(self) -> List[AnnulusResult]:
+        """Run the search to its end, or resume it, as the one writer of the run directory.
+
+        The run takes the directory's lock first (:class:`klip_tpe.registry.RunLock`) and holds it to
+        the end, so a second process cannot write the same run, a resume of it included.
+
+        Returns
+        -------
+        results : list of AnnulusResult
+            One per annulus.
+
+        Raises
+        ------
+        RuntimeError
+            If another process holds the run's lock.
+        """
+        from .registry import RunLock, lock_holder
+        lock = RunLock(self.run_dir)
+        if not lock.acquire():
+            who = lock_holder(self.run_dir)
+            raise RuntimeError(
+                f"{os.path.basename(os.path.abspath(self.run_dir))} is being written by another process"
+                + (f" (pid {who})" if who else "") + f", which holds {lock.path}.  Two writers on one run "
+                f"directory would corrupt it.  klip-tpe runs shows what is running, and klip-tpe runs --stop "
+                f"{os.path.abspath(self.run_dir)} stops it.")
+        self._lock = lock
+        try:
+            return self._run_locked()
+        finally:
+            lock.release()
+            self._lock = None
+
+    def _run_locked(self) -> List[AnnulusResult]:
+        """Run the search, :meth:`run` holding the lock.
+
+        Returns
+        -------
+        results : list of AnnulusResult
+            One per annulus.
+        """
         self._auto_resume()            # any run is resumable, however it was constructed
         if not self._resumed:
             self._check_data_edits()   # a resume checked them as it adopted the checkpoint

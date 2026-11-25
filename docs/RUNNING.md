@@ -1251,6 +1251,30 @@ run_20260912_104108  orphaned     1204        19.4h     10  1
 
 `--root <data root>` also picks up runs started before this version, or by someone else.
 
+A process counts as part of a run when it runs klip-tpe and one of its arguments resolves to
+the run's directory, a relative one against the process's working directory, or when the
+registry recorded its pid for the run and its command line still ends as recorded (a run a
+script started, or a bare `klip-tpe resume`).  The processes a run forks count with it.  Since
+2026-11-25 nothing else does (a note from the NOMIC archive session of that date).  Before, any
+command line that held the run directory, or only its name, and `klip_tpe` counted, so a
+`tee -a .../klip_tpe/run_a.log` in the resume's own pipeline blocked the resume, an analysis
+script given the run counted as running it, and a run of the same name in another folder claimed
+the other's processes.
+
+`klip-tpe runs --stop PATH` stops that run alone.  A bare name stops the one run of that name,
+and where runs in several folders share it, they are listed for a path and none is stopped.
+
+One writer per run is enforced by a lock.  A run takes an exclusive `flock` on `run.lock` in
+its directory before it writes and holds it to its end, and a second process that would write
+the same run, a resume included, is refused.  The kernel drops the lock when the process ends,
+so a crash leaves none behind.  `flock` is reliable on a local disk, so check it before relying
+on it over NFS.  `klip-tpe resume` refuses a run whose lock another process holds, or whose
+processes the scan finds running.  The commands that read a run and look it up the same way
+(`rereduce`, `rescore`, `elect`, `extract`, `render`, `fit-chain`) make the same check and write
+nothing in its directory: they open `run.lock` read-only and try a shared lock, which fails while
+a writer holds it.  A run that finds the lock taken tries again for half a second, so such a check
+never refuses it.
+
 ### Resume needs nothing
 
 Every run records its own command line when it starts, so:

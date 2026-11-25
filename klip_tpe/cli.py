@@ -2415,13 +2415,17 @@ def _fill_from_registry(a, argv=None) -> None:
         rec = next((r for r in runs if r["run_dir"] == os.path.abspath(a.run_dir)), None)
         if rec is None:
             return
-    if rec["state"] in ("running", "stalled"):
+    from .registry import lock_holder
+    held = lock_holder(rec["run_dir"])
+    if held is not None or rec["state"] in ("running", "stalled"):
+        why = ("its lock is held" + (f" by pid {held}" if held else "") if held is not None else
+               f"{len(rec['pids'])} process(es) run it")
+        age = "" if rec.get("age") is None else f", last wrote {rec['age']:.0f}s ago"
         raise SystemExit(
-            f"{os.path.basename(rec['run_dir'])} is still running ({len(rec['pids'])} process(es), "
-            f"last wrote {rec['age']:.0f}s ago).\n"
+            f"{os.path.basename(rec['run_dir'])} is still running ({why}{age}).\n"
             f"Resuming it now would put two writers on the same directory.\n"
             f"  klip-tpe runs                      see what is running\n"
-            f"  klip-tpe runs --stop {os.path.basename(rec['run_dir'])}   stop it first")
+            f"  klip-tpe runs --stop {rec['run_dir']}   stop it first")
     if not need_root:
         return
     # The newest entry is not always the useful one: a resume that took its root from here
@@ -2512,11 +2516,20 @@ def cmd_runs(a):
     elif a.stop_stale:
         targets = [r for r in runs if r["state"] == "orphaned"]
     elif a.stop:
-        want = [os.path.basename(str(x).rstrip("/")) for x in a.stop]
-        targets = [r for r in runs if os.path.basename(r["run_dir"]) in want or r["run_dir"] in a.stop]
-        missing = set(want) - {os.path.basename(r["run_dir"]) for r in targets}
-        for m in missing:
-            print(f"  {m}: no such run on record")
+        # a path stops that run alone, and a bare name the one run of that name, never runs of the same
+        # name in other folders
+        from .registry import runs_named
+        for x in a.stop:
+            hit = runs_named(x, runs)
+            if not hit:
+                print(f"  {x}: no such run on record")
+            elif len(hit) > 1:
+                print(f"  {x}: {len(hit)} runs have that name, so none was stopped.  Give the path of the one "
+                      f"to stop:")
+                for r in hit:
+                    print(f"    klip-tpe runs --stop {r['run_dir']}   ({r['state']}, {len(r['pids'])} process(es))")
+            else:
+                targets += [r for r in hit if r not in targets]
     if targets:
         print(f"stopping {len(targets)} run(s):")
         for r in targets:
@@ -3823,7 +3836,9 @@ def _build_parser():
     p = sub.add_parser("runs", help="what runs exist, which are actually running, and stop the strays")
     p.add_argument("--root", nargs="?", default=None,
                    help="also look for run directories under this data root")
-    p.add_argument("--stop", nargs="+", metavar="RUN", help="stop these runs (name or directory)")
+    p.add_argument("--stop", nargs="+", metavar="RUN",
+                   help="stop these runs: a run directory stops that run alone, and a name the one run of that "
+                        "name (runs of the same name in other folders are listed instead, for a path)")
     p.add_argument("--stop-stale", action="store_true",
                    help="stop runs that still have processes but stopped writing long ago")
     p.add_argument("--stop-all", action="store_true", help="stop every run that has processes")

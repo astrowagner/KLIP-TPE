@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased — 2026-11-25 (the processes of a run counted by their arguments, and one writer per run)
+
+After a note from the NOMIC archive session of 2026-11-25.
+
+- **A process counts as part of a run only when it runs klip-tpe and names the run**
+  (`registry.processes_for`, `registry._entry_point`, `registry._names_run`).  A process counted when
+  its command line held the run directory or only its name, held `klip-tpe` or `klip_tpe`, and its
+  program was not on a list of shells and tools.  So a `tee -a .../klip_tpe/run_a.log` in a resume's
+  own pipeline blocked the resume ("still running (1 process(es), last wrote 117s ago)") while `runs
+  --stop` found nothing, an analysis script given the run counted, and a run of the same name in
+  another folder claimed the other's processes.  Now its program has to be `klip-tpe`, or an
+  interpreter running the `klip-tpe` script or `-m klip_tpe`, and one argument has to resolve to the
+  run directory, a relative one against the process's working directory (`/proc/<pid>/cwd`, or
+  psutil elsewhere).  A pid the registry recorded for the run counts while its command line ends as
+  recorded, which covers a run a script started and a bare `klip-tpe resume`, and the processes a
+  counted one forks count with it.
+- **`klip-tpe runs --stop PATH` stops that run alone** (`registry.runs_named`).  Every argument was
+  cut to its name, so a full path stopped every run of that name.  A bare name now stops the one run
+  of that name, and where several folders hold one, it lists them for a path and stops none.
+- **One writer per run** (`registry.RunLock`, `registry.lock_holder`, `Runner.run`).  A run takes an
+  exclusive `flock` on `run.lock` in its directory before it writes and holds it to its end, so a second
+  writer, a resume included, is refused.  The kernel drops the lock when the process ends, so a crash
+  leaves none.  `klip-tpe resume` refuses a run whose lock another process holds, and a run whose
+  processes the scan finds.  The check (`lock_holder`) opens `run.lock` read-only and tries a shared
+  lock, so the commands that read a run and make the same check (`rereduce`, `rescore`, `elect`,
+  `extract`, `render`, `fit-chain`) write nothing in its directory, and a run that finds the lock taken
+  tries again for half a second (`RunLock.acquire(wait=)`), so a check in flight never refuses it.
+  `flock` is reliable on local disks, so check it before relying on it over NFS.
+- Docs: RUNNING.md ("Knowing what is running, and getting a run back").  Tests:
+  `tests/test_liveness_scan.py`, with the note's cases.
+
 ## Unreleased — 2026-11-25 (the audit's smaller points)
 
 From the audit of 2026-11-25.

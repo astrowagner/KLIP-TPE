@@ -24,7 +24,7 @@ import signal
 import subprocess
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 __all__ = ["registry_path", "register", "known_runs", "processes_for", "stop_run",
            "run_state", "format_table", "records_for"]
@@ -88,59 +88,467 @@ def records_for(run_dir: str) -> List[Dict[str, Any]]:
     return out
 
 
-def _ps() -> List[tuple]:
-    """``[(pid, command line), ...]`` for every process we can see.  Empty when ``ps``
-    is unavailable, in which case liveness falls back to the run's own files."""
+class Proc(NamedTuple):
+    """One process as the liveness scan sees it.
+
+    Attributes
+    ----------
+    pid : int
+        Its id.
+    args : str
+        Its command line as one string, as ``ps`` shows it.
+    argv : tuple of str or None
+        Its arguments exactly, from ``/proc/<pid>/cmdline`` or psutil, or split from ``args``.
+    cwd : str or None
+        Its working directory, None where it cannot be read.
+    ppid : int or None
+        Its parent's id.
+    """
+
+    pid: int
+    args: str
+    argv: Optional[Tuple[str, ...]] = None
+    cwd: Optional[str] = None
+    ppid: Optional[int] = None
+
+
+def _proc_linux(pid: int) -> Optional[Proc]:
+    """Read one process from ``/proc``.
+
+    Parameters
+    ----------
+    pid : int
+        The process.
+
+    Returns
+    -------
+    proc : Proc or None
+        The process, None when it is gone or unreadable.
+    """
+    base = f"/proc/{pid}"
     try:
-        r = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True, timeout=20)
+        with open(base + "/cmdline", "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    argv = tuple(a.decode("utf-8", "replace") for a in raw.split(b"\0") if a)
+    if not argv:
+        return None
+    try:
+        cwd = os.readlink(base + "/cwd")
+    except OSError:
+        cwd = None
+    ppid = None
+    try:
+        with open(base + "/stat") as f:
+            stat = f.read()
+        ppid = int(stat[stat.rindex(")") + 2:].split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return Proc(pid, " ".join(argv), argv, cwd, ppid)
+
+
+def _ps() -> List[Proc]:
+    """Return every process we can see, with its arguments, working directory and parent.
+
+    ``/proc`` gives them on Linux and psutil elsewhere where it is installed.  Otherwise ``ps`` gives
+    the command line as one string, split on spaces, with no working directory, so an argument
+    relative to one cannot name a run.  Empty when nothing can list the processes, in which case
+    liveness falls back to the run's own files and its lock.
+
+    Returns
+    -------
+    procs : list of Proc
+        The processes.
+    """
+    if os.path.isdir("/proc/self"):
+        out = []
+        for name in os.listdir("/proc"):
+            if name.isdigit():
+                pr = _proc_linux(int(name))
+                if pr is not None:
+                    out.append(pr)
+        return out
+    try:
+        import psutil                                         # type: ignore
+        out = []
+        for q in psutil.process_iter(["pid", "ppid", "cmdline", "cwd"]):
+            info = q.info
+            argv = tuple(info.get("cmdline") or ())
+            if argv:
+                out.append(Proc(int(info["pid"]), " ".join(argv), argv, info.get("cwd"), info.get("ppid")))
+        return out
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["ps", "-eo", "pid=,ppid=,args="], capture_output=True, text=True, timeout=20)
     except Exception:
         return []
     out = []
     for line in r.stdout.splitlines():
-        line = line.strip()
-        if not line:
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
             continue
-        pid, _, args = line.partition(" ")
         try:
-            out.append((int(pid), args.strip()))
+            out.append(Proc(int(parts[0]), parts[2].strip(), tuple(parts[2].split()), None, int(parts[1])))
         except ValueError:
             continue
     return out
 
 
-#: command names that can mention a run directory without being one (a shell running a
-#: heredoc, an editor, the very tools used to look for runs)
-_NOT_A_RUN = {"bash", "sh", "zsh", "dash", "fish", "csh", "tcsh", "ps", "grep", "egrep",
-              "pgrep", "pkill", "tail", "head", "less", "more", "cat", "vim", "vi", "nano",
-              "emacs", "code", "open", "find", "rsync", "cp", "mv", "tar", "du", "ls"}
+def _as_proc(entry) -> Proc:
+    """Return a process table's entry as a :class:`Proc`.
+
+    Parameters
+    ----------
+    entry : Proc or tuple
+        A :class:`Proc`, or ``(pid, command line)`` as tables built by hand give it.
+
+    Returns
+    -------
+    proc : Proc
+        The entry, its arguments split from the command line where it has none.
+    """
+    if isinstance(entry, Proc):
+        return entry if entry.argv is not None else entry._replace(argv=tuple(entry.args.split()))
+    pid, args = entry[0], entry[1]
+    return Proc(int(pid), str(args), tuple(str(args).split()), *tuple(entry[2:4]))
+
+
+#: interpreters that can run the klip-tpe script or module
+_PYTHONS = ("python", "pypy")
+
+
+def _entry_point(argv: Sequence[str]) -> Optional[int]:
+    """Tell whether a command line runs klip-tpe, and where its own arguments start.
+
+    It does when its program is ``klip-tpe``, or an interpreter running the ``klip-tpe`` script or
+    ``-m klip_tpe`` (or a module of it).  A shell, ``tee``, an editor or a script of one's own that
+    names a run is not klip-tpe, whatever folder it works in.
+
+    Parameters
+    ----------
+    argv : sequence of str
+        The command line.
+
+    Returns
+    -------
+    start : int or None
+        Index of the first argument after the program, the script or the module, None when the
+        command line does not run klip-tpe.
+    """
+    if not argv:
+        return None
+    prog = os.path.basename(argv[0])
+    if prog in ("klip-tpe", "klip-tpe.exe"):
+        return 1
+    if not prog.lower().startswith(_PYTHONS):
+        return None
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "-m":
+            mod = argv[i + 1] if i + 1 < len(argv) else ""
+            return i + 2 if (mod == "klip_tpe" or mod.startswith("klip_tpe.")) else None
+        if a.startswith("-m") and len(a) > 2:
+            mod = a[2:]
+            return i + 1 if (mod == "klip_tpe" or mod.startswith("klip_tpe.")) else None
+        if a in ("-c",):
+            return None
+        if a.startswith("-"):
+            i += 1
+            continue
+        return i + 1 if os.path.basename(a) in ("klip-tpe", "klip-tpe.py") else None
+    return None
 
 
 def _looks_like_a_run(args: str) -> bool:
-    """A klip-tpe process, not something that merely mentions one."""
-    if "klip-tpe" not in args and "klip_tpe" not in args:
-        return False
-    head = args.split(None, 1)[0] if args.strip() else ""
-    return os.path.basename(head).split(".")[0].lower() not in _NOT_A_RUN
+    """Tell whether a command line, as one string, runs klip-tpe (:func:`_entry_point`).
+
+    Parameters
+    ----------
+    args : str
+        The command line.
+
+    Returns
+    -------
+    is_run : bool
+        True for a klip-tpe process.
+    """
+    return _entry_point(tuple(str(args).split())) is not None
+
+
+def _names_run(argv: Sequence[str], start: int, cwd: Optional[str], run_dir: str) -> bool:
+    """Tell whether one of a command's arguments resolves to a run directory.
+
+    Parameters
+    ----------
+    argv : sequence of str
+        The command line.
+    start : int
+        Index of its first own argument (:func:`_entry_point`).
+    cwd : str or None
+        The process's working directory, against which a relative argument resolves.  None leaves
+        relative arguments out.
+    run_dir : str
+        The run directory, absolute.
+
+    Returns
+    -------
+    names : bool
+        True when an argument, or the value of an ``--option=value``, is the run directory.
+    """
+    want = os.path.normpath(run_dir)
+    for a in argv[start:]:
+        for v in (a, a.split("=", 1)[1] if a.startswith("-") and "=" in a else None):
+            if not v or v.startswith("-"):
+                continue
+            if os.path.isabs(v):
+                path = v
+            elif cwd:
+                path = os.path.join(cwd, v)
+            else:
+                continue
+            if os.path.normpath(path) == want:
+                return True
+    return False
+
+
+def _recorded_pids(run_dir: str) -> Dict[int, Tuple[str, ...]]:
+    """Return the pids the registry recorded as running a run, with the command lines they recorded.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run directory, absolute.
+
+    Returns
+    -------
+    pids : dict of int to tuple of str
+        Each recorded pid and its recorded ``argv``.
+    """
+    out: Dict[int, Tuple[str, ...]] = {}
+    for rec in records_for(run_dir):
+        try:
+            out.setdefault(int(rec["pid"]), tuple(str(a) for a in rec.get("argv") or ()))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
 
 
 def processes_for(run_dir: str, table: Optional[List[tuple]] = None) -> List[int]:
-    """Every pid whose command line names ``run_dir`` -- the parent and its workers alike,
-    including workers orphaned by a parent that is already gone (a forked worker inherits
-    the parent's command line, which is what makes them findable at all).
+    """Return every pid running a run, the parent and its workers alike.
 
-    Deliberately conservative: a shell, an editor or a ``grep`` that happens to mention the
-    directory is not a run, and reporting one as running would block a legitimate resume.
+    A process counts when it runs klip-tpe (:func:`_entry_point`) and one of its arguments
+    resolves to the run directory, relative ones against the process's working directory, or when
+    the registry recorded its pid for the run and its command line still ends with the one recorded
+    (a run a script started, or a bare ``klip-tpe resume``).  A process whose parent counts counts
+    too, the workers a run forks.  A forked worker inherits the parent's command line, so an orphaned
+    worker of a run named on its command line is found as well.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run directory.
+    table : list or None, default None
+        The processes, :class:`Proc` or ``(pid, command line)`` entries.  None lists them
+        (:func:`_ps`).
+
+    Returns
+    -------
+    pids : list of int
+        The pids, sorted.
+
+    Notes
+    -----
+    Until 2026-11-25 a process counted when its command line held the run directory or only its
+    name, held ``klip-tpe`` or ``klip_tpe``, and its program was not on a list of shells and tools.
+    A ``tee -a .../klip_tpe/run_a.log`` in the resume's own pipeline, an analysis script given the
+    run, and another folder's run of the same name all counted, so a resume was refused and
+    ``runs --stop`` signaled them (a note from the NOMIC archive session, 2026-11-25).
     """
-    run_dir = os.path.abspath(run_dir)
-    base = os.path.basename(run_dir.rstrip("/"))
+    run_dir = os.path.normpath(os.path.abspath(run_dir))
     me = os.getpid()
-    hits = []
-    for pid, args in (table if table is not None else _ps()):
-        if pid == me or not (run_dir in args or (base and base in args)):
+    procs = [_as_proc(e) for e in (table if table is not None else _ps())]
+    recorded = _recorded_pids(run_dir)
+    hit = set()
+    for pr in procs:
+        if pr.pid == me:
             continue
-        if _looks_like_a_run(args):
-            hits.append(pid)
-    return sorted(hits)
+        argv = pr.argv or ()
+        start = _entry_point(argv)
+        if start is not None and _names_run(argv, start, pr.cwd, run_dir):
+            hit.add(pr.pid)
+            continue
+        rec = recorded.get(pr.pid)
+        if rec and len(argv) >= len(rec) and tuple(argv[len(argv) - len(rec):]) == rec:
+            hit.add(pr.pid)
+    # the workers of a process that counts, whatever their own command line
+    parent = {pr.pid: pr.ppid for pr in procs}
+    for pr in procs:
+        seen, q = set(), pr.ppid
+        while q and q not in seen and pr.pid != me:
+            if q in hit:
+                hit.add(pr.pid)
+                break
+            seen.add(q)
+            q = parent.get(q)
+    hit.discard(me)
+    return sorted(hit)
+
+
+LOCK_NAME = "run.lock"
+
+
+class RunLock:
+    """The exclusive ``flock`` that makes a process the one writer of a run directory.
+
+    :meth:`Runner.run <klip_tpe.runner.Runner.run>` takes it before it writes and holds it to its end.
+    The kernel drops it when the last process holding its descriptor ends, a crash included, so it
+    never goes stale.  Workers forked while it is held inherit it.  Without ``fcntl``, as on
+    Windows, it takes nothing and never refuses.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run directory.
+
+    Attributes
+    ----------
+    path : str
+        The lock file, ``run.lock`` in the run directory.
+    held : bool
+        Whether this object holds the lock.
+    """
+
+    def __init__(self, run_dir: str):
+        self.path = os.path.join(os.path.abspath(run_dir), LOCK_NAME)
+        self._fd: Optional[int] = None
+        self.held = False
+
+    def acquire(self, wait: float = 0.5) -> bool:
+        """Take the lock, and write this process's pid into the file.
+
+        It tries for up to ``wait`` seconds, so that a :func:`lock_holder` probe, which holds a shared
+        lock for an instant, never makes a starting run look refused.
+
+        Parameters
+        ----------
+        wait : float, default 0.5
+            Seconds to keep trying while another process holds it.
+
+        Returns
+        -------
+        taken : bool
+            True when this process now holds it, False when another holds it.  True without
+            ``fcntl`` or where the file cannot be made, since the lock is a safeguard and never
+            stands in the way of a run.
+        """
+        try:
+            import fcntl
+        except ImportError:                                   # pragma: no cover - Windows
+            return True
+        try:
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+        except OSError:
+            return True
+        deadline = time.monotonic() + max(float(wait), 0.0)
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    os.close(fd)
+                    return False
+                time.sleep(0.02)
+        try:
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{os.getpid()}\n".encode())
+        except OSError:
+            pass
+        self._fd, self.held = fd, True
+        return True
+
+    def release(self) -> None:
+        """Drop the lock, when this object holds it."""
+        if self._fd is None:
+            return
+        try:
+            import fcntl
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+        except Exception:                                     # pragma: no cover - defensive
+            pass
+        try:
+            os.close(self._fd)
+        except OSError:
+            pass
+        self._fd, self.held = None, False
+
+
+def lock_holder(run_dir: str) -> Optional[int]:
+    """Tell whether another process holds a run's lock (:class:`RunLock`), and which.
+
+    It only reads.  The file is opened read-only and tried with a shared lock, which fails while a
+    writer holds the exclusive one, so the commands that read a run (``rereduce``, ``render`` and
+    the others that check it) change nothing in its directory.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run directory.
+
+    Returns
+    -------
+    pid : int or None
+        The pid the holder wrote, 0 when it is held and the file names none, None when nobody else
+        holds it, the run has no lock file, or ``fcntl`` is missing.
+    """
+    path = os.path.join(os.path.abspath(run_dir), LOCK_NAME)
+    try:
+        import fcntl
+        fd = os.open(path, os.O_RDONLY)
+    except (ImportError, OSError):                            # no lock file, or Windows
+        return None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError:
+            pass                                              # a writer holds it
+        else:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return None
+        try:
+            pid = int((os.read(fd, 64).decode(errors="replace").strip() or "0").split()[0])
+        except (OSError, ValueError):
+            return 0
+    finally:
+        os.close(fd)
+    # a lock this process holds, through another descriptor, is no other process's
+    return None if pid == os.getpid() else pid
+
+
+def runs_named(name: str, runs: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return the runs a ``--stop`` argument names: the run at a path, or every run of a bare name.
+
+    Parameters
+    ----------
+    name : str
+        A run directory, absolute or relative, or a run's name alone.
+    runs : sequence of dict
+        The runs on record (:func:`known_runs`).
+
+    Returns
+    -------
+    runs : list of dict
+        The run whose directory the argument is, or the runs whose directory has that name, which
+        can be several in different folders.
+    """
+    n = str(name).rstrip("/")
+    if os.sep in n or os.path.isdir(n):
+        want = os.path.normpath(os.path.abspath(n))
+        return [r for r in runs if os.path.normpath(r["run_dir"]) == want]
+    return [r for r in runs if os.path.basename(os.path.normpath(r["run_dir"])) == n]
 
 
 def run_state(run_dir: str, table: Optional[List[tuple]] = None) -> Dict[str, Any]:
