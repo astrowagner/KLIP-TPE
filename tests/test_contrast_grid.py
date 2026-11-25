@@ -119,8 +119,20 @@ def test_the_curve_is_the_median_over_pa_with_the_band():
         p.status, p.contrast = "converged", c * 1e-6
     pos[9].status, pos[9].contrast = "blocked", None
     out = CG.summarize(pos, [20.0, 30.0], 0.01, cfg, [30.0, 30.0], 17)
-    assert out["curve"] == pytest.approx([3e-6, 25e-6])
+    # the blocked position counts above the four that settled: the median of 5, and no 84th percentile
+    assert out["curve"] == pytest.approx([3e-6, 30e-6])
+    assert out["p84"][1] is None and out["p16"][1] == pytest.approx(np.percentile([10, 20, 30, 40, 1e9], 16) * 1e-6)
+    # the settled positions alone, as the IDL predecessor's contrast generators give them
+    assert out["curve_settled"] == pytest.approx([3e-6, 25e-6])
+    assert out["p84_settled"][1] == pytest.approx(np.percentile([10, 20, 30, 40], 84) * 1e-6)
     assert out["p16"][0] == pytest.approx(np.percentile([1, 2, 3, 4, 5], 16) * 1e-6)
+    # half or more blocked: no median
+    for q in pos[5:8]:
+        q.status, q.contrast = "blocked", None
+    half = CG.summarize(pos, [20.0, 30.0], 0.01, cfg, [30.0, 30.0], 17)
+    assert half["curve"][1] is None and half["curve_settled"][1] == pytest.approx(40e-6) and half["n_blocked"] == [0, 4]
+    for q, c in zip(pos[5:8], [10, 20, 30]):
+        q.status, q.contrast = "converged", c * 1e-6
     assert out["n"] == [5, 4] and out["n_pos"] == [5, 5] and out["n_blocked"] == [0, 1]
     assert out["r_as"] == pytest.approx([0.2, 0.3]) and out["n_reductions"] == 17
 
@@ -197,6 +209,14 @@ def test_a_run_makes_the_grid_one_source_at_a_time_and_leaves_its_draws_alone(tm
     assert "injection-recovery" in open(d / "annulus01" / "contrast_curve.txt").read()
     assert "Injection-recovery" in open(d / "contrast_curve.txt").read().splitlines()[0]
     assert os.path.exists(d / "annulus01" / "contrast_grid.txt")
+    # the grid's table ends with the blocked count and the settled positions' own median
+    lines = open(d / "annulus01" / "contrast_grid.txt").read().splitlines()
+    assert lines[1].split()[-2:] == ["n_blocked", "median_settled"] and "blocked position counted" in lines[0]
+    body = [ln.split() for ln in lines if not ln.startswith("#")]
+    assert len(body) == len(g["r_as"]) and all(len(r) == 8 for r in body)
+    assert [int(r[6]) for r in body] == g["n_blocked"]
+    assert [float(r[7]) for r in body] == pytest.approx([np.nan if v is None else v for v in g["curve_settled"]],
+                                                        rel=1e-4, nan_ok=True)
     w = json.load(open(d / "annulus01" / "winner.json"))
     assert w["grid_curve"]["curve"] == g["curve"]
 

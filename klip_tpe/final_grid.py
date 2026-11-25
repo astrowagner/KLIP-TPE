@@ -2200,14 +2200,19 @@ def _write_reports(out_dir: str, rec: Dict[str, Any]) -> None:
     C = [f"# klip_tpe final-image contrast curve -- {now}", f"# run: {rec['run']}",
          f"# the elected winners' stitch, one injected source per reduction at each point of the curve's grid (the "
          f"election's turned by half a step), each point's contrast stepped to S/N {cv['target_snr']:g} +/- "
-         f"{100 * cv['precision']:g} %, read with {snr}; the median over position angle at each separation",
-         "# sep_arcsec   contrast_median   p16   p84   n_settled   n_tested   annulus   band"]
+         f"{100 * cv['precision']:g} %, read with {snr}; the median over position angle at each separation, a "
+         f"blocked point counted above the settled ones (median_settled leaves it out)",
+         "# sep_arcsec   contrast_median   p16   p84   n_settled   n_tested   annulus   band   n_blocked   "
+         "median_settled"]
     for i, r in enumerate(cv["r_as"]):
         def g(key):
-            v = cv[key][i]
+            vals = cv.get(key) or []
+            v = vals[i] if i < len(vals) else None
             return float("nan") if v is None else float(v)
+        nb = (cv.get("n_blocked") or [0] * len(cv["r_as"]))[i]
         C.append(f"{r:10.4f}   {g('curve'):12.4e}   {g('p16'):12.4e}   {g('p84'):12.4e}   {cv['n'][i]:4d}   "
-                 f"{cv['n_pos'][i]:4d}   {cv['annulus'][i]:3d}   {cv['role'][i]}")
+                 f"{cv['n_pos'][i]:4d}   {cv['annulus'][i]:3d}   {cv['role'][i]}   {int(nb):4d}   "
+                 f"{g('curve_settled'):12.4e}")
     C.append("# seam per annulus, the curve near each tile edge over its middle:")
     for s in cv.get("seams") or []:
         C.append(f"# annulus {s['annulus']}: {_seam_text(s)}")

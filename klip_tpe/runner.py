@@ -2895,14 +2895,18 @@ class Runner:
         hdr = (f"annulus {ia + 1}  injection-recovery {gc.target_snr:g}-sigma contrast  (one injection per reduction, "
                f"{n_test} positions, {gc.n_pa if str(gc.mode).lower() != 'random' else gc.n_samples} "
                f"{'per separation' if str(gc.mode).lower() != 'random' else 'random'}, S/N {gc.target_snr:g} +/- "
-               f"{100 * gc.precision:g} %, {'aperture' if aperture else 'matched-filter'} S/N, median over position angle)")
-        rows = [(r, c, lo, hi, n_, np_) for r, c, lo, hi, n_, np_ in zip(out["r_as"], out["curve"], out["p16"],
-                                                                          out["p84"], out["n"], out["n_pos"])]
+               f"{100 * gc.precision:g} %, {'aperture' if aperture else 'matched-filter'} S/N, median over position angle, "
+               f"a blocked position counted above the settled ones)")
+        rows = [(r, c, lo, hi, n_, np_, nb_, cs_) for r, c, lo, hi, n_, np_, nb_, cs_ in
+                zip(out["r_as"], out["curve"], out["p16"], out["p84"], out["n"], out["n_pos"], out["n_blocked"],
+                    out["curve_settled"])]
         with open(os.path.join(d, "contrast_grid.txt"), "w") as f:
-            f.write(f"# {hdr}\n# sep_arcsec   contrast_median   p16   p84   n_settled   n_tested\n")
-            for r, c, lo, hi, n_, np_ in rows:
+            f.write(f"# {hdr}\n# sep_arcsec   contrast_median   p16   p84   n_settled   n_tested   n_blocked   "
+                    f"median_settled\n")
+            for r, c, lo, hi, n_, np_, nb_, cs_ in rows:
                 f.write(f"{r:10.4f}   {np.nan if c is None else c:12.4e}   {np.nan if lo is None else lo:12.4e}   "
-                        f"{np.nan if hi is None else hi:12.4e}   {n_:4d}   {np_:4d}\n")
+                        f"{np.nan if hi is None else hi:12.4e}   {n_:4d}   {np_:4d}   {nb_:4d}   "
+                        f"{np.nan if cs_ is None else cs_:12.4e}\n")
         with open(os.path.join(d, "contrast_curve.txt"), "a") as f:
             f.write(f"# {hdr}\n# sep_arcsec   contrast_5sig\n")
             for r, c, *_ in rows:

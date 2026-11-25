@@ -267,6 +267,13 @@ def test_a_run_elects_on_the_final_grid_and_its_products_take_the_curve(runs):
     # the curve: 3 separations an annulus, each with its seam line, in contrast_curve.txt as its main section
     assert cv["annulus"] == [1, 1, 1, 2, 2, 2, 3, 3, 3] and cv["role"][:3] == ["inner", "middle", "outer"]
     assert len(cv["seams"]) == 3 and cv["read_with"] == "grid"
+    # curve.txt ends each line with the blocked count and the settled points' own median
+    ct = [ln for ln in open(os.path.join(fgd, "curve.txt")).read().splitlines() if ln.startswith("# sep_arcsec")]
+    assert ct and ct[0].split()[-2:] == ["n_blocked", "median_settled"]
+    body = [ln.split() for ln in open(os.path.join(fgd, "curve.txt")).read().splitlines() if ln and ln[0] != "#"]
+    assert [int(r[8]) for r in body] == cv["n_blocked"]
+    assert [float(r[9]) for r in body] == pytest.approx([np.nan if v is None else v for v in cv["curve_settled"]],
+                                                        rel=1e-4, nan_ok=True)
     cc = open(os.path.join(a, "contrast_curve.txt")).read()
     assert cc.startswith("# Final-image injection-recovery SNR=5 contrast curve") and "# seam, annulus 2:" in cc
     rows = [ln.split() for ln in cc.splitlines() if ln and not ln.startswith("#")]

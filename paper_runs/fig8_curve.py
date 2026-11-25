@@ -241,7 +241,8 @@ def main():
         check = check_winners(r, log)
         rec = run_final_grid(r, od, config=fc, weights=weights, log=log)
         cv = rec.get("curve") or {}
-        keep = ("r_as", "curve", "p16", "p84", "n", "n_pos", "n_all", "n_blocked", "annulus", "band", "role",
+        keep = ("r_as", "curve", "p16", "p84", "curve_settled", "p16_settled", "p84_settled", "n", "n_pos", "n_all",
+                "n_blocked", "annulus", "band", "role",
                 "read_with", "target_snr", "precision", "snr", "sidelobe", "n_pa", "reductions", "seams",
                 "seam_steps")
         summary = {"stage": st, "run": STAGES[st], "commit": a.commit, "date": time.strftime("%Y-%m-%d %H:%M:%S"),

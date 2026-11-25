@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased — 2026-11-25 (the contrast grid's median counts the blocked positions)
+
+From the audit of 2026-11-25.
+
+- **A blocked position counts in the curve** (`contrast_grid.summarize`, which the per-annulus grid
+  and the final grid's curve take).  A position that never reaches the target S/N, at the contrast
+  cap or within the reductions allowed, lies above every contrast tried, yet it was left out of the
+  median and the percentiles.  It now counts as a value above all the settled ones.  A statistic
+  that falls among the blocked positions has no value, the median when half or more of a
+  separation's positions are blocked and the 84th percentile from about one in six.  On the paper's
+  beta Pic run the 6 settled positions at 0.299" gave 1.03e-3, and the 10 tested give 1.38e-3 and no
+  84th percentile.  The four blocked there came from the seam (the stitch fix of this date), and the
+  paper's other two runs have no blocked position (166 of 166 and 213 of 213 settled).
+- The settled positions alone stay as `curve_settled`, `p16_settled` and `p84_settled`, as the IDL
+  predecessor's contrast generators give them.  `contrast_grid.txt` and `final_grid/curve.txt` gain
+  the columns `n_blocked` and `median_settled` at the end of each line, and
+  `paper_runs/fig8_curve.py` keeps the settled statistics in its summary.  The curve is a product
+  and steers no search, so a resumed run takes the new median in what it writes from then on.
+- Docs: RUNNING.md (the bullet on the curve at a separation).  Tests: `tests/test_contrast_grid.py`.
+
 ## Unreleased — 2026-11-25 (angles that cross a branch cut, on one branch)
 
 From the audit of 2026-11-25.

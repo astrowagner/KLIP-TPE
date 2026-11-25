@@ -52,6 +52,9 @@ _DEFAULT = {"mode": "grid"}
 
 STATUS_DONE = ("converged", "accepted")
 
+#: A blocked position's stand-in contrast in :func:`summarize`, above any contrast a grid tries.
+_ABOVE = 1e300
+
 
 @dataclass
 class ContrastGridConfig:
@@ -462,7 +465,16 @@ def _pct(v: np.ndarray, q: float) -> float:
 
 def summarize(positions: Sequence[GridPosition], seps: Sequence[float], pxscale: float,
               cfg: ContrastGridConfig, sidelobe_deg: Sequence[float], n_reductions: int) -> Dict[str, Any]:
-    """Summarize the curve, per separation the settled positions' median contrast, its percentiles and the counts.
+    """Summarize the curve, per separation the tested positions' median contrast, its percentiles and the counts.
+
+    A blocked position never reached the target S/N, at any contrast up to the cap or within the
+    reductions allowed, so its contrast lies above every contrast tried.  It counts in the median and
+    the percentiles as a value above all the settled ones.  A statistic that falls among the blocked
+    positions has no value: the median when half or more of a separation's positions are blocked, the
+    84th percentile from about one in six.  ``curve_settled``, ``p16_settled`` and ``p84_settled``
+    keep the statistics of the settled positions alone, as the IDL predecessor's contrast generators
+    give them and as this function gave them until 2026-11-25.  Failed positions, whose S/N could not
+    be measured, stay out of both.
 
     Parameters
     ----------
@@ -483,27 +495,40 @@ def summarize(positions: Sequence[GridPosition], seps: Sequence[float], pxscale:
     Returns
     -------
     curve : dict
-        ``r_as``, ``curve``, ``p16``, ``p84``, ``n`` (settled), ``n_pos`` (tested), ``n_all`` (laid out,
-        the excluded too), ``n_blocked``, ``sidelobe_deg``, the settings (``mode``, ``n_pa``,
-        ``n_samples``, ``target_snr``, ``precision``, ``snr``, ``sidelobe``), ``n_reductions`` and
-        ``n_excluded``, with None for NaN.
+        ``r_as``, ``curve``, ``p16``, ``p84`` (the blocked positions counted), ``curve_settled``,
+        ``p16_settled``, ``p84_settled`` (the settled positions alone), ``n`` (settled), ``n_pos``
+        (tested), ``n_all`` (laid out, the excluded too), ``n_blocked``, ``sidelobe_deg``, the settings
+        (``mode``, ``n_pa``, ``n_samples``, ``target_snr``, ``precision``, ``snr``, ``sidelobe``),
+        ``n_reductions`` and ``n_excluded``, with None for NaN and for a statistic among the blocked
+        positions.
     """
     seps = np.asarray(seps, float)
     med, p16, p84, n, npos, nblk, nall = [], [], [], [], [], [], []
+    med_s, p16_s, p84_s = [], [], []
     for j in range(seps.size):
         nall.append(int(sum(p.sep_index == j for p in positions)))
         here = [p for p in positions if p.sep_index == j and p.status != "excluded"]
         v = np.array([p.contrast for p in here if p.status in STATUS_DONE and p.contrast is not None], float)
-        med.append(float(np.median(v)) if v.size else float("nan"))
-        p16.append(_pct(v, 16.0))
-        p84.append(_pct(v, 84.0))
+        nb = int(sum(p.status == "blocked" for p in here))
+        med_s.append(float(np.median(v)) if v.size else float("nan"))
+        p16_s.append(_pct(v, 16.0))
+        p84_s.append(_pct(v, 84.0))
+        # the blocked positions as one value above every settled one, and a statistic that reaches it has no value
+        w = np.concatenate([v, np.full(nb, _ABOVE)]) if v.size else v
+        stats = [float(np.median(w)) if w.size else float("nan"), _pct(w, 16.0), _pct(w, 84.0)]
+        top = float(v.max()) if v.size else float("nan")
+        stats = [x if (np.isfinite(x) and x <= top) else float("nan") for x in stats]
+        med.append(stats[0])
+        p16.append(stats[1])
+        p84.append(stats[2])
         n.append(int(v.size))
         npos.append(len(here))
-        nblk.append(int(sum(p.status == "blocked" for p in here)))
+        nblk.append(nb)
 
     def js(a):
         return [None if not np.isfinite(x) else float(x) for x in a]
-    return {"r_as": js(seps * pxscale), "curve": js(med), "p16": js(p16), "p84": js(p84), "n": n, "n_pos": npos,
+    return {"r_as": js(seps * pxscale), "curve": js(med), "p16": js(p16), "p84": js(p84),
+            "curve_settled": js(med_s), "p16_settled": js(p16_s), "p84_settled": js(p84_s), "n": n, "n_pos": npos,
             "n_all": nall, "n_blocked": nblk, "sidelobe_deg": js(sidelobe_deg), "mode": str(cfg.mode), "n_pa": int(cfg.n_pa),
             "n_samples": int(cfg.n_samples), "target_snr": float(cfg.target_snr), "precision": float(cfg.precision),
             "snr": str(cfg.snr), "sidelobe": str(cfg.sidelobe), "n_reductions": int(n_reductions),

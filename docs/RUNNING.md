@@ -180,6 +180,20 @@ in order:
   keep-outs.  `--cg-snr matched` takes the run's matched-filter S/N instead, and
   `--cg-sidelobe rotation` or `fixed` leaves out each position's sidelobe arcs too.  Under
   `--sidelobes farthest` or `clean` the grid takes that rule, with its fallback.
+* The curve at a separation is the median contrast over its positions, and a blocked position
+  counts in it (since 2026-11-25, from the audit of that date).  A position is blocked when it
+  never reaches the target S/N, at the contrast cap or within the reductions allowed, so its
+  contrast lies above every contrast tried.  It counts as a value above all the settled ones in
+  the median and the 16th and 84th percentiles.  A statistic that falls among the blocked
+  positions has no value, the median when half or more of a separation's positions are blocked
+  and the 84th percentile from about one in six.  Before, the blocked positions were left out, so
+  a separation with blocked positions read deeper than its positions reach.  On the paper's beta
+  Pic run, at 0.299" in its Fig. 8, the 6 settled positions gave 1.03e-3, and the 10 tested
+  positions give 1.38e-3 and no 84th percentile.  The settled positions alone stay in
+  `curve_settled`, `p16_settled` and `p84_settled` of `contrast_grid.json` and the final grid's
+  `curve.json`, and in the `median_settled` column of `contrast_grid.txt` and
+  `final_grid/curve.txt`, as the IDL predecessor's contrast generators give them.  Failed
+  positions, whose S/N could not be measured, stay out of both.
 * `scripts/plot_noise_rings.py` draws the noise apertures of every phase as the code measures
   them, on a synthetic run with a chosen geometry (see the script's help).
 * The contrast grid reduces its test positions several at a time, one injected source in
