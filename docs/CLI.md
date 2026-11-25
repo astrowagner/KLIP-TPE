@@ -89,6 +89,7 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--verify-n-boot VERIFY_N_BOOT] [--param-verify]
                         [--no-param-verify] [--n-remeasure N]
                         [--score-floor S] [--verify-snr {search,idl}]
+                        [--klip-eig-cut {relative,absolute}]
                         [--verify-position {given,peak}] [--fmmf-fm-apertures]
                         [--n-sources N [N ...]] [--min-r-fwhm X] [--n-pv N_PV]
                         [--pv-divmin PV_DIVMIN] [--candidates]
@@ -464,6 +465,14 @@ options:
                         with the IDL verify's S/N (a Gaussian kernel, no
                         despike or radial band) and the pixel mask in the
                         search's rings alone, as --from-idl-setup does
+  --klip-eig-cut {relative,absolute}
+                        the eigenvalue cut of the KL modes (default relative:
+                        only the eigenvalues at or below the round-off floor
+                        of the decomposition are dropped, whatever the data's
+                        units). absolute drops those below 1e-6, as the IDL
+                        predecessor and runs made before 2026-11-25 do, under
+                        which frames of small values, such as a cube in units
+                        of the star's peak, lose modes
   --verify-position {given,peak}
                         where the verify, the final grid and the candidate
                         search read a source (default given: a known companion
@@ -790,6 +799,7 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--verify] [--no-verify] [--verify-n-boot VERIFY_N_BOOT]
                      [--param-verify] [--no-param-verify] [--n-remeasure N]
                      [--score-floor S] [--verify-snr {search,idl}]
+                     [--klip-eig-cut {relative,absolute}]
                      [--verify-position {given,peak}] [--fmmf-fm-apertures]
                      [--n-sources N [N ...]] [--min-r-fwhm X] [--n-pv N_PV]
                      [--pv-divmin PV_DIVMIN] [--candidates]
@@ -1164,6 +1174,14 @@ options:
                         with the IDL verify's S/N (a Gaussian kernel, no
                         despike or radial band) and the pixel mask in the
                         search's rings alone, as --from-idl-setup does
+  --klip-eig-cut {relative,absolute}
+                        the eigenvalue cut of the KL modes (default relative:
+                        only the eigenvalues at or below the round-off floor
+                        of the decomposition are dropped, whatever the data's
+                        units). absolute drops those below 1e-6, as the IDL
+                        predecessor and runs made before 2026-11-25 do, under
+                        which frames of small values, such as a cube in units
+                        of the star's peak, lose modes
   --verify-position {given,peak}
                         where the verify, the final grid and the candidate
                         search read a source (default given: a known companion

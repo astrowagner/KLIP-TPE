@@ -10,8 +10,9 @@ The numerics are as validated (``gpu_benchmark_plan.md`` sections 6, 9 and 12, a
 ``gpu_validate.py --check`` on every run, within 1e-5 of the image noise): frames in float32 on the
 device, the high-pass in the frames' precision, the Gram matrix in float64, the eigendecomposition
 in float64 with cuSOLVER's batched divide-and-conquer solver (``eigh="xbatched64"``), the
-projection, derotation and combination in float64, and klip-tpe's absolute 1e-6 as the only
-eigenvalue threshold.
+projection, derotation and combination in float64, and the eigenvalue cut of
+``klip.klip_annular``, the round-off floor ``n_ref eps lam_max`` or for runs made before 2026-11-25
+the absolute 1e-6 (``eig_tol``, :func:`kept_modes`).
 
 New here, the per-target eigenproblems are solved on each target's own ``n_ref x n_ref``
 sub-matrix, the targets grouped into size classes (``compact`` the class step, 0 the benchmark's
@@ -26,7 +27,34 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-EIG_TOL = 1e-6          # klip_basis's absolute eigenvalue threshold: the only one anywhere
+EIG_TOL = 1e-6          # the IDL predecessor's absolute eigenvalue cut, which runs made before 2026-11-25 keep
+
+
+def kept_modes(xp, lam, nref, eig_tol: Optional[float] = None):
+    """Return which of each eigenproblem's top eigenpairs the KLIP keeps.
+
+    Parameters
+    ----------
+    xp : module
+        The array module, NumPy or CuPy.
+    lam : array, shape (P, k)
+        Each problem's top eigenvalues, the largest first.
+    nref : array_like of int, shape (P,)
+        Each problem's number of references, the size of its covariance.
+    eig_tol : float or None, default None
+        An absolute cut, such as :data:`EIG_TOL`, above which an eigenvalue is kept.  None keeps each
+        eigenvalue above its problem's round-off floor ``n_ref eps lam_max``, as
+        :func:`klip_tpe.klip.eig_floor` does on the CPU.
+
+    Returns
+    -------
+    kept : array of bool, shape (P, k)
+        True for each mode kept.
+    """
+    if eig_tol is not None:
+        return lam > float(eig_tol)
+    n = xp.asarray(np.asarray(nref, np.float64))[:, None]
+    return lam > xp.maximum(lam[:, :1], 0.0) * n * float(np.finfo(np.float64).eps)
 
 
 # ----------------------------------------------------------------------------- backend
@@ -730,12 +758,13 @@ class Problems:
         return [(int(s), np.flatnonzero(sz == s)) for s in np.unique(sz)]
 
 
-def klip_weights(be: Backend, G, prob: Problems, k: int, eigh_mode: str, compact: int, rr: bool = False):
+def klip_weights(be: Backend, G, prob: Problems, k: int, eigh_mode: str, compact: int, rr: bool = False,
+                 eig_tol: Optional[float] = None):
     """Return the KLIP weights of every target.
 
     For target t with references r and the top-k eigenpairs (lam, V) of ``G[r, r]``, the weights are
-    ``w_t[r] = V diag(1/lam) V^T G[t, r]``, the modes with lam <= 1e-6 dropped, which is
-    ``klip_annular``'s zone-Gram projection.  The target's residual is ``D[t] - W[i] @ D``.
+    ``w_t[r] = V diag(1/lam) V^T G[t, r]``, the modes at or below the cut dropped (:func:`kept_modes`),
+    which is ``klip_annular``'s zone-Gram projection.  The target's residual is ``D[t] - W[i] @ D``.
 
     Parameters
     ----------
@@ -755,6 +784,9 @@ def klip_weights(be: Backend, G, prob: Problems, k: int, eigh_mode: str, compact
     rr : bool, default False
         Whether to add a float64 Rayleigh-Ritz step inside the solver's top-k subspace, for a float32
         solver.
+    eig_tol : float or None, default None
+        The eigenvalue cut, None for the round-off floor and a number for an absolute cut
+        (:func:`kept_modes`).
 
     Returns
     -------
@@ -794,7 +826,7 @@ def klip_weights(be: Backend, G, prob: Problems, k: int, eigh_mode: str, compact
         lam, Vk = topk(w, V)
         if rr:
             lam, Vk = ritz(A64, lam, Vk)
-        kept = lam > EIG_TOL
+        kept = kept_modes(xp, lam, prob.nref, eig_tol)
         inv = xp.where(kept, 1.0 / xp.where(kept, lam, 1.0), 0.0)
         g = G[tx] * masks[probx]                                        # (T, M): G[t, refs]
         c = xp.einsum("tm,tmk->tk", g, Vk[probx]) * inv[probx]
@@ -816,7 +848,7 @@ def klip_weights(be: Backend, G, prob: Problems, k: int, eigh_mode: str, compact
         lam, Vk = topk(w, V)
         if rr:
             lam, Vk = ritz(A64, lam, Vk)
-        kept = lam > EIG_TOL
+        kept = kept_modes(xp, lam, np.asarray(prob.nref)[probs], eig_tol)
         inv = xp.where(kept, 1.0 / xp.where(kept, lam, 1.0), 0.0)
         n_modes += int(kept.sum())
         # the targets of this class
@@ -836,7 +868,7 @@ def klip_weights(be: Backend, G, prob: Problems, k: int, eigh_mode: str, compact
     return W, n_modes
 
 
-def padded_weights(be: Backend, G, prob: "Problems", masks_x, lam, Vk):
+def padded_weights(be: Backend, G, prob: "Problems", masks_x, lam, Vk, eig_tol: Optional[float] = None):
     """Return the KLIP weights from the top-k eigenpairs of the padded problems.
 
     Parameters
@@ -853,18 +885,21 @@ def padded_weights(be: Backend, G, prob: "Problems", masks_x, lam, Vk):
         The eigenvalues, descending.
     Vk : array, shape (P, M, k)
         The eigenvectors, in M-space.
+    eig_tol : float or None, default None
+        The eigenvalue cut, None for the round-off floor and a number for an absolute cut
+        (:func:`kept_modes`).
 
     Returns
     -------
     W : array, shape (T, M)
         The weights.
     n_modes : int
-        Number of modes kept, those above 1e-6.
+        Number of modes kept, those above the cut.
     """
     xp = be.xp
     tx = xp.asarray(prob.targets)
     probx = xp.asarray(prob.prob_of[prob.targets])
-    kept = lam > EIG_TOL
+    kept = kept_modes(xp, lam, prob.nref, eig_tol)
     inv = xp.where(kept, 1.0 / xp.where(kept, lam, 1.0), 0.0)
     g = G[tx] * masks_x[probx]                                          # (T, M): G[t, refs]
     c = xp.einsum("tm,tmk->tk", g, Vk[probx]) * inv[probx]
@@ -882,7 +917,7 @@ def klip_annular(be: Backend, bc_dev, bang: np.ndarray, *, k: int, inrad: float,
                  arc_radii: Optional[Tuple[float, float]] = None, zone_center=None, zone_angles: str = "ccw",
                  fast: bool = False, eigh_mode: str = "xbatched64", compact: int = 0, rr: bool = False,
                  batch_sectors: bool = True, zone_cache: Optional[Dict[Any, Any]] = None,
-                 keep_nan: bool = True) -> Tuple[Any, Dict[str, Any]]:
+                 keep_nan: bool = True, eig_tol: Optional[float] = None) -> Tuple[Any, Dict[str, Any]]:
     """Run annular KLIP on one binned, high-passed cube on the device, in the Gram-matrix formulation.
 
     The reference sets are per target, as ``klip_annular``'s slow path makes them.  Pixels outside the
@@ -936,6 +971,8 @@ def klip_annular(be: Backend, bc_dev, bang: np.ndarray, *, k: int, inrad: float,
         Cache of the sectors' pixel indices, shared between calls.
     keep_nan : bool, default True
         Whether a target's NaN pixels come out NaN, as ``klip_annular``'s ``KLIPParams.keep_nan``.
+    eig_tol : float or None, default None
+        The eigenvalue cut, as ``klip_annular``'s ``KLIPParams.eig_tol`` (:func:`kept_modes`).
 
     Returns
     -------
@@ -992,7 +1029,7 @@ def klip_annular(be: Backend, bc_dev, bang: np.ndarray, *, k: int, inrad: float,
             put(idx_d, D, D[keep_t], 0)
     elif compact > 0 or not batch_sectors:
         for idx_d, D, G in sectors:
-            W, nm = klip_weights(be, G, prob, k_eff, eigh_mode, compact, rr)
+            W, nm = klip_weights(be, G, prob, k_eff, eigh_mode, compact, rr, eig_tol)
             put(idx_d, D, D[keep_t] - W @ D, nm)
     else:
         P = prob.P
@@ -1016,7 +1053,8 @@ def klip_annular(be: Backend, bc_dev, bang: np.ndarray, *, k: int, inrad: float,
                 lam, Vk = th[:, ::-1], Vk @ Q[:, :, ::-1]
             del A, w, V
             for si, (idx_d, D, G) in enumerate(chunk):
-                W, nm = padded_weights(be, G, prob, masks_x, lam[si * P:(si + 1) * P], Vk[si * P:(si + 1) * P])
+                W, nm = padded_weights(be, G, prob, masks_x, lam[si * P:(si + 1) * P], Vk[si * P:(si + 1) * P],
+                                       eig_tol)
                 put(idx_d, D, D[keep_t] - W @ D, nm)
             del lam, Vk
     info["n_modes"] = n_modes

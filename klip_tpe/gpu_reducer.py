@@ -36,7 +36,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from klip_tpe.reducer import KLIPReducer, ReductionRequest, ReductionResult, _flag, _zone_center, _zone_ext
+from klip_tpe.reducer import KLIPReducer, ReductionRequest, ReductionResult, _eig_tol, _flag, _zone_center, _zone_ext
 
 try:
     from . import klip_gpu as kg          # as klip_tpe.gpu_reducer, next to klip_tpe/klip_gpu.py
@@ -300,7 +300,8 @@ class GPUKLIPReducer(KLIPReducer):
                                     arc_radii=(ann_in, ann_out) if widened else None, zone_center=_zone_center(p),
                                     zone_angles=str(p.get("zone_angles") or "ccw"), eigh_mode=self.eigh_mode,
                                     compact=self.compact, rr=self.rr, batch_sectors=self.batch_sectors,
-                                    zone_cache=self._zones, keep_nan=_flag(p.get("keep_target_nan", True)))
+                                    zone_cache=self._zones, keep_nan=_flag(p.get("keep_target_nan", True)),
+                                    eig_tol=_eig_tol(p))
         del bc
         lap("klip")
         # ---- the residuals' high-pass, the derotation, the combination

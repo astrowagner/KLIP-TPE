@@ -26,7 +26,7 @@ __all__ = ["frame_selection_mask", "bin_frames", "bin_groups", "bin_by_groups", 
            "coverage_map", "group_mean", "group_bounds", "bins_with_data", "rotation_backend", "set_rotation_backend",
            "rotation_info",
            "nw_ang_comb", "nw_ang_comb_ref", "klip_basis", "zone_indices", "klip_annular", "klip_fm_zone",
-           "arcdist_deg", "reference_mask", "unwrap_angles", "KLIPParams"]
+           "arcdist_deg", "reference_mask", "unwrap_angles", "eig_floor", "EIG_TOL_IDL", "KLIPParams"]
 
 
 # ----------------------------------------------------------------------------
@@ -1247,28 +1247,92 @@ def _eig_desc(C: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return lam[order], V[:, order]
 
 
-def _basis_scale(lam: np.ndarray, tol: float) -> np.ndarray:
+#: The IDL predecessor's eigenvalue cut (``get_klip_basis_new.pro``), absolute: a KL mode whose
+#: eigenvalue lies below it is dropped.  Runs made before 2026-11-25 keep it
+#: (``RunConfig.klip_eig_cut = "absolute"``).
+EIG_TOL_IDL = 1e-6
+
+
+def eig_floor(lam: np.ndarray, tol: Optional[float] = None) -> float:
+    """Return the eigenvalue at or below which a KL mode is dropped.
+
+    With ``tol`` None it is the round-off floor of the eigen-decomposition, ``m eps lam_max`` for an
+    ``m x m`` covariance in float64, which ``scipy.linalg.pinvh`` also takes as zero.  An eigenvalue at
+    or below it cannot be told from 0, and every mode above it is kept, whatever the data's units.  In
+    520 random rank-deficient covariances the null eigenvalue came out at a median 1 % of it and never
+    above 26 %.
+
+    Parameters
+    ----------
+    lam : ndarray
+        Eigenvalues of the covariance matrix, in any order.
+    tol : float or None, default None
+        An absolute cut in place of the floor, such as :data:`EIG_TOL_IDL`.
+
+    Returns
+    -------
+    floor : float
+        The cut, ``tol`` itself when it is given.
+
+    Notes
+    -----
+    Until 2026-11-25 every mode with an eigenvalue below 1e-6 was dropped, the IDL predecessor's
+    absolute cut.  Frames of small values, such as a cube in units of the star's peak, then lost
+    modes that were asked for, and from about 1e-7 of a cube in counts none was left (the audit of
+    2026-11-25).  pyKLIP drops eigenvalues at or below 0, and VIP's SVD drops none.
+    """
+    if tol is not None:
+        return float(tol)
+    lam = np.asarray(lam, float)
+    top = float(np.max(lam)) if lam.size else 0.0
+    return max(top, 0.0) * lam.size * float(np.finfo(np.float64).eps)
+
+
+def _keep_modes(lam: np.ndarray, tol: Optional[float] = None) -> np.ndarray:
+    """Return which KL modes a cut keeps.
+
+    Parameters
+    ----------
+    lam : ndarray
+        Eigenvalues of the covariance matrix.
+    tol : float or None, default None
+        The absolute cut, None for the round-off floor (:func:`eig_floor`).
+
+    Returns
+    -------
+    keep : ndarray of bool
+        True for each mode kept.  The floor keeps an eigenvalue above it, and an absolute cut one at
+        or above it, as the IDL predecessor's ``get_klip_basis_new.pro`` does.
+    """
+    lam = np.asarray(lam, float)
+    if tol is None:
+        return lam > eig_floor(lam)
+    return (lam >= float(tol)) & (lam > 0)
+
+
+def _basis_scale(lam: np.ndarray, tol: Optional[float] = None) -> np.ndarray:
     """Compute each KL mode's normalization ``1 / sqrt(lam)``, 0 for the modes dropped.
 
     Parameters
     ----------
     lam : ndarray
         Eigenvalues of the references' covariance matrix, the largest first.
-    tol : float
-        Minimum eigenvalue a mode keeps.  Modes below it get a scale of 0.
+    tol : float or None, default None
+        The absolute cut, below which a mode gets a scale of 0.  None drops only the eigenvalues at or
+        below the round-off floor (:func:`eig_floor`).
 
     Returns
     -------
     scale : ndarray
         Scale of each mode, one per eigenvalue.
     """
-    lam = np.where(lam < tol, 0.0, lam)
+    keep = _keep_modes(lam, tol)
     with np.errstate(divide="ignore", invalid="ignore"):
-        return np.where(lam > 0, 1.0 / np.sqrt(np.where(lam > 0, lam, 1.0)), 0.0)
+        return np.where(keep, 1.0 / np.sqrt(np.where(keep, lam, 1.0)), 0.0)
 
 
 def _klip_basis_eig(R: np.ndarray, k: int, spat_mean: bool = False, temp_mean: bool = False,
-                    tol: float = 1e-6, only_k: bool = False):
+                    tol: Optional[float] = None, only_k: bool = False):
     """Compute the KL modes of a set of reference frames, with the eigen-decomposition behind them.
 
     Parameters
@@ -1281,8 +1345,9 @@ def _klip_basis_eig(R: np.ndarray, k: int, spat_mean: bool = False, temp_mean: b
         Whether to subtract each frame's mean over its pixels first.
     temp_mean : bool, default False
         Whether to subtract the frames' mean frame first.
-    tol : float, default 1e-6
-        Minimum eigenvalue a mode keeps.  Modes below it are rows of zeros.
+    tol : float or None, default None
+        The absolute cut, below which a mode is a row of zeros.  None drops only the eigenvalues at or
+        below the round-off floor (:func:`eig_floor`).
     only_k : bool, default False
         Whether to form only the first ``k`` modes.  False forms all m and keeps the first ``k``,
         the same modes though not always to the bit.
@@ -1317,12 +1382,12 @@ def _klip_basis_eig(R: np.ndarray, k: int, spat_mean: bool = False, temp_mean: b
 
 
 def klip_basis(R: np.ndarray, k: int, spat_mean: bool = False, temp_mean: bool = False,
-               tol: float = 1e-6) -> np.ndarray:
+               tol: Optional[float] = None) -> np.ndarray:
     """Compute the KL basis of a set of reference frames (Soummer et al. 2012).
 
-    It eigen-decomposes ``R R^T`` in float64, drops the eigenvalues below ``tol`` and forms the
-    modes ``Z_j = R^T v_j / sqrt(lam_j)``, where ``v_j`` and ``lam_j`` are the j-th eigenvector
-    and eigenvalue.
+    It eigen-decomposes ``R R^T`` in float64, drops the eigenvalues at or below the round-off floor
+    (:func:`eig_floor`) or below ``tol``, and forms the modes ``Z_j = R^T v_j / sqrt(lam_j)``, where
+    ``v_j`` and ``lam_j`` are the j-th eigenvector and eigenvalue.
 
     Parameters
     ----------
@@ -1334,8 +1399,9 @@ def klip_basis(R: np.ndarray, k: int, spat_mean: bool = False, temp_mean: bool =
         Whether to subtract each frame's mean over its pixels first.
     temp_mean : bool, default False
         Whether to subtract the frames' mean frame first.
-    tol : float, default 1e-6
-        Minimum eigenvalue a mode keeps.  Modes below it are rows of zeros.
+    tol : float or None, default None
+        The absolute cut, below which a mode is a row of zeros, such as :data:`EIG_TOL_IDL`.  None
+        drops only the eigenvalues at or below the round-off floor.
 
     Returns
     -------
@@ -1521,6 +1587,11 @@ class KLIPParams:
         Whether a target frame's NaN pixels come out NaN.  The projection takes them as 0, which
         leaves minus the PSF model there, and True puts NaN back, so a pixel without data stays without
         data through the combination.  False keeps the zero-filled residuals, as before 2026-11-21.
+    eig_tol : float or None, default None
+        The eigenvalue cut of the KL modes.  None drops only the eigenvalues at or below the round-off
+        floor of the decomposition (:func:`eig_floor`), whatever the data's units.  A number drops the
+        modes below it, absolute, as the IDL predecessor's :data:`EIG_TOL_IDL` and runs made before
+        2026-11-25 do.
 
     Notes
     -----
@@ -1560,14 +1631,38 @@ class KLIPParams:
     zone_angles: str = "ccw"
     #: whether a target's NaN pixels come out NaN rather than as minus the PSF model
     keep_nan: bool = True
+    #: the eigenvalue cut: None the round-off floor (eig_floor), a number an absolute cut (EIG_TOL_IDL)
+    eig_tol: Optional[float] = None
 
 
-_FM_TOL = 1e-6                   # eigenvalue tolerance of get_klip_basis_new / the FM block
+#: The FM's eigenvalue cut under an absolute cut, and the fraction of an eigenvalue by which two must
+#: differ for the perturbation to divide by their difference (``multiklip.pro`` L365-403)
+_FM_TOL = 1e-6
+
+
+def _fm_valid(lam: np.ndarray, tol: Optional[float] = None) -> np.ndarray:
+    """Return which modes the forward model keeps.
+
+    Parameters
+    ----------
+    lam : ndarray
+        Eigenvalues of the references' covariance matrix.
+    tol : float or None, default None
+        The absolute cut, None for the round-off floor (:func:`eig_floor`).
+
+    Returns
+    -------
+    valid : ndarray of bool
+        True for an eigenvalue above the cut.  Under an absolute cut the FM drops an eigenvalue equal
+        to it, where the basis keeps it, as the IDL predecessor's ``multiklip.pro`` does.
+    """
+    lam = np.asarray(lam, float)
+    return lam > eig_floor(lam, tol)
 
 
 def klip_fm_zone(R: np.ndarray, Mref: Optional[np.ndarray], T: np.ndarray, Mtar: np.ndarray, k: int,
-                 fm_selfsub: bool = True, eig: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None
-                 ) -> np.ndarray:
+                 fm_selfsub: bool = True, eig: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None,
+                 tol: Optional[float] = None) -> np.ndarray:
     """Forward-model a planet through KLIP in one zone (KLIP-FM, Pueyo 2016, to first order).
 
     The forward model includes the planet's over-subtraction and its self-subtraction, the change of
@@ -1597,6 +1692,9 @@ def klip_fm_zone(R: np.ndarray, Mref: Optional[np.ndarray], T: np.ndarray, Mtar:
     eig : tuple or None, default None
         Decomposition of ``R R^T`` already made for this ``R``, as its eigenvalues (the largest
         first), its eigenvectors, and its first ``k`` modes or None.  None decomposes again.
+    tol : float or None, default None
+        The eigenvalue cut, None for the round-off floor (:func:`eig_floor`) and a number for an
+        absolute cut such as :data:`EIG_TOL_IDL`.
 
     Returns
     -------
@@ -1608,9 +1706,11 @@ def klip_fm_zone(R: np.ndarray, Mref: Optional[np.ndarray], T: np.ndarray, Mtar:
     The first-order change comes from ``dC = R Mref^T + Mref R^T``, with ``l_k`` and ``u_k`` the
     eigenvalues and eigenvectors of ``R R^T`` and ``Z_k = R^T u_k / sqrt(l_k)``:
     ``dl_k = u_k . dC u_k``, ``du_k = sum_{j != k} (u_j . dC u_k) / (l_k - l_j) u_j`` over
-    eigenvalues that differ by more than 1e-6 of ``max(|l_k|, 1)``, and
+    eigenvalues that differ by more than 1e-6 of ``|l_k|``, and
     ``dZ_k = -dl_k / (2 l_k) Z_k + (R^T du_k + Mref^T u_k) / sqrt(l_k)``.  The IDL predecessor
-    does the same in ``multiklip.pro`` L365-403 (one basis) and L494-527 (per target).
+    does the same in ``multiklip.pro`` L365-403 (one basis) and L494-527 (per target), with 1e-6
+    of ``max(|l_k|, 1)``, which an absolute ``tol`` keeps.  With the round-off floor every cut
+    scales with the data, so a cube times ``s`` gives the forward model times ``s``.
     """
     R = np.asarray(R, np.float64)
     T = np.asarray(T, np.float64)
@@ -1623,7 +1723,7 @@ def klip_fm_zone(R: np.ndarray, Mref: Optional[np.ndarray], T: np.ndarray, Mtar:
         lam, U = _eig_desc(R @ R.T)
     else:
         lam, U = eig[0], eig[1]
-    valid = lam > _FM_TOL
+    valid = _fm_valid(lam, tol)
     scale = np.where(valid, 1.0 / np.sqrt(np.where(valid, lam, 1.0)), 0.0)
     if eig is not None and eig[2] is not None:
         Zb = eig[2]
@@ -1638,12 +1738,15 @@ def klip_fm_zone(R: np.ndarray, Mref: Optional[np.ndarray], T: np.ndarray, Mtar:
         proj = U.T @ Tk                                         # proj[j, k2] = u_j . dC u_k
         idx = np.arange(nref)
         for k2 in range(nmod):
-            if lam[k2] <= _FM_TOL:
+            if not valid[k2]:
                 continue
             u_k = U[:, k2]
             dlam = proj[k2, k2]
             ddl = lam[k2] - lam
-            ok = (idx != k2) & (np.abs(ddl) > _FM_TOL * max(abs(lam[k2]), 1.0))
+            # two eigenvalues closer than 1e-6 of this one are taken as one, and the IDL predecessor's
+            # absolute cut floors that at 1e-6
+            gap = _FM_TOL * (abs(lam[k2]) if tol is None else max(abs(lam[k2]), 1.0))
+            ok = (idx != k2) & (np.abs(ddl) > gap)
             coef = np.where(ok, proj[:, k2] / np.where(ok, ddl, 1.0), 0.0)
             du = U @ coef
             term = du @ R + u_k @ Mref
@@ -1821,19 +1924,19 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
         # the modes, eigenvalues and eigenvectors.  The zone mode forms only the k modes it uses.
         if k == 0:
             return np.zeros((0, R.shape[1])), None, None
-        Z, lam, V, _ = _klip_basis_eig(R, k, p.spat_mean, p.temp_mean, only_k=(gram == "zone"))
+        Z, lam, V, _ = _klip_basis_eig(R, k, p.spat_mean, p.temp_mean, tol=p.eig_tol, only_k=(gram == "zone"))
         return Z, lam, V
 
     def _fm_eig(R, Z, lam, V):
         # The basis' decomposition, handed to klip_fm_zone so it is not made twice.  The FM
         # decomposes the raw frames, so only without centering, and it takes the basis' modes
-        # only where its eigenvalue cut keeps the same ones (they differ at lambda == tol).
+        # only where its eigenvalue cut keeps the same ones (an absolute cut's differ at lambda == tol).
         if lam is None or p.spat_mean or p.temp_mean:
             return None
         nmod = min(k, R.shape[0])
-        valid = lam[:nmod] > _FM_TOL
+        valid = _fm_valid(lam, p.eig_tol)[:nmod]
         sf = np.where(valid, 1.0 / np.sqrt(np.where(valid, lam[:nmod], 1.0)), 0.0)
-        return lam, V, (Z[:nmod] if np.array_equal(_basis_scale(lam, 1e-6)[:nmod], sf) else None)
+        return lam, V, (Z[:nmod] if np.array_equal(_basis_scale(lam, p.eig_tol)[:nmod], sf) else None)
 
     def _project(T, Z, kk):
         # T (t, N), Z (m, N) orthonormal rows -> residuals for modes 0..kk-1
@@ -1898,7 +2001,8 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
                 else:
                     Mref = None                                   # RDI without a ref model: no self-sub
                 fo = fm_out.reshape(n, ny * nx)
-                fo[:, idx] = klip_fm_zone(R, Mref, T, Mtar, k, fm_selfsub, eig=_fm_eig(R, Z, lam, V))
+                fo[:, idx] = klip_fm_zone(R, Mref, T, Mtar, k, fm_selfsub, eig=_fm_eig(R, Z, lam, V),
+                                          tol=p.eig_tol)
         _nan_back()
         return (out, info, fm_out) if do_fm else (out, info)
 
@@ -1972,7 +2076,7 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
             Vk = V[:, :kk_max]
             # T's coefficient on mode m is (G[t, r] . v_m) / sqrt(lambda_m), and mode m is
             # R^T v_m / sqrt(lambda_m): the projection is w . R with w = V_k c
-            c = (X[t, r] @ Vk) * _basis_scale(lam, 1e-6)[:kk_max] ** 2
+            c = (X[t, r] @ Vk) * _basis_scale(lam, p.eig_tol)[:kk_max] ** 2
             if p.k_scan:
                 W = np.zeros((kk_max, bzd.shape[0]))
                 W[:, r] = np.cumsum(Vk * c[None, :], axis=1).T     # row m: the weights of modes 0..m
@@ -1991,13 +2095,13 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
             if p.spat_mean or lam is None:
                 # the FM decomposes the raw frames, which the centered Gram does not hold
                 R = _zero_nan(BD[refs])
-                fm = klip_fm_zone(R, Mref, _zero_nan(D[t:t + 1]), Mtar, k, fm_selfsub)
+                fm = klip_fm_zone(R, Mref, _zero_nan(D[t:t + 1]), Mtar, k, fm_selfsub, tol=p.eig_tol)
             else:
                 R = bzd[r]
-                valid = lam > _FM_TOL
+                valid = _fm_valid(lam, p.eig_tol)
                 sf = np.where(valid, 1.0 / np.sqrt(np.where(valid, lam, 1.0)), 0.0)
                 Zb = (V[:, :kk_max] * sf[None, :kk_max]).T @ R
-                fm = klip_fm_zone(R, Mref, zd[t:t + 1], Mtar, k, fm_selfsub, eig=(lam, V, Zb))
+                fm = klip_fm_zone(R, Mref, zd[t:t + 1], Mtar, k, fm_selfsub, eig=(lam, V, Zb), tol=p.eig_tol)
             fm_out[t].reshape(-1)[idx] = fm[0]
 
     def _target(t):
@@ -2042,7 +2146,7 @@ def klip_annular(cube: np.ndarray, angles: np.ndarray, p: KLIPParams, lam_over_d
             if do_fm:
                 Mref, Mtar = _fm_models(t, refs, idx)
                 fm_out[t].reshape(-1)[idx] = klip_fm_zone(R, Mref, Star, Mtar, k, fm_selfsub,
-                                                          eig=_fm_eig(R, Z, lam, V))[0]
+                                                          eig=_fm_eig(R, Z, lam, V), tol=p.eig_tol)[0]
 
     nthr = int(max(getattr(p, "threads", 1), 1))
     if nthr > 1 and n > 1:

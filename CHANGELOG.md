@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased — 2026-11-25 (the KL modes' eigenvalue cut at the round-off floor)
+
+From the audit of 2026-11-25.
+
+- **A KL mode is dropped only when its eigenvalue is round-off** (`klip.eig_floor`,
+  `KLIPParams.eig_tol`, `RunConfig.klip_eig_cut`, `--klip-eig-cut`, `reducer.set_eig_cut`).  Every mode
+  whose eigenvalue lay below 1e-6 was dropped, the IDL predecessor's absolute cut in
+  `get_klip_basis_new.pro`, in `klip._basis_scale`, KLIP-FM's `_FM_TOL` and the card's `EIG_TOL`.
+  Frames of small values lost modes they asked for, and nothing said so.  The same cube times 1 to
+  1e-4 gave one image, at 1e-5 and 1e-6 one mode was left whatever k asked, and at 1e-7 nothing was
+  subtracted, where an injected source read S/N 4.25 against 19.45.  A cube in units of the star's
+  peak can lie there.
+- The cut is now `m eps lam_max` for the `m x m` covariance in float64, the floor
+  `scipy.linalg.pinvh` and `numpy.linalg.matrix_rank` take as zero.  In 520 random rank-deficient
+  covariances the null eigenvalue came out at a median 1 % of it and never above 26 %.  pyKLIP drops
+  eigenvalues at or below 0, and VIP's SVD drops none.  KLIP-FM's test for two eigenvalues too close
+  to divide by their difference is now 1e-6 of the eigenvalue, where the absolute cut floored it at
+  1e-6, so the forward model of a cube times `s` is the forward model times `s`.  The CPU path, the
+  zone Gram, KLIP-FM and the card (`klip_gpu.kept_modes`, per eigenproblem) take the same cut.
+- On the paper's beta Pic run the three winners' clean images and annulus 1's forward model come
+  out the same to the bit under either cut, and equal the run's `best_clean.fits` with scipy's
+  rotation.  Still, `"absolute"` keeps the old cut, and a run saved before 2026-11-25 resumes with
+  it, as do `--from-idl-setup` runs.  The log says when a run keeps it.  `klip.klip_basis` and
+  `klip.klip_fm_zone` take `tol=None` (the floor) by default, and `tol=1e-6`
+  (`klip.EIG_TOL_IDL`) gives the old cut.
+- Each request carries the run's cut (`klip_eig_cut`), so worker processes forked before the run was
+  built take it.  The synthetic reducer, which seeds its noise from a request's parameters, leaves it
+  out of the seed (`synthetic._UNSEEDED`), so a synthetic run draws what it drew before.
+- Docs: RUNNING.md ("The eigenvalue cut of the KL modes"), CLI.md.  Tests: `tests/test_eig_cut.py`.
+
 ## Unreleased — 2026-11-25 (the contrast grid's median counts the blocked positions)
 
 From the audit of 2026-11-25.

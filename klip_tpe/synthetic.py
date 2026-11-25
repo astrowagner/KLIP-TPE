@@ -19,6 +19,11 @@ from .reducer import Dataset, KLIPReducer, ReductionRequest, ReductionResult, Re
 
 __all__ = ["SyntheticReducer", "make_synthetic_partitions", "synthetic_klip_dataset"]
 
+#: Settings every request carries that the synthetic images do not depend on.  They stay out of
+#: :meth:`SyntheticReducer._rng`'s seed, so a synthetic run draws what it drew before requests
+#: carried them (the eigenvalue cut since 2026-11-25).
+_UNSEEDED = ("klip_eig_cut",)
+
 
 def _outside_zone(rr: np.ndarray, p: Dict[str, Any]) -> np.ndarray:
     """Return the pixels outside the zone a KLIP reduction would cover.
@@ -171,6 +176,9 @@ class SyntheticReducer(Reducer):
     def _rng(self, req: ReductionRequest) -> np.random.Generator:
         """Return the generator of a request, seeded by its parameters, sources, k-scan flag, seed and partition.
 
+        The parameters in :data:`_UNSEEDED`, which the synthetic images do not depend on, stay out of
+        the seed.
+
         Parameters
         ----------
         req : ReductionRequest
@@ -182,7 +190,7 @@ class SyntheticReducer(Reducer):
             The generator, the same for the same request.
         """
         key = repr((sorted((k, round(float(v), 6) if isinstance(v, (int, float)) else str(v))
-                           for k, v in req.params.items()),
+                           for k, v in req.params.items() if k not in _UNSEEDED),
                     None if not req.injections else [s.as_tuple() for s in req.injections],
                     req.k_scan, self.seed, str(self.partition)))
         h = int(hashlib.sha256(key.encode()).hexdigest()[:16], 16)

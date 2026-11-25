@@ -28,14 +28,15 @@ import numpy as np
 
 from .injection import (InjectionModel, _check_float32_headroom, add_crop, cube_peak, inject_frames,
                         interp_order, place_source, prepare_sources)
-from .klip import (BLOCK_BYTES, KLIPParams, _highpass_frames, arcdist_deg, bin_by_groups, bin_frames,
+from .klip import (BLOCK_BYTES, EIG_TOL_IDL, KLIPParams, _highpass_frames, arcdist_deg, bin_by_groups, bin_frames,
                    bin_groups, bin_values, bins_with_data, coverage_map, derotate, destripe, frame_blocks,
                    frame_selection_mask, group_bounds, group_mean, highpass_stack, klip_annular, nw_ang_comb,
                    run_blocks)
 from .metrics import Source
 from .space import Config
 
-__all__ = ["reducer_class", "set_klip_gram", "set_zone_center", "KLIP_GRAM_MODES", "ReductionRequest", "ReductionResult", "Reducer", "Dataset", "KLIPReducer",
+__all__ = ["reducer_class", "set_klip_gram", "set_eig_cut", "set_zone_center", "KLIP_GRAM_MODES", "EIG_CUT_MODES",
+           "ReductionRequest", "ReductionResult", "Reducer", "Dataset", "KLIPReducer",
            "PartitionedReducer", "EvalImages"]
 
 
@@ -707,6 +708,32 @@ def _zone_ext(p: Dict[str, Any]) -> Tuple[float, float]:
     return (max(float(p.get("zone_in", 0.0) or 0.0), 0.0), max(float(p.get("zone_out", 0.0) or 0.0), 0.0))
 
 
+def _eig_tol(p: Dict[str, Any]) -> Optional[float]:
+    """Return the eigenvalue cut a request's ``klip_eig_cut`` asks for (:attr:`klip_tpe.klip.KLIPParams.eig_tol`).
+
+    Parameters
+    ----------
+    p : dict
+        The request's parameters.
+
+    Returns
+    -------
+    tol : float or None
+        None for ``"relative"``, the default, which drops only the eigenvalues at or below the
+        round-off floor (:func:`klip_tpe.klip.eig_floor`), and :data:`klip_tpe.klip.EIG_TOL_IDL` for
+        ``"absolute"``, the IDL predecessor's cut, which runs made before 2026-11-25 keep.
+
+    Raises
+    ------
+    ValueError
+        If ``klip_eig_cut`` is neither.
+    """
+    mode = str(p.get("klip_eig_cut") or "relative").lower()
+    if mode not in EIG_CUT_MODES:
+        raise ValueError(f"klip_eig_cut is one of {EIG_CUT_MODES}, not {mode!r}")
+    return EIG_TOL_IDL if mode == "absolute" else None
+
+
 def _zone_center(p: Dict[str, Any]) -> Optional[Tuple[float, float]]:
     """Return a request's ``zone_center`` as an ``(x, y)`` pixel, or None.
 
@@ -826,6 +853,11 @@ class KLIPReducer(Reducer):
     ``klip_gram``
         "target" by default, or "zone" (:attr:`klip_tpe.klip.KLIPParams.gram`), about twice as fast
         per target at small bins and equal to float64 rounding (:func:`set_klip_gram`).
+    ``klip_eig_cut``
+        "relative" by default, which drops only the KL modes whose eigenvalue lies at or below the
+        round-off floor of the decomposition, whatever the data's units.  "absolute" drops those
+        below 1e-6, as the IDL predecessor and runs made before 2026-11-25 do
+        (:attr:`klip_tpe.klip.KLIPParams.eig_tol`, :func:`set_eig_cut`).
     ``inject_interp``
         "linear" by default, the predecessor's bilinear ``fshift``, "cubic", a cubic spline with its
         prefilter, or "quintic", a spline of order 5: how each injected stamp goes to its sub-pixel position
@@ -900,7 +932,7 @@ class KLIPReducer(Reducer):
                          "n_min_ref": 10, "comb_type": "nwadi",
                          "use_rdi": False, "rdi_mode": "ardi", "do_destripe": False, "destripe_clip": 0.0,
                          "fm_selfsub": True, "hp_nan_aware": False, "prep_fused": True,
-                         "klip_gram": "target", "inject_interp": "linear"}
+                         "klip_gram": "target", "inject_interp": "linear", "klip_eig_cut": "relative"}
         self.defaults.update(defaults or {})
         #: whether the frames hold NaN, pixels without data beyond a detector's or a registration's edge
         self.has_nan = _holds_nan(data.cube)
@@ -2505,7 +2537,7 @@ class KLIPReducer(Reducer):
                         ref_lib=ref_lib, ref_keep=ref_keep, gram=str(p.get("klip_gram", "target") or "target"),
                         arc_radii=ann if widened else None, zone_center=_zone_center(p),
                         zone_angles=str(p.get("zone_angles") or "ccw"),
-                        keep_nan=_flag(p.get("keep_target_nan", True)))
+                        keep_nan=_flag(p.get("keep_target_nan", True)), eig_tol=_eig_tol(p))
         if widened:
             meta["annulus"] = [ann[0], ann[1]]
         fm_img = nosub = cadi = None
@@ -3836,6 +3868,8 @@ class PartitionedReducer(Reducer):
 
 
 KLIP_GRAM_MODES = ("target", "zone")
+#: the eigenvalue cuts of the KL modes (:func:`set_eig_cut`, :attr:`klip_tpe.klip.KLIPParams.eig_tol`)
+EIG_CUT_MODES = ("relative", "absolute")
 
 
 def set_zone_center(reducer: Reducer, center: Optional[Sequence[float]], angles: Optional[str] = None) -> List[Any]:
@@ -3921,6 +3955,44 @@ def set_klip_gram(reducer: Reducer, mode: str) -> List[Any]:
         d = getattr(r, "defaults", None)
         if isinstance(d, dict) and "klip_gram" in d:
             d["klip_gram"] = mode
+            done.append(pid)
+    return done
+
+
+def set_eig_cut(reducer: Reducer, mode: str) -> List[Any]:
+    """Set ``klip_eig_cut`` as the default of every KLIP reducer in a reducer.
+
+    Set it before the worker pool starts, since the workers keep the reducers they were forked with.
+
+    Parameters
+    ----------
+    reducer : Reducer
+        A :class:`PartitionedReducer`, whose partitions are set, or a single reducer.
+    mode : {"relative", "absolute"}
+        The eigenvalue cut of the KL modes (:attr:`klip_tpe.klip.KLIPParams.eig_tol`).  None or empty
+        takes "relative".
+
+    Returns
+    -------
+    done : list
+        The partitions it was set on, or ``[None]`` for a single reducer.  A backend that builds its
+        own basis, such as pyKLIP or VIP, has no ``klip_gram`` default and is left as it is.
+
+    Raises
+    ------
+    ValueError
+        If ``mode`` is unknown.
+    """
+    mode = str(mode or "relative").lower()
+    if mode not in EIG_CUT_MODES:
+        raise ValueError(f"klip_eig_cut is one of {EIG_CUT_MODES}, not {mode!r}")
+    subs = getattr(reducer, "reducers", None)
+    items = list(subs.items()) if isinstance(subs, dict) and subs else [(None, reducer)]
+    done = []
+    for pid, r in items:
+        d = getattr(r, "defaults", None)
+        if isinstance(d, dict) and "klip_gram" in d:
+            d["klip_eig_cut"] = mode
             done.append(pid)
     return done
 

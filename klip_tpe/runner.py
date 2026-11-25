@@ -219,9 +219,16 @@ class RunConfig:
         innermost inner edge and outermost outer edge are reduced and stitched as given.
         ``"all"`` pads every edge, as the IDL does.  A run saved before this field existed
         resumes with ``"all"``, so its evaluations stay comparable.
+    klip_eig_cut
+        the eigenvalue cut of the KL modes (:attr:`klip_tpe.klip.KLIPParams.eig_tol`).
+        ``"relative"`` (the default) drops only the modes whose eigenvalue lies at or below the
+        round-off floor of the decomposition, ``m eps lam_max``, so a cube in any units keeps the
+        modes asked for.  ``"absolute"`` drops those below 1e-6, the IDL predecessor's cut, under
+        which frames of small values lose modes.  A run saved before 2026-11-25 resumes with
+        ``"absolute"``, so its reductions reproduce.
     verify_position
-        where the verify, the stitched verify, the tile verify, the final grid's readings and the
-        candidate search read a source.  ``"given"`` (the default): a known companion or an injection
+        where the verify, the stitched verify, the tile verify, the final grid's readings, the
+        contrast grid's matched S/N and the candidate search read a source.  ``"given"`` (the default): a known companion or an injection
         at its given position, so its small-sample FAP holds, and a candidate the blind search found
         at the matched filter's peak within FWHM/2, with its FAP over the field from random-field
         theory (:func:`klip_tpe.verify.field_fap`).  ``"peak"``: every source at the peak within
@@ -486,6 +493,7 @@ class RunConfig:
     edge_padding: str = "between"         # "between" (only where annuli meet) | "all" (every edge, the IDL)
     stitch_blend: str = "own"             # "own" (each pixel from its tile's annulus) | "weighted" (2 px blend)
     verify_position: str = "given"        # "given" (sources at their positions) | "peak" (within 1.5 px)
+    klip_eig_cut: str = "relative"        # "relative" (the round-off floor) | "absolute" (1e-6, the IDL)
     stitch_overlap_pads: bool = False     # pad the stitch's tile edges between overlapping annuli
     stitch_injections: str = "all"        # "all" (every annulus' validation sources in each) | "own"
     #: the library the run rotates its frames with, "scipy" | "opencv" (klip.set_rotation_backend):
@@ -634,9 +642,11 @@ class RunConfig:
         # annulus' injected image with its own sources
         d.setdefault("stitch_overlap_pads", True)
         d.setdefault("stitch_injections", "own")
-        # and one saved before 2026-11-25 its blended seams, and its verify's 1.5 px peak search
+        # and one saved before 2026-11-25 its blended seams, its verify's 1.5 px peak search and the
+        # absolute eigenvalue cut
         d.setdefault("stitch_blend", "weighted")
         d.setdefault("verify_position", "peak")
+        d.setdefault("klip_eig_cut", "absolute")
         return _from_dict_filtered(cls, d)
 
 
@@ -1284,6 +1294,7 @@ class Runner:
         self._install_sidelobes()
         self._install_fmmf_turn()
         self._install_rotation(from_checkpoint=_from_checkpoint)
+        self._install_eig_cut()
         self.callbacks: List[RunCallback] = list(callbacks)
         self._last_images: Dict[str, Any] = {}
         os.makedirs(run_dir, exist_ok=True)
@@ -2543,6 +2554,12 @@ class Runner:
             params.setdefault("inject_interp", str(interp))
             for dd in per.values():
                 dd.setdefault("inject_interp", str(interp))
+        # and so does its eigenvalue cut (RunConfig.klip_eig_cut), since the workers may have forked
+        # before the runner set the reducers' defaults
+        cut = str(getattr(self.cfg, "klip_eig_cut", "relative") or "relative").lower()
+        params["klip_eig_cut"] = cut
+        for dd in per.values():
+            dd["klip_eig_cut"] = cut
         cfg2 = Config(params, per, cfg.selected, cfg.x)
         if (fm_sources is None and sources and not k_scan and self.reducer.supports_fm
                 and getattr(self.objective.metric, "needs_fm", False)):
@@ -7482,6 +7499,7 @@ class Runner:
         self._install_sidelobes()
         self._install_fmmf_turn()
         self._install_rotation(from_checkpoint=True)
+        self._install_eig_cut()
         self.space = SearchSpace.from_dict(
             st["space"], project=project if project is not None else getattr(self.space, "project", None))
         self.rng.bit_generator.state = st["rng_state"]
@@ -7609,6 +7627,21 @@ class Runner:
         out = out_dir or os.path.join(self.run_dir, "steps_rebuilt")
         kw.setdefault("movie_dir", out)
         return render_steps(self.run_dir, out_dir=out, reducer=self.reducer, **kw)
+
+    def _install_eig_cut(self) -> None:
+        """Give the reducer the run's eigenvalue cut of the KL modes (:attr:`RunConfig.klip_eig_cut`).
+
+        The setting goes into each KLIP reducer's defaults (:func:`klip_tpe.reducer.set_eig_cut`), for a
+        reduction made in this process outside :meth:`_reduce`, and a run that keeps the IDL
+        predecessor's absolute cut says so in its log.  Every request :meth:`_reduce` makes carries the
+        cut in its parameters, so worker processes forked before the runner was built take it too.
+        """
+        from .reducer import set_eig_cut
+        mode = str(getattr(self.cfg, "klip_eig_cut", "relative") or "relative").lower()
+        if set_eig_cut(self.reducer, mode) and mode == "absolute" and not getattr(self, "_eig_cut_said", False):
+            self._eig_cut_said = True          # a resume installs it twice, as it builds and as it adopts
+            self.log("  KLIP: the eigenvalue cut is the absolute 1e-6 of runs made before 2026-11-25 "
+                     "(RunConfig.klip_eig_cut), under which frames of small values lose modes")
 
     def _install_rotation(self, from_checkpoint: bool = False) -> None:
         """Rotate the run's frames with its library (:attr:`RunConfig.rotation`,

@@ -1746,6 +1746,11 @@ def _protocol_args(p):
                         "search's own S/N under the run's rules, and every ring and map without the pixel mask). idl "
                         "measures as before 2026-11-01, with the IDL verify's S/N (a Gaussian kernel, no despike or "
                         "radial band) and the pixel mask in the search's rings alone, as --from-idl-setup does")
+    p.add_argument("--klip-eig-cut", default=None, choices=["relative", "absolute"],
+                   help="the eigenvalue cut of the KL modes (default relative: only the eigenvalues at or below the "
+                        "round-off floor of the decomposition are dropped, whatever the data's units). absolute drops "
+                        "those below 1e-6, as the IDL predecessor and runs made before 2026-11-25 do, under which "
+                        "frames of small values, such as a cube in units of the star's peak, lose modes")
     p.add_argument("--verify-position", default=None, choices=["given", "peak"],
                    help="where the verify, the final grid and the candidate search read a source (default given: a "
                         "known companion or an injection at its given position, so its FAP holds, and a candidate "
@@ -2065,6 +2070,7 @@ def _protocol_config(a) -> dict:
                 **({"score_floor": _score_floor(sf)} if sf is not None else {}),
                 **({"verify_snr": a.verify_snr} if getattr(a, "verify_snr", None) else {}),
                 **({"verify_position": a.verify_position} if getattr(a, "verify_position", None) else {}),
+                **({"klip_eig_cut": a.klip_eig_cut} if getattr(a, "klip_eig_cut", None) else {}),
                 **({"fmmf_fm_apertures": True} if getattr(a, "fmmf_fm_apertures", False) else {}),
                 **({"stitch_injections": a.stitch_injections} if getattr(a, "stitch_injections", None) else {}),
                 **({"stitch_blend": a.stitch_blend} if getattr(a, "stitch_blend", None) else {}),

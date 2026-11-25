@@ -312,6 +312,36 @@ small bins.  On an LMIRCam sequence of 189 frames a bin-1 configuration took 6 s
 28 s, to the same float32 image, and a run resumed with it reproduced its winners exactly
 (a user's note of 2026-11-22).
 
+### The eigenvalue cut of the KL modes (`--klip-eig-cut`)
+
+KLIP divides each mode by the square root of its eigenvalue, so a mode whose eigenvalue is only
+round-off would be noise blown up, and the decomposition drops it.  Since 2026-11-25 (the audit of
+that date) the cut is the round-off floor of the decomposition, `m eps lam_max` for the `m x m`
+covariance of the references in float64 (`klip.eig_floor`), the floor `scipy.linalg.pinvh` and
+`numpy.linalg.matrix_rank` take as zero.  Every mode above it is kept, whatever the data's units.
+In 520 random rank-deficient covariances of 8 to 200 frames and 100 to 60,000 pixels, the null
+eigenvalue came out at a median 1 % of the floor and never above 26 % of it.
+
+Before, every mode whose eigenvalue lay below 1e-6 was dropped, the IDL predecessor's absolute cut
+(`get_klip_basis_new.pro`).  Frames of small values lost modes they asked for, silently.  The same
+cube times 1 to 1e-4 gave one image, at 1e-5 and 1e-6 one mode was left whatever k asked, and at
+1e-7 nothing was subtracted, where an injected source read S/N 4.25 against 19.45.  A cube in
+units of the star's peak can lie there, while counts and MJy/sr lie decades above.  pyKLIP drops
+the eigenvalues at or below 0, and VIP's SVD drops none.
+
+The cut applies on the CPU, in KLIP-FM and on the card alike.  KLIP-FM also takes two eigenvalues
+closer than 1e-6 of one of them as one, and the absolute cut floored that at 1e-6, so with the
+round-off floor the forward model scales with the frames too.  On the paper's beta Pic run the
+three winners' images and annulus 1's forward model come out the same to the bit under either cut,
+and equal the run's own `best_clean.fits`.  A run saved before 2026-11-25 resumes with the absolute
+cut (`RunConfig.klip_eig_cut = "absolute"`), so do `--from-idl-setup` runs, and `--klip-eig-cut
+absolute` picks it for a new run.  The log says when a run keeps it.  Each reduction a run makes
+carries its cut in its parameters, so worker processes forked before the run was built take it too.
+A script that calls a reducer itself sets it before the workers start,
+`klip_tpe.reducer.set_eig_cut(reducer, "absolute")`, or with
+`defaults={"klip_eig_cut": "absolute"}` in `generic.make_reducer`.  `klip.klip_basis(..., tol=1e-6)`
+and `KLIPParams(eig_tol=1e-6)` take the absolute cut directly.
+
 ### The plate scale and the PSF library (`--pxscale`, `--psflib`)
 
 The astrometry of the 2026 cubes gives NEAR 0.04450"/px near the star, where klip-tpe used
