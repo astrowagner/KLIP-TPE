@@ -43,7 +43,7 @@ from .injection import LibraryPSF
 
 __all__ = ["offaxis_grid", "library", "throughput_fn", "model_for_datasets",
            "mode_from_header", "cache_dir", "DEFAULTS", "have_stpsf",
-           "unocculted_ee", "star_flux_from_flux_density"]
+           "unocculted_ee", "star_flux_from_flux_density", "star_flux_pair"]
 
 #: ``image_mask`` -> the instrument and pupil stop that go with it, so callers only have
 #: to name the coronagraph they used.
@@ -283,24 +283,26 @@ def _ee_radius(ref: np.ndarray, frac: float = 0.5, scale: float = 1.5) -> float:
 
 
 def _ap_sum(img: np.ndarray, r: float) -> float:
-    """Return the flux of a centered aperture.
+    """Return the flux of a centered aperture, each pixel by its exact area inside it.
 
     Parameters
     ----------
     img : ndarray, shape (ny, nx)
-        The image.
+        The image.  NaN pixels count as 0.
     r : float
         Radius of the aperture, in pixels.
 
     Returns
     -------
     flux : float
-        The sum of the finite pixels within ``r`` of the center.
+        The flux within ``r`` of the center (:func:`klip_tpe.instruments.generic.aperture_sum`), as the
+        star's flux is measured.  Until 2026-11-25 it summed the whole pixels whose centers lay inside,
+        in the grids cached before.
     """
+    from .instruments.generic import aperture_sum
     img = np.asarray(img, float)
     cy, cx = (img.shape[0] - 1) / 2.0, (img.shape[1] - 1) / 2.0
-    yy, xx = np.mgrid[0:img.shape[0], 0:img.shape[1]]
-    return float(np.nansum(img[np.hypot(xx - cx, yy - cy) <= r]))
+    return float(aperture_sum(np.where(np.isfinite(img), img, 0.0), cx, cy, float(r)))
 
 
 def _source_center(img: np.ndarray, guess: Tuple[float, float], win: float = 5.0) -> Tuple[float, float]:
@@ -651,7 +653,7 @@ def throughput_fn(g: Dict[str, Any]) -> Callable[[Any], Any]:
     return f
 
 
-def library(g: Dict[str, Any], star_flux: float = 1.0, ee_radius_px: Optional[float] = None,
+def library(g: Dict[str, Any], star_flux=1.0, ee_radius_px: Optional[float] = None,
             refpa_deg: Optional[float] = None) -> LibraryPSF:
     """Build a :class:`~klip_tpe.injection.LibraryPSF` from an :func:`offaxis_grid`.
 
@@ -662,10 +664,11 @@ def library(g: Dict[str, Any], star_flux: float = 1.0, ee_radius_px: Optional[fl
     ----------
     g : dict
         The grid, from :func:`offaxis_grid`.
-    star_flux : float, default 1.0
+    star_flux : float or dict, default 1.0
         The star's flux in the data's own units, measured in the same aperture ``ee_radius_px``, such as
         from the target-acquisition image or the reference star's photometry.  1 injects in units of the
-        template.
+        template.  ``{"exact": f, "whole": g}`` gives one for each normalization aperture
+        (:meth:`~klip_tpe.injection.LibraryPSF.set_ee_aperture`), :func:`star_flux_pair`'s.
     ee_radius_px : float or None, default None
         The normalization aperture, in pixels.  None takes the grid's.
     refpa_deg : float or None, default None
@@ -694,7 +697,7 @@ def library(g: Dict[str, Any], star_flux: float = 1.0, ee_radius_px: Optional[fl
     return LibraryPSF(sl, g["seps"], center=c, ee_radius_px=rap,
                       throughput_fn=throughput_fn(g),
                       refpa_deg=None if refpa_deg is None else float(refpa_deg),
-                      flux_unit=float(star_flux))
+                      flux_unit=dict(star_flux) if isinstance(star_flux, dict) else float(star_flux))
 
 
 # ------------------------------------------------------------------ absolute flux scale
@@ -702,7 +705,7 @@ def unocculted_ee(radius_px: float, instrument: str = "NIRCam", filter: str = "F
                   pupil_mask: Optional[str] = "MASKRND", fov_arcsec: float = 30.0,
                   oversample: int = 2, nlambda: int = 3, aperture: Optional[str] = None,
                   detector_position: Optional[Tuple[int, int]] = None, date: Optional[str] = None,
-                  cache: bool = True, log: Callable[[str], None] = print) -> float:
+                  cache: bool = True, log: Callable[[str], None] = print, center: str = "psf") -> float:
     """Return the fraction of an unocculted point source's flux inside a radius.
 
     The source is unocculted through the Lyot stop, ``image_mask`` removed and ``pupil_mask`` kept,
@@ -741,6 +744,10 @@ def unocculted_ee(radius_px: float, instrument: str = "NIRCam", filter: str = "F
         Whether to read and write the cache.
     log : callable, default print
         Function that takes each line of the log.
+    center : {"psf", "geometric"}, default "psf"
+        Where the aperture is centered, on the PSF (:func:`_source_center`) or on the image's middle,
+        as until 2026-11-25.  STPSF's NIRCam MASKRND PSF sits 0.76 px from the middle, which changes
+        the fraction by 3 % at 3 px and by 0.2 % at the 7.5 and 16.5 px of the cached grids.
 
     Returns
     -------
@@ -751,8 +758,18 @@ def unocculted_ee(radius_px: float, instrument: str = "NIRCam", filter: str = "F
     ------
     RuntimeError
         If the PSF is not in the cache and STPSF is not installed, or the PSF has no flux.
+    ValueError
+        If ``center`` is neither.
     """
     from .instruments.generic import aperture_sum
+    if center not in ("psf", "geometric"):
+        raise ValueError(f"center is 'psf' or 'geometric', not {center!r}")
+
+    def ee_of(img: np.ndarray, tot: float) -> float:
+        c = ((img.shape[1] - 1) / 2.0, (img.shape[0] - 1) / 2.0)
+        if center == "psf":
+            c = _source_center(img, c)
+        return float(aperture_sum(img, c[0], c[1], float(radius_px)) / tot)
     meta = {"kind": "unocculted_ee", "instrument": instrument, "filter": filter,
             "pupil_mask": pupil_mask, "fov_arcsec": float(fov_arcsec), "oversample": int(oversample),
             "nlambda": int(nlambda), "aperture": aperture, "detector_position": detector_position,
@@ -764,8 +781,7 @@ def unocculted_ee(radius_px: float, instrument: str = "NIRCam", filter: str = "F
             with fits.open(path) as h:
                 img = np.asarray(h[0].data, float)
                 tot, px = float(h[0].header["PSFTOTAL"]), float(h[0].header["PIXELSCL"])
-            c = ((img.shape[1] - 1) / 2.0, (img.shape[0] - 1) / 2.0)
-            return float(aperture_sum(img, c[0], c[1], float(radius_px)) / tot)
+            return ee_of(img, tot)
         except Exception as exc:                                # pragma: no cover - corrupt cache
             log(f"  stpsf: ignoring unreadable EE cache {os.path.basename(path)} ({exc})")
 
@@ -796,14 +812,13 @@ def unocculted_ee(radius_px: float, instrument: str = "NIRCam", filter: str = "F
             hdr[f"KTMETA{i:02d}"] = line
         fits.PrimaryHDU(np.asarray(img, np.float32), header=hdr).writeto(path, overwrite=True)
         log(f"  stpsf: cached unocculted PSF -> {os.path.basename(path)}")
-    c = ((img.shape[1] - 1) / 2.0, (img.shape[0] - 1) / 2.0)
-    return float(aperture_sum(img, c[0], c[1], float(radius_px)) / tot)
+    return ee_of(img, tot)
 
 
 def star_flux_from_flux_density(g: Dict[str, Any], flux_density_jy: float, pixar_sr: float,
                                 ee_radius_px: Optional[float] = None, bunit: str = "MJy/sr",
                                 optics_transmission: float = 1.0,
-                                log: Callable[[str], None] = print, **kw) -> float:
+                                log: Callable[[str], None] = print, ee_center: str = "psf", **kw) -> float:
     """Return ``star_flux`` for :func:`library` from the star's flux density in the band.
 
     The JWST pipeline calibrates NRC_CORON data to surface brightness, so a point source of flux
@@ -830,6 +845,10 @@ def star_flux_from_flux_density(g: Dict[str, Any], flux_density_jy: float, pixar
         JWST calints it stays 1.
     log : callable, default print
         Function that takes each line of the log.
+    ee_center : {"psf", "geometric"}, default "psf"
+        Where :func:`unocculted_ee`'s aperture is centered.  "geometric", the image's middle, gives the
+        star flux of runs made before 2026-11-25, which go with stamps normalized by whole pixels
+        (``RunConfig.ee_aperture``).
     kw : dict
         Keywords of :func:`unocculted_ee`, such as ``fov_arcsec`` and ``date``.
 
@@ -868,7 +887,7 @@ def star_flux_from_flux_density(g: Dict[str, Any], flux_density_jy: float, pixar
                        pupil_mask=m.get("pupil_mask"), aperture=m.get("aperture"),
                        detector_position=m.get("detector_position"), date=m.get("date"),
                        oversample=int(m.get("oversample", 2)), nlambda=int(m.get("nlambda", 3)),
-                       log=log, **kw)
+                       log=log, center=ee_center, **kw)
     total = float(flux_density_jy) / (1e6 * float(pixar_sr))
     t = float(optics_transmission)
     log(f"  stpsf: S = {flux_density_jy:.4f} Jy -> {total:.4e} MJy/sr summed over the PSF; "
@@ -879,6 +898,31 @@ def star_flux_from_flux_density(g: Dict[str, Any], flux_density_jy: float, pixar
             "mode already carries its optics; only use this for data whose calibration "
             "demonstrably excludes part of the train (see the docstring)")
     return total * ee * t
+
+
+def star_flux_pair(g: Dict[str, Any], flux_density_jy: float, pixar_sr: float, **kw) -> Dict[str, float]:
+    """Return :func:`library`'s ``star_flux`` for each normalization aperture of the stamps.
+
+    Parameters
+    ----------
+    g : dict
+        The grid, from :func:`offaxis_grid`.
+    flux_density_jy : float
+        The star's flux density in this filter, in Jy.
+    pixar_sr : float
+        The ``PIXAR_SR`` of the science frames.
+    kw : dict
+        More keywords of :func:`star_flux_from_flux_density`.
+
+    Returns
+    -------
+    star_flux : dict
+        ``{"exact": f, "whole": g}``, the encircled energy about the PSF for stamps normalized
+        exactly and about the image's middle for stamps normalized by whole pixels, as runs made before
+        2026-11-25 measured it.  A run takes the one of its ``RunConfig.ee_aperture``.
+    """
+    return {"exact": star_flux_from_flux_density(g, flux_density_jy, pixar_sr, ee_center="psf", **kw),
+            "whole": star_flux_from_flux_density(g, flux_density_jy, pixar_sr, ee_center="geometric", **kw)}
 
 
 # ------------------------------------------------------------------ from the data itself

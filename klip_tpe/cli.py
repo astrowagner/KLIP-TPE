@@ -332,6 +332,13 @@ def _subtract(red, a, log=print) -> None:
         Function that takes each line of the log.
     """
     from .reducer import _taken_text
+    # the frames are edited with the run's stamp normalization (RunConfig.ee_aperture): the one typed,
+    # else a run's own from its checkpoint (whole pixels for a run made before 2026-11-25), else exact
+    ee = getattr(a, "ee_aperture", None) or getattr(a, "_run_ee_aperture", None) or "exact"
+    subs = getattr(red, "reducers", None)
+    for r in (list(subs.values()) if isinstance(subs, dict) and subs else [red]):
+        if callable(getattr(r, "use_ee_aperture", None)):
+            r.use_ee_aperture(ee)
     src, meta = _subtract_request(red, a)
     if src:
         n = red.subtract_sources(src)
@@ -648,6 +655,8 @@ def _data_edits_for_run(a) -> None:
     if st is None:
         return
     rec = dict((st.get("config") or {}).get("data_edits") or {})
+    # the stamps' normalization the run's frames were edited with (RunConfig.ee_aperture)
+    a._run_ee_aperture = str((st.get("config") or {}).get("ee_aperture") or "whole")
     given = _explicit_dests(getattr(a, "_argv", None))
     name = os.path.basename(os.path.abspath(run_dir))
     was_cube = rec.get("cube_name") or None
@@ -723,6 +732,8 @@ def _data_edits_for_rereduce(a) -> None:
         if checkpoint_candidates(run_dir):
             st, _ = load_checkpoint(run_dir, log=lambda s: None)
             rec = dict(((st or {}).get("config") or {}).get("data_edits") or {})
+            if st:
+                a._run_ee_aperture = str((st.get("config") or {}).get("ee_aperture") or "whole")
     from .metrics import Source
     given = _explicit_dests(getattr(a, "_argv", None))
     name = os.path.basename(os.path.abspath(str(run_dir or ".")))
@@ -1746,6 +1757,12 @@ def _protocol_args(p):
                         "search's own S/N under the run's rules, and every ring and map without the pixel mask). idl "
                         "measures as before 2026-11-01, with the IDL verify's S/N (a Gaussian kernel, no despike or "
                         "radial band) and the pixel mask in the search's rings alone, as --from-idl-setup does")
+    p.add_argument("--ee-aperture", default=None, choices=["exact", "whole"],
+                   help="how the injection models normalize their stamps in their aperture (default exact: each "
+                        "pixel by its area inside, as the star's flux is measured, so a source carries the flux its "
+                        "contrast asks for). whole sums the pixels whose centers lie inside, as runs made before "
+                        "2026-11-25 do. It matters only for a model normalized inside a radius (--r-ee, a PSF "
+                        "library)")
     p.add_argument("--klip-eig-cut", default=None, choices=["relative", "absolute"],
                    help="the eigenvalue cut of the KL modes (default relative: only the eigenvalues at or below the "
                         "round-off floor of the decomposition are dropped, whatever the data's units). absolute drops "
@@ -2072,6 +2089,7 @@ def _protocol_config(a) -> dict:
                 **({"verify_snr": a.verify_snr} if getattr(a, "verify_snr", None) else {}),
                 **({"verify_position": a.verify_position} if getattr(a, "verify_position", None) else {}),
                 **({"klip_eig_cut": a.klip_eig_cut} if getattr(a, "klip_eig_cut", None) else {}),
+                **({"ee_aperture": a.ee_aperture} if getattr(a, "ee_aperture", None) else {}),
                 **({"fmmf_fm_apertures": True} if getattr(a, "fmmf_fm_apertures", False) else {}),
                 **({"stitch_injections": a.stitch_injections} if getattr(a, "stitch_injections", None) else {}),
                 **({"stitch_blend": a.stitch_blend} if getattr(a, "stitch_blend", None) else {}),

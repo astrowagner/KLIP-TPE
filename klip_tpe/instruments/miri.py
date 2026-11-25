@@ -666,7 +666,7 @@ class MIRILibraryPSF(LibraryPSF):
         return np.arange(0.0, 360.0, 1.0)
 
 
-def library(filter: str = "F1065C", star_flux: float = 1.0,
+def library(filter: str = "F1065C", star_flux=1.0,
             seps_as: Optional[Sequence[float]] = None, date: Optional[str] = None,
             log: Callable[[str], None] = print, **kw) -> MIRILibraryPSF:
     """Build the injection model of a MIRI coronagraphic mode, radial stamps with a 2-D throughput.
@@ -678,9 +678,10 @@ def library(filter: str = "F1065C", star_flux: float = 1.0,
     ----------
     filter : str, default "F1065C"
         The coronagraphic filter.
-    star_flux : float, default 1.0
+    star_flux : float or dict, default 1.0
         The flux unit, one unit of contrast in the science frames' units
-        (:func:`star_flux_from_flux_density`).
+        (:func:`star_flux_from_flux_density`), or ``{"exact": f, "whole": g}``, one for each
+        normalization aperture of the stamps (:meth:`~klip_tpe.injection.LibraryPSF.set_ee_aperture`).
     seps_as : sequence of float or None, default None
         Separations of the stamp library, in arcsec.  None takes :func:`default_separations`, and the
         throughput map keeps its own ladder either way.
@@ -718,7 +719,8 @@ def library(filter: str = "F1065C", star_flux: float = 1.0,
     # data set).
     return MIRILibraryPSF(sl, grid["seps"], center=c,
                           ee_radius_px=float(grid.get("ee_radius_px") or 3.0),
-                          refpa_deg=None, flux_unit=float(star_flux),
+                          refpa_deg=None,
+                          flux_unit=dict(star_flux) if isinstance(star_flux, dict) else float(star_flux),
                           thru2d=throughput_map_fn(tmap))
 
 
@@ -726,7 +728,7 @@ def star_flux_from_flux_density(filter: str, flux_density_jy: float, pixar_sr: f
                                 bunit: str = "MJy/sr", date: Optional[str] = None,
                                 seps_as: Optional[Sequence[float]] = None,
                                 optics_transmission: float = 1.0,
-                                log: Callable[[str], None] = print) -> float:
+                                log: Callable[[str], None] = print, ee_center: str = "psf") -> float:
     """Compute :func:`library`'s ``star_flux`` from the star's flux density in this filter.
 
     It wraps :func:`klip_tpe.stpsf_psf.star_flux_from_flux_density` on the grid :func:`library`
@@ -750,6 +752,10 @@ def star_flux_from_flux_density(filter: str, flux_density_jy: float, pixar_sr: f
         Transmission of the optics, applied to the flux.
     log : callable, default print
         Function called with each log line.
+    ee_center : {"psf", "geometric"}, default "psf"
+        Where the encircled energy's aperture is centered
+        (:func:`klip_tpe.stpsf_psf.star_flux_from_flux_density`).  "geometric" gives the flux of runs
+        made before 2026-11-25.
 
     Returns
     -------
@@ -769,7 +775,7 @@ def star_flux_from_flux_density(filter: str, flux_density_jy: float, pixar_sr: f
     grid = offaxis_grid(instrument="MIRI", filter=m["filter"], image_mask=m["image_mask"],
                         pupil_mask=m["pupil_mask"], seps_as=seps, date=date, log=log)
     return _sf(grid, float(flux_density_jy), float(pixar_sr), bunit=bunit,
-               optics_transmission=float(optics_transmission), log=log)
+               optics_transmission=float(optics_transmission), log=log, ee_center=ee_center)
 
 
 def forbidden_pa(angles, rho_as: float, filter: str = "F1065C", truenorth: float = 0.0,

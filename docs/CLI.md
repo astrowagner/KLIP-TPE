@@ -90,6 +90,7 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--verify-n-boot VERIFY_N_BOOT] [--param-verify]
                         [--no-param-verify] [--n-remeasure N]
                         [--score-floor S] [--verify-snr {search,idl}]
+                        [--ee-aperture {exact,whole}]
                         [--klip-eig-cut {relative,absolute}]
                         [--verify-position {given,peak}] [--fmmf-fm-apertures]
                         [--n-sources N [N ...]] [--min-r-fwhm X] [--n-pv N_PV]
@@ -473,6 +474,14 @@ options:
                         with the IDL verify's S/N (a Gaussian kernel, no
                         despike or radial band) and the pixel mask in the
                         search's rings alone, as --from-idl-setup does
+  --ee-aperture {exact,whole}
+                        how the injection models normalize their stamps in
+                        their aperture (default exact: each pixel by its area
+                        inside, as the star's flux is measured, so a source
+                        carries the flux its contrast asks for). whole sums
+                        the pixels whose centers lie inside, as runs made
+                        before 2026-11-25 do. It matters only for a model
+                        normalized inside a radius (--r-ee, a PSF library)
   --klip-eig-cut {relative,absolute}
                         the eigenvalue cut of the KL modes (default relative:
                         only the eigenvalues at or below the round-off floor
@@ -808,6 +817,7 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--verify] [--no-verify] [--verify-n-boot VERIFY_N_BOOT]
                      [--param-verify] [--no-param-verify] [--n-remeasure N]
                      [--score-floor S] [--verify-snr {search,idl}]
+                     [--ee-aperture {exact,whole}]
                      [--klip-eig-cut {relative,absolute}]
                      [--verify-position {given,peak}] [--fmmf-fm-apertures]
                      [--n-sources N [N ...]] [--min-r-fwhm X] [--n-pv N_PV]
@@ -1190,6 +1200,14 @@ options:
                         with the IDL verify's S/N (a Gaussian kernel, no
                         despike or radial band) and the pixel mask in the
                         search's rings alone, as --from-idl-setup does
+  --ee-aperture {exact,whole}
+                        how the injection models normalize their stamps in
+                        their aperture (default exact: each pixel by its area
+                        inside, as the star's flux is measured, so a source
+                        carries the flux its contrast asks for). whole sums
+                        the pixels whose centers lie inside, as runs made
+                        before 2026-11-25 do. It matters only for a model
+                        normalized inside a radius (--r-ee, a PSF library)
   --klip-eig-cut {relative,absolute}
                         the eigenvalue cut of the KL modes (default relative:
                         only the eigenvalues at or below the round-off floor

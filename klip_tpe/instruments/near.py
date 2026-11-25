@@ -782,13 +782,14 @@ class N4Library:
                 "platescale": self.platescale, "throughput": "throughput_merged.csv"
                 if os.path.exists(os.path.join(self.dir, "throughput_merged.csv")) else "analytic"}
 
-    def model(self, flux_unit: float = 1.0) -> LibraryPSF:
+    def model(self, flux_unit=1.0) -> LibraryPSF:
         """Build the injection model of the library.
 
         Parameters
         ----------
-        flux_unit : float, default 1.0
-            Flux of alpha Cen A in the stamps' normalization (:func:`template_flux_unit`).
+        flux_unit : float or dict, default 1.0
+            Flux of alpha Cen A in the stamps' normalization (:func:`template_flux_unit`), or one for
+            each normalization aperture, ``{"exact": f, "whole": g}``.
 
         Returns
         -------
@@ -821,7 +822,8 @@ def _north_text(rec: Dict[str, Any]) -> str:
     return f"true north {float(rec.get('deg', NEAR.truenorth)):g} deg for every frame" + (f" ({why})" if why else "")
 
 
-def template_flux_unit(psf_template: np.ndarray, lam_over_d_px: Optional[float] = None) -> float:
+def template_flux_unit(psf_template: np.ndarray, lam_over_d_px: Optional[float] = None,
+                       exact: bool = True) -> float:
     """Return the flux unit for a contrast relative to alpha Cen A, from the B-star template.
 
     It is ``(129/57) * EE_B(1 lambda/D)``, the template's flux within lambda/D of its center (7.5, 7.5)
@@ -834,6 +836,10 @@ def template_flux_unit(psf_template: np.ndarray, lam_over_d_px: Optional[float] 
     lam_over_d_px : float or None, default None
         lambda/D in pixels, the run's own from :func:`near_constants`.  None takes
         :attr:`NEAR.lam_over_d_px`.
+    exact : bool, default True
+        Whether the aperture sums each pixel by its area inside, as the injection models normalize
+        their stamps (:data:`klip_tpe.injection.EE_APERTURES`).  False sums the whole pixels whose
+        centers lie inside, as runs made before 2026-11-25 do.
 
     Returns
     -------
@@ -841,9 +847,13 @@ def template_flux_unit(psf_template: np.ndarray, lam_over_d_px: Optional[float] 
         The flux of alpha Cen A in the template's units.
     """
     t = np.where(np.isfinite(psf_template), psf_template, 0.0)
-    yy, xx = np.mgrid[0:t.shape[0], 0:t.shape[1]]
     c = ((t.shape[1] - 1) / 2.0, (t.shape[0] - 1) / 2.0)
-    m = np.hypot(xx - c[0], yy - c[1]) <= (NEAR.lam_over_d_px if lam_over_d_px is None else float(lam_over_d_px))
+    r = NEAR.lam_over_d_px if lam_over_d_px is None else float(lam_over_d_px)
+    if exact:
+        from .generic import aperture_sum
+        return NEAR.b_to_a * float(aperture_sum(t, c[0], c[1], r))
+    yy, xx = np.mgrid[0:t.shape[0], 0:t.shape[1]]
+    m = np.hypot(xx - c[0], yy - c[1]) <= r
     return NEAR.b_to_a * float(t[m].sum())
 
 
@@ -971,7 +981,10 @@ def make_reducer(root: str, nights: Sequence[int] = (1, 2, 3, 4, 5, 6), frames: 
                                                                              drop_frames=drop.get(f"n{seq}"),
                                                                              north=nn)
         psf = ds.meta.get("psf_template")
-        fu = template_flux_unit(psf, const["lam_over_d_px"]) if psf is not None else 1.0
+        # the flux unit in each normalization aperture (RunConfig.ee_aperture), whole pixels as before
+        # 2026-11-25 or exact
+        fu = ({"exact": template_flux_unit(psf, const["lam_over_d_px"]),
+               "whole": template_flux_unit(psf, const["lam_over_d_px"], exact=False)} if psf is not None else 1.0)
         thru = lib.throughput if lib is not None else analytic_throughput
         fallback = TemplatePSF(psf, center=(7.5, 7.5), ee_radius_px=const["lam_over_d_px"],
                                star_flux=fu, throughput_fn=thru) if psf is not None else None

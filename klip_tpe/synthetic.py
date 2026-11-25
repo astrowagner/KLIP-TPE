@@ -21,8 +21,9 @@ __all__ = ["SyntheticReducer", "make_synthetic_partitions", "synthetic_klip_data
 
 #: Settings every request carries that the synthetic images do not depend on.  They stay out of
 #: :meth:`SyntheticReducer._rng`'s seed, so a synthetic run draws what it drew before requests
-#: carried them (the eigenvalue cut since 2026-11-25).
-_UNSEEDED = ("klip_eig_cut",)
+#: carried them (the eigenvalue cut and the stamps' normalization aperture since 2026-11-25).  Its
+#: Gaussian model sums to 1 over its stamp and takes no aperture.
+_UNSEEDED = ("klip_eig_cut", "ee_aperture")
 
 
 def _outside_zone(rr: np.ndarray, p: Dict[str, Any]) -> np.ndarray:

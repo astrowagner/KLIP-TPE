@@ -199,6 +199,7 @@ class GPUKLIPReducer(KLIPReducer):
             self.stats["cpu_s"] += time.perf_counter() - t0
             return res
         t0 = time.perf_counter()
+        self.use_ee_aperture((req.params or {}).get("ee_aperture") or self.defaults.get("ee_aperture"))
         res = self._reduce_gpu(req)
         self.stats["gpu_jobs"] += 1
         self.stats["gpu_s"] += time.perf_counter() - t0

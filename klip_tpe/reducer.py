@@ -1913,6 +1913,34 @@ class KLIPReducer(Reducer):
         return ref
 
     # -- main entry ----------------------------------------------------------
+    def use_ee_aperture(self, mode: Optional[str]) -> bool:
+        """Normalize the injection models' stamps in an aperture summed exactly or by whole pixels.
+
+        A request carries its run's ``ee_aperture`` (``RunConfig.ee_aperture``), and each reduction
+        sets it here before it injects, so worker processes forked before the run was built take it
+        too.  The injected stamps cached before a change are dropped.
+
+        Parameters
+        ----------
+        mode : {"exact", "whole"} or None
+            The aperture (:meth:`klip_tpe.injection.TemplatePSF.set_ee_aperture`), None for "exact".
+
+        Returns
+        -------
+        changed : bool
+            Whether a model changed its normalization.
+        """
+        mode = str(mode or "exact").lower()
+        changed = False
+        for m in (self.model, self.fallback):
+            if m is not None and hasattr(m, "set_ee_aperture") and getattr(m, "ee_aperture", mode) != mode:
+                m.set_ee_aperture(mode)
+                changed = True
+        if changed:
+            self._inj_cache, self._fm_cache = {}, {}
+            self._crops = {"inj": _CropCache(), "fm": _CropCache()}
+        return changed
+
     def prepare(self, req: ReductionRequest) -> PreparedFrames:
         """Run the first half of :meth:`reduce`, up to the binned frames.
 
@@ -1940,6 +1968,7 @@ class KLIPReducer(Reducer):
         """
         p = dict(self.defaults)
         p.update({k: v for k, v in req.params.items() if v is not None})
+        self.use_ee_aperture(p.get("ee_aperture"))
         k = int(max(round(p["k_klip"]), 1))
         bin_ = int(max(round(p["bin"]), 1))
         filt = int(round(p["filter"]))

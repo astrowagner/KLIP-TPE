@@ -315,7 +315,8 @@ def test_the_jwst_call_sites_use_the_model_and_the_measured_centre():
                if os.path.exists(q)), None)
     if pr:
         src = open(pr).read()
-        assert "star_flux_from_flux_density" in src
+        # the star flux from the flux density, one for each normalization aperture of the stamps
+        assert "star_flux_pair" in src or "star_flux_from_flux_density" in src
         assert "raise RuntimeError" in src and "GaussianPSF" in src, \
             "runs D/H2 must refuse rather than fall back silently"
         # the *argument*, not the comment that explains where 52.7 came from

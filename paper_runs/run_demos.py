@@ -334,7 +334,10 @@ def hip65426_objects(partition="all", engine="pyklip", library=True):
         grid = stpsf_psf.offaxis_grid("NIRCam", info["filter"] or "F444W", image_mask="MASK335R",
                                       seps_as=np.arange(0.2, 3.01, 0.2), stamp_px=41, nlambda=3,
                                       log=log)
-        sf = stpsf_psf.star_flux_from_flux_density(
+        # one flux for each normalization aperture of the stamps (RunConfig.ee_aperture): the
+        # encircled energy about the PSF for new runs, about the image's middle for runs made
+        # before 2026-11-25, which keep their whole pixels
+        sf = stpsf_psf.star_flux_pair(
             grid, phot["flux_density_jy"], info["pixar_sr"], bunit=info["bunit"] or "MJy/sr",
             optics_transmission=phot["optics_transmission"], log=log)
     except ImportError as exc:

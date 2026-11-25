@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased — 2026-11-25 (the injected stamps normalized in the aperture the star's flux is measured in)
+
+From the audit of 2026-11-25.
+
+- **`TemplatePSF` and `LibraryPSF` normalize their stamps in the exact aperture**
+  (`injection.TemplatePSF.set_ee_aperture`, `LibraryPSF.set_ee_aperture`, `RunConfig.ee_aperture`,
+  `--ee-aperture`).  They summed the whole pixels inside `ee_radius_px`, while
+  `generic.star_flux_from_aperture_photometry` and `stpsf_psf.unocculted_ee` measure the star's flux
+  in the exact aperture, so an injected source carried exact over whole of the flux its contrast
+  asked for.  For a Gaussian template that is 0.90 to 1.03 for radii from FWHM/2 to one FWHM (0.80 at
+  FWHM/2 on a 2.3 px FWHM) and within 0.2 % from 1.5 FWHM, and the cached JWST grids give 0.9885 to
+  1.0021.  A model normalized over its whole stamp, as the generic path and the paper's NACO and
+  SPHERE runs, is unchanged, as are `AiryPSF` and `FramePSF`.
+- NEAR's flux unit, the B template's flux inside 1 lambda/D, is measured the same way as its stamps
+  (`near.template_flux_unit(exact=)`, both kept for each normalization).
+- `stpsf_psf.unocculted_ee` centers its aperture on the PSF (`center="psf"`).  STPSF's NIRCam MASKRND
+  PSF sits 0.76 px from the image's middle, which changed the encircled energy by 3 % at 3 px and by
+  0.2 % at the 7.5 and 16.5 px of the cached grids.  `stpsf_psf.star_flux_pair` gives the star flux
+  for each normalization, and the paper's NIRCam runs (`paper_runs/run_demos.py`) take it.
+  `miri.star_flux_from_flux_density` takes `ee_center` too.  `stpsf_psf._ap_sum`, the throughput of
+  a newly computed grid, sums exactly as well, while a cached grid keeps its throughput.
+- `"exact"` is the default for new runs and for the models.  `"whole"` keeps the old stamps to the
+  bit, and a run saved before 2026-11-25 resumes with it, as do `--from-idl-setup` runs.  Each request
+  carries the run's aperture (`KLIPReducer.use_ee_aperture`), so worker processes forked before the
+  run was built take it, and a resumed run edits its frames with it.  The synthetic reducer leaves it
+  out of the seed of its noise, as it does the eigenvalue cut.  A MIRI run built by
+  `scripts/run_miri.py` takes one star flux, now measured about the PSF, within 0.1 % of before at
+  radii from 4.5 px.
+- Docs: FLUX_CALIBRATION.md ("The aperture is summed as the star's flux is"), CLI.md.  Tests:
+  `tests/test_ee_aperture.py`, and `tests/test_injection.py` for the exact normalization.
+
 ## Unreleased — 2026-11-25 (the contrast grid's apertures summed exactly)
 
 From the audit of 2026-11-25.

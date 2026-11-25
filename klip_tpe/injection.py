@@ -445,12 +445,98 @@ class GaussianPSF(InjectionModel):
         return self._stamp, self._center, True
 
 
+#: How a stamp's normalization aperture sums it (:meth:`TemplatePSF.set_ee_aperture`,
+#: :meth:`LibraryPSF.set_ee_aperture`): each pixel by its exact area inside, as the star's flux is
+#: measured (:func:`klip_tpe.instruments.generic.star_flux_from_aperture_photometry`,
+#: :func:`klip_tpe.stpsf_psf.unocculted_ee`), or the whole pixels whose centers lie inside, as runs
+#: made before 2026-11-25 do.
+EE_APERTURES = ("exact", "whole")
+
+
+def _ee_mode(mode: Optional[str]) -> str:
+    """Return a normalization aperture's name, checked.
+
+    Parameters
+    ----------
+    mode : str or None
+        "exact" or "whole".  None takes "exact".
+
+    Returns
+    -------
+    mode : str
+        The name, in lower case.
+
+    Raises
+    ------
+    ValueError
+        If the name is neither.
+    """
+    m = str(mode or "exact").lower()
+    if m not in EE_APERTURES:
+        raise ValueError(f"ee_aperture is one of {EE_APERTURES}, not {mode!r}")
+    return m
+
+
+def _exact_weights(shape: Tuple[int, int], center: Tuple[float, float], r: float) -> np.ndarray:
+    """Return each pixel's area inside a circle, the weights of an exact aperture sum.
+
+    Parameters
+    ----------
+    shape : tuple of 2 ints
+        The stamp's ``(sy, sx)``.
+    center : tuple of 2 floats
+        The circle's ``(x, y)`` center, in pixels.
+    r : float
+        The circle's radius, in pixels.
+
+    Returns
+    -------
+    weights : ndarray, shape (sy, sx)
+        Pixel ``(i, j)``'s area inside, from 0 to 1, the pixel covering ``[j - 0.5, j + 0.5]`` by
+        ``[i - 0.5, i + 0.5]``.  ``(img * weights).sum()`` is
+        :func:`klip_tpe.instruments.generic.aperture_sum` of a finite image.
+    """
+    from .instruments.generic import _quadrant_area
+    sy, sx = int(shape[0]), int(shape[1])
+    xa = (np.arange(sx) - 0.5 - float(center[0]))[None, :]
+    ya = (np.arange(sy) - 0.5 - float(center[1]))[:, None]
+    xb, yb = xa + 1.0, ya + 1.0
+
+    def quad(u, v):
+        return np.sign(u) * np.sign(v) * _quadrant_area(np.abs(u), np.abs(v), float(r))
+    return quad(xb, yb) - quad(xa, yb) - quad(xb, ya) + quad(xa, ya)
+
+
+def _flux_for(flux, mode: str) -> Optional[float]:
+    """Return a flux given for one normalization aperture or for each.
+
+    Parameters
+    ----------
+    flux : float, dict or None
+        One flux for both apertures, ``{"exact": f, "whole": g}``, or None.
+    mode : str
+        The aperture.
+
+    Returns
+    -------
+    flux : float or None
+        The aperture's flux, None for None.
+    """
+    if flux is None:
+        return None
+    if isinstance(flux, dict):
+        return float(flux[mode])
+    return float(flux)
+
+
 class TemplatePSF(InjectionModel):
     """Empirical PSF template, such as an unsaturated median PSF.
 
     The stamp is normalized to unit flux inside ``ee_radius_px``, or to unit total.  By default
     ``flux_unit`` is the template's own flux in that normalization, so the contrast is relative to
-    the template star.
+    the template star.  The aperture sums each pixel by its exact area inside it, as the star's flux
+    is measured (:func:`klip_tpe.instruments.generic.star_flux_from_aperture_photometry`), or the
+    whole pixels inside, as runs made before 2026-11-25 do (:meth:`set_ee_aperture`).
 
     Parameters
     ----------
@@ -461,37 +547,86 @@ class TemplatePSF(InjectionModel):
         ``((sx-1)/2, (sy-1)/2)``.
     ee_radius_px : float or None, default None
         Radius of the unit-flux normalization, in pixels.  None normalizes the total.
-    star_flux : float or None, default None
-        Flux of the science star in the same normalization.  None takes the template's flux.
+    star_flux : float, dict or None, default None
+        Flux of the science star in the same normalization, or ``{"exact": f, "whole": g}`` when it
+        differs between the two apertures.  None takes the template's flux.
     throughput_fn : callable or None, default None
         Throughput as a function of separation in arcsec.  None gives 1.
+    ee_aperture : {"exact", "whole"}, default "exact"
+        How the normalization aperture sums the template (:meth:`set_ee_aperture`).
 
     Attributes
     ----------
     template_flux : float
         Flux of the template in the normalization, before it is divided out.
+    ee_aperture : str
+        The normalization aperture in use.
     """
 
     name = "template"
 
     def __init__(self, template: np.ndarray, center: Optional[Tuple[float, float]] = None,
-                 ee_radius_px: Optional[float] = None, star_flux: Optional[float] = None,
-                 throughput_fn=None):
+                 ee_radius_px: Optional[float] = None, star_flux=None,
+                 throughput_fn=None, ee_aperture: str = "exact"):
         t = np.asarray(template, float)
         t = np.where(np.isfinite(t), t, 0.0)
         if center is None:
             center = ((t.shape[1] - 1) / 2.0, (t.shape[0] - 1) / 2.0)
         self._center = tuple(center)
+        # the whole pixels' normalization, as before 2026-11-25, kept as it was made
         if ee_radius_px is None:
             f = float(t.sum())
         else:
             yy, xx = np.mgrid[0:t.shape[0], 0:t.shape[1]]
             m = np.hypot(xx - center[0], yy - center[1]) <= ee_radius_px
             f = float(t[m].sum())
-        self._stamp = t / f if f != 0 else t
-        self.template_flux = f
-        self.flux_unit = float(f if star_flux is None else star_flux)
+        self._whole = (t / f if f != 0 else t, f)
+        self._raw = t
+        self._ee_r = None if ee_radius_px is None else float(ee_radius_px)
+        self._star_flux = star_flux
         self._thru = throughput_fn
+        self.ee_aperture = ""
+        self.set_ee_aperture(ee_aperture)
+
+    def set_ee_aperture(self, mode: str) -> str:
+        """Normalize the template in an aperture summed exactly or by whole pixels.
+
+        Parameters
+        ----------
+        mode : {"exact", "whole"}
+            "exact" sums each pixel by its area inside ``ee_radius_px``, as the star's flux is measured.
+            "whole" sums the pixels whose centers lie inside, as runs made before 2026-11-25 do, and
+            gives their stamp to the bit.  Without ``ee_radius_px`` both normalize the total.
+
+        Returns
+        -------
+        mode : str
+            The aperture now in use.
+        """
+        mode = _ee_mode(mode)
+        if mode == "whole" or self._ee_r is None:
+            stamp, f = self._whole
+        else:
+            from .instruments.generic import aperture_sum
+            f = float(aperture_sum(self._raw, self._center[0], self._center[1], self._ee_r))
+            stamp = self._raw / f if f != 0 else self._raw
+        self._stamp, self.template_flux = stamp, f
+        sf = _flux_for(self._star_flux, mode)
+        self.flux_unit = float(f if sf is None else sf)
+        self.ee_aperture = mode
+        return mode
+
+    def describe(self) -> dict:
+        """Return the model's settings, for a run's record.
+
+        Returns
+        -------
+        info : dict
+            The base keys plus ``ee_radius_px`` and ``ee_aperture``.
+        """
+        d = super().describe()
+        d.update(ee_radius_px=self._ee_r, ee_aperture=self.ee_aperture)
+        return d
 
     def stamp(self, rho_as: float):
         """Return the normalized template, the same at every separation.
@@ -877,8 +1012,10 @@ class FramePSF(InjectionModel):
 class LibraryPSF(InjectionModel):
     """Separation-dependent PSF library, interpolated linearly between its slices.
 
-    Each stamp is renormalized to unit flux within ``ee_radius_px`` of ``center``.  Outside the
-    library's separations :meth:`stamp` reports no template.
+    Each stamp is renormalized to unit flux within ``ee_radius_px`` of ``center``, summing each pixel
+    by its exact area inside, as the star's flux is measured (:func:`klip_tpe.stpsf_psf.unocculted_ee`),
+    or the whole pixels inside, as runs made before 2026-11-25 do (:meth:`set_ee_aperture`).  Outside
+    the library's separations :meth:`stamp` reports no template.
 
     Parameters
     ----------
@@ -896,15 +1033,23 @@ class LibraryPSF(InjectionModel):
     refpa_deg : float or None, default None
         Reference axis of the slices, in degrees, for an anisotropic PSF.  None leaves the stamps
         unrotated.
-    flux_unit : float, default 1.0
-        Flux of the star in the normalization of the slices, in data units.
+    flux_unit : float or dict, default 1.0
+        Flux of the star in the normalization of the slices, in data units, or ``{"exact": f,
+        "whole": g}`` when it differs between the two apertures.
+    ee_aperture : {"exact", "whole"}, default "exact"
+        How the normalization aperture sums a stamp (:meth:`set_ee_aperture`).
+
+    Attributes
+    ----------
+    ee_aperture : str
+        The normalization aperture in use.
     """
 
     name = "library"
 
     def __init__(self, slices: np.ndarray, seps: Sequence[float], center: Tuple[float, float],
                  ee_radius_px: float, throughput_fn=None, refpa_deg: Optional[float] = None,
-                 flux_unit: float = 1.0):
+                 flux_unit=1.0, ee_aperture: str = "exact"):
         self.slices = np.asarray(slices, float)
         self.seps = np.asarray(seps, float)
         self.center = tuple(center)
@@ -913,11 +1058,58 @@ class LibraryPSF(InjectionModel):
         self._eemask = np.hypot(xx - center[0], yy - center[1]) <= self.rap
         self._thru = throughput_fn
         self.refpa_deg = refpa_deg
-        self.flux_unit = float(flux_unit)
+        # the whole pixels' normalization, as before 2026-11-25, kept as it was made
         for i in range(self.slices.shape[0]):
             s = self.slices[i][self._eemask].sum()
             if s > 0:
                 self.slices[i] = self.slices[i] / s
+        self._whole_slices = self.slices
+        self._flux_units = flux_unit
+        self._eew: Optional[np.ndarray] = None
+        self.ee_aperture = ""
+        self.set_ee_aperture(ee_aperture)
+
+    def set_ee_aperture(self, mode: str) -> str:
+        """Normalize the slices in an aperture summed exactly or by whole pixels.
+
+        Parameters
+        ----------
+        mode : {"exact", "whole"}
+            "exact" sums each pixel by its area inside ``ee_radius_px``, as the star's flux is measured.
+            "whole" sums the pixels whose centers lie inside, as runs made before 2026-11-25 do, and
+            gives their stamps to the bit.
+
+        Returns
+        -------
+        mode : str
+            The aperture now in use.
+        """
+        mode = _ee_mode(mode)
+        if mode == "whole":
+            self.slices, self._eew = self._whole_slices, None
+        else:
+            w = _exact_weights(self._whole_slices.shape[1:], self.center, self.rap)
+            sl = self._whole_slices.copy()
+            for i in range(sl.shape[0]):
+                s = float((sl[i] * w).sum())
+                if s > 0:
+                    sl[i] = sl[i] / s
+            self.slices, self._eew = sl, w
+        self.flux_unit = float(_flux_for(self._flux_units, mode))
+        self.ee_aperture = mode
+        return mode
+
+    def describe(self) -> dict:
+        """Return the model's settings, for a run's record.
+
+        Returns
+        -------
+        info : dict
+            The base keys plus ``ee_radius_px`` and ``ee_aperture``.
+        """
+        d = super().describe()
+        d.update(ee_radius_px=self.rap, ee_aperture=self.ee_aperture)
+        return d
 
     def stamp(self, rho_as: float):
         """Return the library's stamp at a separation, interpolated between the two nearest slices.
@@ -942,7 +1134,7 @@ class LibraryPSF(InjectionModel):
         j = int(np.clip(np.searchsorted(self.seps, r, side="right") - 1, 0, len(self.seps) - 2))
         f = (r - self.seps[j]) / (self.seps[j + 1] - self.seps[j])
         st = (1 - f) * self.slices[j] + f * self.slices[j + 1]
-        s = st[self._eemask].sum()
+        s = st[self._eemask].sum() if self._eew is None else float((st * self._eew).sum())
         if s > 0:
             st = st / s
         return st, self.center, True

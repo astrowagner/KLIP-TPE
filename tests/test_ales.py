@@ -171,10 +171,16 @@ def test_the_reducer_takes_the_representative_groups_fwhm_and_filter(tmp_path):
     assert red.matched_filter_kernel(0.3) is None
     assert red.partition_label == "group" and red.provenance["groups"][0]["name"] == "g00"
     assert all(r.defaults["hp_nan_aware"] for r in red.reducers.values())
-    # the flux unit is the group template's flux in 3 spaxels of its star, so a contrast is a flux ratio
+    # the flux unit is the group template's flux in 3 spaxels of its star, so a contrast is a flux ratio,
+    # summed exactly (or by whole spaxels for a run saved before 2026-11-25, RunConfig.ee_aperture)
+    from klip_tpe.instruments.generic import aperture_sum
     t0 = ds["g00"].meta["psf"]
     ty, tx = np.mgrid[0:t0.shape[0], 0:t0.shape[1]]
-    assert red.reducers["g00"].model.flux_unit == pytest.approx(t0[np.hypot(tx - 27, ty - 25) <= 3.0].sum(), rel=1e-6)
+    model = red.reducers["g00"].model
+    assert model.flux_unit == pytest.approx(aperture_sum(np.nan_to_num(t0), 27, 25, 3.0), rel=1e-6)
+    model.set_ee_aperture("whole")
+    assert model.flux_unit == pytest.approx(t0[np.hypot(tx - 27, ty - 25) <= 3.0].sum(), rel=1e-6)
+    model.set_ee_aperture("exact")
 
     class _K:
         def __init__(self, v):

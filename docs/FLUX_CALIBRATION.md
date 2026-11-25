@@ -50,6 +50,33 @@ Four different ones, and the `star_flux` has to match whichever the model used:
 `stpsf_psf.offaxis_grid` uses `1.5 × EE50` of the unocculted PSF. These are not
 interchangeable and nothing checks them against each other.
 
+### The aperture is summed as the star's flux is (`--ee-aperture`)
+
+Since 2026-11-25 (the audit of that date) `TemplatePSF` and `LibraryPSF` sum their normalization
+aperture with each pixel weighted by its exact area inside it, as
+`generic.star_flux_from_aperture_photometry` and `stpsf_psf.unocculted_ee` measure the star's
+flux (`generic.aperture_sum`, photutils' `method="exact"`).  Before, the stamps summed the whole
+pixels whose centers lay inside, so an injected source carried exact over whole of the flux its
+contrast asked for.  For a Gaussian template that ratio is 0.90 to 1.03 for radii from FWHM/2 to
+one FWHM (0.80 at FWHM/2 on a 2.3 px FWHM) and within 0.2 % from 1.5 FWHM, and the cached JWST
+grids give 0.9885 to 1.0021.  A model normalized over its whole stamp (`ee_radius_px=None`, the
+generic path and the paper's NACO and SPHERE runs) is unchanged, and so are `AiryPSF` and
+`FramePSF`, whose flux unit is measured in their own aperture.  NEAR's flux unit, the B
+template's flux inside 1 λ/D, follows the stamps (`near.template_flux_unit(exact=)`).
+
+`stpsf_psf.unocculted_ee` now centers its aperture on the PSF (`center="psf"`).  STPSF's NIRCam
+MASKRND PSF sits 0.76 px from the image's middle, where the aperture was, which changed the
+fraction by 3 % at 3 px and by 0.2 % at the 7.5 and 16.5 px of the cached grids, and MIRI's sits
+within 0.2 px.  `stpsf_psf.star_flux_pair` gives the flux for each normalization, and the paper's
+NIRCam runs take it.  `stpsf_psf._ap_sum`, the throughput of a newly computed grid, sums exactly
+too, while a cached grid keeps the throughput it was computed with.
+
+A run saved before 2026-11-25 keeps the whole pixels (`RunConfig.ee_aperture = "whole"`), and so
+do `--from-idl-setup` runs.  Each request carries the run's aperture, so worker processes take it,
+and a resumed run edits its frames (`--subtract-sources`, `--inject-sources`) with it.  Its stamps
+then come out to the bit as before.  `--ee-aperture whole` picks the old stamps for a new run.
+A MIRI run built by `scripts/run_miri.py` takes one star flux, measured about the PSF.
+
 ## Per observation
 
 ### β Pic — VLT/NACO L′ (tutorials 01 and 04; paper runs A, A2, B, B2, E, E2, F, F2)

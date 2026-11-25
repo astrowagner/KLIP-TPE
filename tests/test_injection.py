@@ -72,12 +72,16 @@ def test_template_psf_normalisation():
     assert ok and c == (15.0, 15.0)
     assert st.sum() == pytest.approx(1.0)
     assert m.flux_unit == pytest.approx(np.nansum(t)) and m.template_flux == m.flux_unit
-    # encircled-energy normalization: unit flux inside the aperture, > 1 in total
+    # encircled-energy normalization: unit flux inside the exact aperture, > 1 in total
+    from klip_tpe.instruments.generic import aperture_sum
     m2 = TemplatePSF(t, ee_radius_px=3.0, star_flux=123.0, throughput_fn=lambda r: 0.5)
     st2, _, _ = m2.stamp(0.7)
     inside = np.hypot(xx - 15, yy - 15) <= 3.0
-    assert st2[inside].sum() == pytest.approx(1.0)
+    assert aperture_sum(st2, 15.0, 15.0, 3.0) == pytest.approx(1.0)
     assert st2.sum() > 1.0
+    # the whole pixels inside, as before 2026-11-25 (RunConfig.ee_aperture "whole")
+    m2.set_ee_aperture("whole")
+    assert m2.stamp(0.7)[0][inside].sum() == pytest.approx(1.0)
     assert m2.flux_unit == 123.0 and m2.throughput(0.7) == 0.5
     # zero template does not divide by zero
     z = TemplatePSF(np.zeros((5, 5)))
@@ -90,11 +94,12 @@ def test_library_psf_interpolation_and_ok_flag():
     s1 = np.exp(-0.5 * ((xx - 10) ** 2 + (yy - 10) ** 2) / 3.0 ** 2)
     lib = LibraryPSF(np.stack([s0, s1, s0]), [0.5, 1.0, 1.5], (10, 10), ee_radius_px=8.0,
                      throughput_fn=lambda r: 0.8, refpa_deg=None, flux_unit=5.0)
+    from klip_tpe.instruments.generic import aperture_sum
     ee = np.hypot(xx - 10, yy - 10) <= 8.0
     for r in (0.5, 0.75, 1.0, 1.5):
         st, c, ok = lib.stamp(r)
         assert ok and c == (10, 10)
-        assert st[ee].sum() == pytest.approx(1.0)
+        assert aperture_sum(st, 10.0, 10.0, 8.0) == pytest.approx(1.0)
     st_lo, _, _ = lib.stamp(0.5)
     st_mid, _, _ = lib.stamp(1.0)
     st_q, _, _ = lib.stamp(0.75)
@@ -102,7 +107,10 @@ def test_library_psf_interpolation_and_ok_flag():
     assert st_mid[10, 10] < st_q[10, 10] < st_lo[10, 10]
     # midpoint = renormalised average of the two neighbors
     avg = 0.5 * (lib.slices[0] + lib.slices[1])
-    np.testing.assert_allclose(st_q, avg / avg[ee].sum(), atol=1e-12)
+    np.testing.assert_allclose(st_q, avg / aperture_sum(avg, 10.0, 10.0, 8.0), atol=1e-12)
+    # the whole pixels inside, as before 2026-11-25
+    lib.set_ee_aperture("whole")
+    assert lib.stamp(0.75)[0][ee].sum() == pytest.approx(1.0)
     # outside the tabulated range -> ok False, stamp None
     for r in (0.49, 1.51, np.nan):
         st, c, ok = lib.stamp(r)

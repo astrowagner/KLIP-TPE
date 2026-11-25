@@ -219,6 +219,14 @@ class RunConfig:
         innermost inner edge and outermost outer edge are reduced and stitched as given.
         ``"all"`` pads every edge, as the IDL does.  A run saved before this field existed
         resumes with ``"all"``, so its evaluations stay comparable.
+    ee_aperture
+        how the injection models' stamps are normalized in their aperture
+        (:meth:`klip_tpe.injection.LibraryPSF.set_ee_aperture`).  ``"exact"`` (the default) sums each
+        pixel by its area inside, as the star's flux is measured
+        (:func:`~klip_tpe.instruments.generic.star_flux_from_aperture_photometry`,
+        :func:`~klip_tpe.stpsf_psf.unocculted_ee`), so an injected source carries the flux its contrast
+        asks for.  ``"whole"`` sums the pixels whose centers lie inside, as runs saved before
+        2026-11-25 do, and resume with.  Every request carries it, as ``inject_interp``.
     sampler_fallback
         whether a draw of injections that breaks the sampler's rules at every try is placed again one
         source at a time, each clear of the rules (:attr:`klip_tpe.positions.PositionSampler.fallback`).
@@ -501,6 +509,7 @@ class RunConfig:
     verify_position: str = "given"        # "given" (sources at their positions) | "peak" (within 1.5 px)
     klip_eig_cut: str = "relative"        # "relative" (the round-off floor) | "absolute" (1e-6, the IDL)
     sampler_fallback: bool = True         # a draw that breaks the sampler's rules placed one source at a time
+    ee_aperture: str = "exact"            # "exact" (each pixel by its area) | "whole": the stamps' normalization
     stitch_overlap_pads: bool = False     # pad the stitch's tile edges between overlapping annuli
     stitch_injections: str = "all"        # "all" (every annulus' validation sources in each) | "own"
     #: the library the run rotates its frames with, "scipy" | "opencv" (klip.set_rotation_backend):
@@ -656,6 +665,7 @@ class RunConfig:
         d.setdefault("verify_position", "peak")
         d.setdefault("klip_eig_cut", "absolute")
         d.setdefault("sampler_fallback", False)
+        d.setdefault("ee_aperture", "whole")
         return _from_dict_filtered(cls, d)
 
 
@@ -1304,6 +1314,7 @@ class Runner:
         self._install_fmmf_turn()
         self._install_rotation(from_checkpoint=_from_checkpoint)
         self._install_eig_cut()
+        self._install_ee_aperture()
         self.callbacks: List[RunCallback] = list(callbacks)
         self._last_images: Dict[str, Any] = {}
         os.makedirs(run_dir, exist_ok=True)
@@ -2597,6 +2608,11 @@ class Runner:
         params["klip_eig_cut"] = cut
         for dd in per.values():
             dd["klip_eig_cut"] = cut
+        # and the stamps' normalization aperture (RunConfig.ee_aperture)
+        ee = str(getattr(self.cfg, "ee_aperture", "exact") or "exact").lower()
+        params["ee_aperture"] = ee
+        for dd in per.values():
+            dd["ee_aperture"] = ee
         cfg2 = Config(params, per, cfg.selected, cfg.x)
         if (fm_sources is None and sources and not k_scan and self.reducer.supports_fm
                 and getattr(self.objective.metric, "needs_fm", False)):
@@ -7543,6 +7559,7 @@ class Runner:
         self._install_fmmf_turn()
         self._install_rotation(from_checkpoint=True)
         self._install_eig_cut()
+        self._install_ee_aperture()
         self.space = SearchSpace.from_dict(
             st["space"], project=project if project is not None else getattr(self.space, "project", None))
         self.rng.bit_generator.state = st["rng_state"]
@@ -7685,6 +7702,23 @@ class Runner:
             self._eig_cut_said = True          # a resume installs it twice, as it builds and as it adopts
             self.log("  KLIP: the eigenvalue cut is the absolute 1e-6 of runs made before 2026-11-25 "
                      "(RunConfig.klip_eig_cut), under which frames of small values lose modes")
+
+    def _install_ee_aperture(self) -> List[Any]:
+        """Normalize the reducer's injection models as the run does (:attr:`RunConfig.ee_aperture`).
+
+        For what this process injects outside :meth:`_reduce`, such as a fit by negative injection.
+        Each request :meth:`_reduce` makes carries the aperture too
+        (:meth:`klip_tpe.reducer.KLIPReducer.use_ee_aperture`).
+
+        Returns
+        -------
+        changed : list
+            The partitions whose models changed, ``[None]`` for a single reducer.
+        """
+        mode = str(getattr(self.cfg, "ee_aperture", "exact") or "exact").lower()
+        subs = getattr(self.reducer, "reducers", None)
+        items = list(subs.items()) if isinstance(subs, dict) and subs else [(None, self.reducer)]
+        return [pid for pid, r in items if callable(getattr(r, "use_ee_aperture", None)) and r.use_ee_aperture(mode)]
 
     def _install_rotation(self, from_checkpoint: bool = False) -> None:
         """Rotate the run's frames with its library (:attr:`RunConfig.rotation`,
