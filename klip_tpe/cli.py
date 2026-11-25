@@ -1933,6 +1933,7 @@ def _contrast_grid_config(a):
                               target_snr=float(getattr(a, "cg_target", 5.0)),
                               precision=float(getattr(a, "cg_precision", 0.1)),
                               snr=getattr(a, "cg_snr", "aperture") or "aperture",
+                              aperture=getattr(a, "cg_aperture", "exact") or "exact",
                               sidelobe=getattr(a, "cg_sidelobe", "off") or "off",
                               sidelobe_fwhm=float(getattr(a, "cg_sidelobe_fwhm", 2.0)))
 
@@ -3309,6 +3310,11 @@ def _add_run_args(p):
     p.add_argument("--cg-snr", default="aperture", choices=["aperture", "matched"],
                    help="the grid's S/N: the IDL contrast generators' aperture photometry at the injected position "
                         "(aperture, the default) or the run's matched-filter Mawet S/N (matched)")
+    p.add_argument("--cg-aperture", default="exact", choices=["exact", "whole"],
+                   help="how the grid's aperture S/N sums an aperture: each pixel by its exact area inside it, as "
+                        "the IDL contrast generators' aper /exact (exact, the default), or the whole pixels whose "
+                        "centers lie inside, as runs made before 2026-11-25 do (whole), whose count moves with the "
+                        "sub-pixel position")
     p.add_argument("--cg-sidelobe", default="off", choices=["off", "rotation", "fixed"],
                    help="the grid's noise ring. off (the default) skips the apertures within 1.5 FWHM of the source "
                         "and the known companions, as the IDL contrast generators skip the source and the aperture "

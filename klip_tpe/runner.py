@@ -629,10 +629,11 @@ class RunConfig:
         v.setdefault("dedup", "vector")
         v.setdefault("n_rescore", 0)
         d["validation"] = _from_dict_filtered(ValidationConfig, v)
-        # and one saved before the injection grid existed made no grid
+        # and one saved before the injection grid existed made no grid, and one saved before
+        # 2026-11-25 summed whole pixels in its apertures
         cg = d.get("contrast_grid")
-        d["contrast_grid"] = (_from_dict_filtered(ContrastGridConfig, cg) if isinstance(cg, dict)
-                              else ContrastGridConfig(mode="off"))
+        d["contrast_grid"] = (_from_dict_filtered(ContrastGridConfig, dict({"aperture": "whole"}, **cg))
+                              if isinstance(cg, dict) else ContrastGridConfig(mode="off", aperture="whole"))
         # and one saved before the final-image grid existed (2026-11-16) elects no winner again
         fg = d.get("final_grid")
         d["final_grid"] = (_from_dict_filtered(FinalGridConfig, fg) if isinstance(fg, dict)
@@ -2823,10 +2824,13 @@ class Runner:
         # an injection's position is given, so the matched-filter S/N reads it there
         # (RunConfig.verify_position), or for a run saved before 2026-11-25 at the metric's peak search
         sp = float(mget("search_px", 1.5)) if legacy_position(self._ring_rules()) else 0.0
+        # the aperture S/N's exact apertures (ContrastGridConfig.aperture), or the whole pixels of a run
+        # saved before 2026-11-25
+        exact = str(getattr(gc, "aperture", "exact") or "exact").lower() == "exact"
         if rule is not None:
             if geo["aperture"]:
                 kw: Dict[str, Any] = dict(excl_fwhm=float(mget("excl_fwhm", 1.5)), measure=aperture_mawet_snr,
-                                          pixel_mask=self._pixel_mask())
+                                          pixel_mask=self._pixel_mask(), exact=exact)
                 cln = None if clean is None else np.asarray(clean, float)
             else:
                 flat = bool(mget("flatten", False))
@@ -2849,7 +2853,7 @@ class Runner:
         if geo["aperture"]:
             snr, det = aperture_mawet_snr(img, [rho], [theta], pxscale, fwhm, excl_fwhm=float(mget("excl_fwhm", 1.5)),
                                           angle_convention=geo["conv"], known=geo["known"], excl_arcs=arcs,
-                                          return_details=True, pixel_mask=self._pixel_mask())
+                                          return_details=True, pixel_mask=self._pixel_mask(), exact=exact)
         else:
             kern = metric.kernel(rho) if callable(getattr(metric, "kernel", None)) else None
             im = radprof(img) if mget("flatten", False) else img

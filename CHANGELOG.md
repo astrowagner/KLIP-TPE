@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased — 2026-11-25 (the contrast grid's apertures summed exactly)
+
+From the audit of 2026-11-25.
+
+- **The aperture S/N sums each pixel by its exact area inside an aperture**
+  (`metrics._aperture_sum(exact=)`, `metrics.aperture_mawet_snr(exact=)`, `ContrastGridConfig.aperture`,
+  `--cg-aperture`).  It summed the whole pixels whose centers lay within FWHM/2, where the IDL
+  predecessor's contrast generators use `aper, /exact`.  The count moved with the sub-pixel position,
+  3 to 6 pixels at a 2.3 px FWHM and 10 to 14 at 4 px.  On zero-mean noise the median S/N was the
+  same (whole over exact 1.00 to 1.02), with 5 to 7 % more scatter per position at 2.3 to 4 px, and a
+  constant level of 3 times the pixel rms lowered it 7 % at 2.3 px.  The exact sum leaves it unchanged
+  by a constant level, and the matched-filter S/N was already invariant.
+- `"exact"` is the default for new runs and for `aperture_mawet_snr`.  `"whole"` keeps the old sums,
+  and a run saved before 2026-11-25 resumes with it, so its contrast grid and final-grid curve
+  reproduce.  The final grid's kept readings of such a run keep their fingerprint.
+  `paper_runs/fig8_curve.py --cg-aperture whole` reads Fig. 8 as the paper did.
+  `metrics.injection_difference_snr`, the IDL predecessor's `near2_snr_inj`, keeps whole pixels.
+- Docs: RUNNING.md (the bullet on the grid's apertures), CLI.md.  Tests: `tests/test_exact_aperture.py`.
+
 ## Unreleased — 2026-11-25 (a draw of injections that breaks the sampler's rules, placed one source at a time)
 
 From the audit of 2026-11-25.

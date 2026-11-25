@@ -1033,6 +1033,10 @@ class FinalGrid:
         from .runner import _core_edits, _describe_edits
         gc = asdict(self.r.cfg.contrast_grid)
         gc.pop("mode", None)
+        # a run saved before 2026-11-25 sums whole pixels in its apertures, as its kept readings did, and
+        # keeps the fingerprint it had before the key existed
+        if str(gc.get("aperture")) == "whole":
+            gc.pop("aperture")
         edits = dict(getattr(self.r.reducer, "data_edits", None) or {})
         # a run saved before 2026-11-25 reads sources at their peak (RunConfig.verify_position "peak"), as
         # its kept readings were made, and keeps the fingerprint it had before the key existed

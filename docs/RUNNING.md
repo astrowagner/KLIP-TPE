@@ -180,6 +180,17 @@ in order:
   keep-outs.  `--cg-snr matched` takes the run's matched-filter S/N instead, and
   `--cg-sidelobe rotation` or `fixed` leaves out each position's sidelobe arcs too.  Under
   `--sidelobes farthest` or `clean` the grid takes that rule, with its fallback.
+* Each aperture sums each pixel by its exact area inside it, as the generators' `aper, /exact`
+  does (`--cg-aperture exact`, the default since 2026-11-25, from the audit of that date).
+  Before, it summed the whole pixels whose centers lay inside, 3 to 6 of them at a 2.3 px FWHM
+  and 10 to 14 at 4 px by sub-pixel position.  On zero-mean noise the median S/N came out the
+  same (whole over exact 1.00 to 1.02), with 5 to 7 % more scatter per position at 2.3 to 4 px,
+  and a constant level of 3 times the pixel rms lowered the S/N 7 % at 2.3 px.  The exact sum
+  leaves the S/N unchanged by a constant level.  A run saved before 2026-11-25 keeps whole
+  pixels (`ContrastGridConfig.aperture = "whole"`), and `--cg-aperture whole` picks them for a
+  new run.  One difference stays, at the edges of the data.  The IDL drops a ring aperture that
+  touches a NaN, and this one sums the finite pixels, while the grid's positions keep 1 FWHM
+  inside each zone.
 * The curve at a separation is the median contrast over its positions, and a blocked position
   counts in it (since 2026-11-25, from the audit of that date).  A position is blocked when it
   never reaches the target S/N, at the contrast cap or within the reductions allowed, so its

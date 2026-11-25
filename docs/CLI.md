@@ -72,6 +72,7 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--contrast-grid {grid,random,off}] [--cg-pa N]
                         [--cg-samples N] [--cg-step FWHM] [--cg-target SNR]
                         [--cg-precision F] [--cg-snr {aperture,matched}]
+                        [--cg-aperture {exact,whole}]
                         [--cg-sidelobe {off,rotation,fixed}]
                         [--cg-sidelobe-fwhm FWHM] [--final-grid {on,off}]
                         [--fg-pa N] [--fg-step FWHM] [--fg-cover FWHM]
@@ -348,6 +349,13 @@ options:
                         photometry at the injected position (aperture, the
                         default) or the run's matched-filter Mawet S/N
                         (matched)
+  --cg-aperture {exact,whole}
+                        how the grid's aperture S/N sums an aperture: each
+                        pixel by its exact area inside it, as the IDL contrast
+                        generators' aper /exact (exact, the default), or the
+                        whole pixels whose centers lie inside, as runs made
+                        before 2026-11-25 do (whole), whose count moves with
+                        the sub-pixel position
   --cg-sidelobe {off,rotation,fixed}
                         the grid's noise ring. off (the default) skips the
                         apertures within 1.5 FWHM of the source and the known
@@ -783,6 +791,7 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--cg-pa N] [--cg-samples N] [--cg-step FWHM]
                      [--cg-target SNR] [--cg-precision F]
                      [--cg-snr {aperture,matched}]
+                     [--cg-aperture {exact,whole}]
                      [--cg-sidelobe {off,rotation,fixed}]
                      [--cg-sidelobe-fwhm FWHM] [--final-grid {on,off}]
                      [--fg-pa N] [--fg-step FWHM] [--fg-cover FWHM] [--fg-z Z]
@@ -1057,6 +1066,13 @@ options:
                         photometry at the injected position (aperture, the
                         default) or the run's matched-filter Mawet S/N
                         (matched)
+  --cg-aperture {exact,whole}
+                        how the grid's aperture S/N sums an aperture: each
+                        pixel by its exact area inside it, as the IDL contrast
+                        generators' aper /exact (exact, the default), or the
+                        whole pixels whose centers lie inside, as runs made
+                        before 2026-11-25 do (whole), whose count moves with
+                        the sub-pixel position
   --cg-sidelobe {off,rotation,fixed}
                         the grid's noise ring. off (the default) skips the
                         apertures within 1.5 FWHM of the source and the known

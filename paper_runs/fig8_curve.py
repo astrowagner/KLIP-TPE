@@ -35,6 +35,11 @@ A2 that blend suppresses sources just inside the 12 px seam, and four positions 
 S/N 5 (``docs/RUNNING.md``, "The seams between annuli").  A stage read with another stitch than an
 earlier one needs another ``--out``, since the saved readings belong to the stitch they were made on.
 
+``--cg-aperture whole`` sums the whole pixels whose centers lie inside each aperture, as the paper's
+curves were read.  The default since 2026-11-25 sums each pixel by its exact area inside it, as the IDL
+predecessor's contrast generators do (``ContrastGridConfig.aperture``), which moves each point's S/N
+by a few percent.
+
 Outputs, in ``--out``: ``<run>_fig8/`` (the stage's ``election.*``, ``winners.txt``,
 ``curve.json``, ``curve.txt`` and its readings under ``state/``, from which a stage started
 again resumes), ``fig8_<stage>.json`` (the curve, the check and the provenance) and
@@ -181,6 +186,10 @@ def main():
     ap.add_argument("--stitch-blend", choices=("own", "weighted"), default=None,
                     help="how the stitch treats an edge two annuli share (default: the run's own, weighted for "
                          "the paper runs).  own: each pixel from the annulus whose tile holds it")
+    ap.add_argument("--cg-aperture", choices=("exact", "whole"), default="exact",
+                    help="how the aperture S/N sums an aperture (default exact, each pixel by its area inside it, "
+                         "as the IDL contrast generators).  whole: the pixels whose centers lie inside, as the "
+                         "paper's curves were read")
     a = ap.parse_args()
     code = os.path.abspath(os.path.expanduser(a.code))
     sys.path.insert(0, os.path.join(code, "paper_runs"))
@@ -230,7 +239,7 @@ def main():
             r.cfg.stitch_blend = a.stitch_blend
         # A run made before the injection grid resumes with the grid's mode "off".  The curve takes
         # the contrast grid's current settings: aperture S/N, within 10 % of S/N 5, no sidelobe arcs.
-        r.cfg.contrast_grid = ContrastGridConfig()
+        r.cfg.contrast_grid = ContrastGridConfig(aperture=a.cg_aperture)
         fc = FinalGridConfig(mode="on", finalists=1)
         weights = run_weights(r.run_dir, r.cfg.nann)
         if a.plan:
@@ -247,7 +256,7 @@ def main():
                 "seam_steps")
         summary = {"stage": st, "run": STAGES[st], "commit": a.commit, "date": time.strftime("%Y-%m-%d %H:%M:%S"),
                    "minutes": (time.time() - t0) / 60.0, "versions": versions(), "check": check,
-                   "stitch_blend": str(r.cfg.stitch_blend),
+                   "stitch_blend": str(r.cfg.stitch_blend), "cg_aperture": str(a.cg_aperture),
                    "changed": [k for k, v in (rec.get("annuli") or {}).items() if v.get("changed")],
                    "calibration": rec.get("calibration"), "ann_edges_px": [float(e) for e in r.cfg.ann_edges],
                    "pxscale": float(red.pxscale), "fwhm_px": float(red.fwhm),

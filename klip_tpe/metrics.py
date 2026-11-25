@@ -870,8 +870,8 @@ def clip0(x):
     return x
 
 
-def _aperture_sum(img: np.ndarray, x: float, y: float, r: float) -> float:
-    """Sum the finite pixels whose centers lie within a radius of a position.
+def _aperture_sum(img: np.ndarray, x: float, y: float, r: float, exact: bool = False) -> float:
+    """Sum an image inside a circle, by whole pixels or by each pixel's exact area inside it.
 
     Parameters
     ----------
@@ -883,6 +883,11 @@ def _aperture_sum(img: np.ndarray, x: float, y: float, r: float) -> float:
         Row of the aperture's center, in pixels.
     r : float
         Radius of the aperture, in pixels.
+    exact : bool, default False
+        Whether each finite pixel counts by its area inside the circle, as the IDL predecessor's
+        contrast generators measure with ``aper, /exact``.  False sums the finite pixels whose centers
+        lie inside, whose number moves with the sub-pixel position, 3 to 6 pixels for the 4.15 px² of
+        a 2.3 px FWHM and 10 to 14 for the 12.6 px² of a 4 px FWHM.
 
     Returns
     -------
@@ -895,6 +900,22 @@ def _aperture_sum(img: np.ndarray, x: float, y: float, r: float) -> float:
     y0, y1 = int(max(np.floor(y - r), 0)), int(min(np.ceil(y + r), ny - 1))
     if x1 < x0 or y1 < y0:
         return np.nan
+    if exact:
+        if not r > 0:
+            return np.nan
+        from .instruments.generic import _quadrant_area
+        # pixel (i, j) covers [j - 0.5, j + 0.5] x [i - 0.5, i + 0.5]: its area inside the circle
+        xa = (np.arange(x0, x1 + 1) - 0.5 - x)[None, :]
+        xb = (np.arange(x0, x1 + 1) + 0.5 - x)[None, :]
+        ya = (np.arange(y0, y1 + 1) - 0.5 - y)[:, None]
+        yb = (np.arange(y0, y1 + 1) + 0.5 - y)[:, None]
+
+        def quad(u, v):
+            return np.sign(u) * np.sign(v) * _quadrant_area(np.abs(u), np.abs(v), r)
+        frac = quad(xb, yb) - quad(xa, yb) - quad(xb, ya) + quad(xa, ya)
+        vals = img[y0:y1 + 1, x0:x1 + 1]
+        use = np.isfinite(vals) & (frac > 0)
+        return float((vals[use] * frac[use]).sum()) if use.any() else np.nan
     yy, xx = np.mgrid[y0:y1 + 1, x0:x1 + 1]
     m = (xx - x) ** 2 + (yy - y) ** 2 <= r * r
     vals = img[y0:y1 + 1, x0:x1 + 1][m]
@@ -1823,7 +1844,7 @@ def matched_filter(img: np.ndarray, fwhm: float, rules: Optional[Dict[str, Any]]
 
 
 def _ring_fluxes(img, cx, cy, sep, phi0, nap, aprad, excl_xy, exr, known_xy, skip=None, trace=None,
-                 n_src=None, skip_k=(), pixel_mask=None):
+                 n_src=None, skip_k=(), pixel_mask=None, exact=False):
     """Return the aperture sums on a source's ring, the source's own position left out.
 
     Parameters
@@ -1861,6 +1882,8 @@ def _ring_fluxes(img, cx, cy, sep, phi0, nap, aprad, excl_xy, exr, known_xy, ski
     pixel_mask : ndarray of bool or None, default None
         Pixels that leave out an aperture centered on them, as :func:`mawet_peak_snr` leaves out a
         sample there.
+    exact : bool, default False
+        Whether the apertures sum each pixel by its exact area inside them (:func:`_aperture_sum`).
 
     Returns
     -------
@@ -1894,7 +1917,7 @@ def _ring_fluxes(img, cx, cy, sep, phi0, nap, aprad, excl_xy, exr, known_xy, ski
             if trace is not None:
                 trace.append([xk, yk, "arc"])
             continue
-        f = _aperture_sum(img, xk, yk, aprad)
+        f = _aperture_sum(img, xk, yk, aprad, exact)
         if np.isfinite(f):
             ref.append(f)
             ok.append(not any(np.hypot(xk - kx, yk - ky) < exr for kx, ky in known_xy))
@@ -1984,7 +2007,8 @@ def aperture_mawet_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float,
                        excl_fwhm: float = 1.5, angle_convention: str = "pa",
                        known: Sequence[Tuple[float, float]] = (),
                        excl_arcs: Sequence[Tuple[float, float, float, float]] = (),
-                       return_details: bool = False, pixel_mask: Optional[np.ndarray] = None):
+                       return_details: bool = False, pixel_mask: Optional[np.ndarray] = None,
+                       exact: bool = True):
     """Measure each source's plain aperture S/N, as the IDL predecessor's contrast generators do.
 
     The S/N is ``(f_src - mean(ring)) / (std(ring) sqrt(1 + 1/n))`` with apertures of radius FWHM/2,
@@ -2018,6 +2042,10 @@ def aperture_mawet_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float,
     pixel_mask : ndarray of bool or None, default None
         Pixels that leave out an aperture centered on them, as the run's disk mask leaves out the
         search's samples.
+    exact : bool, default True
+        Whether each aperture sums each pixel by its exact area inside it, as the contrast generators'
+        ``aper, /exact`` does.  False sums the pixels whose centers lie inside, as this function did
+        until 2026-11-25 and as runs saved before keep (``ContrastGridConfig.aperture``).
 
     Returns
     -------
@@ -2056,11 +2084,11 @@ def aperture_mawet_snr(img: np.ndarray, rho, theta, pxscale: float, fwhm: float,
         sep = rho[s] / pxscale
         nap = max(int(round(2 * np.pi * sep / fwhm)) - 1, 2)
         near = {1, nap - 1} if nap >= 6 else set()
-        f_src = _aperture_sum(imz, xs[s], ys[s], aprad)
+        f_src = _aperture_sum(imz, xs[s], ys[s], aprad, exact)
         trace: Optional[List[List[Any]]] = [] if recording else None
         others = excl[:s] + excl[s + 1:]               # the other sources, then the known companions
         ref, _ = _ring_fluxes(img, cx, cy, sep, phi[s], nap, aprad, others, exr, [], skip=skip, trace=trace,
-                              n_src=int(rho.size) - 1, skip_k=near, pixel_mask=pixel_mask)
+                              n_src=int(rho.size) - 1, skip_k=near, pixel_mask=pixel_mask, exact=exact)
         details.append({"nclean": int(ref.size), "n_left": int(ref.size), "nap": nap, "peak": float(f_src)})
         if trace is not None:
             kxy = excl[int(rho.size):]

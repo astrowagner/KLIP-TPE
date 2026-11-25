@@ -80,6 +80,10 @@ class ContrastGridConfig:
     snr : {"aperture", "matched"}, default "aperture"
         The S/N, the predecessor's aperture photometry at the injected position
         (:func:`~klip_tpe.metrics.aperture_mawet_snr`) or the run's matched-filter Mawet S/N.
+    aperture : {"exact", "whole"}, default "exact"
+        How the aperture S/N sums an aperture, each pixel by its exact area inside it, as the
+        predecessor's contrast generators' ``aper, /exact``, or the whole pixels whose centers lie
+        inside, as runs saved before 2026-11-25 keep.
     sidelobe : {"off", "rotation", "fixed"}, default "off"
         What the ring leaves out besides the 1.5 FWHM keep-outs: nothing, the arc the field rotation
         sweeps, or ``sidelobe_fwhm`` FWHM of arc each side.
@@ -106,6 +110,10 @@ class ContrastGridConfig:
     #: aperture photometry at the injected position (:func:`~klip_tpe.metrics.aperture_mawet_snr`,
     #: the predecessor's ``near2_snr``).  ``"matched"``: the run's matched-filter Mawet S/N
     snr: str = "aperture"
+    #: ``"exact"`` (default since 2026-11-25): the aperture S/N sums each pixel by its exact area
+    #: inside an aperture, as the predecessor's contrast generators' ``aper, /exact``.  ``"whole"``:
+    #: the pixels whose centers lie inside, whose count moves with the sub-pixel position
+    aperture: str = "exact"
     #: ``"off"`` (default since 2026-11-01): no arcs, the ring skips the apertures within 1.5
     #: FWHM of the source and of each known companion, as the IDL predecessor's contrast
     #: generators skip the source and the aperture each side of it.  ``"rotation"``: also the arc
