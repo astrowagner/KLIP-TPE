@@ -4274,15 +4274,14 @@ class Runner:
             except Exception as exc:
                 self.log(f"  KLIP-FM preview failed: {exc!r}")
 
-    def _search_annulus(self, ia: int, start_index: int) -> None:
-        """Run evaluations ``start_index .. n_iter-1`` of annulus ``ia``."""
+    def _search_annulus(self, ia: int) -> None:
+        """Run annulus ``ia``'s evaluations from the history's length to ``n_iter``."""
         c = self.cfg
         n_iter = c.per_annulus(c.n_iter, ia)
         opt = self._make_optimizer(ia)
-        n_init = opt.n_init
         if self._pipelined():
             if self._search_pipeline(ia, n_iter, opt):
-                return self._search_annulus(ia, 0)
+                return self._search_annulus(ia)
             return
         if int(c.batch) > 1:
             why = " (each trial picks its k as it runs, so batches go whole)" \
@@ -4294,7 +4293,7 @@ class Runner:
             props = opt.ask(self.history, self.rng, nb)
             if nb > 1 and self._batch_concurrent():
                 if self._search_batch(ia, n_iter, props, t_loop):
-                    return self._search_annulus(ia, 0)
+                    return self._search_annulus(ia)
                 continue
             for b, pr in enumerate(props):
                 phase = pr.flags.get("phase", "tpe")
@@ -4305,7 +4304,7 @@ class Runner:
                     x, phase, tag=f"a{ia+1}_e{len(self.history)+1}",
                     on_draw=lambda j, nd, r, i_, c_: self._on_draw(ia, j, nd, r, i_, c_))
                 if self._after_eval(ia, n_iter, phase, rec, inj, clean, t_loop, checkpoint=b == len(props) - 1):
-                    return self._search_annulus(ia, 0)
+                    return self._search_annulus(ia)
                 t_loop = time.time()
 
     def _batch_concurrent(self) -> bool:
@@ -5424,7 +5423,7 @@ class Runner:
                     self._save_eval_images(rec, inj, clean)
                     self._emit("on_eval", rec, inj, clean, True)
                 self._mark_card()
-                self._search_annulus(ia, len(self.history))
+                self._search_annulus(ia)
             else:
                 self.log(f"=== annulus {ia+1}: RE-VALIDATE {len(self.history)} existing evals in place "
                          f"(contrast {self.contrast:.3e})")
@@ -5448,13 +5447,13 @@ class Runner:
             self._emit("on_calibration", cinfo, self._calib_images)
             self._mark_card()                   # the search's seed trial, in _reset_history, counts too
             self._reset_history(ia)
-            self._search_annulus(ia, len(self.history))
+            self._search_annulus(ia)
         else:
             self._draw_tally[ia] = {"n": 0, "failed": 0, "why": collections.Counter(), "warned": False,
                                     "since_resume": True}
             self._restore_best_images(ia)
             self._mark_card(resumed=resume_index > 0)
-            self._search_annulus(ia, resume_index)
+            self._search_annulus(ia)
         return self._finish_annulus(ia)
 
     def _restore_best_images(self, ia: int) -> None:

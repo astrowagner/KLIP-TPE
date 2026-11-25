@@ -780,7 +780,7 @@ def unocculted_ee(radius_px: float, instrument: str = "NIRCam", filter: str = "F
             from astropy.io import fits
             with fits.open(path) as h:
                 img = np.asarray(h[0].data, float)
-                tot, px = float(h[0].header["PSFTOTAL"]), float(h[0].header["PIXELSCL"])
+                tot = float(h[0].header["PSFTOTAL"])
             return ee_of(img, tot)
         except Exception as exc:                                # pragma: no cover - corrupt cache
             log(f"  stpsf: ignoring unreadable EE cache {os.path.basename(path)} ({exc})")

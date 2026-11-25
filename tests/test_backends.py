@@ -92,6 +92,13 @@ def test_dataset_from_pyklip_generic_data():
     assert abs(ix - (36 - 36.3 + 19.5)) <= 1 and abs(iy - (34 - 33.8 + 19.5)) <= 1
     one = dataset_from_pyklip(data, crop_half=20, partition_by=None, name="all")
     assert list(one) == ["all"] and one["all"].nframes == n
+    # a pixel without data: 0 as always, or NaN for the reducer to leave out (fill_nan=False)
+    imgs[:, 30, 30] = np.nan
+    data = GenericData(imgs, centers, parangs=np.linspace(-10, 10, n), filenames=[f"f{i//4}" for i in range(n)])
+    filled = dataset_from_pyklip(data, crop_half=20, partition_by=None, name="all")["all"].cube
+    kept = dataset_from_pyklip(data, crop_half=20, partition_by=None, name="all", fill_nan=False)["all"].cube
+    assert np.isfinite(filled).all() and not np.isfinite(kept).all()
+    assert np.array_equal(np.where(np.isfinite(kept), kept, 0.0), filled)
 
 
 def test_pyklip_backend_in_runner(tmp_path):

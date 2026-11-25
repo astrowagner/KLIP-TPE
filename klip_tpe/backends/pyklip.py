@@ -539,7 +539,8 @@ class PyKLIPReducer(KLIPReducer):
 def dataset_from_pyklip(data, crop_half: Optional[int] = None, partition_by: Optional[str] = "filenums",
                         name: str = "pyklip", texp_per_frame: Optional[float] = None,
                         tags_fn: Optional[Callable[[Any, np.ndarray], Optional[Dict[str, np.ndarray]]]] = None,
-                        include_psflib: bool = True, wv_index: Optional[int] = None) -> Dict[str, Dataset]:
+                        include_psflib: bool = True, wv_index: Optional[int] = None,
+                        fill_nan: bool = True) -> Dict[str, Dataset]:
     """Turn a pyKLIP ``Data`` object into datasets, one per partition.
 
     The frames (``data.input``) are shifted, bilinearly, so that each star center (``data.centers``) lands
@@ -568,6 +569,11 @@ def dataset_from_pyklip(data, crop_half: Optional[int] = None, partition_by: Opt
         Whether to attach ``data.psflib``'s master frames as ``Dataset.ref_cube`` for RDI, when present.
     wv_index : int or None, default None
         The channel of multi-wavelength data, None for every frame.  No spectral collapse is done here.
+    fill_nan : bool, default True
+        Whether the science frames' NaN pixels, those without data and those the shift reaches from
+        beyond a frame's edge, become 0, which KLIP counts as data, as they always have.  False keeps
+        them NaN for the reducer, which leaves them out of the high-pass and keeps them NaN in the
+        residuals (``hp_nan_aware``, ``keep_target_nan``), as the reference frames always are.
 
     Returns
     -------
@@ -631,7 +637,8 @@ def dataset_from_pyklip(data, crop_half: Optional[int] = None, partition_by: Opt
             ref_cube = None
     for gname, idx in groups:
         cube = np.stack([_recentre(imgs[i], centers[i, 0], centers[i, 1]) for i in idx])
-        cube = np.where(np.isfinite(cube), cube, 0.0).astype(np.float32)
+        if fill_nan:
+            cube = np.where(np.isfinite(cube), cube, 0.0).astype(np.float32)
         tags = tags_fn(data, idx) if tags_fn else None
         pid = f"{name}{gname}" if gname else name
         meta = {"source": "pyklip", "partition_by": partition_by, "crop_half": h,

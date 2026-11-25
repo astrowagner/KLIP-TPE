@@ -109,7 +109,11 @@ def t_fap(snr: float, n: int) -> float:
 
     Notes
     -----
-    It is ``near2v_tfap`` of the IDL predecessor (verify 66-72).
+    It is ``near2v_tfap`` of the IDL predecessor (verify 66-72).  Its ``n - 2`` degrees of freedom are
+    one fewer than the ``n - 1`` of ``n`` noise samples, which errs on the safe side.  At a fixed pixel
+    of noise correlated at the PSF the FAP was reached 1.0 to 1.2 times as often as it says from 0.1 to
+    1.35e-3, and 0.5 to 1.0 times at 1e-4 (the audit of 2026-11-25).  A negative S/N, whose FAP lies
+    above 0.5, reads 0.5, which no detection rule reaches.
     """
     if not np.isfinite(snr):
         return float("nan")

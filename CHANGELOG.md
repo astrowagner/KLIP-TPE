@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased — 2026-11-25 (the audit's smaller points)
+
+From the audit of 2026-11-25.
+
+- **The frame selection's description** (`docs/CUSTOM_PIPELINE.md`, section 4).  It said the three
+  cuts were normalized so that 1 is the median.  `klip.frame_selection_mask` cuts `noises` and
+  `coronoise` at a multiple of their mean over the frames, and `corr_thresh` is an absolute
+  correlation.  The section now says so, with the floor on the frames kept.
+- **`backends.pyklip.dataset_from_pyklip(fill_nan=)`**.  The loader set a science frame's NaN pixels
+  to 0, so KLIP counted them as data at 0.  `fill_nan=False` keeps them NaN for the reducer, which
+  leaves them out of the high-pass and keeps them NaN in the residuals.  The default stays True, so
+  the JWST loaders and their runs read their frames as before.
+- **`t_fap`'s docstring** says its `n - 2` degrees of freedom are the IDL predecessor's, one fewer
+  than `n` noise samples give, with the calibration measured at a fixed pixel.
+- **Dead code**.  `Runner._search_annulus` lost its unused `start_index` (it always continued from
+  the history's length) and an unused local, and `stpsf_psf.unocculted_ee` an unused read of the
+  cache's plate scale.
+- Unchanged by decision: the KLIP zones and `metrics.radprof` stay centered on `(nx/2, ny/2)`, 0.71 px
+  from the star, as in the IDL predecessor and as their docstrings say.  Moving them would change
+  every run's reductions and objective.
+- Tests: `tests/test_backends.py` for `fill_nan`.
+
 ## Unreleased — 2026-11-25 (the injected stamps normalized in the aperture the star's flux is measured in)
 
 From the audit of 2026-11-25.
