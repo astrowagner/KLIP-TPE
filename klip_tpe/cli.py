@@ -757,6 +757,22 @@ def _data_edits_for_rereduce(a) -> None:
 _KLIP_GRAM_FILE = "klip_gram.json"
 
 
+def _stitch_blend_for_run(a, r) -> None:
+    """Apply ``--stitch-blend`` to a resumed run's configuration, for a command that only reads the run.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The command's arguments.  Without ``stitch_blend`` the run keeps the stitch it made.
+    r : Runner
+        The resumed run, whose ``cfg.stitch_blend`` changes in memory only.
+    """
+    v = getattr(a, "stitch_blend", None)
+    if v and str(v) != str(getattr(r.cfg, "stitch_blend", "weighted")):
+        print(f"  stitch: --stitch-blend {v}, the run's own is {getattr(r.cfg, 'stitch_blend', 'weighted')}")
+        r.cfg.stitch_blend = str(v)
+
+
 def _klip_gram_for_run(a, record: bool = True) -> None:
     """Settle ``--klip-gram`` for a command on a run directory.
 
@@ -1779,7 +1795,7 @@ def _protocol_args(p):
 
 
 def _stitch_args(p, rerun: bool = False):
-    """Add ``--stitch-injections`` and ``--overlap-pads`` to a parser.
+    """Add ``--stitch-blend``, ``--stitch-injections`` and ``--overlap-pads`` to a parser.
 
     Parameters
     ----------
@@ -1790,6 +1806,12 @@ def _stitch_args(p, rerun: bool = False):
         (``near``, ``generic``).
     """
     was = ("the run's, all for a run made since 2026-11-03 and own before" if rerun else "all")
+    p.add_argument("--stitch-blend", choices=("own", "weighted"), default=None,
+                   help="how the stitch treats an edge two annuli share. own: each pixel from the annulus whose "
+                        "tile holds it, as pyKLIP and VIP assign pixels to zones. weighted: a 2 px band on each "
+                        "side blended by 1/sigma^2, which can take the last 2 px of a tile from the neighbor's "
+                        "padding (default: " + ("the run's, weighted for a run made before 2026-11-25)" if rerun
+                                                else "own)"))
     p.add_argument("--stitch-injections", choices=("all", "own"), default=None,
                    help="what the final stitch's injected images hold. all: each annulus' winner reduced once "
                         "more with every annulus' validation sources, so the final verify measures each source on "
@@ -2020,6 +2042,7 @@ def _protocol_config(a) -> dict:
                 **({"verify_snr": a.verify_snr} if getattr(a, "verify_snr", None) else {}),
                 **({"fmmf_fm_apertures": True} if getattr(a, "fmmf_fm_apertures", False) else {}),
                 **({"stitch_injections": a.stitch_injections} if getattr(a, "stitch_injections", None) else {}),
+                **({"stitch_blend": a.stitch_blend} if getattr(a, "stitch_blend", None) else {}),
                 **({"stitch_overlap_pads": bool(a.overlap_pads)} if getattr(a, "overlap_pads", None) is not None
                    else {}))
 
@@ -2622,6 +2645,7 @@ def cmd_rereduce(a):
         # the re-reduction's verify, in place of the run's own (the run directory is only read)
         print(f"  verify: --verify-snr {a.verify_snr}, the run's own is {r.cfg.verify_snr}")
         r.cfg.verify_snr = a.verify_snr
+    _stitch_blend_for_run(a, r)
     try:
         r.rereduce(out, verify_sources=vs, verify=not a.no_verify,
                    stitch_injections=getattr(a, "stitch_injections", None),
@@ -2665,6 +2689,7 @@ def cmd_rescore(a):
     if getattr(a, "verify_snr", None):
         print(f"  verify: --verify-snr {a.verify_snr}, the run's own is {r.cfg.verify_snr}")
         r.cfg.verify_snr = a.verify_snr
+    _stitch_blend_for_run(a, r)
     logf = None
     if not a.plan:
         os.makedirs(out, exist_ok=True)
@@ -2738,6 +2763,7 @@ def cmd_elect(a):
         raise SystemExit(f"elect: {exc}") from None
     red, objective, sampler, guard, thr = _near_objects(a)
     r = Runner.resume(a.run_dir, red, objective, sampler, project=guard, throughput_fn=thr, same_frames=False)
+    _stitch_blend_for_run(a, r)
     logf = None
     if not a.plan:
         os.makedirs(out, exist_ok=True)
@@ -3544,6 +3570,9 @@ def _build_parser():
                       help="pad the stitch's tile edges between overlapping annuli (default: the base run's pads)")
     pads.add_argument("--no-overlap-pads", dest="overlap_pads", action="store_const", const=False,
                       help="no pads between overlapping annuli, as rereduce --no-overlap-pads")
+    p.add_argument("--stitch-blend", choices=("own", "weighted"), default=None,
+                   help="how the stitch treats an edge two annuli share, as rereduce --stitch-blend (default: the "
+                        "base run's, weighted for a run made before 2026-11-25)")
     p.add_argument("--verify-snr", default=None, choices=["search", "idl"],
                    help="how each source is measured (default: as the base run's verify)")
     p.add_argument("--out", default=None, metavar="DIR",

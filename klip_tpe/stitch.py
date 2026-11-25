@@ -4,10 +4,12 @@ Everything here is a pure function of arrays and numbers.  :class:`~klip_tpe.run
 what to stitch (the previous annuli's winners, the current running best, the per-partition stacks)
 and calls in here for how:
 
-* :func:`tile_mask` and :func:`stitch_tiles`, the NaN-aware weighted mean over radial tiles
-  ``edge_ia - pad <= r <= edge_ia+1 + pad``, with equal weights for the running stitch and the
-  sensitivity weights of :func:`klip_tpe.products.stitch_annuli` for the final one.  A run pads
-  only the edges where two annuli meet (``RunConfig.edge_padding``).
+* :func:`tile_mask`, :func:`tile_masks` and :func:`stitch_tiles`, the NaN-aware weighted mean over
+  radial tiles ``edge_ia - pad <= r <= edge_ia+1 + pad``.  A run stitched with
+  ``RunConfig.stitch_blend = "own"`` (the default since 2026-11-25) pads no edge two annuli share, so
+  each pixel comes from the annulus whose tile holds it.  A run with ``"weighted"`` pads those edges by
+  2 px and blends the band, with equal weights in the running stitch and the sensitivity weights
+  (:meth:`klip_tpe.runner.Runner._stitch_weights`) in the final one.
 * :func:`stitch_stacks`, the same for per-partition stacks, onto the union of the partition ids.
 * :func:`annulus_tiles` and :func:`open_ends`, the tiles of overlapping annuli and the tiles an
   image product is stitched over.
@@ -34,7 +36,7 @@ import numpy as np
 from . import __version__
 from .metrics import star_center
 
-__all__ = ["tile_mask", "stitch_tiles", "stitch_stacks", "seam_pixels", "seam_trim", "annulus_tiles", "open_ends",
+__all__ = ["tile_mask", "tile_masks", "stitch_tiles", "stitch_stacks", "seam_pixels", "seam_trim", "annulus_tiles", "open_ends",
            "tile_of", "tile_index", "stitch_by_tiles", "put_tile_in", "put_tile_in_stack",
            "fits_header", "write_fits", "read_fits", "write_params_table", "write_contrast_curve",
            "write_setup_file", "PARAM_COLUMNS"]
@@ -174,12 +176,56 @@ def _pair(pad: Any) -> Tuple[float, float]:
     return float(pad), float(pad)
 
 
+def tile_masks(shape, zones: Sequence[Tuple[float, float]], pads: Sequence[Any]) -> List[np.ndarray]:
+    """Return each tile's mask, an edge two tiles share without a pad given to the outer tile alone.
+
+    A tile is ``rin - pad_in <= r <= rout + pad_out`` (:func:`tile_mask`).  Where tile ``k`` ends at the
+    radius where another tile starts and neither pads that edge, tile ``k`` stops short of it
+    (``r < rout``), so a pixel exactly on the edge belongs to one tile, the outer, as
+    :func:`tile_of` assigns radii.  Padded edges overlap and blend as before.
+
+    Parameters
+    ----------
+    shape : tuple of 2 ints
+        Shape of the image, ``(ny, nx)``.
+    zones : sequence of tuple of 2 floats
+        Each tile, ``(rin, rout)`` in pixels.
+    pads : sequence of float or tuple of 2 floats
+        Each tile's pad, one for both edges or ``(pad_in, pad_out)``, in pixels.
+
+    Returns
+    -------
+    masks : list of ndarray of bool
+        One mask of shape ``(ny, nx)`` per tile.
+
+    Notes
+    -----
+    Without this rule a pixel exactly on an unpadded shared edge would take the weighted mean of both
+    tiles.  It changes nothing where an edge is padded.
+    """
+    rr = _radius(shape)
+    n = min(len(zones), len(pads))
+    zones = [(float(z[0]), float(z[1])) for z in list(zones)[:n]]
+    pr = [_pair(pd) for pd in list(pads)[:n]]
+    starts = [(z[0], pr[j][0]) for j, z in enumerate(zones)]
+    out = []
+    for k, ((rin, rout), (pin, pout)) in enumerate(zip(zones, pr)):
+        rin, rout = float(rin), float(rout)
+        shared = pout == 0.0 and np.isfinite(rout) and any(
+            j != k and abs(r0 - rout) < 1e-9 and p0 == 0.0 for j, (r0, p0) in enumerate(starts))
+        upper = (rr < rout) if shared else (rr <= rout + pout)
+        out.append((rr >= rin - pin) & upper)
+    return out
+
+
 def stitch_tiles(images: Sequence[Optional[np.ndarray]], zones: Sequence[Tuple[float, float]],
                  weights: Optional[Sequence[float]] = None, pad: float = 2.0,
                  pads: Optional[Sequence[Tuple[float, float]]] = None) -> np.ndarray:
     """Stitch images into their NaN-aware weighted mean over their tiles.
 
-    Where padded tiles overlap, each pixel is the weighted mean of the images finite there.
+    Where padded tiles overlap, each pixel is the weighted mean of the images finite there.  An edge two
+    tiles share without a pad gives its pixels to the outer tile (:func:`tile_masks`), so with no pads
+    each pixel comes from one image.
 
     Parameters
     ----------
@@ -192,8 +238,8 @@ def stitch_tiles(images: Sequence[Optional[np.ndarray]], zones: Sequence[Tuple[f
     pad : float, default 2.0
         Pad of every edge, in pixels, when ``pads`` is None.
     pads : sequence of tuple of 2 floats or None, default None
-        Each tile's ``(pad_in, pad_out)``, in pixels.  The runner pads only the edges between two annuli
-        (``RunConfig.edge_padding``).
+        Each tile's ``(pad_in, pad_out)``, in pixels.  The runner pads the edges between two annuli only
+        under ``RunConfig.stitch_blend = "weighted"`` (:meth:`klip_tpe.runner.Runner._tile_pads`).
 
     Returns
     -------
@@ -213,10 +259,11 @@ def stitch_tiles(images: Sequence[Optional[np.ndarray]], zones: Sequence[Tuple[f
     num = np.zeros((ny, nx))
     den = np.zeros((ny, nx))
     pads = [(pad, pad)] * len(images) if pads is None else list(pads)
-    for im, (rin, rout), wi, pd in zip(images, zones, w, pads):
+    masks = tile_masks((ny, nx), zones, pads)
+    for im, wi, tm in zip(images, w, masks):
         if im is None or im.shape != (ny, nx):
             continue
-        m = tile_mask((ny, nx), rin, rout, pd) & np.isfinite(im)
+        m = tm & np.isfinite(im)
         num[m] += wi * im[m]
         den[m] += wi
     return num / np.where(den > 0, den, np.nan)
@@ -268,10 +315,10 @@ def stitch_stacks(stacks: Sequence[Optional[np.ndarray]], part_ids: Sequence[Opt
     num = np.zeros((len(union), ny, nx))
     den = np.zeros((len(union), ny, nx))
     pads = [(pad, pad)] * len(stacks) if pads is None else list(pads)
-    for st, ids, (rin, rout), wi, pd in zip(stacks, part_ids, zones, w, pads):
+    masks = tile_masks((ny, nx), zones, pads)
+    for st, ids, wi, tile in zip(stacks, part_ids, w, masks):
         if st is None or ids is None or st.shape[-2:] != (ny, nx):
             continue
-        tile = tile_mask((ny, nx), rin, rout, pd)
         for j, p in enumerate(ids):
             if j >= st.shape[0]:
                 break

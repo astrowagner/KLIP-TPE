@@ -95,6 +95,7 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--no-setup-files] [--legacy-stitch] [--batch BATCH]
                         [--batch-mode {pipeline,sync}]
                         [--edge-padding {between,all}]
+                        [--stitch-blend {own,weighted}]
                         [--stitch-injections {all,own}] [--overlap-pads |
                         --no-overlap-pads] [--display] [--no-display]
                         [--display-every DISPLAY_EVERY]
@@ -500,6 +501,13 @@ options:
                         pad annulus edges only where two annuli meet (between,
                         the default) or on every edge including the innermost
                         and outermost (all, as the IDL does)
+  --stitch-blend {own,weighted}
+                        how the stitch treats an edge two annuli share. own:
+                        each pixel from the annulus whose tile holds it, as
+                        pyKLIP and VIP assign pixels to zones. weighted: a 2
+                        px band on each side blended by 1/sigma^2, which can
+                        take the last 2 px of a tile from the neighbor's
+                        padding (default: own)
   --stitch-injections {all,own}
                         what the final stitch's injected images hold. all:
                         each annulus' winner reduced once more with every
@@ -776,6 +784,7 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--legacy-stitch] [--batch BATCH]
                      [--batch-mode {pipeline,sync}]
                      [--edge-padding {between,all}]
+                     [--stitch-blend {own,weighted}]
                      [--stitch-injections {all,own}] [--overlap-pads |
                      --no-overlap-pads] [--display] [--no-display]
                      [--display-every DISPLAY_EVERY] [--pdf-every PDF_EVERY]
@@ -1180,6 +1189,13 @@ options:
                         pad annulus edges only where two annuli meet (between,
                         the default) or on every edge including the innermost
                         and outermost (all, as the IDL does)
+  --stitch-blend {own,weighted}
+                        how the stitch treats an edge two annuli share. own:
+                        each pixel from the annulus whose tile holds it, as
+                        pyKLIP and VIP assign pixels to zones. weighted: a 2
+                        px band on each side blended by 1/sigma^2, which can
+                        take the last 2 px of a tile from the neighbor's
+                        padding (default: own)
   --stitch-injections {all,own}
                         what the final stitch's injected images hold. all:
                         each annulus' winner reduced once more with every
@@ -2523,6 +2539,7 @@ usage: klip-tpe rereduce [-h] [--instrument {near,nomic,generic,ales}]
                          [--subtract-sources FILE] [--subtract-line FILE]
                          [--inject-sources FILE] [--metric {mawet,fmmf}]
                          [--run-dir RUN_DIR] [--verify-sources FILE]
+                         [--stitch-blend {own,weighted}]
                          [--stitch-injections {all,own}] [--overlap-pads |
                          --no-overlap-pads] [--no-verify]
                          [--verify-snr {search,idl}] [--base-winners FILE]
@@ -2692,6 +2709,14 @@ options:
                         annulus' injected reduction (default: the winners'
                         validation injections, as the run stitched them, see
                         --stitch-injections)
+  --stitch-blend {own,weighted}
+                        how the stitch treats an edge two annuli share. own:
+                        each pixel from the annulus whose tile holds it, as
+                        pyKLIP and VIP assign pixels to zones. weighted: a 2
+                        px band on each side blended by 1/sigma^2, which can
+                        take the last 2 px of a tile from the neighbor's
+                        padding (default: the run's, weighted for a run made
+                        before 2026-11-25)
   --stitch-injections {all,own}
                         what the final stitch's injected images hold. all:
                         each annulus' winner reduced once more with every
@@ -2921,6 +2946,7 @@ usage: klip-tpe rescore [-h] [--instrument {near,nomic,generic,ales}]
                         [--target LO HI] [--n-cal N_CAL] [--seed SEED]
                         [--sources-per-tile N] [--clear-fwhm F]
                         [--window WINDOW] [--overlap-pads | --no-overlap-pads]
+                        [--stitch-blend {own,weighted}]
                         [--verify-snr {search,idl}] [--out DIR] [--card]
                         [--plan]
 
@@ -3136,6 +3162,10 @@ options:
                         (default: the base run's pads)
   --no-overlap-pads     no pads between overlapping annuli, as rereduce --no-
                         overlap-pads
+  --stitch-blend {own,weighted}
+                        how the stitch treats an edge two annuli share, as
+                        rereduce --stitch-blend (default: the base run's,
+                        weighted for a run made before 2026-11-25)
   --verify-snr {search,idl}
                         how each source is measured (default: as the base
                         run's verify)
@@ -3340,6 +3370,7 @@ usage: klip-tpe elect [-h] [--instrument {near,nomic,generic,ales}]
                       [--z Z] [--sweeps SWEEPS] [--finalists N]
                       [--target LO HI] [--n-cal N_CAL]
                       [--curve {grid,path_a,off}]
+                      [--stitch-blend {own,weighted}]
                       [--stitch-injections {all,own}] [--overlap-pads |
                       --no-overlap-pads] [--window WINDOW] [--card]
                       [--no-products] [--plan]
@@ -3528,6 +3559,14 @@ options:
                         how the curve is read: the contrast grid's S/N (grid,
                         the default), the stitched verify's (path_a), or no
                         curve (off)
+  --stitch-blend {own,weighted}
+                        how the stitch treats an edge two annuli share. own:
+                        each pixel from the annulus whose tile holds it, as
+                        pyKLIP and VIP assign pixels to zones. weighted: a 2
+                        px band on each side blended by 1/sigma^2, which can
+                        take the last 2 px of a tile from the neighbor's
+                        padding (default: the run's, weighted for a run made
+                        before 2026-11-25)
   --stitch-injections {all,own}
                         what the final stitch's injected images hold. all:
                         each annulus' winner reduced once more with every

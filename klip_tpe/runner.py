@@ -219,6 +219,14 @@ class RunConfig:
         innermost inner edge and outermost outer edge are reduced and stitched as given.
         ``"all"`` pads every edge, as the IDL does.  A run saved before this field existed
         resumes with ``"all"``, so its evaluations stay comparable.
+    stitch_blend
+        how the stitch treats an edge two annuli share.  ``"own"`` (the default): each pixel from
+        the annulus whose tile holds it, a pixel exactly on the edge from the outer annulus, as the
+        KLIP codes pyKLIP and VIP assign pixels to zones.  ``"weighted"``: a 2 px band on each side
+        of the edge blended by the stitch weights (``1/sigma^2`` of each annulus' median noise in the
+        final products, equal weights in the running stitch).  A blended band takes the last 2 px of
+        one annulus' tile from its neighbor's padding, whose configuration may keep almost none of a
+        source there.  A run saved before 2026-11-25 resumes with ``"weighted"``, the stitch it made.
     stitch_overlap_pads
         whether the stitch pads a tile edge between two overlapping annuli
         (``ann_extra``).  Such an edge lies inside both zones, so there is no zone edge to
@@ -467,6 +475,7 @@ class RunConfig:
     cand_verify_top: int = 5
     legacy_stitch: bool = False
     edge_padding: str = "between"         # "between" (only where annuli meet) | "all" (every edge, the IDL)
+    stitch_blend: str = "own"             # "own" (each pixel from its tile's annulus) | "weighted" (2 px blend)
     stitch_overlap_pads: bool = False     # pad the stitch's tile edges between overlapping annuli
     stitch_injections: str = "all"        # "all" (every annulus' validation sources in each) | "own"
     #: the library the run rotates its frames with, "scipy" | "opencv" (klip.set_rotation_backend):
@@ -615,6 +624,8 @@ class RunConfig:
         # annulus' injected image with its own sources
         d.setdefault("stitch_overlap_pads", True)
         d.setdefault("stitch_injections", "own")
+        # and one saved before 2026-11-25 its blended seams
+        d.setdefault("stitch_blend", "weighted")
         return _from_dict_filtered(cls, d)
 
 
@@ -1454,20 +1465,49 @@ class Runner:
 
     def _tile_pads(self, zones: Sequence[Tuple[float, float]], pad: float = 2.0,
                    annuli: Optional[Sequence[Tuple[float, float]]] = None) -> List[Tuple[float, float]]:
-        """``(pad_in, pad_out)`` in px for each stitch tile (``zones``, the tiles): ``pad`` on
-        an edge between annuli, 0 at the run's innermost and outermost edges
-        (:meth:`_pad_edges`).  ``annuli``, the annuli' zones the tiles were made from, also
-        gives 0 to an edge between two annuli that overlap, unless
-        :attr:`RunConfig.stitch_overlap_pads`: that edge lies inside both zones."""
+        """Return each stitch tile's pads, by how the run stitches an edge two annuli share.
+
+        Under :attr:`RunConfig.stitch_blend` ``"own"`` no edge between two tiles is padded, so each
+        pixel comes from the annulus whose tile holds it (:func:`klip_tpe.stitch.tile_masks`).  Under
+        ``"weighted"`` an edge between annuli takes ``pad`` on both sides and the stitch blends that
+        band, except an edge between two annuli that overlap, unless
+        :attr:`RunConfig.stitch_overlap_pads`, since it lies inside both zones.  The run's innermost
+        and outermost edges take ``pad`` only where :meth:`_pad_edges` pads them.
+
+        Parameters
+        ----------
+        zones : sequence of tuple of 2 floats
+            The tiles, ``(rin, rout)`` in pixels, innermost first.
+        pad : float, default 2.0
+            Pad of a padded edge, in pixels.
+        annuli : sequence of tuple of 2 floats or None, default None
+            The annuli' zones the tiles were made from, which tell where two annuli overlap.
+
+        Returns
+        -------
+        pads : list of tuple of 2 floats
+            Each tile's ``(pad_in, pad_out)``, in pixels.
+
+        Notes
+        -----
+        A blended band takes the last 2 px of one annulus' tile from its neighbor's padding, a radius the
+        neighbor's configuration was never searched, calibrated or validated at, and the 1/sigma^2
+        weights give the quieter annulus nearly all of it whatever it keeps of a source.  On the paper's
+        beta Pic run the stitch kept a median 8 % of a source 1 px inside a seam.  Hence ``"own"`` for
+        new runs (the audit of 2026-11-25).  The KLIP codes pyKLIP and VIP also process each pixel in one
+        zone.
+        """
         over = [False] * len(zones)
         if annuli is not None and len(annuli) == len(zones) and not getattr(self.cfg, "stitch_overlap_pads", True):
             for k in range(len(annuli) - 1):
                 over[k] = float(annuli[k][1]) > float(annuli[k + 1][0]) + 1e-9
+        own = str(getattr(self.cfg, "stitch_blend", "weighted")).lower() == "own"
+        n = len(zones)
         out = []
         for k, (a_in, a_out) in enumerate(zones):
             pin, pout = self._pad_edges(float(a_in), float(a_out))
-            pin = pin and not (k > 0 and over[k - 1])
-            pout = pout and not over[k]
+            pin = pin and not (k > 0 and (over[k - 1] or own))
+            pout = pout and not (over[k] or (own and k < n - 1))
             out.append((pad if pin else 0.0, pad if pout else 0.0))
         return out
 
@@ -6665,6 +6705,7 @@ class Runner:
         overlap = any(tuple(t) != tuple(z) for t, z in zip(tiles, zones))
         hdr = {"NANN": len(items), "PHASE": "final", "IMGTYPE": f"radially-optimized stitch{self._flat_tag}",
                "LEGACY": int(self.cfg.legacy_stitch), "NSEAM": int(seam.sum()), "NPATCH": npatch,
+               "STBLEND": str(getattr(self.cfg, "stitch_blend", "weighted")),
                "EDGES": ",".join(f"{e:.1f}" for e in edges), "WEIGHTS": ",".join(f"{v:.3f}" for v in w),
                "METRIC": getattr(self.objective.metric, "name", "metric"), "KMODE": self.cfg.k_mode,
                "NITER": str(self.cfg.n_iter), "NINIT": str(self.cfg.n_init), "NVALID": self.cfg.validation.n_valid,

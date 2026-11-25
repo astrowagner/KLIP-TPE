@@ -50,9 +50,13 @@ def test_the_reducer_pads_only_the_edges_it_is_told():
 
 
 def test_the_runner_pads_only_edges_between_annuli(tmp_path):
-    r = _runner(tmp_path)
+    r = _runner(tmp_path, stitch_blend="weighted")
     assert [r._pad_edges(*r._annulus(ia)) for ia in range(3)] == [(False, True), (True, True), (True, False)]
     assert r._tile_pads([(8, 20), (20, 30), (30, 45)]) == [(0.0, 2.0), (2.0, 2.0), (2.0, 0.0)]
+    # a new run's stitch (stitch_blend "own") pads none of them: each pixel from its tile's annulus
+    own = _runner(tmp_path / "own")
+    assert own.cfg.stitch_blend == "own"
+    assert own._tile_pads([(8, 20), (20, 30), (30, 45)]) == [(0.0, 0.0)] * 3
     one = _runner(tmp_path / "one", ann_edges=[8, 30], n_iter=6)
     assert one._pad_edges(8, 30) == (False, False)
     every = _runner(tmp_path / "all", edge_padding="all")

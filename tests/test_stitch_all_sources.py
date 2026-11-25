@@ -74,7 +74,8 @@ def _runner(tmp_path, **kw):
 
 
 def test_no_pads_where_annuli_overlap_and_pads_where_they_meet(tmp_path):
-    r = _runner(tmp_path / "a")
+    # the pads of RunConfig.stitch_blend "weighted", where "own" (the default) has none between tiles
+    r = _runner(tmp_path / "a", stitch_blend="weighted")
     zones = r.cfg.zones
     tiles = r._tiles(zones)
     assert zones == [(8.0, 20.0), (14.0, 26.0), (20.0, 32.0)] and tiles == [(8.0, 17.0), (17.0, 23.0), (23.0, 32.0)]
@@ -84,14 +85,18 @@ def test_no_pads_where_annuli_overlap_and_pads_where_they_meet(tmp_path):
     r.cfg.stitch_overlap_pads = True
     assert r._tile_pads(tiles, annuli=zones) == [(0.0, 2.0), (2.0, 2.0), (2.0, 0.0)]
     # an edge where two annuli only meet keeps its pad
-    m = _runner(tmp_path / "b", ann_edges=[8, 20, 32, 44])
+    m = _runner(tmp_path / "b", ann_edges=[8, 20, 32, 44], stitch_blend="weighted")
     zm = m.cfg.zones
     assert zm[-1] == (32.0, 44.0) and m._tile_pads(m._tiles(zm), annuli=zm) == [(0.0, 0.0), (0.0, 0.0),
                                                                                   (0.0, 2.0), (2.0, 0.0)]
     # without overlaps nothing changes
-    p = _runner(tmp_path / "c", ann_extra=[])
+    p = _runner(tmp_path / "c", ann_extra=[], stitch_blend="weighted")
     zp = p.cfg.zones
     assert p._tile_pads(p._tiles(zp), annuli=zp) == [(0.0, 2.0), (2.0, 0.0)]
+    # and under "own" no edge between tiles is padded, overlapping or not
+    o = _runner(tmp_path / "d", ann_edges=[8, 20, 32, 44])
+    zo = o.cfg.zones
+    assert o._tile_pads(o._tiles(zo), annuli=zo) == [(0.0, 0.0)] * 4
 
 
 def test_a_reduced_stack_is_put_in_the_validated_partitions_order():

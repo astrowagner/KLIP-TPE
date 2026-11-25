@@ -1989,13 +1989,15 @@ def _stitch_record(scorer: StitchScorer, runner) -> Dict[str, Any]:
     -------
     stitch : dict
         ``overlap_pads`` (whether overlapping annuli take pads between them here), ``run_overlap_pads``
-        (the run's own), ``overlapping`` (whether any two annuli overlap), ``edge_pads_px`` (the pad at each
-        edge between two tiles, in pixels), ``tiles_px`` and ``pads_px``.
+        (the run's own), ``blend`` (``RunConfig.stitch_blend`` here, ``"own"`` or ``"weighted"``),
+        ``overlapping`` (whether any two annuli overlap), ``edge_pads_px`` (the pad at each edge between two
+        tiles, in pixels), ``tiles_px`` and ``pads_px``.
     """
     z = scorer.zones
     edges = [max(float(scorer.pads[k][1]), float(scorer.pads[k + 1][0])) for k in range(len(z) - 1)]
     return {"overlap_pads": bool(scorer.overlap_pads),
             "run_overlap_pads": bool(getattr(runner.cfg, "stitch_overlap_pads", True)),
+            "blend": str(getattr(scorer, "blend", "weighted")),
             "overlapping": any(float(z[k][1]) > float(z[k + 1][0]) + 1e-9 for k in range(len(z) - 1)),
             "edge_pads_px": edges, "tiles_px": [[float(v) for v in t] for t in scorer.tiles],
             "pads_px": [[float(v) for v in p] for p in scorer.pads]}
@@ -2013,7 +2015,8 @@ def _pads_text(st: Dict[str, Any]) -> str:
     -------
     text : str
         Such as ``no pads between overlapping annuli, the tiles meeting sharply there (the run's own
-        stitch had 2 px pads)``.
+        stitch had 2 px pads)``.  A stitch under ``RunConfig.stitch_blend = "own"`` pads no edge
+        between tiles whatever ``overlap_pads`` says, and the text says so.
     """
     pads = sorted({round(float(v), 3) for v in st.get("edge_pads_px") or []})
     if not pads:
@@ -2021,7 +2024,9 @@ def _pads_text(st: Dict[str, Any]) -> str:
     width = "/".join(f"{v:g}" for v in pads)
     if not st.get("overlapping"):
         return (f"{width} px pads at the edges between tiles, the annuli meeting there" if max(pads) > 0 else
-                "the tiles meeting sharply, without pads")
+                "the tiles meeting sharply, without pads, each pixel from its tile's annulus")
+    if max(pads) == 0 and str(st.get("blend", "weighted")).lower() == "own":
+        return "no pads between overlapping annuli, each pixel from its tile's annulus (stitch blend own)"
     if st.get("overlap_pads"):
         text = f"{width} px pads at the edges between overlapping annuli"
     else:

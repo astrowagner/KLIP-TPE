@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased — 2026-11-25 (each pixel of the stitch from its own annulus)
+
+From the audit of 2026-11-25.
+
+- **The stitch takes each pixel from the annulus whose tile holds it** (`RunConfig.stitch_blend`,
+  `--stitch-blend`, `Runner._tile_pads`, `stitch.tile_masks`).  A run padded each edge two annuli share
+  by 2 px on both sides and blended the band, by `1/sigma^2` of each annulus' median noise in the final
+  products.  The noise falls steeply with radius, so the outer annulus won the whole band, the last
+  2 px inside the inner annulus' tile included, where it reads its own padding.  Its configuration was
+  never searched or validated there and may keep almost none of a source.  On the paper's beta Pic run
+  (NACO, edges 6, 12, 24, 40 px) the weights were 0.0016, 0.53 and 1.0.  Annulus 2's winner keeps 0.1 %
+  of a source 1 px inside the 12 px seam, and the stitch kept a median 8 % of what annulus 1's image
+  holds.  A source of contrast 9.7e-4 at the grid's 10 angles read a median S/N of 3.4 at 11 px, 3.9 at
+  12 px and 6.3 at 13 px, against 8.9, 8.8 and 8.2 with each pixel from its own annulus.  Four positions
+  at 0.299" in the paper's Fig. 8 never reached S/N 5 for this reason.
+- `"own"` is the default for new runs.  A pixel exactly on an edge two tiles share without a pad goes
+  to the outer tile, in the stitches, the per-partition stacks and the param maps.  `"weighted"` keeps the
+  blend, and a run saved before 2026-11-25 resumes with it, so its products reproduce.  `rereduce`,
+  `elect` and `rescore` take `--stitch-blend` for a finished run, `paper_runs/fig8_curve.py` takes it to
+  read Fig. 8 again, and `idl_compare` keeps the blend of the IDL predecessor.  The final stitch's header
+  records the rule (`STBLEND`), and the final grid's record names it, its report saying "no pads
+  between overlapping annuli, each pixel from its tile's annulus (stitch blend own)".
+- Why ownership: fields that combine overlapping images weight each by its response over its noise
+  variance (Sault, Staveley-Smith & Brouw 1996 for radio mosaics, Roemer et al. 1990 for MRI coils).
+  The blend was that rule with the response set equal for both annuli, while a KLIP reduction's
+  throughput can differ 100 times across a seam.  Without each reduction's throughput measured where
+  it is used, the rule gives an annulus no weight outside its zone.  pyKLIP and VIP also process each
+  pixel in one zone.  A response-weighted blend measured on the beta Pic run reads 7.1, 14.2 and 14.4 at
+  11, 12 and 13 px: better where annulus 2's winner keeps little of a source near its inner edge even
+  inside its zone, worse at 11 px, where the two reductions' shared noise counts.
+- Docs: RUNNING.md ("The seams between annuli"), CLI.md.  Tests: `tests/test_stitch_blend.py`, and
+  `tests/test_edge_padding.py`, `tests/test_stitch_all_sources.py` and `tests/test_final_grid.py` for
+  the blend's pads.
+
 ## Unreleased — 2026-11-23 (little field rotation, the companions in the S/N maps, and a stitch whose noise falls continuously)
 
 After a user's note of 2026-11-22, from an LBTI/LMIRCam run of 189 frames over 12.7 deg.

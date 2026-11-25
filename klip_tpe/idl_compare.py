@@ -332,7 +332,8 @@ def matched_run_config(run_setup_path: str, seed: Optional[int] = None, **overri
               edge_padding="all",                   # the IDL pads every zone edge (--edge-padding overrides)
               score_floor=None,                     # and does not floor its scores (--score-floor overrides)
               verify_snr="idl",                     # and verifies with near2v_snrfap (--verify-snr overrides)
-              stitch_injections="own")              # on each annulus' own injections (--stitch-injections)
+              stitch_injections="own",              # on each annulus' own injections (--stitch-injections)
+              stitch_blend="weighted")              # and blends a 2 px band at each seam (--stitch-blend)
     # keep only fields RunConfig knows (older/newer setup files may differ)
     import dataclasses
     fields = {f.name for f in dataclasses.fields(RunConfig)}

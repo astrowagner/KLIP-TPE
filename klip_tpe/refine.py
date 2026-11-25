@@ -635,6 +635,9 @@ class StitchScorer:
         Each annulus' tile, in pixels.
     pads : list of tuple of 2 floats
         Each tile's ``(pad_in, pad_out)``, in pixels.
+    blend : str
+        How the stitch treats an edge two annuli share, the run's ``RunConfig.stitch_blend`` when the
+        scorer was made: ``"own"``, no pads there, or ``"weighted"``, a blended 2 px band.
     itiles : list of tuple of 2 floats
         The tiles the stitched images are made over, the innermost and the outermost reaching the
         whole KLIP zones of their annuli.
@@ -679,6 +682,7 @@ class StitchScorer:
         self.zones = [(float(self.results[a].inrad), float(self.results[a].outrad)) for a in self.order]
         pads_run = bool(getattr(runner.cfg, "stitch_overlap_pads", True))
         self.overlap_pads = pads_run if overlap_pads is None else bool(overlap_pads)
+        self.blend = str(getattr(runner.cfg, "stitch_blend", "weighted"))
         keep = runner.cfg.stitch_overlap_pads
         try:
             runner.cfg.stitch_overlap_pads = self.overlap_pads

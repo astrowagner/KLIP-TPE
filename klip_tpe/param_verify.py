@@ -629,8 +629,9 @@ def stitch_param_maps(results: Sequence[Dict[str, Any]], zones: Sequence[Tuple[f
     """Merge the annuli's maps of each kind, as the IDL predecessor's ``near2m_pvstitch`` does.
 
     Each annulus gives its finite pixels in ``rlo - 1 <= r <= rhi + 1``, the overlaps (2 px seams) are
-    averaged, and the rest is NaN.  The star is at ``(n - 1)/2``, where the IDL predecessor put it at
-    ``n/2``.
+    averaged, and the rest is NaN.  An edge two zones share without a pad gives its pixels to the outer
+    zone (:func:`klip_tpe.stitch.tile_masks`).  The star is at ``(n - 1)/2``, where the IDL predecessor
+    put it at ``n/2``.
 
     Parameters
     ----------
@@ -651,24 +652,23 @@ def stitch_param_maps(results: Sequence[Dict[str, Any]], zones: Sequence[Tuple[f
     maps : dict
         Each kind's stitched map, a kind no annulus has left out.
     """
+    from .stitch import tile_masks
     out: Dict[str, np.ndarray] = {}
+    pr = [(1.0, 1.0) if pads is None else (float(pads[j][0]), float(pads[j][1])) for j in range(len(zones))]
     for kind in kinds:
         acc = wgt = None
+        masks = None
         for j, (res, (rlo, rhi)) in enumerate(zip(results, zones)):
-            pin, pout = (1.0, 1.0) if pads is None else (float(pads[j][0]), float(pads[j][1]))
             m = res.get(kind) if isinstance(res, dict) else None
             if m is None:
                 continue
             m = np.asarray(m, float)
             if acc is None:
                 acc = np.zeros(m.shape); wgt = np.zeros(m.shape)
-                ny, nx = m.shape
-                cx, cy = star_center(m.shape)
-                yy, xx = np.mgrid[0:ny, 0:nx]
-                rr = np.hypot(xx - cx, yy - cy)
+                masks = tile_masks(m.shape, zones, pr)
             if m.shape != acc.shape:
                 continue
-            z = (rr >= rlo - pin) & (rr <= rhi + pout) & np.isfinite(m)
+            z = masks[j] & np.isfinite(m)
             acc[z] += m[z]
             wgt[z] += 1.0
         if acc is None:

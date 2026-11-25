@@ -431,12 +431,13 @@ def test_elect_on_finished_runs_takes_other_runs_finalists_and_writes_the_produc
 
 @pytest.fixture(scope="module")
 def padded_run(tmp_path_factory):
-    """A finished run of overlapping annuli saved with pads between them, as s7 was."""
+    """A finished run of overlapping annuli saved with pads between them and the 2 px blend, as s7 and
+    every run before 2026-11-25 were (``stitch_blend="weighted"``)."""
     d = str(tmp_path_factory.mktemp("final_grid_pads") / "run_p")
     red, space, obj, samp, cfg = build_synthetic_run(
         ann_edges=[8, 20, 32], ann_extra=[[14, 26]], n_iter=[5], n_init=3, seed=7, param_verify=False,
         stitch_every=0, verify=False, write_setup_files=False, fm_curve=False, stitch_overlap_pads=True,
-        stitch_injections="own", validation=ValidationConfig(n_top=2, n_valid=1),
+        stitch_blend="weighted", stitch_injections="own", validation=ValidationConfig(n_top=2, n_valid=1),
         calibration=CalibrationConfig(forced=[2e-3, 2e-3, 2e-3]))
     Runner(red, space, obj, samp, cfg, d, log=QUIET).run()
     return d
@@ -463,6 +464,15 @@ def test_elect_reads_the_stitch_asked_and_lists_its_winners_for_rereduce(padded_
     cov_pad = sum(v["cover"] for v in pl_pad["plan"]["annuli"].values())
     cov_sharp = sum(v["cover"] for v in pl_sharp["plan"]["annuli"].values())
     assert cov_pad > cov_sharp, "the pads widen the part of the stitch an annulus reaches"
+    # read with each pixel from its own annulus (a new run's default), no edge is padded either way
+    lines_own = []
+    r_own = _resume(run, same_frames=False)
+    r_own.cfg.stitch_blend = "own"
+    pl_own = run_final_grid(r_own, str(tmp_path / "p2"), config=fc, plan=True, log=lines_own.append)
+    assert pl_own["stitch"]["blend"] == "own" and pl_own["stitch"]["edge_pads_px"] == [0.0, 0.0]
+    assert pl_own["stitch"]["tiles_px"] == pl_sharp["stitch"]["tiles_px"]
+    assert any("the stitch read: no pads between overlapping annuli, each pixel from its tile's annulus "
+               "(stitch blend own)" in ln for ln in lines_own), [ln for ln in lines_own if "stitch read" in ln]
     # the stage without pads: its record, its report and its winners
     out = str(tmp_path / "el")
     r = _resume(run, same_frames=False)

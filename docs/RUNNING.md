@@ -324,15 +324,65 @@ as any annulus is.  Where two annuli overlap, the stitch takes each radius from 
 center is nearest.  The boundary between their tiles is the midpoint between the centers, and
 the tiles meet there sharply.  The boundary lies inside both zones, so there is no zone edge to
 blend over, and a 2 px blend would give the sources inside it partly to the neighbor's image.
-Where annuli meet without overlapping, the tile edge is their shared edge, with the 2 px blend.
-A run saved before 2026-11-03 keeps the blend it was stitched with, and `--overlap-pads` gives a
-new run that blend.  The run's stitch and its per-night cubes, the param maps, the seam
+Where annuli meet without overlapping, the tile edge is their shared edge (see "The seams between
+annuli" below for how a run stitches it).  A run saved before 2026-11-03 keeps the pads it had between
+overlapping annuli, and `--overlap-pads` gives a new run those pads.  The run's stitch and its
+per-night cubes, the param maps, the seam
 patching, the contrast curve (each annulus' section over its tile, with the seam trim at the tile
 edges), `rereduce` and `fit-chain` all use the tiles.  The log lists the zones and tiles at the
 start.  `final_results.json` records both, and `klip_stitched_params.txt` adds the tile columns.
 `rereduce` refuses a run whose recorded tiles differ from those its zones give.  A zone that holds
 another, or the same zone twice, is refused, and so is `--ann-extra` with `--opt-width`.  Without
 `--ann-extra` the tiles are the zones and every product is as before.
+
+### The seams between annuli (`--stitch-blend`)
+
+Since 2026-11-25 (the audit of that date) a new run takes each pixel of its stitch from the annulus
+whose tile holds it (`RunConfig.stitch_blend = "own"`).  A pixel exactly on the edge two tiles share
+goes to the outer tile.  The KLIP codes pyKLIP and VIP also process each pixel in exactly one zone.
+
+Until then a run padded each edge two annuli share by 2 px on both sides and blended that band
+(`"weighted"`).  The final products weighted each annulus by `1/sigma^2` of its median noise, and the
+running stitch weighted them equally.  The noise falls steeply with radius, so the outer annulus won
+the whole band, the last 2 px inside the inner annulus' tile included.  There the outer annulus reads
+its own padding, a radius its configuration was never searched, calibrated or validated at, and it
+may keep almost none of a source.
+
+On the paper's beta Pic run (NACO, edges 6, 12, 24 and 40 px, FWHM 3.6 px) the weights were 0.0016,
+0.53 and 1.0.  Annulus 2's winner (`angsep` 0, k 17, 4 sectors) keeps 0.1 % of a source 1 px inside
+the 12 px seam, where annulus 1's keeps 8.5 %.  One source of contrast 9.7e-4, at each of the final
+grid's 10 angles, read these median S/N:
+
+| Source at | Annulus 1's image | Each pixel from its own annulus | The 1/sigma^2 blend |
+|---|---|---|---|
+| 11 px | 9.3 | 8.9 | 3.4 |
+| 12 px | 13.3 | 8.8 | 3.9 |
+| 13 px | 14.4 | 8.2 | 6.3 |
+
+Four of the 10 positions at 0.299" (11 px) in the paper's Fig. 8 never reached S/N 5 for this
+reason, and the plotted point there, 1.03e-3, is the seam's.
+
+**The standard rule, and why the default is ownership.**  Fields that combine overlapping images
+weight each one by its response over its noise variance, `I = sum(A I / sigma^2) / sum(A^2 / sigma^2)`.
+Radio mosaics use it (CASA's `linearmosaic`, after Cornwell, Holdaway et al. 1993, A&A 271, 697, and
+Sault, Staveley-Smith & Brouw 1996, A&AS 120, 375), and MRI coil arrays add the noise covariance
+between coils (Roemer et al. 1990, MRM 16, 192).  The 1/sigma^2 blend is that rule with the response set
+equal for both annuli, while a KLIP reduction's point-source throughput can differ 100 times across a
+seam.  The rule needs each reduction's throughput where it is used, which only injections measure,
+and the two annuli reduce the same frames, so their noise is correlated.  Where an annulus' throughput
+outside its zone is not measured, the rule gives that annulus no weight there, which is ownership.
+Measured on the beta Pic run, a response-weighted blend reads 7.1, 14.2 and 14.4 in the table's rows:
+better at 12 and 13 px, where annulus 2's winner keeps little of a source near its inner edge even
+inside its own zone, and worse at 11 px, where the correlated noise counts.
+
+**Options.**
+
+* `--stitch-blend weighted` gives a new run the blend.  `rereduce`, `elect` and `rescore` take the
+  same option for a finished run, whose own is the default.
+* A run saved before 2026-11-25 resumes with `"weighted"`, so its products reproduce.
+* The final stitch's header records the rule (`STBLEND`), and the final grid's `election.txt` and
+  `election.json` name the stitch read.
+* `products.stitch_annuli`, an older recipe no stage uses now, blends as before.
 
 ### The stitched images reach the whole zones at the ends
 
