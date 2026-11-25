@@ -2,7 +2,10 @@
 
 * Path A is the search's matched-filter S/N on the combined image (Mawet et al. 2014,
   :func:`snr_fap`), with the small-sample false-alarm probability (Student t, ``df = n_ap - 2``).
-  The decision is ``fap < fap_op``.
+  The decision is ``fap < fap_op``.  A source whose position is given, a known companion or an
+  injection, is read at that position.  A candidate a blind search found is read at the matched
+  filter's peak within FWHM/2 of where it was found, and its FAP also comes corrected for the search
+  over the field (:func:`field_fap`).
 * Path B is the night-to-night consistency: the night-STIM map with an empirical FAP from the
   same-radius annulus, a bootstrap over nights of the matched-filter peak, and the S/N in five
   semi-independent subsets (combined, first half, second half, even and odd nights), whose
@@ -50,6 +53,12 @@ where listed here, each also flagged at its call site:
   Path A and of the subsets also leaves out the ADI arcs of the source, of the known companions and
   of the block's other sources, as do the STIM annulus and the solved contrasts (:func:`ring_snr`).
   The predecessor has no such rule, and ``sidelobes=None`` keeps its rings.
+* Since 2026-11-25 (the audit of that date) a source whose position is given is read at it
+  (:func:`search_px`).  The predecessor took every source's matched-filter peak within 1.5 px and
+  read the FAP as if at a fixed pixel.  On source-free Gaussian noise correlated at the PSF that
+  peak's S/N averages +0.29 to +0.75 sigma (FWHM 6.4 to 2.3 px), and its FAP is reached 1.6 to 4.6
+  times as often as it says, between 0.1 and 1e-4.  At the given position the rate equals the FAP.
+  A run saved before keeps the 1.5 px search (``RunConfig.verify_position = "peak"``).
 """
 from __future__ import annotations
 
@@ -58,6 +67,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy import ndimage
+from scipy.stats import norm as _norm
 from scipy.stats import t as _student_t
 
 from . import metrics as _metrics
@@ -65,7 +75,8 @@ from .metrics import (_arc_regions, _in_arcs, gaussian_kernel, matched_filter, m
                       radprof, rule_kwargs, sidelobe_snr, source_xy,
                       star_center, verify_idl)
 
-__all__ = ["t_fap", "t_thresh", "contrast_limit", "contrast_limit_image", "mf_convolve",
+__all__ = ["t_fap", "t_thresh", "legacy_position", "search_px", "field_fap", "field_smoothness", "field_geometry",
+           "contrast_limit", "contrast_limit_image", "mf_convolve",
            "snr_fap", "solved_contrasts", "combine_nights", "night_stim", "stim_fap", "bootstrap_nights",
            "night_subsets", "verify_maps", "verify_candidates", "verify_injections", "verify_tiles",
            "tile_comparison_lines", "limit_tables", "write_verify_table", "write_curve_table"]
@@ -161,6 +172,225 @@ def _t_exact(alpha: float, n: int) -> float:
     if alpha <= 0:
         return float("inf")
     return float(_student_t.isf(float(alpha), max(int(n) - 2, 1)))
+
+
+#: The verify's peak search for every source of a run saved before 2026-11-25
+#: (``RunConfig.verify_position = "peak"``), in pixels.
+LEGACY_SEARCH_PX = 1.5
+
+
+def legacy_position(rules: Optional[Dict[str, Any]]) -> bool:
+    """Tell whether a run's rules keep the verify's measures of before 2026-11-25.
+
+    Parameters
+    ----------
+    rules : dict or None
+        The run's ring rules (:meth:`klip_tpe.runner.Runner._ring_rules`).
+
+    Returns
+    -------
+    legacy : bool
+        True for rules whose ``position`` is ``"peak"`` (``RunConfig.verify_position``) and for those of
+        a verify of before 2026-11-01 (:data:`~klip_tpe.metrics.VERIFY_IDL`): every source at the matched
+        filter's peak within 1.5 px, and a blind candidate's field-wide FAP by ``1 - (1 - p)^N_resel``.
+    """
+    return verify_idl(rules) or str((rules or {}).get("position", "given")).lower() == "peak"
+
+
+def search_px(fwhm: float, found: bool = False, rules: Optional[Dict[str, Any]] = None,
+              drift_px: Optional[float] = None) -> float:
+    """Return how far from a source's position the verify takes the matched filter's peak, in pixels.
+
+    A source whose position is given, a known companion or an injection, is read at its position, so
+    its S/N is the statistic the small-sample t-test calibrates.  A candidate a blind search found is
+    read at the peak within half an FWHM, the aperture of the S/N, of where the search found it.  Its
+    local FAP then needs the correction for the search over the field (:func:`field_fap`), which
+    covers the half FWHM too.
+
+    Parameters
+    ----------
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    found : bool, default False
+        Whether a blind search found the source, rather than its position being given.
+    rules : dict or None, default None
+        The run's ring rules (:meth:`klip_tpe.runner.Runner._ring_rules`).  Rules whose ``position`` is
+        ``"peak"``, or the rules of a verify of before 2026-11-01
+        (:data:`~klip_tpe.metrics.VERIFY_IDL`), give every source :data:`LEGACY_SEARCH_PX`.
+    drift_px : float or None, default None
+        A radius the caller sets, which wins.
+
+    Returns
+    -------
+    radius : float
+        The search radius, in pixels, 0 to read the source at its position.
+
+    Notes
+    -----
+    The IDL predecessor and runs saved before 2026-11-25 took every source's peak within 1.5 px.  On
+    source-free Gaussian noise correlated at the PSF, the peak's FAP was reached 1.6 to 4.6 times as
+    often as it said (FWHM 6.4 to 2.3 px, FAPs 0.1 to 1e-4), and about 10 times at 2.87e-7 by
+    extrapolation, while the S/N at the given position follows its FAP (the audit of 2026-11-25).
+    """
+    if drift_px is not None:
+        return float(drift_px)
+    if legacy_position(rules):
+        return LEGACY_SEARCH_PX
+    return 0.5 * float(fwhm) if found else 0.0
+
+
+def field_fap(fap_local: float, area_px: float, perimeter_px: float, fwhm_eff_px: float,
+              euler: float = 0.0) -> float:
+    """Return the false-alarm probability of the strongest peak a search over a field finds.
+
+    The local FAP ``p`` of the peak, its small-sample t-test at the peak, becomes the Gaussian
+    threshold ``u = Phi^-1(1 - p)``.  The expected Euler characteristic of the excursion set above
+    ``u`` of a smooth Gaussian field over the search region (Worsley et al. 1996) is
+
+    ``E = R0 Q(u) + R1 sqrt(4 ln 2) / (2 pi) exp(-u^2/2) + R2 4 ln 2 / (2 pi)^(3/2) u exp(-u^2/2)``,
+
+    with ``R0`` the region's Euler characteristic (0 for an annulus), ``R1`` half its perimeter and
+    ``R2`` its area, in units of the field's FWHM and its square.  The probability that the field's
+    maximum passes ``u`` is ``1 - exp(-E)``.
+
+    Parameters
+    ----------
+    fap_local : float
+        The peak's FAP as if at a fixed pixel (:func:`t_fap`).
+    area_px : float
+        Area searched, in square pixels.
+    perimeter_px : float
+        Length of the region's boundary, in pixels.
+    fwhm_eff_px : float
+        FWHM of the smoothing that would give white noise the field's roughness, in pixels
+        (:func:`field_smoothness`).  For a matched filter of noise correlated at the PSF it is about
+        sqrt(2) times the PSF's FWHM.
+    euler : float, default 0.0
+        Euler characteristic of the region, 0 for an annulus, 1 for a disk.
+
+    Returns
+    -------
+    fap : float
+        The field-wide FAP, at least ``fap_local``, at most 1, and NaN for a non-finite input.
+
+    Notes
+    -----
+    The same theory gives the look-elsewhere correction of particle physics (Gross & Vitells 2010,
+    Eur. Phys. J. C 70, 525) and the family-wise error of statistical parametric maps in brain imaging.
+    It replaces the candidate search's ``1 - (1 - p)^N_resel`` with ``N_resel = area / FWHM^2``, the
+    IDL predecessor's.  On source-free fields of Gaussian noise correlated at the PSF (FWHM 4 px, a
+    0.24 to 2.8" annulus at 0.05"/px), that FAP was reached 2.7, 3.0 and 3.4 times as often as it
+    said at 0.1, 0.05 and 0.01 (18,000 fields), and this one 0.83, 0.85 and 0.67 times (12,000
+    fields, the audit of 2026-11-25).  From 0.5 to 0.01 this one is reached 0.68 to 0.82 times as
+    often at a FWHM of 2.3 px and 0.89 to 1.05 times at 6.4 px.  It errs on the safe side, as the
+    theory does on a field sampled in pixels, and on a Gaussian field of known scatter at 4 px it is
+    reached 0.82 to 0.93 times as often as it says.
+    """
+    p = float(fap_local)
+    if not np.isfinite(p) or not (np.isfinite(area_px) and np.isfinite(fwhm_eff_px)) or fwhm_eff_px <= 0:
+        return float("nan")
+    if p <= 0.0:
+        return 0.0
+    if p >= 0.5:
+        return 1.0
+    u = float(_norm.isf(p))
+    e = float(np.exp(-0.5 * u * u))
+    r1 = 0.5 * max(float(perimeter_px), 0.0) / float(fwhm_eff_px)
+    r2 = max(float(area_px), 0.0) / float(fwhm_eff_px) ** 2
+    c = 4.0 * np.log(2.0)
+    ec = float(euler) * p + r1 * np.sqrt(c) / (2.0 * np.pi) * e + r2 * c / (2.0 * np.pi) ** 1.5 * u * e
+    return float(min(1.0, max(p, -np.expm1(-max(ec, 0.0)))))
+
+
+def field_smoothness(snrmap: np.ndarray, mask: Optional[np.ndarray] = None) -> float:
+    """Return the FWHM of the smoothing that gives white noise an S/N map's roughness, in pixels.
+
+    White noise smoothed by a Gaussian of FWHM ``s`` has a Gaussian autocorrelation whose value one
+    pixel away is ``exp(-2 ln 2 / s^2)``.  The map is put to unit robust scatter, the scatter of the
+    differences between neighboring pixels along each axis gives that value, ``1 - var/2``, and the two
+    axes' mean gives ``s``.  Robust scatters keep a few bright sources from setting it.
+
+    Parameters
+    ----------
+    snrmap : ndarray, shape (ny, nx)
+        The S/N map.  NaN pixels are left out.
+    mask : ndarray of bool or None, default None
+        The pixels to use, True kept, such as the search annulus.
+
+    Returns
+    -------
+    fwhm : float
+        The smoothing's FWHM, in pixels, NaN when fewer than 50 pixel pairs are usable.
+
+    Notes
+    -----
+    For the matched filter of white noise ``s`` is the kernel's FWHM, and for the matched filter of
+    noise correlated at the PSF about sqrt(2) times the PSF's.  The estimator is that of Forman et
+    al. (1995, Magn. Reson. Med. 33, 636), the classic method of AFNI's ``3dFWHMx``.  Brain imaging
+    also estimates the smoothness from the residuals' gradients (Kiebel et al. 1999, NeuroImage 10,
+    756).
+    """
+    z = np.asarray(snrmap, float)
+    ok = np.isfinite(z) if mask is None else (np.isfinite(z) & np.asarray(mask, bool))
+    if ok.sum() < 50:
+        return float("nan")
+    v = z[ok]
+    med = float(np.median(v))
+    sc = 1.4826 * float(np.median(np.abs(v - med)))
+    if not sc > 0:
+        return float("nan")
+    zz = (z - med) / sc
+    rhos = []
+    for axis in (0, 1):
+        a, b = (zz[:-1, :], zz[1:, :]) if axis == 0 else (zz[:, :-1], zz[:, 1:])
+        m = (ok[:-1, :] & ok[1:, :]) if axis == 0 else (ok[:, :-1] & ok[:, 1:])
+        if m.sum() < 50:
+            continue
+        d = (a - b)[m]
+        vd = (1.4826 * float(np.median(np.abs(d - np.median(d))))) ** 2
+        rhos.append(1.0 - 0.5 * vd)
+    if not rhos:
+        return float("nan")
+    rho = float(np.clip(np.mean(rhos), 1e-6, 1.0 - 1e-9))
+    return float(np.sqrt(-2.0 * np.log(2.0) / np.log(rho)))
+
+
+def field_geometry(snrmap: np.ndarray, iwa_px: float, owa_px: float, fwhm: float) -> Dict[str, float]:
+    """Return what :func:`field_fap` needs of a blind search's field: its area, boundary and smoothness.
+
+    Parameters
+    ----------
+    snrmap : ndarray, shape (ny, nx)
+        The S/N map the search finds its peaks on, with the star at ``((nx-1)/2, (ny-1)/2)``.
+    iwa_px : float
+        Inner radius of the search, in pixels.
+    owa_px : float
+        Outer radius of the search, in pixels.
+    fwhm : float
+        FWHM of the PSF, in pixels, for the fallback smoothness.
+
+    Returns
+    -------
+    field : dict
+        ``area_px`` (the map's finite pixels between the radii), ``perimeter_px`` (the two circles'
+        lengths), ``fwhm_eff_px`` (:func:`field_smoothness` of the map there, or sqrt(2) times ``fwhm``
+        when it cannot be measured), ``fwhm_eff_from`` ("map" or "psf"), ``euler`` (0, an annulus) and
+        ``n_resel`` (the area over ``fwhm^2``, the IDL predecessor's count, for comparison).
+    """
+    z = np.asarray(snrmap, float)
+    ny, nx = z.shape
+    cx, cy = star_center(z.shape)
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    rr = np.hypot(xx - cx, yy - cy)
+    ann = (rr >= float(iwa_px)) & (rr <= float(owa_px))
+    fe = field_smoothness(z, ann)
+    src = "map"
+    if not (np.isfinite(fe) and fe > 0):
+        fe, src = float(np.sqrt(2.0) * fwhm), "psf"
+    area = float(np.count_nonzero(ann & np.isfinite(z)))
+    return {"area_px": area, "perimeter_px": float(2.0 * np.pi * (float(iwa_px) + float(owa_px))),
+            "fwhm_eff_px": float(fe), "fwhm_eff_from": src, "euler": 0.0,
+            "n_resel": max(np.pi * (float(owa_px) ** 2 - float(iwa_px) ** 2) / float(fwhm) ** 2, 1.0)}
 
 
 def contrast_limit(alpha: float, beta: float, ci, si, napi) -> float:
@@ -402,7 +632,7 @@ def _snr_fap_idl(img: np.ndarray, rho: float, theta: float, pxscale: float, fwhm
 
 
 def snr_fap(img: np.ndarray, rho: float, theta: float, pxscale: float, fwhm: float,
-            exr: Optional[float] = None, srad: float = 1.5, *,
+            exr: Optional[float] = None, srad: Optional[float] = None, *,
             exclude_xy: Sequence[Tuple[float, float]] = (), mfmap: Optional[np.ndarray] = None,
             angle_convention: str = "pa", excl_arcs: Sequence[Tuple[float, float, float, float]] = (),
             peak_xy: Optional[Tuple[float, float]] = None, rules: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
@@ -410,8 +640,9 @@ def snr_fap(img: np.ndarray, rho: float, theta: float, pxscale: float, fwhm: flo
 
     The S/N is the search's matched-filter Mawet S/N (:func:`~klip_tpe.metrics.mawet_peak_snr`) under
     the run's ring rules (:func:`~klip_tpe.metrics.ring_rules`), or that function's defaults.  The
-    source is the matched-filter peak within ``srad`` of its position, and the ring through it skips
-    ``exr`` around the source as given and around each ``exclude_xy``, the pixel mask and ``excl_arcs``.
+    source is read at its position, or with ``srad`` at the matched-filter peak within ``srad`` of it
+    (:func:`search_px`), and the ring through it skips ``exr`` around the source as given and around
+    each ``exclude_xy``, the pixel mask and ``excl_arcs``.
     ``fap = t_fap(snr, n)`` with ``n`` the ring samples used, or the ring's count when the radial band
     gave the noise.
 
@@ -429,8 +660,11 @@ def snr_fap(img: np.ndarray, rho: float, theta: float, pxscale: float, fwhm: flo
         FWHM of the PSF, in pixels.
     exr : float or None, default None
         Radius of the keep-outs, in pixels.  None takes 1.5 FWHM.
-    srad : float, default 1.5
-        Radius of the peak search, in pixels.
+    srad : float or None, default None
+        Radius of the peak search, in pixels.  0 reads the source at its position, where its FAP
+        holds, since a search raises the S/N and the FAP then says too little.  None reads where
+        ``rules`` say (:func:`search_px`), at the position or, for a run made before 2026-11-25, at
+        the peak within 1.5 px.
     exclude_xy : sequence of tuple of 2 floats, default ()
         More ``(x, y)`` pixels whose keep-out the ring skips, such as the other sources and the known
         companions.
@@ -460,6 +694,7 @@ def snr_fap(img: np.ndarray, rho: float, theta: float, pxscale: float, fwhm: flo
     Before, this function ported the IDL predecessor's ``near2v_snrfap``, with a Gaussian kernel, no
     despike, ``exr`` kept around the located peak and no radial band.
     """
+    srad = search_px(fwhm, False, rules) if srad is None else float(srad)
     if verify_idl(rules):
         return _snr_fap_idl(img, rho, theta, pxscale, fwhm, exr, srad, exclude_xy=exclude_xy, mfmap=mfmap,
                             angle_convention=angle_convention, excl_arcs=excl_arcs, peak_xy=peak_xy)
@@ -491,7 +726,7 @@ def snr_fap(img: np.ndarray, rho: float, theta: float, pxscale: float, fwhm: flo
 
 
 def _fap_measure(img, rho, theta, pxscale, fwhm, *, known=(), excl_arcs=(), angle_convention="pa",
-                 return_details=True, exr=None, srad=1.5, exclude_xy=(), mfmap=None, peak_xy=None, rules=None,
+                 return_details=True, exr=None, srad=None, exclude_xy=(), mfmap=None, peak_xy=None, rules=None,
                  **_):
     """Measure one source with :func:`snr_fap` in the form :func:`~klip_tpe.metrics.sidelobe_snr` asks of a measure.
 
@@ -517,8 +752,8 @@ def _fap_measure(img, rho, theta, pxscale, fwhm, *, known=(), excl_arcs=(), angl
         Unused, the details always come back.
     exr : float or None, default None
         Radius of the keep-outs, in pixels.
-    srad : float, default 1.5
-        Radius of the peak search, in pixels.
+    srad : float or None, default None
+        Radius of the peak search, in pixels, None where ``rules`` say (:func:`search_px`).
     exclude_xy : sequence of tuple of 2 floats, default ()
         More pixels whose keep-out the ring skips.
     mfmap : ndarray or None, default None
@@ -553,7 +788,7 @@ _fap_measure.takes_peak_xy = True
 
 
 def ring_snr(img: np.ndarray, i: int, rhos: Sequence[float], thetas: Sequence[float], pxscale: float,
-             fwhm: float, sidelobes, *, exr: Optional[float] = None, srad: float = 1.5,
+             fwhm: float, sidelobes, *, exr: Optional[float] = None, srad: Optional[float] = None,
              exclude_xy: Sequence[Tuple[float, float]] = (), known: Sequence[Tuple[float, float]] = (),
              mfmap: Optional[np.ndarray] = None, angle_convention: str = "pa",
              rules: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -583,8 +818,8 @@ def ring_snr(img: np.ndarray, i: int, rhos: Sequence[float], thetas: Sequence[fl
         The sidelobe rule, taken in its "farthest" mode.
     exr : float or None, default None
         Radius of the keep-outs, in pixels.  None takes 1.5 FWHM.
-    srad : float, default 1.5
-        Radius of the peak search, in pixels.
+    srad : float or None, default None
+        Radius of the peak search, in pixels, None where ``rules`` say (:func:`search_px`).
     exclude_xy : sequence of tuple of 2 floats, default ()
         More pixels whose keep-out the ring skips.
     known : sequence of tuple of 2 floats, default ()
@@ -903,7 +1138,7 @@ def _reaches(s: float, n: int, fap: float, beta: float) -> bool:
 
 
 def solved_contrasts(clean_img: np.ndarray, inj_img: np.ndarray, rho: float, theta: float, contrast: float,
-                     pxscale: float, fwhm: float, exr: Optional[float] = None, srad: float = 1.5, *,
+                     pxscale: float, fwhm: float, exr: Optional[float] = None, srad: Optional[float] = None, *,
                      exclude_xy: Sequence[Tuple[float, float]] = (), fap: float = DEFAULT_FAP_LIST[0],
                      taps: Sequence[float] = DEFAULT_TAP_LIST, angle_convention: str = "pa",
                      a_range: Tuple[float, float] = (1e-3, 1e3), n_grid: int = 121,
@@ -937,8 +1172,8 @@ def solved_contrasts(clean_img: np.ndarray, inj_img: np.ndarray, rho: float, the
         FWHM of the PSF, in pixels.
     exr : float or None, default None
         Radius of the keep-outs, in pixels.  None takes 1.5 FWHM.
-    srad : float, default 1.5
-        Radius of the peak search, in pixels.
+    srad : float or None, default None
+        Radius of the peak search, in pixels, None where ``rules`` say (:func:`search_px`).
     exclude_xy : sequence of tuple of 2 floats, default ()
         More pixels whose keep-out the ring skips.
     fap : float, default DEFAULT_FAP_LIST[0]
@@ -981,6 +1216,7 @@ def solved_contrasts(clean_img: np.ndarray, inj_img: np.ndarray, rho: float, the
         return out
     if exr is None:
         exr = 1.5 * fwhm
+    srad = search_px(fwhm, False, rules) if srad is None else float(srad)
     sc = _scaled if _scaled is not None else _ScaledImage(clean_img, inj_img, fwhm, rules=rules)
     args = (rho, theta, pxscale, fwhm, exr, srad, exclude_xy, angle_convention, excl_arcs)
     lo, hi = float(a_range[0]), float(a_range[1])
@@ -1225,14 +1461,14 @@ def stim_fap(stim: np.ndarray, x: float, y: float, rho_px: float, fwhm: float,
 
 
 def bootstrap_nights(stack: np.ndarray, weights: np.ndarray, rho: float, theta: float,
-                     pxscale: float, fwhm: float, srad: float = 1.5, n_boot: int = 500,
+                     pxscale: float, fwhm: float, srad: Optional[float] = None, n_boot: int = 500,
                      rng: Optional[np.random.Generator] = None, angle_convention: str = "pa",
                      rules: Optional[Dict[str, Any]] = None) -> float:
     """Return the bootstrap-over-nights significance of a source, the mean over the scatter of its peak.
 
     The ``n`` nights are drawn with replacement ``n_boot`` times.  Each draw is combined
-    (:func:`combine_nights`, weighted, not flattened), and its matched-filter peak within ``srad`` is
-    read from :func:`snr_fap`, called with ``exr = srad``, whose ring never moves the peak.  The
+    (:func:`combine_nights`, weighted, not flattened), and its matched-filter value at the source, or
+    its peak within ``srad``, is read from :func:`snr_fap`, whose ring never moves the peak.  The
     matched filter is the run's (:func:`~klip_tpe.metrics.matched_filter`), or the Gaussian of
     :func:`mf_convolve` under :data:`~klip_tpe.metrics.VERIFY_IDL`.
 
@@ -1250,8 +1486,8 @@ def bootstrap_nights(stack: np.ndarray, weights: np.ndarray, rho: float, theta: 
         Plate scale, in arcsec per pixel.
     fwhm : float
         FWHM of the PSF, in pixels.
-    srad : float, default 1.5
-        Radius of the peak search, in pixels.
+    srad : float or None, default None
+        Radius of the peak search, in pixels, None where ``rules`` say (:func:`search_px`).
     n_boot : int, default 500
         Number of draws.
     rng : numpy.random.Generator or None, default None
@@ -1273,6 +1509,7 @@ def bootstrap_nights(stack: np.ndarray, weights: np.ndarray, rho: float, theta: 
     """
     stack = np.asarray(stack, float)
     nn = stack.shape[0]
+    srad = search_px(fwhm, False, rules) if srad is None else float(srad)
     if rng is None:
         rng = np.random.default_rng(42)
     vals = np.full(int(n_boot), np.nan)
@@ -1280,7 +1517,7 @@ def bootstrap_nights(stack: np.ndarray, weights: np.ndarray, rho: float, theta: 
         idx = rng.integers(0, nn, nn)
         cb = combine_nights(stack, weights, idx)
         A = mf_convolve(cb, fwhm) if verify_idl(rules) else matched_filter(cb, fwhm, rules, rho)
-        vals[b] = snr_fap(cb, rho, theta, pxscale, fwhm, exr=srad, srad=srad, mfmap=A,
+        vals[b] = snr_fap(cb, rho, theta, pxscale, fwhm, exr=max(srad, LEGACY_SEARCH_PX), srad=srad, mfmap=A,
                           angle_convention=angle_convention, rules=rules)["peak"]
     g = vals[np.isfinite(vals)]
     if g.size < 3:
@@ -1408,18 +1645,21 @@ def _known_xy(known, pxscale, cx, cy, angle_convention):
 def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[Any]],
                       candidates: Sequence[Tuple[float, float]], fwhm: float, pxscale: float, *,
                       known: Sequence[Tuple[float, float]] = (), injected=None,
-                      fap_op: float = 2.87e-7, drift_px: float = 1.5, n_boot: int = 500,
+                      fap_op: float = 2.87e-7, drift_px: Optional[float] = None, n_boot: int = 500,
                       rng: Optional[np.random.Generator] = None, weights: Optional[Sequence[float]] = None,
                       excl_fwhm: float = 1.5, fap_list: Sequence[float] = DEFAULT_FAP_LIST,
                       tap_list: Sequence[float] = DEFAULT_TAP_LIST, rbin_as: Optional[float] = None,
                       angle_convention: str = "pa", return_maps: bool = False,
                       combined: Optional[np.ndarray] = None, combined_inj: Optional[np.ndarray] = None,
                       path_a: Optional[str] = None, sidelobes=None,
-                      rules: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+                      rules: Optional[Dict[str, Any]] = None, found: bool = False,
+                      field: Optional[Dict[str, float]] = None) -> List[Dict[str, Any]]:
     """Verify candidates on a per-night image stack, by Path A and Path B.
 
     Path A is each candidate's S/N and FAP on the combined image (:func:`snr_fap`, or :func:`ring_snr`
-    under the sidelobe rule).  Path B is its S/N in the night subsets, its night-STIM value with the
+    under the sidelobe rule).  A candidate whose position is given, such as a known companion, is read
+    at it, and one a blind search found at the matched filter's peak within FWHM/2 (:func:`search_px`),
+    with its FAP over the field beside the local one (:func:`field_fap`).  Path B is its S/N in the night subsets, its night-STIM value with the
     annulus FAP (:func:`stim_fap`) and the bootstrap over nights (:func:`bootstrap_nights`).  With
     ``injected``, the injections are measured too (:func:`verify_injections`), for the calibration
     block and the detection-limit tables.
@@ -1444,9 +1684,10 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
         ``(inj_stack, sources)``, the injected twin of ``stack`` and its sources as
         ``(rho_arcsec, theta_deg, contrast)``.
     fap_op : float, default 2.87e-7
-        Operating FAP of Path A's decision.
-    drift_px : float, default 1.5
-        Radius of the peak search, in pixels.
+        Operating FAP of Path A's decision, per resolution element.
+    drift_px : float or None, default None
+        Radius of the peak search, in pixels.  None takes :func:`search_px`: 0 for given positions,
+        FWHM/2 for ``found`` ones, 1.5 px for a run saved before 2026-11-25.
     n_boot : int, default 500
         Number of bootstrap draws.  0 skips the bootstrap, as the IDL predecessor's ``/lite`` does.
     rng : numpy.random.Generator or None, default None
@@ -1478,6 +1719,11 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
     rules : dict or None, default None
         The run's ring rules (:func:`~klip_tpe.metrics.ring_rules`), whose matched filter and pixel mask
         every S/N, the STIM annulus and the bootstrap take.  None takes the search metric's defaults.
+    found : bool, default False
+        Whether a blind search found the candidates, rather than their positions being given.
+    field : dict or None, default None
+        The blind search's field (:func:`field_geometry`), which gives ``found`` candidates their FAP
+        over the field.
 
     Returns
     -------
@@ -1485,8 +1731,10 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
         One row per candidate (``kind="candidate"``), then with ``injected`` one per source
         (``kind="injection"``, :func:`verify_injections`).  A candidate's row holds ``index``, ``rho``,
         ``theta``, ``x``, ``y``, ``snr``, ``fap``, ``nap``, ``peak``, ``detect``, ``subsets`` (name to
-        S/N), ``persistence``, ``stim``, ``stim_fap``, ``boot_sig``, ``meta`` and, under the sidelobe
-        rule, ``noise`` (:func:`_noise`).
+        S/N), ``persistence``, ``stim``, ``stim_fap``, ``boot_sig``, ``meta``, ``search_px`` (the peak
+        search used), ``position`` ("given" or "found"), under the sidelobe rule ``noise`` (:func:`_noise`),
+        for a given candidate read at its position ``snr_peak`` (the S/N of the matched filter's peak
+        within FWHM/2, for comparison only), and for a found one with ``field`` ``fap_field``.
     maps : dict [return_maps=True]
         The maps of :func:`verify_maps`, with ``limits`` (:func:`limit_tables`, None without
         ``injected``), ``injected`` (the injections' maps) and ``meta``.
@@ -1520,6 +1768,7 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
     if rng is None:
         rng = np.random.default_rng(42)
     kxy = _known_xy(known, pxscale, cx, cy, angle_convention)
+    srad = search_px(fwhm, found, rules, drift_px)
     if injected is not None and (combined is None) != (combined_inj is None):
         raise ValueError("verify_candidates: give combined and combined_inj together, so the injections are "
                          "measured on the injected twin of the image the candidates are measured on")
@@ -1533,23 +1782,30 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
     for c, (rho, theta) in enumerate(candidates):
         rho, theta = float(rho), float(theta)
         noise = None
+        peak_snr = None
         if sidelobes is None:
             # Path A on the combined image (verify 588), the search's S/N under the run's rules
-            sa = snr_fap(maps["subsets"]["combined"], rho, theta, pxscale, fwhm, exr, drift_px,
+            sa = snr_fap(maps["subsets"]["combined"], rho, theta, pxscale, fwhm, exr, srad,
                          exclude_xy=kxy, angle_convention=angle_convention, rules=rules)
-            ssub = {name: snr_fap(maps["subsets"][name], rho, theta, pxscale, fwhm, exr, drift_px,
+            ssub = {name: snr_fap(maps["subsets"][name], rho, theta, pxscale, fwhm, exr, srad,
                                   exclude_xy=kxy, angle_convention=angle_convention, rules=rules)["snr"]
                     for name in SUBSET_NAMES}
+            if srad == 0.0:
+                peak_snr = snr_fap(maps["subsets"]["combined"], rho, theta, pxscale, fwhm, exr, 0.5 * fwhm,
+                                   exclude_xy=kxy, angle_convention=angle_convention, rules=rules)["snr"]
             arcs = ()
         else:
             # the sidelobe rule: the candidate's own arc and the other known companions'
             others = _without_self(known, rho, theta, pxscale, fwhm, exr, angle_convention)
-            rk = dict(exr=exr, srad=drift_px, exclude_xy=kxy, known=others, angle_convention=angle_convention,
+            rk = dict(exr=exr, srad=srad, exclude_xy=kxy, known=others, angle_convention=angle_convention,
                       rules=rules)
             sa = ring_snr(maps["subsets"]["combined"], 0, [rho], [theta], pxscale, fwhm, sidelobes, **rk)
             ssub = {name: (sa["snr"] if name == "combined" else
                            ring_snr(maps["subsets"][name], 0, [rho], [theta], pxscale, fwhm, sidelobes, **rk)["snr"])
                     for name in SUBSET_NAMES}
+            if srad == 0.0:
+                peak_snr = ring_snr(maps["subsets"]["combined"], 0, [rho], [theta], pxscale, fwhm, sidelobes,
+                                    **dict(rk, srad=0.5 * fwhm))["snr"]
             arcs = sa.get("arcs") or ()
             noise = _noise(sa)
         # Path B: STIM at the nominal (rounded) position with the annulus null (594-602)
@@ -1557,7 +1813,7 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
         sval, sfap = stim_fap(stim, float(xs[0]), float(ys[0]), rho / pxscale, fwhm, exr, exclude_xy=kxy,
                               excl_arcs=arcs, pxscale=pxscale, angle_convention=angle_convention,
                               pixel_mask=(rules or {}).get("pixel_mask"))
-        bsig = bootstrap_nights(stack, w, rho, theta, pxscale, fwhm, drift_px, n_boot, rng,
+        bsig = bootstrap_nights(stack, w, rho, theta, pxscale, fwhm, srad, n_boot, rng,
                                 angle_convention, rules=rules) if (n_boot and nn >= 2) else float("nan")
         part = [ssub[k] for k in SUBSET_NAMES[1:]]
         persist = float(np.nanmin(part)) if np.any(np.isfinite(part)) else float("nan")
@@ -1565,7 +1821,12 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
                      "x": sa["x"], "y": sa["y"], "snr": sa["snr"], "fap": sa["fap"], "nap": sa["nap"],
                      "peak": sa["peak"], "detect": bool(np.isfinite(sa["fap"]) and sa["fap"] < fap_op),
                      "subsets": ssub, "persistence": persist, "stim": sval, "stim_fap": sfap,
-                     "boot_sig": bsig})
+                     "boot_sig": bsig, "search_px": srad, "position": "found" if found else "given"})
+        if peak_snr is not None:
+            rows[-1]["snr_peak"] = float(peak_snr)
+        if found and field:
+            rows[-1]["fap_field"] = field_fap(sa["fap"], field["area_px"], field["perimeter_px"],
+                                              field["fwhm_eff_px"], field.get("euler", 0.0))
         if noise is not None:
             rows[-1]["noise"] = noise
 
@@ -1579,16 +1840,17 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
         # given, or the clean nights combined as the injected ones are
         clean = maps["subsets"]["combined"] if (combined is not None or inj_stack.shape == stack.shape) else None
         irows, imaps = verify_injections(inj_stack, sources, fwhm, pxscale, known=known,
-                                         weights=w[: inj_stack.shape[0]], drift_px=drift_px,
+                                         weights=w[: inj_stack.shape[0]], drift_px=None if found else drift_px,
                                          excl_fwhm=excl_fwhm, angle_convention=angle_convention,
                                          fap_list=fap_list, tap_list=tap_list, rbin_as=rbin_as,
                                          combined=combined_inj, clean=clean, sidelobes=sidelobes, rules=rules)
         rows.extend(irows)
         maps["injected"] = imaps
         maps["limits"] = imaps["limits"]
-    maps["meta"] = {"nights": ids, "fap_op": fap_op, "drift_px": drift_px, "excl_fwhm": excl_fwhm,
+    maps["meta"] = {"nights": ids, "fap_op": fap_op, "drift_px": srad, "excl_fwhm": excl_fwhm,
                     "fwhm": fwhm, "pxscale": pxscale, "n_boot": n_boot, "path_a": path_a,
-                    "sidelobes": None if sidelobes is None else sidelobes.describe()}
+                    "sidelobes": None if sidelobes is None else sidelobes.describe(),
+                    "position": "found" if found else "given", "field": dict(field) if field else None}
     for r in rows:
         r.setdefault("meta", maps["meta"])
     if return_maps:
@@ -1598,7 +1860,7 @@ def verify_candidates(stack: np.ndarray, angles_or_night_ids: Optional[Sequence[
 
 def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, float, float]], fwhm: float,
                       pxscale: float, *, known: Sequence[Tuple[float, float]] = (),
-                      weights: Optional[Sequence[float]] = None, drift_px: float = 1.5,
+                      weights: Optional[Sequence[float]] = None, drift_px: Optional[float] = None,
                       excl_fwhm: float = 1.5, angle_convention: str = "pa",
                       fap_list: Sequence[float] = DEFAULT_FAP_LIST, tap_list: Sequence[float] = DEFAULT_TAP_LIST,
                       rbin_as: Optional[float] = None, combined: Optional[np.ndarray] = None,
@@ -1627,8 +1889,9 @@ def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, floa
         Known companions, as ``(rho_arcsec, theta_deg)``.
     weights : sequence of float or None, default None
         Weight of each night, of which the first ``n`` are taken.  None weighs them equally.
-    drift_px : float, default 1.5
-        Radius of the peak search, in pixels.
+    drift_px : float or None, default None
+        Radius of the peak search, in pixels.  None reads each injection at its position
+        (:func:`search_px`), or within 1.5 px for a run saved before 2026-11-25.
     excl_fwhm : float, default 1.5
         Radius of the keep-outs, in FWHM.
     angle_convention : {"pa", "math"}, default "pa"
@@ -1681,6 +1944,7 @@ def verify_injections(inj_stack: np.ndarray, sources: Sequence[Tuple[float, floa
     cx, cy = star_center((ny, nx))
     w = np.ones(nn) if weights is None else np.asarray(weights, float)[:nn]
     exr = excl_fwhm * fwhm
+    drift_px = search_px(fwhm, False, rules, drift_px)
     kxy = _known_xy(known, pxscale, cx, cy, angle_convention)
     sxy = _known_xy([(s[0], s[1]) for s in sources], pxscale, cx, cy, angle_convention)
     maps = verify_maps(inj_stack, w, fwhm, combined=combined)
@@ -1786,8 +2050,8 @@ def _tile_stack(stack: Optional[np.ndarray], img: np.ndarray,
 
 def verify_tiles(annuli: Sequence[Dict[str, Any]], candidates: Sequence[Tuple[float, float]],
                  sources: Sequence[Tuple[float, ...]], fwhm: float, pxscale: float, *,
-                 known: Sequence[Tuple[float, float]] = (), fap_op: float = 2.87e-7, drift_px: float = 1.5,
-                 n_boot: int = 500, rng: Optional[np.random.Generator] = None, excl_fwhm: float = 1.5,
+                 known: Sequence[Tuple[float, float]] = (), fap_op: float = 2.87e-7,
+                 drift_px: Optional[float] = None, n_boot: int = 500, rng: Optional[np.random.Generator] = None, excl_fwhm: float = 1.5,
                  fap_list: Sequence[float] = DEFAULT_FAP_LIST, tap_list: Sequence[float] = DEFAULT_TAP_LIST,
                  rbin_as: Optional[float] = None, angle_convention: str = "pa", sidelobes=None,
                  rules: Optional[Dict[str, Any]] = None, stitch: Optional[Dict[str, Any]] = None
@@ -1820,8 +2084,9 @@ def verify_tiles(annuli: Sequence[Dict[str, Any]], candidates: Sequence[Tuple[fl
         Known companions, as ``(rho_arcsec, theta_deg)``.
     fap_op : float, default 2.87e-7
         Operating FAP of Path A's decision.
-    drift_px : float, default 1.5
-        Radius of the peak search, in pixels.
+    drift_px : float or None, default None
+        Radius of the peak search, in pixels.  None reads the given positions at themselves
+        (:func:`search_px`), or within 1.5 px for a run saved before 2026-11-25.
     n_boot : int, default 500
         Number of bootstrap draws, 0 to skip the bootstrap.
     rng : numpy.random.Generator or None, default None
@@ -1945,7 +2210,8 @@ def verify_tiles(annuli: Sequence[Dict[str, Any]], candidates: Sequence[Tuple[fl
     if limits is not None and items:
         limits["solved"] = _solved_bins(limits, items)
     rows = [crow[k] for k in sorted(crow)] + inj_rows
-    meta = {"nights": nights, "fap_op": fap_op, "drift_px": drift_px, "excl_fwhm": excl_fwhm, "fwhm": fwhm,
+    meta = {"nights": nights, "fap_op": fap_op, "drift_px": search_px(fwhm, False, rules, drift_px),
+            "excl_fwhm": excl_fwhm, "fwhm": fwhm,
             "pxscale": pxscale, "n_boot": n_boot,
             "path_a": ("the stitched image with the tile of the annulus that holds the position put in: that "
                        "annulus' own pixels on its tile, the stitch's around it" if st is not None else
@@ -2265,7 +2531,14 @@ def write_verify_table(path: str, rows: Sequence[Dict[str, Any]], limits: Option
     if "run" in meta:
         L.append(f"# run: {meta['run']}")
     L.append(f"# nights: {','.join(str(v) for v in meta.get('nights', []))}")
-    L.append(f"# operating FAP threshold: {fap_op:10.2E}   drift tol: {meta.get('drift_px', 1.5):.1f} px")
+    srad = float(meta.get("drift_px", LEGACY_SEARCH_PX) if meta.get("drift_px") is not None else LEGACY_SEARCH_PX)
+    where = (f"the matched filter's peak within {srad:.1f} px of each position" if srad > 0 else
+             "each source at its given position")
+    L.append(f"# operating FAP threshold (per resolution element): {fap_op:10.2E}   read at: {where}")
+    fld = meta.get("field")
+    if meta.get("position") == "found" and fld:
+        L.append(f"#   found by a blind search: FAP_field corrects for the search over {float(fld['area_px']):.0f} px "
+                 f"(smoothness FWHM {float(fld['fwhm_eff_px']):.2f} px, random-field theory)")
     L += ["#", f"# PATH A = {meta.get('path_a', 'the combined image')} (Mawet small-sample t-FAP)",
           "# PATH B = night-to-night (STIM + bootstrap-over-nights + subset S/N, whose comb is the PATH A image)", "#"]
     rule = meta.get("sidelobes")
@@ -2298,6 +2571,10 @@ def write_verify_table(path: str, rows: Sequence[Dict[str, Any]], limits: Option
         fb = (r.get("noise") or {}).get("fallback")
         L.append(f"   [A] combined S/N = {_f(r['snr'])}   FAP = {_f(r['fap'], '{:10.2E}')}   (nap={int(r['nap'])}"
                  + (f", {fb}" if fb else "") + ")")
+        if r.get("snr_peak") is not None:
+            L.append(f"   [A] peak S/N within FWHM/2 = {_f(r['snr_peak'])}   (for comparison, not the FAP's)")
+        if r.get("fap_field") is not None:
+            L.append(f"   [A] FAP over the searched field = {_f(r['fap_field'], '{:10.2E}')}")
         L.append(f"   [A] decision @FAP<{fap_op:8.1E} : {'DETECT' if r['detect'] else 'no'}")
         L.append(f"   [B] night-STIM = {_f(r['stim'])}   empirical FAP = {_f(r['stim_fap'], '{:10.2E}')}")
         L.append(f"   [B] bootstrap-over-nights significance = {_f(r['boot_sig'])}")

@@ -1,5 +1,52 @@
 # Changelog
 
+## Unreleased — 2026-11-25 (a source read where it is given, and the blind search's FAP over the field)
+
+From the audit of 2026-11-25.
+
+- **A source whose position is given is read at that position** (`RunConfig.verify_position`,
+  `--verify-position`, `verify.search_px`).  The verify read every source at the matched filter's
+  peak within 1.5 px and converted that S/N with the small-sample t-test, which gives the FAP of a
+  fixed pixel.  The highest of the 9 pixels within 1.5 px reads higher.  On Gaussian noise
+  correlated at the PSF, at source-free positions, the S/N rose by 0.75, 0.46 and 0.29 on average
+  at FWHMs of 2.3, 4.0 and 6.4 px, and the FAP was reached 2.7 to 4.6, 1.9 to 3.8 and 1.6 to 2.4
+  times as often as it said at nominal FAPs of 0.1 to 1e-4 (130,500 positions).  Read at the given
+  pixel the t-test is calibrated, 1.0 to 1.2 times down to 1.35e-3 and on the safe side at 1e-4.  A known companion, a `--known` position and an
+  injection are now read at their positions in the verify's Path A, subsets, solved contrasts and
+  bootstrap, in the stitched and tile verifies, in the final grid's readings, and in the contrast
+  grid under `--cg-snr matched`.  `verify_report.txt` gives the peak within FWHM/2 beside it
+  (`snr_peak`), for display and not for the FAP.
+- **A candidate the blind search found takes its FAP over the field from random-field theory**
+  (`verify.field_fap`, `verify.field_smoothness`, `verify.field_geometry`).  It is read at the matched
+  filter's peak within FWHM/2.  The FAP over the field is `1 - exp(-E)`, with `E` the expected Euler
+  characteristic of the S/N map above the candidate's level (Worsley et al. 1996, Human Brain
+  Mapping 4, 58).  `E` comes from the searched annulus' area and perimeter in units of the map's
+  smoothness, which is measured on the map from its lag-1 autocorrelation (Forman et al. 1995,
+  Magn. Reson. Med. 33, 636).  The candidate's local FAP enters as the Gaussian level of the same tail.
+  The old correction `1 - (1 - p)^N_resel` counts independent patches of noise but not that each
+  patch's highest pixel reads above its center.  On 18,000 source-free fields at a FWHM of 4 px it
+  was reached 2.7, 3.0 and 3.4 times as often as it said at 0.1, 0.05 and 0.01.  The random-field
+  FAP is reached 0.83, 0.85 and 0.67 times as often (12,000 fields), so it errs on the safe side.
+  From 0.5 to 0.01 it is reached 0.68 to 0.82 times as often at a FWHM of 2.3 px and 0.89 to 1.05
+  times at 6.4 px (8,000 fields each).  The theory errs that way on a field sampled in pixels, and
+  on a Gaussian field of known scatter at 4 px it is reached 0.82 to 0.93 times as often (3,000
+  fields).  A Gaussian tail in place of the
+  t-test's on the same peaks would be reached 2.4 to 6 times as often at 0.1 to 0.01, since the
+  ring's scatter is uncertain at small radii.  `candidates.txt`
+  says which correction its FAP column carries, with the field's area, perimeter and smoothness.
+- `"given"` is the default for new runs.  `"peak"` keeps the 1.5 px search and the count of
+  resolution elements.  A run saved before 2026-11-25 resumes with it, and so do `--verify-snr idl`
+  and `--from-idl-setup` runs, so their products reproduce.  `rereduce`, `rescore` and `elect` take
+  `--verify-position` for a finished run.  The final grid's kept readings of a run that keeps
+  `"peak"` keep their fingerprint.
+- The search's objective keeps its metric's peak search.  It ranks configurations by the S/N of
+  injected sources and reports no FAP.
+- The verify functions' search radius `srad` defaults to where their `rules` say, the position or,
+  under the rules of a run made before 2026-11-25, the peak within 1.5 px.
+- Docs: RUNNING.md (the bullets on where a source is read), CLI.md.  Tests:
+  `tests/test_verify_position.py`.  `tests/test_docstrings.py` now checks `candidates.py`, whose
+  docstrings come up to the rule.
+
 ## Unreleased — 2026-11-25 (each pixel of the stitch from its own annulus)
 
 From the audit of 2026-11-25.

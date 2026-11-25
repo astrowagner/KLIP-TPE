@@ -89,10 +89,11 @@ usage: klip-tpe generic [-h] [--instrument {near,nomic,generic,ales}]
                         [--verify-n-boot VERIFY_N_BOOT] [--param-verify]
                         [--no-param-verify] [--n-remeasure N]
                         [--score-floor S] [--verify-snr {search,idl}]
-                        [--fmmf-fm-apertures] [--n-sources N [N ...]]
-                        [--min-r-fwhm X] [--n-pv N_PV] [--pv-divmin PV_DIVMIN]
-                        [--candidates] [--write-setup-files]
-                        [--no-setup-files] [--legacy-stitch] [--batch BATCH]
+                        [--verify-position {given,peak}] [--fmmf-fm-apertures]
+                        [--n-sources N [N ...]] [--min-r-fwhm X] [--n-pv N_PV]
+                        [--pv-divmin PV_DIVMIN] [--candidates]
+                        [--write-setup-files] [--no-setup-files]
+                        [--legacy-stitch] [--batch BATCH]
                         [--batch-mode {pipeline,sync}]
                         [--edge-padding {between,all}]
                         [--stitch-blend {own,weighted}]
@@ -463,6 +464,17 @@ options:
                         with the IDL verify's S/N (a Gaussian kernel, no
                         despike or radial band) and the pixel mask in the
                         search's rings alone, as --from-idl-setup does
+  --verify-position {given,peak}
+                        where the verify, the final grid and the candidate
+                        search read a source (default given: a known companion
+                        or an injection at its given position, so its FAP
+                        holds, and a candidate the blind search found at its
+                        peak within FWHM/2, with its FAP over the field from
+                        random-field theory). peak reads every source at its
+                        peak within 1.5 px and corrects the field by the count
+                        of resolution elements, as the IDL predecessor and
+                        runs made before 2026-11-25 do. --verify-snr idl
+                        implies peak
   --fmmf-fm-apertures   with --metric fmmf, each noise aperture takes a
                         forward model of its own, from a forward-model pass
                         with a source alone there, and a sample between two
@@ -778,9 +790,10 @@ usage: klip-tpe near [-h] [--instrument {near,nomic,generic,ales}]
                      [--verify] [--no-verify] [--verify-n-boot VERIFY_N_BOOT]
                      [--param-verify] [--no-param-verify] [--n-remeasure N]
                      [--score-floor S] [--verify-snr {search,idl}]
-                     [--fmmf-fm-apertures] [--n-sources N [N ...]]
-                     [--min-r-fwhm X] [--n-pv N_PV] [--pv-divmin PV_DIVMIN]
-                     [--candidates] [--write-setup-files] [--no-setup-files]
+                     [--verify-position {given,peak}] [--fmmf-fm-apertures]
+                     [--n-sources N [N ...]] [--min-r-fwhm X] [--n-pv N_PV]
+                     [--pv-divmin PV_DIVMIN] [--candidates]
+                     [--write-setup-files] [--no-setup-files]
                      [--legacy-stitch] [--batch BATCH]
                      [--batch-mode {pipeline,sync}]
                      [--edge-padding {between,all}]
@@ -1151,6 +1164,17 @@ options:
                         with the IDL verify's S/N (a Gaussian kernel, no
                         despike or radial band) and the pixel mask in the
                         search's rings alone, as --from-idl-setup does
+  --verify-position {given,peak}
+                        where the verify, the final grid and the candidate
+                        search read a source (default given: a known companion
+                        or an injection at its given position, so its FAP
+                        holds, and a candidate the blind search found at its
+                        peak within FWHM/2, with its FAP over the field from
+                        random-field theory). peak reads every source at its
+                        peak within 1.5 px and corrects the field by the count
+                        of resolution elements, as the IDL predecessor and
+                        runs made before 2026-11-25 do. --verify-snr idl
+                        implies peak
   --fmmf-fm-apertures   with --metric fmmf, each noise aperture takes a
                         forward model of its own, from a forward-model pass
                         with a source alone there, and a sample between two
@@ -2542,8 +2566,9 @@ usage: klip-tpe rereduce [-h] [--instrument {near,nomic,generic,ales}]
                          [--stitch-blend {own,weighted}]
                          [--stitch-injections {all,own}] [--overlap-pads |
                          --no-overlap-pads] [--no-verify]
-                         [--verify-snr {search,idl}] [--base-winners FILE]
-                         [--out DIR] [--overwrite]
+                         [--verify-snr {search,idl}]
+                         [--verify-position {given,peak}]
+                         [--base-winners FILE] [--out DIR] [--overwrite]
 
 options:
   -h, --help            show this help message and exit
@@ -2739,6 +2764,12 @@ options:
                         search: the search's own S/N under the run's rules and
                         the pixel mask in every ring and map. idl: the IDL
                         verify's S/N and no mask outside the search
+  --verify-position {given,peak}
+                        where the verify reads a source (default: as the run
+                        did, peak for a run made before 2026-11-25). given:
+                        each injection and known companion at its position.
+                        peak: at the peak within 1.5 px, as the IDL
+                        predecessor
   --base-winners FILE   a composite: each listed annulus reduces another
                         configuration in place of the run's winner. One per
                         line: the annulus (from 1), the run (a directory, or a
@@ -2947,7 +2978,8 @@ usage: klip-tpe rescore [-h] [--instrument {near,nomic,generic,ales}]
                         [--sources-per-tile N] [--clear-fwhm F]
                         [--window WINDOW] [--overlap-pads | --no-overlap-pads]
                         [--stitch-blend {own,weighted}]
-                        [--verify-snr {search,idl}] [--out DIR] [--card]
+                        [--verify-snr {search,idl}]
+                        [--verify-position {given,peak}] [--out DIR] [--card]
                         [--plan]
 
 options:
@@ -3169,6 +3201,10 @@ options:
   --verify-snr {search,idl}
                         how each source is measured (default: as the base
                         run's verify)
+  --verify-position {given,peak}
+                        where each source is read, as rereduce --verify-
+                        position (default: as the base run's verify, peak for
+                        a run made before 2026-11-25)
   --out DIR             output directory (default <run>_rescore beside the
                         run). A re-score started again on the same directory
                         resumes
@@ -3370,6 +3406,7 @@ usage: klip-tpe elect [-h] [--instrument {near,nomic,generic,ales}]
                       [--z Z] [--sweeps SWEEPS] [--finalists N]
                       [--target LO HI] [--n-cal N_CAL]
                       [--curve {grid,path_a,off}]
+                      [--verify-position {given,peak}]
                       [--stitch-blend {own,weighted}]
                       [--stitch-injections {all,own}] [--overlap-pads |
                       --no-overlap-pads] [--window WINDOW] [--card]
@@ -3559,6 +3596,10 @@ options:
                         how the curve is read: the contrast grid's S/N (grid,
                         the default), the stitched verify's (path_a), or no
                         curve (off)
+  --verify-position {given,peak}
+                        where the grid's points and the verify read a source,
+                        as rereduce --verify-position (default: as the run
+                        did, peak for a run made before 2026-11-25)
   --stitch-blend {own,weighted}
                         how the stitch treats an edge two annuli share. own:
                         each pixel from the annulus whose tile holds it, as

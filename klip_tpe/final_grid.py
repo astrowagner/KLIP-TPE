@@ -1034,7 +1034,10 @@ class FinalGrid:
         gc = asdict(self.r.cfg.contrast_grid)
         gc.pop("mode", None)
         edits = dict(getattr(self.r.reducer, "data_edits", None) or {})
-        rules = hashlib.sha1(json.dumps(self._rules, sort_keys=True, default=str).encode()).hexdigest()
+        # a run saved before 2026-11-25 reads sources at their peak (RunConfig.verify_position "peak"), as
+        # its kept readings were made, and keeps the fingerprint it had before the key existed
+        rk = {k: v for k, v in (self._rules or {}).items() if not (k == "position" and str(v) == "peak")}
+        rules = hashlib.sha1(json.dumps(rk, sort_keys=True, default=str).encode()).hexdigest()
         return {"version": 1, "zones": [list(z) for z in self.sc.zones], "tiles": [list(t) for t in self.sc.tiles],
                 "itiles": [list(t) for t in self.sc.itiles], "pads": [list(p) for p in self.sc.pads],
                 "fwhm": self.fwhm, "pxscale": self.px, "frames": _describe_edits(_core_edits(edits)),
@@ -1386,17 +1389,20 @@ class FinalGrid:
         snr : float
             The S/N, NaN where none.
         """
-        from .verify import _known_xy, ring_snr, snr_fap, star_center
+        from .verify import _known_xy, ring_snr, search_px, snr_fap, star_center
         img = np.asarray(img, float)
         cx, cy = star_center(img.shape)
         conv = self.r.reducer.angle_convention
         kxy = _known_xy(self.sc.known, self.px, cx, cy, conv)
+        # an injection's position is given: read at it (RunConfig.verify_position), or for a run saved
+        # before 2026-11-25 at the peak within 1.5 px
+        srad = search_px(self.fwhm, False, self._rules)
         if self._side is None:
-            s = snr_fap(img, float(src.rho), float(src.theta), self.px, self.fwhm, self._exr, 1.5, exclude_xy=kxy,
+            s = snr_fap(img, float(src.rho), float(src.theta), self.px, self.fwhm, self._exr, srad, exclude_xy=kxy,
                         angle_convention=conv, rules=self._rules)
         else:
             s = ring_snr(img, 0, [float(src.rho)], [float(src.theta)], self.px, self.fwhm, self._side, exr=self._exr,
-                         srad=1.5, exclude_xy=kxy, known=list(self.sc.known), angle_convention=conv, rules=self._rules)
+                         srad=srad, exclude_xy=kxy, known=list(self.sc.known), angle_convention=conv, rules=self._rules)
         v = s.get("snr")
         return float("nan") if v is None else float(v)
 

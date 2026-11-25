@@ -42,6 +42,7 @@ DONE = [
     "klip_tpe/backends/spaceklip.py",
     "klip_tpe/backends/vip.py",
     "klip_tpe/bench.py",
+    "klip_tpe/candidates.py",
     "klip_tpe/chainfit.py",
     "klip_tpe/cli.py",
     "klip_tpe/companion.py",

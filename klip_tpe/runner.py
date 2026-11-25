@@ -219,6 +219,15 @@ class RunConfig:
         innermost inner edge and outermost outer edge are reduced and stitched as given.
         ``"all"`` pads every edge, as the IDL does.  A run saved before this field existed
         resumes with ``"all"``, so its evaluations stay comparable.
+    verify_position
+        where the verify, the stitched verify, the tile verify, the final grid's readings and the
+        candidate search read a source.  ``"given"`` (the default): a known companion or an injection
+        at its given position, so its small-sample FAP holds, and a candidate the blind search found
+        at the matched filter's peak within FWHM/2, with its FAP over the field from random-field
+        theory (:func:`klip_tpe.verify.field_fap`).  ``"peak"``: every source at the peak within
+        1.5 px and the field-wide FAP ``1 - (1 - p)^N_resel``, as the IDL predecessor and runs saved
+        before 2026-11-25 measured, whose FAPs are reached 1.6 to 4.6 times as often as they say.  A
+        run saved before 2026-11-25 resumes with ``"peak"``.
     stitch_blend
         how the stitch treats an edge two annuli share.  ``"own"`` (the default): each pixel from
         the annulus whose tile holds it, a pixel exactly on the edge from the outer annulus, as the
@@ -476,6 +485,7 @@ class RunConfig:
     legacy_stitch: bool = False
     edge_padding: str = "between"         # "between" (only where annuli meet) | "all" (every edge, the IDL)
     stitch_blend: str = "own"             # "own" (each pixel from its tile's annulus) | "weighted" (2 px blend)
+    verify_position: str = "given"        # "given" (sources at their positions) | "peak" (within 1.5 px)
     stitch_overlap_pads: bool = False     # pad the stitch's tile edges between overlapping annuli
     stitch_injections: str = "all"        # "all" (every annulus' validation sources in each) | "own"
     #: the library the run rotates its frames with, "scipy" | "opencv" (klip.set_rotation_backend):
@@ -624,8 +634,9 @@ class RunConfig:
         # annulus' injected image with its own sources
         d.setdefault("stitch_overlap_pads", True)
         d.setdefault("stitch_injections", "own")
-        # and one saved before 2026-11-25 its blended seams
+        # and one saved before 2026-11-25 its blended seams, and its verify's 1.5 px peak search
         d.setdefault("stitch_blend", "weighted")
+        d.setdefault("verify_position", "peak")
         return _from_dict_filtered(cls, d)
 
 
@@ -2149,15 +2160,27 @@ class Runner:
             m.correlate = bool(getattr(self.cfg, "fmmf_correlate", True))
 
     def _ring_rules(self) -> Dict[str, Any]:
-        """The search's noise-ring rules (:func:`klip_tpe.metrics.ring_rules`), which the verify,
-        the candidate search and the parameter verify take, so their rings are measured as the
-        search's: its matched filter, despike, keep-outs, radial band, small-sample correction
-        and pixel mask (Kevin Wagner, 2026-11-01).  The S/N maps, noise curves and contrast
-        curves take its pixel mask (:meth:`_pixel_mask`)."""
+        """Return the search's noise-ring rules, which the verify, the candidate search and the parameter verify take.
+
+        Their rings are then measured as the search's (Kevin Wagner, 2026-11-01): its matched filter,
+        despike, keep-outs, radial band, small-sample correction and pixel mask
+        (:func:`klip_tpe.metrics.ring_rules`).  ``position`` adds where a source is read
+        (``RunConfig.verify_position``, :func:`klip_tpe.verify.search_px`).  The S/N maps, noise curves
+        and contrast curves take the pixel mask (:meth:`_pixel_mask`).
+
+        Returns
+        -------
+        rules : dict
+            The rules, or :data:`~klip_tpe.metrics.VERIFY_IDL` for a run that keeps the measures of before
+            2026-11-01.
+        """
         from .metrics import VERIFY_IDL, ring_rules
         if self._verify_idl():
             return dict(VERIFY_IDL)
-        return ring_rules(getattr(self.objective, "metric", None))
+        out = ring_rules(getattr(self.objective, "metric", None))
+        # where the verify reads a source (RunConfig.verify_position, klip_tpe.verify.search_px)
+        out["position"] = str(getattr(self.cfg, "verify_position", "peak") or "peak").lower()
+        return out
 
     def _verify_idl(self) -> bool:
         """Does the run keep the measures of before 2026-11-01 (``RunConfig.verify_snr``)?"""
@@ -2708,18 +2731,45 @@ class Runner:
 
     def _grid_snr(self, geo: Dict[str, Any], img: np.ndarray, r_px: float, theta: float,
                   clean: Optional[np.ndarray] = None) -> Tuple[float, Dict[str, Any]]:
-        """The S/N the contrast grid measures for a source at ``(r_px, theta)`` in ``img``, and
-        its details (:func:`~klip_tpe.metrics.mawet_peak_snr` or
-        :func:`~klip_tpe.metrics.aperture_mawet_snr`): the noise ring without the source, its
-        sidelobes, the known companions and their arcs, under the sidelobe rule
-        (:func:`~klip_tpe.metrics.sidelobe_snr`, whose ``"clean"`` mode reads ``clean``).
-        ``geo`` is :meth:`_grid_geometry`."""
+        """Return the S/N the contrast grid measures for an injected source, and its details.
+
+        The S/N is :func:`~klip_tpe.metrics.aperture_mawet_snr` or the matched-filter
+        :func:`~klip_tpe.metrics.mawet_peak_snr`, with the noise ring leaving out the source, its
+        sidelobes and the known companions and their arcs, under the sidelobe rule through
+        :func:`~klip_tpe.metrics.sidelobe_snr`.  The matched filter reads the source at its position
+        (``RunConfig.verify_position``), or for a run saved before 2026-11-25 at the metric's peak
+        search.
+
+        Parameters
+        ----------
+        geo : dict
+            The grid's measuring settings (:meth:`_grid_geometry`).
+        img : ndarray, shape (ny, nx)
+            The injected image.
+        r_px : float
+            Separation of the source, in pixels.
+        theta : float
+            Angle of the source, in degrees.
+        clean : ndarray or None, default None
+            The clean image, which the sidelobe rule's ``"clean"`` mode reads.
+
+        Returns
+        -------
+        snr : float
+            The S/N, NaN where none.
+        details : dict
+            The measure's details for the source, ``nclean``, ``why`` and the ring's.
+        """
         from .metrics import aperture_mawet_snr, sidelobe_snr
+        from .verify import legacy_position
         gc, mget, metric = self.cfg.contrast_grid, geo["mget"], geo["metric"]
         img = np.asarray(img, float)
         pxscale, fwhm = geo["pxscale"], geo["fwhm"]
         rho = float(r_px) * pxscale
         rule = geo.get("rule")
+        # an injection's position is given, so the matched-filter S/N reads it there
+        # (RunConfig.verify_position), or for a run saved before 2026-11-25 at the metric's peak search
+        sp = float(mget("search_px", 1.5)) if legacy_position(self._ring_rules()) else 0.0
         if rule is not None:
             if geo["aperture"]:
                 kw: Dict[str, Any] = dict(excl_fwhm=float(mget("excl_fwhm", 1.5)), measure=aperture_mawet_snr,
@@ -2728,7 +2778,7 @@ class Runner:
             else:
                 flat = bool(mget("flatten", False))
                 kw = dict(kernel=metric.kernel(rho) if callable(getattr(metric, "kernel", None)) else None,
-                          search_px=float(mget("search_px", 1.5)), excl_fwhm=float(mget("excl_fwhm", 1.5)),
+                          search_px=sp, excl_fwhm=float(mget("excl_fwhm", 1.5)),
                           declip_nsig=mget("declip_nsig", 6.0), declip_isolated=bool(mget("declip_isolated", False)),
                           band_fwhm=float(mget("band_fwhm", 0.6)),
                           penalty=str(mget("penalty", "geometric")), pixel_mask=mget("pixel_mask", None),
@@ -2751,7 +2801,7 @@ class Runner:
             kern = metric.kernel(rho) if callable(getattr(metric, "kernel", None)) else None
             im = radprof(img) if mget("flatten", False) else img
             snr, det = mawet_peak_snr(im, [rho], [theta], pxscale, fwhm, kernel=kern,
-                                      search_px=float(mget("search_px", 1.5)), excl_fwhm=float(mget("excl_fwhm", 1.5)),
+                                      search_px=sp, excl_fwhm=float(mget("excl_fwhm", 1.5)),
                                       known=geo["known"], declip_nsig=mget("declip_nsig", 6.0),
                                       declip_isolated=bool(mget("declip_isolated", False)),
                                       band_fwhm=float(mget("band_fwhm", 0.6)), min_ring=geo["min_ring"],

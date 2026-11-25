@@ -135,6 +135,36 @@ in order:
   verify it was made with (`RunConfig.verify_snr`).  A run saved before 2026-11-01 resumes,
   re-reduces and verifies as before (`idl`), and so does a `--from-idl-setup` run.
   `--verify-snr search` or `idl` picks one for a new run, and for `klip-tpe rereduce`.
+* A source whose position is given is read at that position (`--verify-position given`, the
+  default since 2026-11-25, from the audit of that date).  That holds for a known companion, a
+  `--known` position and an injection, in the verify's Path A, subsets, solved contrasts and
+  bootstrap, the stitched and tile verifies, the final grid's readings and the contrast grid's
+  `--cg-snr matched`.  The small-sample FAP is the probability for a fixed pixel, so it holds
+  there.  `verify_report.txt` also gives the peak within FWHM/2 (`snr_peak`), for display.
+  Before, every source was read at the matched filter's peak within 1.5 px, and the t-test took
+  that maximum for a fixed pixel's value.  On noise correlated at the PSF the FAP was then reached
+  1.6 to 4.6 times as often as it said, at FWHMs of 6.4 to 2.3 px and nominal FAPs of 0.1 to 1e-4,
+  and the S/N of an empty position rose by 0.3 to 0.75 on average.
+* A candidate the blind search found is read at the matched filter's peak within FWHM/2, and its
+  FAP over the field comes from random-field theory (`verify.field_fap`, Worsley et al. 1996,
+  Human Brain Mapping 4, 58).  The expected Euler characteristic of the S/N map above the
+  candidate's level gives it, from the searched annulus' area and perimeter in units of the map's
+  smoothness.  The smoothness is measured on the map from its lag-1 autocorrelation
+  (`verify.field_smoothness`, Forman et al. 1995), about 1.4 FWHM for the matched filter of noise
+  correlated at the PSF.  The candidate's local FAP enters as the Gaussian level of the same tail.
+  Before, the correction was `1 - (1 - p)^N_resel`, with `N_resel` the resolution elements
+  `pi (r_out^2 - r_in^2) / FWHM^2`, which counts independent patches of noise but not that each
+  patch's highest pixel reads above its center.  On source-free fields at a FWHM of 4 px that
+  field FAP was reached 2.7, 3.0 and 3.4 times as often as it said at 0.1, 0.05 and 0.01 (18,000
+  fields).  The random-field FAP is reached 0.83, 0.85 and 0.67 times as often (12,000 fields), so
+  it errs on the safe side.  From 0.5 to 0.01 it is reached 0.68 to 0.82 times as often at a FWHM
+  of 2.3 px and 0.89 to 1.05 times at 6.4 px (8,000 fields each), as the theory does on a field
+  sampled in pixels.  `candidates.txt` says which correction its FAP column carries, with
+  the field's area, perimeter and smoothness.
+* A run saved before 2026-11-25 resumes, re-reduces and verifies with the 1.5 px search and the
+  count of resolution elements (`peak`), and so do `--verify-snr idl` and `--from-idl-setup` runs.
+  `--verify-position given` or `peak` picks one for a new run, and for `rereduce`, `rescore` and
+  `elect` on a finished run.
 * Every ring and map leaves the run's pixel mask out (the disk, `docs/ALES.md` section 9): the
   search's and the contrast grid's, the verify's Path A, subsets, STIM annulus and solved
   contrasts, the candidate search, param_verify, the S/N maps, the noise and contrast curves

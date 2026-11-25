@@ -296,16 +296,17 @@ def test_verify_path_a_on_the_combined_image_given(tmp_path):
     cand, injr = rows[0], rows[1]
     cand0, injr0 = rows0[0], rows0[1]
     exr = 1.5 * FWHM
-    assert cand["snr"] == pytest.approx(V.snr_fap(prod_c, 0.7, 120.0, PX, FWHM, exr, 1.5)["snr"], rel=1e-12)
-    assert injr["snr"] == pytest.approx(V.snr_fap(prod_i, 1.0, 200.0, PX, FWHM, exr, 1.5)["snr"], rel=1e-12)
-    assert injr0["snr"] == pytest.approx(V.snr_fap(mean_i, 1.0, 200.0, PX, FWHM, exr, 1.5)["snr"], rel=1e-12)
+    # given positions are read where they are given (the audit of 2026-11-25)
+    assert cand["snr"] == pytest.approx(V.snr_fap(prod_c, 0.7, 120.0, PX, FWHM, exr, 0.0)["snr"], rel=1e-12)
+    assert injr["snr"] == pytest.approx(V.snr_fap(prod_i, 1.0, 200.0, PX, FWHM, exr, 0.0)["snr"], rel=1e-12)
+    assert injr0["snr"] == pytest.approx(V.snr_fap(mean_i, 1.0, 200.0, PX, FWHM, exr, 0.0)["snr"], rel=1e-12)
     assert abs(injr["snr"] - injr0["snr"]) > 0.05
     assert injr["subsets"]["combined"] == injr["snr"] and cand["subsets"]["combined"] == cand["snr"]
     for q in V.SUBSET_NAMES[1:]:
         assert injr["subsets"][q] == injr0["subsets"][q] and cand["subsets"][q] == cand0["subsets"][q]
     assert injr["stim"] == injr0["stim"] and cand["stim"] == cand0["stim"]
     # the solved contrasts pair the product with its injected twin
-    sc = V.solved_contrasts(prod_c, prod_i, 1.0, 200.0, 1e-4, PX, FWHM, exr, 1.5)
+    sc = V.solved_contrasts(prod_c, prod_i, 1.0, 200.0, 1e-4, PX, FWHM, exr, 0.0)
     assert injr["c_det"] == pytest.approx(sc["c_det"], rel=1e-12)
     assert injr["c_tap_solved"] == pytest.approx(sc["c_tap"], rel=1e-12)
     assert maps["meta"]["path_a"] == "the combined image given"
@@ -422,7 +423,7 @@ def test_candidates_measure_the_image_given(tmp_path):
     r1 = C.candidate_metrics(px, py, np.array([5.0]), stack, FWHM, PX, 6.0, 40.0, image=img)[0]
     fin = np.isfinite(stack)
     mean = np.where(fin, stack, 0.0).sum(axis=0) / np.maximum(fin.sum(axis=0), 1)
-    args = (r1["rho"], r1["theta"], PX, FWHM, 1.5 * FWHM, 1.5)
+    args = (r1["rho"], r1["theta"], PX, FWHM, 1.5 * FWHM, V.search_px(FWHM, found=True))
     assert r1["snr"] == pytest.approx(V.snr_fap(img, *args)["snr"], rel=1e-12)
     assert r0["snr"] == pytest.approx(V.snr_fap(mean, *args)["snr"], rel=1e-12)
     assert abs(r1["snr"] - r0["snr"]) > 0.05
@@ -433,7 +434,8 @@ def test_candidates_measure_the_image_given(tmp_path):
     top = rows[0]
     assert top["meta"]["comb"] == "image"
     assert top["verify"]["snr"] == pytest.approx(
-        V.snr_fap(img, top["rho"], top["theta"], PX, FWHM, 1.5 * FWHM, 1.5)["snr"], rel=1e-12)
+        V.snr_fap(img, top["rho"], top["theta"], PX, FWHM, 1.5 * FWHM, V.search_px(FWHM, found=True))["snr"],
+        rel=1e-12)
     assert "S/N, FAP and PSF on the source image" in C.write_candidates(str(tmp_path / "c.txt"), rows)
     assert C.find_candidates(None, stack, FWHM, PX)[0]["meta"]["comb"] == "nights"
 

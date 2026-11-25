@@ -29,6 +29,13 @@ Deliberate deviations / omissions:
 * Under the run's sidelobe rule (``sidelobes=``) each peak's S/N leaves its own ADI arc
   and the known companions' out of its rings, and the S/N map made here leaves out the
   known companions' (:func:`klip_tpe.verify.ring_snr`).
+* Since 2026-11-25 (the audit of that date) each peak is read at the matched filter's
+  maximum within FWHM/2 of where the map peaked, in place of 1.5 px, and its FAP over the
+  field comes from random-field theory (:func:`klip_tpe.verify.field_fap`) with the S/N
+  map's measured smoothness, in place of ``1 - (1 - p)^N_resel``.  On source-free fields of
+  Gaussian noise correlated at the PSF that count's FAP was reached 2.6 to 3 times as often
+  as it said, at 0.1 to 0.01.  A run saved before keeps both (``RunConfig.verify_position =
+  "peak"``).
 """
 from __future__ import annotations
 
@@ -39,7 +46,8 @@ import numpy as np
 
 from .metrics import matched_filter, nanmedian_even, radprof, rule_kwargs, source_xy, star_center, verify_idl
 from .products import snr_map
-from .verify import _noise, _without_self, mf_convolve, ring_snr, snr_fap, verify_candidates
+from .verify import (_noise, _without_self, field_fap, field_geometry, legacy_position, mf_convolve, ring_snr,
+                     search_px, snr_fap, verify_candidates)
 
 __all__ = ["detect_peaks", "psf_correlation", "candidate_metrics", "score_candidates",
            "find_candidates", "write_candidates", "coverage_rim"]
@@ -47,16 +55,37 @@ __all__ = ["detect_peaks", "psf_correlation", "candidate_metrics", "score_candid
 
 def coverage_rim(image: np.ndarray, stack: Optional[np.ndarray], r_lo: float, r_hi: float,
                  drop: float = 0.8, stack_from: Optional[float] = None) -> Optional[float]:
-    """The innermost integer radius in ``[r_lo, r_hi]`` (px) where the image, or from
-    ``stack_from`` on a layer of ``stack`` (the nights) that reaches that ring at all, is finite
-    on less than ``drop`` of the largest fraction it covered on the rings inside: the rim where
-    the frames stop covering the field.  None when no ring drops.
+    """Return the rim where the frames stop covering the field, the radius the search should stop at.
 
-    A layer with nothing at a radius is a night left out of that annulus and does not count.
-    ``stack_from`` keeps the nights' check off the seams inside the field, where a night that
-    one annulus keeps and the next leaves out covers part of a ring.  A share of every ring
-    that is always missing, as along the MIRI 4QPM boundaries, keeps the fraction level and
-    is not a rim."""
+    It is the innermost integer radius in ``[r_lo, r_hi]`` where the image, or from ``stack_from`` on a
+    layer of ``stack`` that reaches that ring at all, is finite on less than ``drop`` of the largest
+    fraction it covered on the rings inside.
+
+    Parameters
+    ----------
+    image : ndarray, shape (ny, nx)
+        The combined image.
+    stack : ndarray or None
+        The per-night images, ``(nn, ny, nx)``.  A layer with nothing at a radius is a night left out
+        of that annulus and does not count.
+    r_lo, r_hi : float
+        Radii checked, in pixels.
+    drop : float, default 0.8
+        Fraction of the best coverage inside below which a ring is the rim.
+    stack_from : float or None, default None
+        Radius from which the nights are checked, in pixels, which keeps their check off the seams
+        inside the field.  None takes ``r_lo``.
+
+    Returns
+    -------
+    rim : float or None
+        The rim's radius, in pixels, None when no ring drops.
+
+    Notes
+    -----
+    A share of every ring that is always missing, as along the MIRI 4QPM boundaries, keeps the
+    fraction level and is not a rim.
+    """
     img = np.asarray(image, float)
     cx, cy = star_center(img.shape)
     yy, xx = np.mgrid[0:img.shape[0], 0:img.shape[1]]
@@ -87,10 +116,32 @@ def coverage_rim(image: np.ndarray, stack: Optional[np.ndarray], r_lo: float, r_
 # ----------------------------------------------------------------------------
 def detect_peaks(snrmap: np.ndarray, snrmin: float, sep: float, iwa: float, owa: float,
                  nmax: int = 400) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Iterative local-maximum extraction: mask non-finite pixels and ``r < iwa``,
-    ``r > owa``; repeatedly take the global maximum (stop below ``snrmin`` or
-    after ``nmax`` peaks) and suppress the disk of radius ``sep`` around it.
-    Returns integer ``(px, py, snr)`` arrays."""
+    """Find the peaks of an S/N map, the highest first, each at least ``sep`` from those found before.
+
+    Non-finite pixels and those outside ``[iwa, owa]`` are left out.  The map's maximum is taken and a
+    disk of radius ``sep`` around it suppressed, again and again, until the maximum falls below
+    ``snrmin`` or ``nmax`` peaks are found (``near2c_detect``, candidates 32-51).
+
+    Parameters
+    ----------
+    snrmap : ndarray, shape (ny, nx)
+        The S/N map, with the star at ``((nx-1)/2, (ny-1)/2)``.
+    snrmin : float
+        Smallest S/N taken.
+    sep : float
+        Radius of the suppression, in pixels.
+    iwa, owa : float
+        Radii of the search, in pixels.
+    nmax : int, default 400
+        Most peaks taken.
+
+    Returns
+    -------
+    px, py : ndarray of int
+        The peaks' columns and rows.
+    snr : ndarray
+        The peaks' values.
+    """
     m = np.asarray(snrmap, float)
     ny, nx = m.shape
     cx, cy = star_center(m.shape)
@@ -113,9 +164,25 @@ def detect_peaks(snrmap: np.ndarray, snrmin: float, sep: float, iwa: float, owa:
 # PSF-likeness  (near2c_psfcorr, candidates 57-72)
 # ----------------------------------------------------------------------------
 def psf_correlation(img: np.ndarray, px: int, py: int, fwhm: float) -> float:
-    """Normalized cross-correlation in ``[-1, 1]`` of the median-subtracted stamp
-    (half-box ``max(round(1.5 fwhm), 3)``) with a zero-mean Gaussian of
-    ``sigma = fwhm / 2.3548`` centered on the peak, over finite pixels (>= 5)."""
+    """Return how much a peak looks like a point source, its stamp's correlation with a Gaussian.
+
+    The stamp, of half-width ``max(round(1.5 fwhm), 3)`` and its median subtracted, is correlated with a
+    zero-mean Gaussian of the FWHM centered on the peak, over its finite pixels (``near2c_psfcorr``).
+
+    Parameters
+    ----------
+    img : ndarray, shape (ny, nx)
+        The image.
+    px, py : int
+        The peak's column and row.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+
+    Returns
+    -------
+    corr : float
+        The normalized correlation, in ``[-1, 1]``, NaN for fewer than 5 finite pixels or a flat stamp.
+    """
     img = np.asarray(img, float)
     ny, nx = img.shape
     hb = max(int(round(1.5 * fwhm)), 3)
@@ -144,40 +211,85 @@ def psf_correlation(img: np.ndarray, px: int, py: int, fwhm: float) -> float:
 # ----------------------------------------------------------------------------
 def candidate_metrics(px: np.ndarray, py: np.ndarray, snr0: np.ndarray, stack: np.ndarray, fwhm: float,
                       pxscale: float, iwa: float, owa: float, *, known: Sequence[Tuple[float, float]] = (),
-                      injected: Sequence[Tuple[float, ...]] = (), excl_fwhm: float = 1.5, srad: float = 1.5,
-                      angle_convention: str = "pa", flatten: bool = False,
+                      injected: Sequence[Tuple[float, ...]] = (), excl_fwhm: float = 1.5,
+                      srad: Optional[float] = None, angle_convention: str = "pa", flatten: bool = False,
                       image: Optional[np.ndarray] = None, sidelobes=None,
-                      rules: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    """Per-peak metrics from the per-night stack ``(nn, ny, nx)`` (unflattened).
+                      rules: Optional[Dict[str, Any]] = None,
+                      field: Optional[Dict[str, float]] = None) -> List[Dict[str, Any]]:
+    """Measure each peak of a blind search on the per-night stack and the combined image.
 
-    Precomputed once (227-247): ``slices[j] = radprof(stack[j])``, ``comb =
-    radprof(nanmean)`` (unweighted), even / odd nanmeans ``s1, s2``, and their
-    matched-filter maps.  Constants: ``exr = 1.5 fwhm``, ``srad = 1.5`` px,
-    aperture ``ap = max(0.5 fwhm, 1.5)``, ``n_resel = pi (owa^2 - iwa^2) / fwhm^2``.
-    Per peak: per-night S/N ``pn`` (275), ``n_nights = count(pn >= 2)``,
-    ``pn_min/med/max``; aperture STIM ``mean(av)/std(av)`` over >= 2 finite nights
-    (279-284); ``sub1/sub2`` (286-287); ``psf_corr`` (289); combined S/N replaces
-    the map value when finite (293); look-elsewhere FAP ``min(1 - (1 - p)^n_resel,
-    1)`` (294); flags ``KNOWN`` / ``INJ`` within ``0.8 fwhm`` (296-306).
+    Each peak is read at the matched filter's maximum within ``srad`` of the map's peak pixel: its S/N
+    in each night (``pn``), in the even and odd nights' means (``sub1``, ``sub2``) and on the combined
+    image, its aperture STIM over the nights, its Gaussian PSF correlation, and its FAPs.  ``fap_resel``
+    is the small-sample t FAP at the peak (:func:`klip_tpe.verify.t_fap`), and ``fap`` the FAP over the
+    searched field (:func:`klip_tpe.verify.field_fap`).
 
-    ``image``, the combined image the run made (its stitch), is what the combined S/N,
-    FAP and PSF-likeness are measured on, ``comb = radprof(image)``.  Without it ``comb``
-    is the nights' mean, as in the IDL.
+    Parameters
+    ----------
+    px, py : ndarray of int
+        The peaks' columns and rows (:func:`detect_peaks`).
+    snr0 : ndarray
+        The peaks' values on the S/N map, which the combined S/N replaces where it is finite.
+    stack : ndarray, shape (nn, ny, nx) or (ny, nx)
+        The per-night images, not flattened.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    iwa, owa : float
+        Inner and outer radii of the search, in pixels, for the field when ``field`` is None.
+    known : sequence of tuple, default ()
+        Known companions as ``(rho_arcsec, theta_deg)``, flagged ``KNOWN`` within 0.8 FWHM and left out
+        of every ring.
+    injected : sequence of tuple, default ()
+        Injected sources, flagged ``INJ`` within 0.8 FWHM.
+    excl_fwhm : float, default 1.5
+        Radius of the keep-outs, in FWHM.
+    srad : float or None, default None
+        Radius of the peak search, in pixels.  None takes :func:`klip_tpe.verify.search_px` of a found
+        source: FWHM/2, or 1.5 px for a run saved before 2026-11-25.
+    angle_convention : {"pa", "math"}, default "pa"
+        How the angles are read.
+    flatten : bool, default False
+        Whether to subtract each image's radial profile first.
+    image : ndarray or None, default None
+        The combined image the run made, its stitch, on which the combined S/N, the FAPs and the PSF
+        correlation are measured.  None takes the nights' mean, as the IDL predecessor does.
+    sidelobes : Sidelobes or None, default None
+        The run's sidelobe rule, under which every ring leaves out the peak's own ADI arc and the known
+        companions' (:func:`klip_tpe.verify.ring_snr`), and each row adds ``noise``.
+    rules : dict or None, default None
+        The run's ring rules (:func:`~klip_tpe.metrics.ring_rules`), so every S/N is the search's.
+    field : dict or None, default None
+        The search's field (:func:`klip_tpe.verify.field_geometry`).  None takes the annulus from
+        ``iwa`` to ``owa`` with a smoothness of sqrt(2) FWHM.
 
-    ``sidelobes`` (:class:`~klip_tpe.metrics.Sidelobes`): every S/N's ring (per night,
-    even / odd and combined) leaves out the peak's own ADI arc and the known companions',
-    with the farthest fallback (:func:`klip_tpe.verify.ring_snr`).  A peak at a known
-    companion is not left out of its own ring as a companion.  Each row adds ``noise``, how
-    the combined ring came out.  ``rules``: the run's ring rules
-    (:func:`~klip_tpe.metrics.ring_rules`), so every S/N is the search's, its matched filter
-    and pixel mask included (:func:`klip_tpe.verify.snr_fap`)."""
+    Returns
+    -------
+    rows : list of dict
+        One per peak: ``x``, ``y``, ``rho``, ``theta``, ``map_snr``, ``snr``, ``fap_resel``, ``fap``,
+        ``nap``, ``per_night``, ``n_nights`` (nights at S/N 2 or more), ``pn_min``, ``pn_med``,
+        ``pn_max``, ``stim``, ``sub1``, ``sub2``, ``psf_corr``, ``flag`` and, under the sidelobe rule,
+        ``noise``.
+
+    Notes
+    -----
+    It is the per-peak part of ``near2_candidates`` of the IDL predecessor (candidates 222-307), whose
+    1.5 px search and ``1 - (1 - p)^N_resel``, ``N_resel = pi (owa^2 - iwa^2) / fwhm^2``, a run saved
+    before 2026-11-25 keeps (``RunConfig.verify_position = "peak"``).
+    """
     stack = np.asarray(stack, float)
     if stack.ndim == 2:
         stack = stack[None]
     nn, ny, nx = stack.shape
     cx, cy = star_center((ny, nx))
     exr = excl_fwhm * fwhm
+    srad = search_px(fwhm, True, rules, srad)
     nresel = max(np.pi * (owa ** 2 - iwa ** 2) / fwhm ** 2, 1.0)
+    legacy = legacy_position(rules)
+    if field is None:
+        field = {"area_px": np.pi * (owa ** 2 - iwa ** 2), "perimeter_px": 2.0 * np.pi * (owa + iwa),
+                 "fwhm_eff_px": float(np.sqrt(2.0) * fwhm), "euler": 0.0}
     ap = max(0.5 * fwhm, 1.5)
     _flat = radprof if flatten else (lambda a: np.asarray(a, float))
     slices = np.stack([_flat(stack[j]) for j in range(nn)])
@@ -258,7 +370,13 @@ def candidate_metrics(px: np.ndarray, py: np.ndarray, snr0: np.ndarray, stack: n
         psfc = psf_correlation(comb, int(px[c]), int(py[c]), fwhm)
         cf = _fap(comb)
         csnr = float(cf["snr"]) if np.isfinite(cf["snr"]) else float(snr0[c])
-        fap = float(min(1.0 - (1.0 - cf["fap"]) ** nresel, 1.0)) if np.isfinite(cf["fap"]) else float("nan")
+        if not np.isfinite(cf["fap"]):
+            fap = float("nan")
+        elif legacy:
+            fap = float(min(1.0 - (1.0 - cf["fap"]) ** nresel, 1.0))
+        else:
+            fap = field_fap(cf["fap"], field["area_px"], field["perimeter_px"], field["fwhm_eff_px"],
+                            field.get("euler", 0.0))
         flag = ""
         if kx.size and np.any(np.hypot(px[c] - kx, py[c] - ky) <= 0.8 * fwhm):
             flag = "KNOWN"
@@ -279,8 +397,9 @@ def candidate_metrics(px: np.ndarray, py: np.ndarray, snr0: np.ndarray, stack: n
 # ----------------------------------------------------------------------------
 def score_candidates(rows: List[Dict[str, Any]], nn: int, persistence_map: Optional[np.ndarray] = None,
                      stim_half: float = 1.5) -> List[Dict[str, Any]]:
-    """Add ``score``, ``tier`` and ``rank`` in place and return the rows sorted by
-    descending score::
+    """Score, tier and rank the candidates, in place, and return them sorted by score.
+
+    ::
 
         f_nt  = n_nights / nn
         f_psf = clip(psf_corr, 0, 1)             (NaN -> 0)
@@ -291,6 +410,22 @@ def score_candidates(rows: List[Dict[str, Any]], nn: int, persistence_map: Optio
         tier A: snr >= 5 and n_nights >= ceil(nn/2) and psf_corr >= 0.5
         tier B: snr >= 3.5 and (n_nights >= 2 or psf_corr >= 0.4)
         tier C: otherwise
+
+    Parameters
+    ----------
+    rows : list of dict
+        The candidates (:func:`candidate_metrics`), which take ``score``, ``tier`` and ``rank``.
+    nn : int
+        Number of nights.
+    persistence_map : ndarray or None, default None
+        The parameter-persistence map (``paramverify_stim_stitched``), for ``f_pv``.  None sets it to 1.
+    stim_half : float, default 1.5
+        The STIM and persistence values at which their terms reach half, 1.5 above.
+
+    Returns
+    -------
+    rows : list of dict
+        The candidates, the highest score first.
     """
     nhalf = int(np.ceil(0.5 * nn))
     pv = None
@@ -338,46 +473,66 @@ def find_candidates(image: Optional[np.ndarray], stack: np.ndarray, fwhm: float,
                     verify_kwargs: Optional[Dict[str, Any]] = None, angle_convention: str = "pa",
                     flatten: bool = False, sidelobes=None,
                     rules: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    """Blind candidate search (``near2_candidates``).
+    """Search an image for point-source candidates without knowing where they are (``near2_candidates``).
+
+    The peaks of the S/N map above ``snrmin``, at least ``max(0.9 fwhm, 2)`` px apart between
+    ``iwa_px`` and ``owa_px``, are measured (:func:`candidate_metrics`), scored and ranked
+    (:func:`score_candidates`), and the best ``verify_top`` verified
+    (:func:`klip_tpe.verify.verify_candidates` with ``found=True``).  Each candidate's local FAP is its
+    small-sample t-test at its peak, and its FAP over the field corrects for the search over the
+    annulus by random-field theory (:func:`klip_tpe.verify.field_fap`), with the smoothness measured on
+    the S/N map (:func:`klip_tpe.verify.field_geometry`).
 
     Parameters
     ----------
-    image
-        combined (stitched) image: the S/N map's source when ``snrmap`` is not given
-        (``snr_map(radprof(image), fwhm)``), and the image the candidates' combined S/N,
-        FAP and PSF-likeness are measured on (and the verify's Path A).  ``None``: the
-        nights' mean for all of these, as in the IDL.
-    stack
-        ``(nn, ny, nx)`` per-night images (unflattened), chronological order.
-    iwa_px, owa_px
-        search radii; defaults ``1.2 fwhm`` and ``min(nx, ny)/2 - fwhm`` (214-215).
-    snrmin, nmax
-        detection threshold (2.0) and peak cap (400); suppression radius
-        ``max(0.9 fwhm, 2)`` px (216).
-    known, injected
-        ``(rho, theta[, contrast])`` lists for the ``KNOWN`` / ``INJ`` flags (and
-        ``known`` is excluded from the noise rings, and from the noise of the S/N map made
-        here, 1.5 FWHM around each, since 2026-11-23).
-    persistence_map
-        ``paramverify_stim_stitched`` map for the ``f_pv`` score term.
-    verify_top
-        run :func:`klip_tpe.verify.verify_candidates` on the top-N ranked peaks
-        (IDL ``npage=25`` unless ``/quick``); ``verify_kwargs`` are forwarded
-        (e.g. ``n_boot``, ``rng``, ``injected=(inj_stack, sources)``).  The
-        result is attached as ``row['verify']``.
-    sidelobes
-        the run's sidelobe rule (:class:`~klip_tpe.metrics.Sidelobes`), or None for the rings
-        of the IDL's search.  The S/N map made here leaves the known companions' ADI arcs
-        out of its noise (a map given is used as it is), each peak's S/N leaves out its own
-        arc and the known companions' (:func:`candidate_metrics`), and the verify of the top
-        peaks takes the rule (:func:`klip_tpe.verify.verify_candidates`).
-    rules
-        the run's ring rules (:func:`~klip_tpe.metrics.ring_rules`): the S/N map made here
-        leaves the pixel mask out of its noise, and every peak's S/N and the verify are the
-        search's.
+    image : ndarray or None
+        The combined (stitched) image: the S/N map's source when ``snrmap`` is not given, and the image
+        the candidates' combined S/N, FAP and PSF-likeness and the verify's Path A are measured on.
+        None takes the nights' mean for all of these, as the IDL predecessor does.
+    stack : ndarray, shape (nn, ny, nx) or (ny, nx)
+        The per-night images, not flattened, in chronological order.
+    fwhm : float
+        FWHM of the PSF, in pixels.
+    pxscale : float
+        Plate scale, in arcsec per pixel.
+    snrmap : ndarray or None, default None
+        The S/N map to search.  None makes one, ``snr_map(radprof(image), fwhm)`` with the known
+        companions and the pixel mask left out of its noise.
+    iwa_px, owa_px : float or None, default None
+        Radii of the search, in pixels.  None takes ``1.2 fwhm`` and ``min(nx, ny)/2 - fwhm``.
+    snrmin : float, default 2.0
+        Detection threshold on the S/N map.
+    nmax : int, default 400
+        Most peaks taken.
+    known, injected : sequence of tuple, default ()
+        ``(rho, theta[, contrast])`` lists for the ``KNOWN`` and ``INJ`` flags.  The known companions
+        are left out of the noise rings and of the noise of the S/N map made here, 1.5 FWHM around each.
+    persistence_map : ndarray or None, default None
+        The ``paramverify_stim_stitched`` map, for the score's ``f_pv`` term.
+    night_ids : sequence or None, default None
+        The nights' names, for the report.
+    weights : sequence of float or None, default None
+        The nights' weights, for the verify.
+    verify_top : int, default 0
+        Number of the best candidates to verify.  Each result goes into ``row["verify"]``.
+    verify_kwargs : dict or None, default None
+        More keywords of the verify, such as ``n_boot``, ``rng`` or ``injected``.
+    angle_convention : {"pa", "math"}, default "pa"
+        How the angles are read.
+    flatten : bool, default False
+        Whether the measures subtract each image's radial profile first.
+    sidelobes : Sidelobes or None, default None
+        The run's sidelobe rule.  The S/N map made here leaves the known companions' ADI arcs out of its
+        noise, and each peak's rings leave out its own arc and the known companions'.
+    rules : dict or None, default None
+        The run's ring rules (:func:`~klip_tpe.metrics.ring_rules`): the S/N map made here leaves the
+        pixel mask out of its noise, and every S/N and the verify are the search's.
 
-    Returns the ranked rows (dicts) with the fields written by
-    :func:`write_candidates`; an empty list when no peak reaches ``snrmin``.
+    Returns
+    -------
+    rows : list of dict
+        The ranked candidates, with the fields :func:`write_candidates` writes and ``meta`` (the search's
+        settings and its field), empty when no peak reaches ``snrmin``.
     """
     stack = np.asarray(stack, float)
     if stack.ndim == 2:
@@ -408,14 +563,17 @@ def find_candidates(image: Optional[np.ndarray], stack: np.ndarray, fwhm: float,
     px, py, ps = detect_peaks(snrmap, snrmin, sep, iwa, owa, nmax)
     if px.size == 0:
         return []
+    field = field_geometry(snrmap, iwa, owa, fwhm)
     rows = candidate_metrics(px, py, ps, stack, fwhm, pxscale, iwa, owa, known=known, injected=injected,
                              angle_convention=angle_convention, flatten=flatten, image=given, sidelobes=sidelobes,
-                             rules=rules)
+                             rules=rules, field=field)
     rows = score_candidates(rows, nn, persistence_map)
     meta = {"nights": list(range(nn)) if night_ids is None else [str(v) for v in night_ids],
             "snrmin": snrmin, "sep": sep, "iwa": iwa, "owa": owa,
-            "nresel": max(np.pi * (owa ** 2 - iwa ** 2) / fwhm ** 2, 1.0), "fwhm": fwhm, "pxscale": pxscale,
-            "comb": "image" if given is not None else "nights"}
+            "nresel": field["n_resel"], "fwhm": fwhm, "pxscale": pxscale,
+            "comb": "image" if given is not None else "nights", "field": field,
+            "look_elsewhere": "n_resel" if legacy_position(rules) else "random field",
+            "search_px": search_px(fwhm, True, rules)}
     for r in rows:
         r["meta"] = meta
     if verify_top and verify_top > 0:
@@ -425,6 +583,8 @@ def find_candidates(image: Optional[np.ndarray], stack: np.ndarray, fwhm: float,
         if given is not None and (vk.get("injected") is None or vk.get("combined_inj") is not None):
             kw.update(combined=given, path_a="the source image")
         kw.update(vk)
+        kw.setdefault("found", True)
+        kw.setdefault("field", field)
         vrows = verify_candidates(stack, meta["nights"], [(r["rho"], r["theta"]) for r in top], fwhm, pxscale, **kw)
         vc = [v for v in vrows if v.get("kind") == "candidate"]
         for r, v in zip(top, vc):
@@ -433,10 +593,27 @@ def find_candidates(image: Optional[np.ndarray], stack: np.ndarray, fwhm: float,
 
 
 def write_candidates(path: str, rows: Sequence[Dict[str, Any]], source: str = "") -> str:
-    """Write ``candidates.txt`` (candidates 369-393): ``#`` header then the
-    fixed-width columns ``rank x y rho" PA S/N Nnt pn_md STIM sub1 sub2 PSF FAP
-    score tier flag`` (formats I4 I5 I5 F7.3 F7.1 F7.2 I4 F7.2 F7.2 F6.2 F6.2 F6.2
-    E10.2 F8.2 A A).  Returns the text."""
+    """Write ``candidates.txt``, a ``#`` header and one fixed-width line per candidate.
+
+    The columns are ``rank x y rho" PA S/N Nnt pn_md STIM sub1 sub2 PSF FAP score tier flag``, in the
+    formats ``I4 I5 I5 F7.3 F7.1 F7.2 I4 F7.2 F7.2 F6.2 F6.2 F6.2 E10.2 F8.2 A A`` of the IDL
+    predecessor (candidates 369-393).  FAP is over the searched field, and the header says how it was
+    corrected.
+
+    Parameters
+    ----------
+    path : str
+        File to write.
+    rows : sequence of dict
+        The ranked candidates (:func:`find_candidates`).
+    source : str, default ""
+        Name of the searched image, for the header.
+
+    Returns
+    -------
+    text : str
+        The text written.
+    """
     meta = rows[0].get("meta", {}) if rows else {}
     L = [f"# KLIP-TPE automatic candidate search -- {_dt.datetime.now().isoformat(timespec='seconds')}"]
     if source:
@@ -444,13 +621,22 @@ def write_candidates(path: str, rows: Sequence[Dict[str, Any]], source: str = ""
     if meta:
         L.append(f"# detection    : S/N >= {meta['snrmin']:.1f}, >= {meta['sep']:.1f} px apart, "
                  f"IWA {meta['iwa']:.1f} - OWA {meta['owa']:.1f} px")
-        L.append(f"# nights       : {','.join(str(v) for v in meta['nights'])}   look-elsewhere N_resel = {meta['nresel']:.1f}")
+        if meta.get("look_elsewhere", "n_resel") == "random field" and meta.get("field"):
+            fld = meta["field"]
+            L.append(f"# nights       : {','.join(str(v) for v in meta['nights'])}   field {float(fld['area_px']):.0f} px, "
+                     f"perimeter {float(fld.get('perimeter_px', float('nan'))):.0f} px, smoothness FWHM {float(fld['fwhm_eff_px']):.2f} px ({fld.get('fwhm_eff_from', 'map')}), "
+                     f"N_resel = {meta['nresel']:.1f}")
+        else:
+            L.append(f"# nights       : {','.join(str(v) for v in meta['nights'])}   look-elsewhere N_resel = {meta['nresel']:.1f}")
         if meta.get("comb") == "image":
             L.append("# measured on  : S/N, FAP and PSF on the source image, Nnt, pn_md, STIM, sub1 and sub2 on the nights")
     L += ["# score = S/N * persistence(nights) * PSF-likeness * consistency(STIM) * persistence(params)",
           "# tier  : A=strong (S/N>=5, >=half nights, PSF-like)  B=marginal  C=likely speckle",
           "# S/N   : matched-filter Mawet (2014) small-sample S/N (Student-t, df=n_ap-2)",
-          "# FAP   : 1 - (1 - p)^N_resel, p the per-resel small-sample-t false-alarm prob (look-elsewhere corrected)", ""]
+          ("# FAP   : over the searched field, random-field theory (Worsley et al. 1996) on p, the small-sample-t "
+           "FAP at the peak (verify.field_fap)" if meta.get("look_elsewhere") == "random field" else
+           "# FAP   : 1 - (1 - p)^N_resel, p the per-resel small-sample-t false-alarm prob (look-elsewhere corrected)"),
+          ""]
     rho_hdr = 'rho"'
     L.append("  " + f"{'rank':>4}{'x':>5}{'y':>5}{rho_hdr:>7}{'PA':>7}{'S/N':>7}{'Nnt':>4}{'pn_md':>7}{'STIM':>7}"
              f"{'sub1':>6}{'sub2':>6}{'PSF':>6}{'FAP':>10}{'score':>8}  tier  flag")

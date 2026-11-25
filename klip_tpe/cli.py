@@ -773,6 +773,23 @@ def _stitch_blend_for_run(a, r) -> None:
         r.cfg.stitch_blend = str(v)
 
 
+def _verify_position_for_run(a, r) -> None:
+    """Apply ``--verify-position`` to a resumed run's configuration, for a command that only reads the run.
+
+    Parameters
+    ----------
+    a : argparse.Namespace
+        The command's arguments.  Without ``verify_position`` the run keeps where its verify read,
+        ``"peak"`` for a run made before 2026-11-25.
+    r : Runner
+        The resumed run, whose ``cfg.verify_position`` changes in memory only.
+    """
+    v = getattr(a, "verify_position", None)
+    if v and str(v) != str(getattr(r.cfg, "verify_position", "peak")):
+        print(f"  verify: --verify-position {v}, the run's own is {getattr(r.cfg, 'verify_position', 'peak')}")
+        r.cfg.verify_position = str(v)
+
+
 def _klip_gram_for_run(a, record: bool = True) -> None:
     """Settle ``--klip-gram`` for a command on a run directory.
 
@@ -1729,6 +1746,13 @@ def _protocol_args(p):
                         "search's own S/N under the run's rules, and every ring and map without the pixel mask). idl "
                         "measures as before 2026-11-01, with the IDL verify's S/N (a Gaussian kernel, no despike or "
                         "radial band) and the pixel mask in the search's rings alone, as --from-idl-setup does")
+    p.add_argument("--verify-position", default=None, choices=["given", "peak"],
+                   help="where the verify, the final grid and the candidate search read a source (default given: a "
+                        "known companion or an injection at its given position, so its FAP holds, and a candidate "
+                        "the blind search found at its peak within FWHM/2, with its FAP over the field from "
+                        "random-field theory). peak reads every source at its peak within 1.5 px and corrects the "
+                        "field by the count of resolution elements, as the IDL predecessor and runs made before "
+                        "2026-11-25 do. --verify-snr idl implies peak")
     p.add_argument("--fmmf-fm-apertures", action="store_true", default=False,
                    help="with --metric fmmf, each noise aperture takes a forward model of its own, from a "
                         "forward-model pass with a source alone there, and a sample between two apertures their two "
@@ -2040,6 +2064,7 @@ def _protocol_config(a) -> dict:
                 **({"ann_extra": extra} if extra else {}),
                 **({"score_floor": _score_floor(sf)} if sf is not None else {}),
                 **({"verify_snr": a.verify_snr} if getattr(a, "verify_snr", None) else {}),
+                **({"verify_position": a.verify_position} if getattr(a, "verify_position", None) else {}),
                 **({"fmmf_fm_apertures": True} if getattr(a, "fmmf_fm_apertures", False) else {}),
                 **({"stitch_injections": a.stitch_injections} if getattr(a, "stitch_injections", None) else {}),
                 **({"stitch_blend": a.stitch_blend} if getattr(a, "stitch_blend", None) else {}),
@@ -2646,6 +2671,7 @@ def cmd_rereduce(a):
         print(f"  verify: --verify-snr {a.verify_snr}, the run's own is {r.cfg.verify_snr}")
         r.cfg.verify_snr = a.verify_snr
     _stitch_blend_for_run(a, r)
+    _verify_position_for_run(a, r)
     try:
         r.rereduce(out, verify_sources=vs, verify=not a.no_verify,
                    stitch_injections=getattr(a, "stitch_injections", None),
@@ -2690,6 +2716,7 @@ def cmd_rescore(a):
         print(f"  verify: --verify-snr {a.verify_snr}, the run's own is {r.cfg.verify_snr}")
         r.cfg.verify_snr = a.verify_snr
     _stitch_blend_for_run(a, r)
+    _verify_position_for_run(a, r)
     logf = None
     if not a.plan:
         os.makedirs(out, exist_ok=True)
@@ -2764,6 +2791,7 @@ def cmd_elect(a):
     red, objective, sampler, guard, thr = _near_objects(a)
     r = Runner.resume(a.run_dir, red, objective, sampler, project=guard, throughput_fn=thr, same_frames=False)
     _stitch_blend_for_run(a, r)
+    _verify_position_for_run(a, r)
     logf = None
     if not a.plan:
         os.makedirs(out, exist_ok=True)
@@ -3507,6 +3535,10 @@ def _build_parser():
                    help="how the verify and the S/N map measure (default: as the run did, idl for a run saved "
                         "before 2026-11-01). search: the search's own S/N under the run's rules and the pixel mask "
                         "in every ring and map. idl: the IDL verify's S/N and no mask outside the search")
+    p.add_argument("--verify-position", default=None, choices=["given", "peak"],
+                   help="where the verify reads a source (default: as the run did, peak for a run made before "
+                        "2026-11-25). given: each injection and known companion at its position. peak: at the "
+                        "peak within 1.5 px, as the IDL predecessor")
     p.add_argument("--base-winners", default=None, metavar="FILE",
                    help="a composite: each listed annulus reduces another configuration in place of the run's "
                         "winner.  One per line: the annulus (from 1), the run (a directory, or a run beside this "
@@ -3575,6 +3607,9 @@ def _build_parser():
                         "base run's, weighted for a run made before 2026-11-25)")
     p.add_argument("--verify-snr", default=None, choices=["search", "idl"],
                    help="how each source is measured (default: as the base run's verify)")
+    p.add_argument("--verify-position", default=None, choices=["given", "peak"],
+                   help="where each source is read, as rereduce --verify-position (default: as the base run's "
+                        "verify, peak for a run made before 2026-11-25)")
     p.add_argument("--out", default=None, metavar="DIR",
                    help="output directory (default <run>_rescore beside the run).  A re-score started again on "
                         "the same directory resumes")
@@ -3615,6 +3650,9 @@ def _build_parser():
     p.add_argument("--curve", default="grid", choices=["grid", "path_a", "off"],
                    help="how the curve is read: the contrast grid's S/N (grid, the default), the stitched "
                         "verify's (path_a), or no curve (off)")
+    p.add_argument("--verify-position", default=None, choices=["given", "peak"],
+                   help="where the grid's points and the verify read a source, as rereduce --verify-position "
+                        "(default: as the run did, peak for a run made before 2026-11-25)")
     _stitch_args(p, rerun=True)
     p.add_argument("--window", type=int, default=None,
                    help="reductions in flight (default: enough to fill the reducer's workers)")

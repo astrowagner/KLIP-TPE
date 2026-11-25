@@ -96,7 +96,9 @@ def test_the_candidate_search_measures_as_the_search():
     near = [r for r in rows if np.hypot(r["rho"] - RHO, (r["theta"] - PA) * np.pi / 180 * RHO) < 2 * PX]
     assert near, [(r["rho"], r["theta"]) for r in rows]
     top = near[0]
-    want = V.snr_fap(img, top["rho"], top["theta"], PX, FWHM, rules=rules)["snr"]
+    # a found candidate is read at the matched filter's peak within FWHM/2 (the audit of 2026-11-25)
+    want = V.snr_fap(img, top["rho"], top["theta"], PX, FWHM, srad=V.search_px(FWHM, found=True, rules=rules),
+                     rules=rules)["snr"]
     assert top["snr"] == pytest.approx(want, rel=1e-12)
     assert top["snr"] > V.snr_fap(img, top["rho"], top["theta"], PX, FWHM, rules=KEEP_SPIKES)["snr"]
 

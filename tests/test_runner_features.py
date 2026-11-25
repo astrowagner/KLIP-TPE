@@ -243,8 +243,11 @@ def test_final_verify_measures_the_stitched_images(hooks_run):
     got = [float(l.split("S/N=")[1].split()[0]) for l in rep.splitlines() if l.startswith("   rho=")]
     assert len(got) == len(src) == 9
     exr = runner._excl_fwhm() * runner.fwhm
+    # an injection's position is given, so the verify reads it there (the audit of 2026-11-25)
+    srad = V.search_px(runner.fwhm, found=False, rules=runner._ring_rules())
+    assert srad == 0.0
     for m, s in enumerate(src):
-        want = V.snr_fap(inj, s[0], s[1], runner.pxscale, runner.fwhm, exr, 1.5,
+        want = V.snr_fap(inj, s[0], s[1], runner.pxscale, runner.fwhm, exr, srad,
                          exclude_xy=kxy + sxy[:m] + sxy[m + 1:], angle_convention=conv)["snr"]
         assert got[m] == pytest.approx(want, abs=0.006)
     for ia in (1, 2):

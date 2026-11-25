@@ -106,7 +106,9 @@ def test_each_night_of_the_candidate_search_is_measured_on_its_own_image(rules):
     stack = T._planted_stack(6, 0.8, 40.0, 8.0)
     rows = C.find_candidates(None, stack, T.FWHM, T.PX, night_ids=list(range(6)), rules=rules)
     for r in rows[:3]:
-        own = [V.snr_fap(stack[j], r["rho"], r["theta"], T.PX, T.FWHM, rules=rules)["snr"] for j in range(6)]
+        # a found candidate is read at its peak within FWHM/2, or under the IDL rules within 1.5 px
+        srad = V.search_px(T.FWHM, found=True, rules=rules)
+        own = [V.snr_fap(stack[j], r["rho"], r["theta"], T.PX, T.FWHM, srad=srad, rules=rules)["snr"] for j in range(6)]
         assert r["per_night"] == pytest.approx(own, rel=1e-12)
         assert len(set(np.round(r["per_night"], 9))) == 6
 
