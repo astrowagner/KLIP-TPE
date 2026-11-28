@@ -8,6 +8,7 @@
     python3 scripts/readme_panel.py --no-show             # no window, panels still written
     python3 scripts/readme_panel.py --target hd95086      # the panel on public data (VLT/SPHERE)
     python3 scripts/readme_panel.py --extra-annuli 1 --seam-annuli   # two annuli and one on their boundary
+    python3 scripts/readme_panel.py --ann-fwhm 1.5 --extra-annuli 2 --seam-annuli   # the README's image, about four days
 
 RX J0534 is ``scripts/run_rxj0534.py``'s four-night search (``--partitions 4``), with the
 companion held out of the objective.  The first annulus is its separation +/- 2 FWHM
@@ -22,7 +23,11 @@ and a plateau as long again.  The outer annuli hold two and three times the inne
 so they take about that much longer.  The contrast grid steps half a FWHM (``--cg-step``): five
 separations per annulus, a FWHM in from its edges, so the curve has no points within a FWHM of
 the seams.  The panel's title is ``--title`` ("RX J0534"), not the run directory's name.  The
-data are read from ``LMIRCAM_ROOT`` (default /Volumes/RAID36TB/LMIRCam).
+data are read from ``LMIRCAM_ROOT`` (default /Volumes/RAID64TB/LMIRCam).
+
+``--ann-fwhm`` sets the half-width of the companion's annulus in FWHM (``run_rxj0534.py
+--ann-fwhm``, 2 by default), and the annuli outside it take its width: 1.5 gives annuli of 3 FWHM,
+0.25-0.53", 0.53-0.82" and 0.82-1.11" with ``--extra-annuli 2``.
 
 ``--seam-annuli`` adds an annulus on each boundary between the annuli (``run_rxj0534.py
 --seam-annuli``), from the center of the one inside to the center of the one outside, numbered by
@@ -45,13 +50,16 @@ source per reduction at 12 position angles per separation (``--cg-pa``), each it
 (``--cg-target``) with the IDL contrast generators' aperture photometry or the run's
 matched-filter S/N (``--cg-snr``).
 
-The run writes to ``--run-dir`` (``~/klip_tpe_runs/rxj0534/readme_3ann``, ``readme_seam`` with
-``--seam-annuli``, or ``~/klip_tpe_runs/hd95086``), outside any synced folder; the single-annulus
-run of 2026-10-30 is in ``~/klip_tpe_runs/rxj0534/readme``.  The image at the top of the README
-(``docs/img/step_display.png``) is the three-annulus run's panel at the end of its second annulus,
-finished with its validated winner: its stitched images and contrast curve cover the first two
-annuli, the companion's included, and its convergence and parameter panels are the second
-annulus'.  Running the command again resumes the run.
+The run writes to ``--run-dir`` (``~/klip_tpe_runs/rxj0534/readme_3ann``; ``readme_seam`` with
+``--seam-annuli``; ``readme_<2N>fwhm`` with ``--ann-fwhm N``, so ``readme_3fwhm`` for 1.5; or
+``~/klip_tpe_runs/hd95086``), outside any synced folder; the single-annulus run of 2026-10-30 is
+in ``~/klip_tpe_runs/rxj0534/readme``.  The image at the top of the README
+(``docs/img/step_display.png``) is the last panel of ``--ann-fwhm 1.5 --extra-annuli 2
+--seam-annuli`` (``readme_3fwhm``, 2026-11-23 to 27): the three annuli of 3 FWHM from 0.25" to
+1.11" and one on each of their two boundaries, 3,000 evaluations each, with the final-image
+grid's winners in the stitch.  Its stitched images and contrast curve cover all five annuli, the
+companion's included, and its convergence and parameter panels are the last annulus'.  Running
+the command again resumes the run.
 """
 from __future__ import annotations
 
@@ -87,13 +95,16 @@ def parse(argv=None) -> argparse.Namespace:
     a : argparse.Namespace
         The options.  Those not given take ``TARGETS``' values for the target (run directory,
         title, seed, warm-up, grid step, source count and extra annuli), and ``run_dir`` is
-        expanded.  With ``--seam-annuli`` the default run directory is
-        ``~/klip_tpe_runs/rxj0534/readme_seam``, so the touching annuli's run is not resumed.
+        expanded.  With ``--ann-fwhm N`` the default run directory is
+        ``~/klip_tpe_runs/rxj0534/readme_<2N>fwhm``, and otherwise with ``--seam-annuli``
+        ``~/klip_tpe_runs/rxj0534/readme_seam``, so no run of another layout is resumed.
+        ``ann_fwhm`` is None when not given (``run_rxj0534.py``'s default).
 
     Raises
     ------
     SystemExit
-        On a bad option, or ``--seam-annuli`` with ``--target hd95086``.
+        On a bad option, ``--seam-annuli`` or ``--ann-fwhm`` with ``--target hd95086``, or an
+        ``--ann-fwhm`` that is not positive.
     """
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -113,8 +124,13 @@ def parse(argv=None) -> argparse.Namespace:
                    help="RX J0534: one more annulus on each boundary between the annuli, so the stitched "
                         "images hold no KLIP zone edge (run_rxj0534.py --seam-annuli; needs --extra-annuli 1 "
                         "or more). Default run directory: ~/klip_tpe_runs/rxj0534/readme_seam")
+    p.add_argument("--ann-fwhm", type=float, default=None, metavar="N",
+                   help="RX J0534: half-width of the companion's annulus in FWHM, the annuli outside it as wide "
+                        "(run_rxj0534.py --ann-fwhm; default 2). Default run directory: "
+                        "~/klip_tpe_runs/rxj0534/readme_<2N>fwhm, readme_3fwhm for the README's 1.5")
     p.add_argument("--run-dir", default=None,
-                   help="run directory (default ~/klip_tpe_runs/rxj0534/readme_3ann or ~/klip_tpe_runs/hd95086)")
+                   help="run directory (default ~/klip_tpe_runs/rxj0534/readme_3ann, readme_seam or "
+                        "readme_<2N>fwhm, or ~/klip_tpe_runs/hd95086)")
     p.add_argument("--title", default=None, help="the panel's title (default \"RX J0534\" or \"HD 95086\")")
     p.add_argument("--cg-pa", type=int, default=12, help="contrast grid: position angles per separation (default 12)")
     p.add_argument("--cg-step", type=float, default=None,
@@ -134,6 +150,13 @@ def parse(argv=None) -> argparse.Namespace:
     a = p.parse_args(argv)
     if a.seam_annuli and a.target != "rxj0534":
         p.error("--seam-annuli is for RX J0534's annuli")
+    if a.ann_fwhm is not None:
+        if a.target != "rxj0534":
+            p.error("--ann-fwhm is for RX J0534's annuli")
+        if not a.ann_fwhm > 0:
+            p.error(f"--ann-fwhm must be positive, not {a.ann_fwhm:g}")
+        if a.run_dir is None:
+            a.run_dir = f"~/klip_tpe_runs/rxj0534/readme_{2 * a.ann_fwhm:g}fwhm"
     if a.seam_annuli and a.run_dir is None:
         a.run_dir = "~/klip_tpe_runs/rxj0534/readme_seam"
     for k, v in TARGETS[a.target].items():
@@ -156,11 +179,13 @@ def rxj0534_argv(a: argparse.Namespace) -> list:
     argv : list of str
         The four-night search (``--partitions 4``) with the sources 180 deg apart on each annulus'
         mid-radius (``--even-pa``) and the injection-grid contrast curve, with the run directory,
-        title, budget, extra and seam annuli, warm-up, seed and window as given.
+        title, budget, annulus width, extra and seam annuli, warm-up, seed and window as given.
     """
     argv = ["--partitions", "4", "--n-iter", str(a.n_iter), "--out", a.run_dir, "--title", a.title,
             "--n-sources", str(a.n_sources), "--even-pa", "--contrast-grid", "grid", "--cg-pa", str(a.cg_pa), "--cg-step", f"{a.cg_step:g}",
             "--cg-target", f"{a.cg_target:g}", "--cg-snr", a.cg_snr, "--workers", str(a.workers)]
+    if getattr(a, "ann_fwhm", None) is not None:
+        argv += ["--ann-fwhm", f"{a.ann_fwhm:g}"]
     if a.extra_annuli:
         argv += ["--extra-annuli", str(a.extra_annuli)]
     if a.seam_annuli:

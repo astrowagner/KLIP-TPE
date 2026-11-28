@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — 2026-11-27 (the README's panel from five annuli of 3 FWHM)
+
+- **The README's panel is RX J0534's run with annuli of 3 FWHM and an annulus on each boundary**
+  (Kevin Wagner, 2026-11-23 and 27).  `docs/img/step_display.png` is now the last panel of
+  `scripts/readme_panel.py --ann-fwhm 1.5 --extra-annuli 2 --seam-annuli`, run on `76c1c64` from
+  2026-11-23 to 27: three touching annuli of 3 FWHM from 0.25" to 1.11" and one on each of their
+  two boundaries, 3,000 evaluations each, with the final-image grid's winners in the stitch.  The
+  stitched images hold no KLIP zone edge and show no ring at the tile edges.  On the stitch the
+  companion reads S/N 7.55 (FAP 1.0E-07, a detection at the operating FAP; 9.02 in the
+  three-annulus run) and the ten injected sources 7.4 to 17.2.  It replaces the second annulus'
+  frame of 2026-11-21, whose touching annuli showed a dark ring just outside the 0.58" boundary.
+- **`scripts/readme_panel.py --ann-fwhm N`** passes the half-width of the companion's annulus in
+  FWHM to `run_rxj0534.py` (default 2), with a default run directory of its own,
+  `~/klip_tpe_runs/rxj0534/readme_<2N>fwhm`, so no run of another layout is resumed.
+- **`scripts/run_rxj0534.py` and `scripts/run_rxj0534.sh` read the data from
+  `/Volumes/RAID64TB/LMIRCam` by default**, where it now lives; `LMIRCAM_ROOT` still overrides it.
+
 ## Unreleased — 2026-11-25 (the processes of a run counted by their arguments, and one writer per run)
 
 After a note from the NOMIC archive session of 2026-11-25.

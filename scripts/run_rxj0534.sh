@@ -11,11 +11,11 @@
 #   klip-tpe view --run-dir <the run directory this prints>
 #
 # Every run checkpoints after each evaluation, so Ctrl-C is safe and `resume` is exact.
-# Set LMIRCAM_ROOT if the data is not at /Volumes/RAID36TB/LMIRCam.
+# Set LMIRCAM_ROOT if the data is not at /Volumes/RAID64TB/LMIRCam.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-export LMIRCAM_ROOT="${LMIRCAM_ROOT:-/Volumes/RAID36TB/LMIRCam}"
+export LMIRCAM_ROOT="${LMIRCAM_ROOT:-/Volumes/RAID64TB/LMIRCam}"
 OUT_BASE="${OUT_BASE:-$HOME/klip_tpe_runs/rxj0534}"
 
 # the live window is on by default here -- this is the interactive entry point.

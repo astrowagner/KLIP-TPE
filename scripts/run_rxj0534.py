@@ -51,7 +51,7 @@ from klip_tpe import (CalibrationConfig, ContrastGridConfig, RunConfig, Runner, 
 from klip_tpe.instruments import generic
 
 # ----------------------------------------------------------------- instrument / target
-ROOT = os.environ.get("LMIRCAM_ROOT", "/Volumes/RAID36TB/LMIRCam")
+ROOT = os.environ.get("LMIRCAM_ROOT", "/Volumes/RAID64TB/LMIRCam")
 NIGHTS = ["RXJ0534", "RXJ0534_2", "RXJ0534_3", "RXJ0534_4"]      # UT 2026 Feb 26, 27, 28, Mar 2
 SIDES = ["left", "right"]
 CUBES = [1, 2]

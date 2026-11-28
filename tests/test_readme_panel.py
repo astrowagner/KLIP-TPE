@@ -87,6 +87,35 @@ def test_seam_annuli_reach_run_rxj0534_with_a_directory_of_their_own():
         readme_panel.parse(["--target", "hd95086", "--seam-annuli"])
 
 
+def test_ann_fwhm_reaches_run_rxj0534_with_a_directory_of_its_own():
+    """--ann-fwhm goes through to run_rxj0534.py, off unless asked, and names its own default
+    directory (readme_3fwhm for the README's 1.5), which wins over --seam-annuli's, so no run of
+    another layout is resumed.  It is RX J0534's alone, and positive."""
+    a = readme_panel.parse(["--ann-fwhm", "1.5", "--extra-annuli", "2", "--seam-annuli"])
+    argv = readme_panel.rxj0534_argv(a)
+    assert _opt(argv, "--ann-fwhm") == "1.5" and "--seam-annuli" in argv and _opt(argv, "--extra-annuli") == "2"
+    assert a.run_dir == os.path.expanduser("~/klip_tpe_runs/rxj0534/readme_3fwhm")
+    assert "--ann-fwhm" not in readme_panel.rxj0534_argv(readme_panel.parse([]))
+    assert readme_panel.parse(["--ann-fwhm", "2.5"]).run_dir == os.path.expanduser("~/klip_tpe_runs/rxj0534/readme_5fwhm")
+    assert readme_panel.parse(["--ann-fwhm", "1.5", "--run-dir", "/tmp/fwhm_run"]).run_dir == "/tmp/fwhm_run"
+    for bad in (["--target", "hd95086", "--ann-fwhm", "1.5"], ["--ann-fwhm", "0"]):
+        with pytest.raises(SystemExit):
+            readme_panel.parse(bad)
+
+
+def test_the_readme_images_five_annuli_reach_1p1_arcsec():
+    """The layout of the README's image, without loading data: --ann-fwhm 1.5 --extra-annuli 2 gives
+    three touching annuli of 3 FWHM from 0.25" to 1.11", --seam-annuli one more on each of their two
+    boundaries, and the frames are cropped to 261 px."""
+    rx = pytest.importorskip("run_rxj0534")
+    r_px = rx.PLANET[0] / rx.PXSCALE
+    e = rx.annulus_edges(r_px, rx.FWHM_PX, ann_fwhm=1.5, extra=2)
+    assert [round(v * rx.PXSCALE, 3) for v in e] == [0.246, 0.534, 0.822, 1.109]
+    assert [e[k + 1] - e[k] for k in range(3)] == pytest.approx([3 * rx.FWHM_PX] * 3)
+    assert len(rx.seam_annuli(e)) == 2
+    assert 2 * rx.crop_for(e) + 1 == 261
+
+
 def test_a_seam_annulus_keeps_every_tile_edge_a_fwhm_inside_the_zones():
     """The geometry --seam-annuli gives, without loading data: one annulus per boundary, from the
     center of the annulus inside to the center of the one outside.  The runner numbers the three by
